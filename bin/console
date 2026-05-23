@@ -1,0 +1,38 @@
+#!/usr/bin/env ruby
+
+require "bundler/setup"
+require 'byebug'
+require 'dotenv'
+require "parse/stack"
+
+Dotenv.load
+
+def setup
+  Parse.setup # cache: 'redis://localhost:6379'
+
+  puts "[ParseServerURL] #{Parse.client.server_url}"
+  puts "[ParseAppID]     #{Parse.client.app_id}"
+
+  if Parse.client.master_key.present?
+    Parse.auto_generate_models!.each do |model|
+      puts "Generated #{model}"
+    end
+  end
+
+end
+puts "Type 'setup' to connect to Parse-Server"
+
+# Create shortnames
+Parse.use_shortnames!
+
+# You can add fixtures and/or initialization code here to make experimenting
+# with your gem easier. You can also use a different console, if you like.
+
+# (If you use this, don't forget to add pry to your Gemfile!)
+require "pry"
+Pry.start
+
+#
+# require "irb"
+# IRB.start
+#Rack::Server.start :app => HelloWorldApp
