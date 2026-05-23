@@ -1,8 +1,10 @@
-> **Historical snapshot — v1.9.1 (Anthony Persaud / modernistik)**
+> **Historical snapshot — v1.11.3 (Henry Spindell / hspindell)**
 >
-> This commit captures the final release on the v1.x line from the original
-> `modernistik/parse-stack` repository. It is preserved as a lineage marker in
-> the `parse-stack-next` history.
+> This commit captures the final pre-2.x state from the
+> `hspindell/parse-stack` fork, which extended `modernistik/parse-stack` v1.9.1
+> with Ruby 3 hash-argument support, `create_or_update`, additional triggers,
+> and several bug fixes. It is preserved as a lineage marker in the
+> `parse-stack-next` history.
 >
 > The active gem is **`parse-stack-next`** — see [HEAD on `main`](https://github.com/neurosynq/parse-stack-next) for current docs, install instructions, and the maintained API.
 

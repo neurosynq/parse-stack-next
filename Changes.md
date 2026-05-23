@@ -1,5 +1,22 @@
 ## Parse-Stack Changelog
 
+### 1.11.3
+- Adds "empty" query constraint option
+- Adds "include" alias for "includes" query method
+
+### 1.11.1
+- Always applies attribute changes in first_or_create resource_attrs argument
+
+### 1.11.0
+- Adds create_or_update! method
+
+### 1.10.3
+- Fixes potential crash caused by activerecord gem version 6+
+
+### 1.10.0
+
+- Adds support for Ruby 3+ style hash and block arguments.
+
 ### 1.9.0
 
 - Support for ActiveModel and ActiveSupport 6.0.

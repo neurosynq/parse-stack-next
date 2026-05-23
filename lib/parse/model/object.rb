@@ -271,7 +271,7 @@ module Parse
     def as_json(opts = nil)
       return pointer if pointer?
       changed_fields = changed_attributes
-      super(opts).delete_if { |k, v| v.nil? && !changed_fields.has_key?(k) }
+      super(opts || {}).delete_if { |k, v| v.nil? && !changed_fields.has_key?(k) }
     end
 
     # The main constructor for subclasses. It can take different parameter types

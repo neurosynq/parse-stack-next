@@ -288,6 +288,32 @@ module Parse
       end
     end
 
+    # Checks whether an array field contains any elements
+    #  q.where :field.empty => true
+    #
+    # @see NullabilityConstraint
+    class EmptyConstraint < Constraint
+      # @!method empty
+      # A registered method on a symbol to create the constraint.
+      # @example
+      #  q.where :field.empty => true
+      # @return [ExistsConstraint]
+      contraint_keyword :$exists
+      register :empty
+
+      # @return [Hash] the compiled constraint.
+      def build
+        # if nullability is equal true, then $empty should be set to false
+        value = formatted_value
+
+        unless value == true || value == false
+          raise ArgumentError, "#{self.class}: Non-Boolean value passed, it must be either `true` or `false`"
+        end
+
+        return { "#{@operation.operand}.0" => { key => !value } }
+      end
+    end
+
     # Equivalent to the `$in` Parse query operation. Checks whether the value in the
     # column field is contained in the set of values in the target array. If the
     # field is an array data type, it checks whether at least one value in the

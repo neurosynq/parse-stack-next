@@ -6,12 +6,12 @@ require "parse/stack/version"
 Gem::Specification.new do |spec|
   spec.name = "parse-stack"
   spec.version = Parse::Stack::VERSION
-  spec.authors = ["Anthony Persaud"]
-  spec.email = ["persaud@modernistik.com"]
+  spec.authors = ["Anthony Persaud", "Henry Spindell"]
+  spec.email = ["henryspindell@gmail.com"]
 
   spec.summary = %q{Parse Server Ruby Client SDK}
   spec.description = %q{Parse Server Ruby Client. Perform Object-relational mapping between Parse Server and Ruby classes, with authentication, cloud code webhooks, push notifications and more built in.}
-  spec.homepage = "https://github.com/modernistik/parse-stack"
+  spec.homepage = "https://github.com/hspindell/parse-stack"
   spec.license = "MIT"
   # Prevent pushing this gem to RubyGems.org by setting 'allowed_push_host', or
   # delete this section to allow pushing this gem to any host.
@@ -25,7 +25,7 @@ Gem::Specification.new do |spec|
   spec.bindir = "bin"
   spec.executables = ["parse-console"] #spec.files.grep(%r{^bin/pstack/}) { |f| File.basename(f) }
   spec.require_paths = ["lib"]
-  spec.required_ruby_version = ">= 2.5.0"
+  spec.required_ruby_version = ">= 2.6"
 
   spec.add_runtime_dependency "activemodel", [">= 5", "< 7"]
   spec.add_runtime_dependency "active_model_serializers", [">= 0.9", "< 1"]
