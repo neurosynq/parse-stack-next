@@ -6,7 +6,7 @@ require_relative "../../../../lib/parse/agent/mcp_rack_app"
 
 # ============================================================================
 # Tests for audit-trail correlation id threading. A client-supplied
-# X-MCP-Session-Id header (or a value set directly on the agent) flows into
+# Mcp-Session-Id header (or a value set directly on the agent) flows into
 # every parse.agent.tool_call notification under :correlation_id so a
 # downstream log subscriber can attribute multiple tool calls to one
 # logical conversation.
@@ -105,7 +105,9 @@ class CorrelationIdTest < Minitest::Test
 
   # ---- MCPRackApp wiring -----------------------------------------------
 
-  def test_rack_app_reads_x_mcp_session_id_header
+  def test_rack_app_reads_mcp_session_id_header
+    # MCP 2025-06-18 Streamable HTTP spec names the session-id header
+    # `Mcp-Session-Id`. Rack maps that to `HTTP_MCP_SESSION_ID`.
     captured_agent = nil
     factory = ->(_env) {
       captured_agent = Parse::Agent.new(permissions: :readonly)
@@ -119,13 +121,13 @@ class CorrelationIdTest < Minitest::Test
     app = Parse::Agent::MCPRackApp.new(agent_factory: factory)
 
     env = {
-      "REQUEST_METHOD"          => "POST",
-      "CONTENT_TYPE"            => "application/json",
-      "HTTP_X_MCP_SESSION_ID"   => "client-conv-7",
-      "rack.input"              => StringIO.new(JSON.generate(
-                                     jsonrpc: "2.0", id: 1,
-                                     method: "tools/list",
-                                   )),
+      "REQUEST_METHOD"        => "POST",
+      "CONTENT_TYPE"          => "application/json",
+      "HTTP_MCP_SESSION_ID"   => "client-conv-7",
+      "rack.input"            => StringIO.new(JSON.generate(
+                                   jsonrpc: "2.0", id: 1,
+                                   method: "tools/list",
+                                 )),
     }
     app.call(env)
 
@@ -145,15 +147,40 @@ class CorrelationIdTest < Minitest::Test
     app = Parse::Agent::MCPRackApp.new(agent_factory: factory)
 
     env = {
-      "REQUEST_METHOD"        => "POST",
-      "CONTENT_TYPE"          => "application/json",
-      "HTTP_X_MCP_SESSION_ID" => "client-tried-to-spoof",
-      "rack.input"            => StringIO.new(JSON.generate(jsonrpc: "2.0", id: 1, method: "tools/list")),
+      "REQUEST_METHOD"      => "POST",
+      "CONTENT_TYPE"        => "application/json",
+      "HTTP_MCP_SESSION_ID" => "client-tried-to-spoof",
+      "rack.input"          => StringIO.new(JSON.generate(jsonrpc: "2.0", id: 1, method: "tools/list")),
     }
     app.call(env)
 
     assert_equal "factory-binds-this", captured_agent.correlation_id,
                  "factory-set correlation_id must not be overwritten by header"
+  end
+
+  def test_rack_app_ignores_legacy_x_mcp_session_id_header
+    # v5.0 dropped the pre-spec `X-MCP-Session-Id` header. Only the
+    # MCP 2025-06-18-canonical `Mcp-Session-Id` is read; sending the
+    # legacy name without the canonical name leaves correlation_id nil.
+    captured_agent = nil
+    factory = ->(_env) {
+      captured_agent = Parse::Agent.new(permissions: :readonly)
+      captured_agent.define_singleton_method(:execute) { |*_, **_| { success: true, data: {} } }
+      captured_agent.define_singleton_method(:tool_definitions) { |**_| [] }
+      captured_agent
+    }
+    app = Parse::Agent::MCPRackApp.new(agent_factory: factory)
+
+    env = {
+      "REQUEST_METHOD"        => "POST",
+      "CONTENT_TYPE"          => "application/json",
+      "HTTP_X_MCP_SESSION_ID" => "legacy-header-ignored",
+      "rack.input"            => StringIO.new(JSON.generate(jsonrpc: "2.0", id: 1, method: "tools/list")),
+    }
+    app.call(env)
+
+    assert_nil captured_agent.correlation_id,
+               "legacy X-MCP-Session-Id must NOT be read in v5"
   end
 
   def test_rack_app_silently_drops_malicious_header_value
@@ -167,10 +194,10 @@ class CorrelationIdTest < Minitest::Test
     app = Parse::Agent::MCPRackApp.new(agent_factory: factory)
 
     env = {
-      "REQUEST_METHOD"        => "POST",
-      "CONTENT_TYPE"          => "application/json",
-      "HTTP_X_MCP_SESSION_ID" => "evil\nLOG-INJECTION",
-      "rack.input"            => StringIO.new(JSON.generate(jsonrpc: "2.0", id: 1, method: "tools/list")),
+      "REQUEST_METHOD"      => "POST",
+      "CONTENT_TYPE"        => "application/json",
+      "HTTP_MCP_SESSION_ID" => "evil\nLOG-INJECTION",
+      "rack.input"          => StringIO.new(JSON.generate(jsonrpc: "2.0", id: 1, method: "tools/list")),
     }
     app.call(env)
 

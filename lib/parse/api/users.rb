@@ -37,6 +37,7 @@ module Parse
       end
 
       # Find user matching this active session token.
+      # @param session_token [String] the Parse user session token to look up.
       # @param opts [Hash] additional options to pass to the {Parse::Client} request.
       # @param headers [Hash] additional HTTP headers to send with the request.
       # @return [Parse::Response]
@@ -69,7 +70,7 @@ module Parse
       # @param headers [Hash] additional HTTP headers to send with the request.
       # @return [Parse::Response]
       def update_user(id, body = {}, headers: {}, **opts)
-        response = request :put, "#{USER_PATH_PREFIX}/#{id}", body: body, opts: opts
+        response = request :put, "#{USER_PATH_PREFIX}/#{id}", body: body, headers: headers, opts: opts
         response.parse_class = Parse::Model::CLASS_USER
         response
       end
@@ -97,13 +98,36 @@ module Parse
       end
 
       # Request a password reset for a registered email.
+      #
+      # Client-side rate limited on a per-email basis using the same
+      # tracker that backs {#login} (entries are namespaced under a
+      # +pwreset:+ prefix so the two limiters don't collide on usernames
+      # that happen to equal an email). Every request counts toward the
+      # backoff — Parse Server's +requestPasswordReset+ response does
+      # not differentiate "email exists" from "email does not exist"
+      # (and rightly so, to avoid account enumeration), so the SDK
+      # cannot distinguish a legitimate retry from an attacker probing
+      # for valid emails. The cap mirrors {LOGIN_MAX_FAILURES}: 5
+      # requests within the rolling window before exponential backoff
+      # kicks in and the limit clears via the same TTL-based cleanup.
+      #
       # @param email [String] the Parse user email.
       # @param opts [Hash] additional options to pass to the {Parse::Client} request.
       # @param headers [Hash] additional HTTP headers to send with the request.
+      # @raise [RuntimeError] when the per-email request rate is exceeded.
       # @return [Parse::Response]
       def request_password_reset(email, headers: {}, **opts)
+        rate_key = "pwreset:#{email}"
+        check_login_rate_limit!(rate_key)
         body = { email: email }
-        request :post, REQUEST_PASSWORD_RESET, body: body, opts: opts, headers: headers
+        response = request :post, REQUEST_PASSWORD_RESET, body: body, opts: opts, headers: headers
+        # Always count the attempt as a "failure" for backoff purposes:
+        # the response body is intentionally indistinguishable across
+        # found/not-found emails, so we cannot reset the counter on
+        # "success" without leaking that distinction to an attacker who
+        # is probing.
+        track_login_attempt(rate_key, false)
+        response
       end
 
       # Login a user. Implements client-side rate limiting with exponential

@@ -153,13 +153,18 @@ class AgentToolFilterTest < Minitest::Test
   end
 
   def test_write_and_admin_tool_names_are_recognized_even_on_readonly_agent
+    prev = Parse::Agent.suppress_master_key_warning
+    Parse::Agent.suppress_master_key_warning = true
     captured = capture_warns do
       Parse::Agent.new(
         permissions: :readonly,
         tools: { except: [:create_object, :update_object, :delete_object, :create_class, :delete_class] },
       )
     end
-    assert_equal "", captured, "permission-tier tool names should not trigger typo warning"
+    refute_match(/unknown tool|typo/i, captured,
+                 "permission-tier tool names should not trigger typo warning")
+  ensure
+    Parse::Agent.suppress_master_key_warning = prev
   end
 
   # ---- :tool_filtered distinct error_code ------------------------------

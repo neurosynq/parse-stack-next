@@ -3,6 +3,7 @@
 
 require "faraday"
 require "moneta"
+require "connection_pool"
 require "digest"
 require_relative "protocol"
 
@@ -81,6 +82,14 @@ module Parse
         @opts = { expires: 0 }
         @opts.merge!(opts) if opts.is_a?(Hash)
         @expires = @opts[:expires]
+        # Optional cache key namespace so two Parse apps sharing one Redis don't
+        # collide (e.g. `mk:/classes/Song/abc` is the same path for both apps).
+        # When set, keys become `<namespace>:<existing-prefix>:<url>`. Empty
+        # string is treated as nil. Trailing `:` is stripped once so users can
+        # pass either `"app_x"` or `"app_x:"`.
+        ns = @opts[:namespace].to_s
+        ns = ns.chomp(":")
+        @namespace = ns.empty? ? nil : ns
 
         unless [:key?, :[], :delete, :store].all? { |method| @store.respond_to?(method) }
           raise ArgumentError, "Caching store object must a Moneta key/value store."
@@ -134,15 +143,28 @@ module Parse
           @cache_key = "mk:#{@cache_key}" # prefix for master key requests
         end
 
+        # Namespace outermost so a SCAN over `<namespace>:*` evicts a whole
+        # tenant/app cleanly without touching another app's entries.
+        @cache_key = "#{@namespace}:#{@cache_key}" if @namespace
+
+        url_path = url.path
+
         begin
           # Skip cache read if write_only mode is enabled
           if method == :get && @cache_key.present? && !@write_only && @store.key?(@cache_key)
-            puts("[Parse::Cache] Hit >> #{url}") if self.class.logging.present?
+            # Debug-log the URL **path only** — `url.to_s` would include the
+            # query string, which Parse encodes JSON `where=` into and may
+            # contain PII. Same redaction discipline as the AS::N payload.
+            puts("[Parse::Cache] Hit >> #{url_path}") if self.class.logging.present?
             response = Faraday::Response.new
             begin
               cache_data = @store[@cache_key] # previous cached response
             rescue => e
-              puts "[Parse::Cache] Error: #{e}"
+              # Log only the class name — some Moneta/Redis drivers echo the
+              # offending key in `e.message`, and our key contains a hashed
+              # session-token prefix that we treat as side-channel material.
+              puts "[Parse::Cache] Error: #{e.class.name}"
+              instrument_cache(:error, method: method, url_path: url_path, error: e.class.name)
               cache_data = nil
             end
 
@@ -160,24 +182,43 @@ module Parse
             if cache_data.present? && body.present?
               response_headers[CACHE_RESPONSE_HEADER] = "true"
               response.finish({ status: 200, response_headers: response_headers, body: body })
+              instrument_cache(:hit, method: method, url_path: url_path)
               return response
             else
-              @store.delete @cache_key
+              delete_cache_variants(url)
+              instrument_cache(:miss, method: method, url_path: url_path, reason: :empty_payload)
             end
+          elsif method == :get && @cache_key.present? && !@write_only
+            # GET miss: opportunistically clear any sibling variants of the
+            # current namespace (anonymous `<url>` and master-key `mk:<url>`
+            # under the same namespace) so a stale variant from a prior
+            # request flavor doesn't linger until TTL.
+            #
+            # When @namespace is set we deliberately do NOT touch the bare
+            # un-namespaced `<url>` / `mk:<url>` keys — those could belong to
+            # another Parse app sharing the Redis DB, and cross-namespace
+            # eviction would be a blast-radius bug, not a fix. Operators
+            # upgrading an SDK that previously wrote un-namespaced keys
+            # should evict those once at upgrade time via SCAN.
+            delete_cache_variants(url)
+            instrument_cache(:miss, method: method, url_path: url_path)
+          elsif method == :get && @cache_key.present? && @write_only
+            delete_cache_variants(url)
+            instrument_cache(:miss, method: method, url_path: url_path, reason: :write_only)
           elsif @cache_key.present?
             #non GET requets should clear the cache for that same resource path.
             #ex. a POST to /1/classes/Artist/<objectId> should delete the cache for a GET
             # request for the same '/1/classes/Artist/<objectId>' where objectId are equivalent
-            @store.delete url.to_s # regular
-            @store.delete "mk:#{url.to_s}" # master key cache-key
-            @store.delete @cache_key # final key
+            delete_cache_variants(url)
+            instrument_cache(:delete, method: method, url_path: url_path)
           end
-        rescue ::TypeError, Errno::EINVAL, Redis::CannotConnectError, Redis::TimeoutError => e
+        rescue ::TypeError, Errno::EINVAL, Redis::CannotConnectError, Redis::TimeoutError, ConnectionPool::TimeoutError => e
           # if the cache store fails to connect, catch the exception but proceed
           # with the regular request, but turn off caching for this request. It is possible
           # that the cache connection resumes at a later point, so this is temporary.
           @enabled = false
-          puts "[Parse::Cache] Error: #{e}"
+          puts "[Parse::Cache] Error: #{e.class.name}"
+          instrument_cache(:error, method: method, url_path: url_path, error: e.class.name)
         end
 
         @app.call(env).on_complete do |response_env|
@@ -186,17 +227,74 @@ module Parse
 
           if @enabled && method == :get && CACHEABLE_HTTP_CODES.include?(response_env.status) &&
              response_env.body.present? && response_env.response_headers[CONTENT_LENGTH_KEY].to_i.between?(20, 1_250_000)
+            store_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
             begin
               @store.store(@cache_key,
                            { headers: response_env.response_headers, body: response_env.body },
                            expires: @expires)
+              duration_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - store_start) * 1000.0).round(3)
+              instrument_cache(:store, method: method, url_path: url_path, duration_ms: duration_ms)
             rescue => e
-              puts "[Parse::Cache] Store Error: #{e}"
+              puts "[Parse::Cache] Store Error: #{e.class.name}"
+              instrument_cache(:error, method: method, url_path: url_path, error: e.class.name)
             end
           end # if
           # do something with the response
           # response_env[:response_headers].merge!(...)
         end
+      end
+
+      private
+
+      # Emit an ActiveSupport::Notifications event under the `parse.cache.*`
+      # namespace.
+      #
+      # **Payload shape (stable):** `{ event:, namespace:, method:, url_path:,
+      # [reason:], [duration_ms:], [error:] }`.
+      #
+      # **Security invariants:**
+      # - The cache key is NEVER emitted. The key contains a hashed
+      #   session-token prefix that would be a side-channel for "this user
+      #   has data at this URL" enumeration.
+      # - `url_path` is `URI#path` only — query strings are stripped because
+      #   Parse encodes query JSON there (potentially long or PII-bearing).
+      # - `error` is `Exception#class.name` only — never the exception
+      #   message or backtrace.
+      # - `namespace` is whatever the SDK consumer configured at setup. Treat
+      #   subscribers as you would your application log sink: they observe
+      #   the namespace, the HTTP method, and the URL path of every cached
+      #   GET / invalidating write.
+      #
+      # **Subscriber discipline:** ActiveSupport::Notifications runs
+      # subscribers **synchronously on the Faraday request thread**. A
+      # blocking subscriber (e.g. synchronous I/O to a slow sink) blocks
+      # every cached request for the duration of its work, and an exception
+      # raised inside a subscriber will surface as a request failure. Keep
+      # subscribers cheap — counter increments, in-memory accumulators, or
+      # non-blocking sinks like StatsD-over-UDP.
+      # @!visibility private
+      def instrument_cache(event, **extra)
+        return unless defined?(ActiveSupport::Notifications)
+        payload = { event: event, namespace: @namespace }.merge!(extra)
+        ActiveSupport::Notifications.instrument("parse.cache.#{event}", payload)
+      end
+
+      # Delete the canonical cache_key plus its legacy un-namespaced and
+      # master-key-prefixed variants. Called on both GET misses (defensive
+      # cleanup of stale pre-namespace entries) and non-GET writes (cache
+      # invalidation for the resource).
+      # @!visibility private
+      def delete_cache_variants(url)
+        if @namespace
+          # Namespaced: only delete our app's variants so a write through
+          # client A doesn't blow away client B's cache when both share Redis.
+          @store.delete "#{@namespace}:#{url.to_s}"
+          @store.delete "#{@namespace}:mk:#{url.to_s}"
+        else
+          @store.delete url.to_s # regular
+          @store.delete "mk:#{url.to_s}" # master key cache-key
+        end
+        @store.delete @cache_key # final key
       end
     end #Caching
   end #Middleware

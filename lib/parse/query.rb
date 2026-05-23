@@ -458,7 +458,15 @@ module Parse
       @skip = 0
       @table = table
       @cache = Parse.default_query_cache
-      @use_master_key = true
+      # Tri-state: `nil` means "no caller preference" — the request layer
+      # then applies the master-key default, the `Parse.client_mode` flag,
+      # and the `Parse.with_session` ambient as configured. Explicit
+      # `true` / `false` (set via `use_master_key=` or the `use_master_key:`
+      # constraint key) wins over both. A `true` default here would
+      # silently smuggle the master-key header past every client-mode
+      # query, so we deliberately leave the decision to the request layer
+      # unless the caller said otherwise.
+      @use_master_key = nil
       @verbose_aggregate = false
       conditions constraints
     end # initialize
@@ -588,15 +596,15 @@ module Parse
     # @return [Array] an array of field values from all matching objects.
     # @example
     #   # Get all asset names
-    #   Asset.query.pluck(:name)
+    #   Document.query.pluck(:name)
     #   # => ["video1.mp4", "image1.jpg", "audio1.mp3"]
     #
-    #   # Get all author team IDs
-    #   Asset.query.pluck(:author_team)
-    #   # => [{"__type"=>"Pointer", "className"=>"Team", "objectId"=>"abc123"}, ...]
+    #   # Get all author workspace IDs
+    #   Document.query.pluck(:author_workspace)
+    #   # => [{"__type"=>"Pointer", "className"=>"Workspace", "objectId"=>"abc123"}, ...]
     #
     #   # Get created dates
-    #   Asset.query.pluck(:created_at)
+    #   Document.query.pluck(:created_at)
     #   # => [2024-11-24 10:30:00 UTC, 2024-11-25 14:20:00 UTC, ...]
     def pluck(field)
       if field.nil? || !field.respond_to?(:to_s)
@@ -835,15 +843,60 @@ module Parse
       unless opts[:filter] == false
         constraint.operand = Query.format_field(constraint.operand)
       end
+      reject_vector_constraint!(constraint)
       @where.push constraint
       @results = nil
       self #chaining
     end
 
+    # @!visibility private
+    # Raise {Parse::VectorSearch::ConstraintNotSupported} when a
+    # constraint targets a declared `:vector` property with an operator
+    # other than the narrow allow-list. Silent-no-op when the query's
+    # `@table` doesn't map to a registered Parse::Object subclass, when
+    # the subclass declares no `:vector` properties, or when the
+    # operand doesn't match a declared vector field on the resolved
+    # class.
+    #
+    # Allow-list: `$exists` (the constraint key for both `:exists` and
+    # `:null`), and that's it. Backfill queries like
+    # `Doc.query(:body_embedding.null => true)` are useful. Equality,
+    # range, $in, $nin, $all, etc. on a 1536-float array are at best
+    # surprising and at worst wrong.
+    def reject_vector_constraint!(constraint)
+      return unless @table
+      klass = Parse::Model.find_class(@table)
+      return unless klass.respond_to?(:vector_properties)
+      vec_fields = klass.vector_properties
+      return if vec_fields.nil? || vec_fields.empty?
+      # `constraint.operand` may be either the local symbol (e.g.
+      # `:body_embedding`) or the camel-cased remote field (e.g.
+      # `:bodyEmbedding`) depending on whether Query.format_field has
+      # already run. Resolve both shapes against the local set.
+      operand_sym = constraint.operand.to_sym
+      local_field =
+        if vec_fields.key?(operand_sym)
+          operand_sym
+        elsif klass.respond_to?(:field_map)
+          klass.field_map.find { |_local, remote| remote.to_sym == operand_sym }&.first
+        end
+      return unless local_field && vec_fields.key?(local_field)
+      # `$exists` is the only constraint key that makes semantic sense
+      # on a dense numeric array — "do you have an embedding yet?" is a
+      # legitimate backfill query.
+      return if constraint.class.key == :$exists
+      op_keyword = constraint.class.key || :eq
+      raise Parse::VectorSearch::ConstraintNotSupported,
+            "#{klass}.#{local_field} is a :vector property; constraint `#{op_keyword}` " \
+            "is not supported on vector fields. Vector queries must use " \
+            "#{klass}.find_similar(vector:/text:) (which routes through Atlas " \
+            "$vectorSearch); only :exists / :null are accepted in Parse::Query."
+    end
+
     # @param raw [Boolean] whether to return the hash form of the constraints.
     # @return [Array<Parse::Constraint>] if raw is false, an array of constraints
     #  composing the :where clause for this query.
-    # @return [Hash] if raw i strue, an hash representing the constraints.
+    # @return [Hash] if raw is true, a hash representing the constraints.
     def constraints(raw = false)
       raw ? where_constraints : @where
     end
@@ -1364,8 +1417,13 @@ module Parse
     def _opts
       opts = {}
       opts[:cache] = self.cache || false
-      opts[:use_master_key] = self.use_master_key
-      opts[:session_token] = self.session_token
+      # Only forward `use_master_key` when the caller actually set it.
+      # Forwarding the default (`nil`) would make `opts.key?(:use_master_key)`
+      # true in the request layer and short-circuit the
+      # `Parse.client_mode` / ambient-session resolution paths. See the
+      # init-block comment on `@use_master_key`.
+      opts[:use_master_key] = self.use_master_key unless self.use_master_key.nil?
+      opts[:session_token] = self.session_token unless self.session_token.nil?
       # for now, don't cache requests where we disable master_key or provide session token
       # if opts[:use_master_key] == false || opts[:session_token].present?
       #   opts[:cache] = false
@@ -1663,7 +1721,22 @@ module Parse
     # @!visibility private
     def assert_mongo_direct_routable!
       has_session = @session_token.is_a?(String) && !@session_token.empty?
-      unless use_master_key || @acl_user || @acl_role || has_session
+      # Mirror the request-layer auth resolution in Parse::Client#request:
+      # when the process is in "server mode" — Parse.client_mode == false
+      # AND the resolved Parse::Client has a master_key — and the caller
+      # hasn't explicitly opted out via `use_master_key = false`, the
+      # configured master key is the ambient credential. A mongo-direct
+      # query in that posture is authorized by the same key the REST
+      # path would have sent; the SDK should not force callers to repeat
+      # `use_master_key: true` on every direct query.
+      client_has_master_key = begin
+        c = client
+        c.respond_to?(:master_key) && !c.master_key.to_s.empty?
+      rescue StandardError
+        false
+      end
+      server_mode_master = (use_master_key != false) && !Parse.client_mode && client_has_master_key
+      unless use_master_key || server_mode_master || @acl_user || @acl_role || has_session
         raise MongoDirectRequired,
           "[Parse::Query] This query uses a constraint that can only run " \
           "via mongo-direct. Mongo-direct bypasses Parse Server's enforcement, " \
@@ -2977,15 +3050,15 @@ module Parse
     #     { "$match" => { "status" => "active" } },
     #     { "$group" => { "_id" => "$category", "count" => { "$sum" => 1 } } }
     #   ]
-    #   aggregation = Asset.query.aggregate(pipeline)
+    #   aggregation = Document.query.aggregate(pipeline)
     #   results = aggregation.results
     #   raw_results = aggregation.raw
     #   pointer_results = aggregation.result_pointers
     #
     #   # With verbose output
-    #   aggregation = Asset.query.aggregate(pipeline, verbose: true)
+    #   aggregation = Document.query.aggregate(pipeline, verbose: true)
     #   # With MongoDB direct (required for $inQuery constraints in aggregation)
-    #   aggregation = Asset.query.aggregate(pipeline, mongo_direct: true)
+    #   aggregation = Document.query.aggregate(pipeline, mongo_direct: true)
     # Pipeline stages that are blocked to prevent data exfiltration or destructive operations.
     # @deprecated Retained for backwards compatibility. The canonical list now lives in
     #   {Parse::PipelineSecurity::DENIED_OPERATORS} and is enforced recursively, not only
@@ -3949,23 +4022,23 @@ module Parse
     # @param return_pointers [Boolean] if true, converts Parse pointer group keys to Parse::Pointer objects.
     # @return [GroupBy, SortableGroupBy] an object that supports chaining aggregation methods.
     # @example
-    #   Asset.group_by(:category).count
-    #   Asset.where(:status => "active").group_by(:project).sum(:file_size)
-    #   Asset.group_by(:media_format).average(:duration)
+    #   Document.group_by(:category).count
+    #   Document.where(:status => "active").group_by(:project).sum(:file_size)
+    #   Document.group_by(:media_format).average(:duration)
     #
     #   # Array flattening example:
     #   # Record 1: tags = ["a", "b"]
     #   # Record 2: tags = ["b", "c"]
-    #   Asset.group_by(:tags, flatten_arrays: true).count
+    #   Document.group_by(:tags, flatten_arrays: true).count
     #   # => {"a" => 1, "b" => 2, "c" => 1}
     #
     #   # Sortable results:
-    #   Asset.group_by(:category, sortable: true).count.sort_by_value_desc
+    #   Document.group_by(:category, sortable: true).count.sort_by_value_desc
     #   # => [["video", 45], ["image", 23], ["audio", 12]]
     #
     #   # Return Parse::Pointer objects for pointer fields:
-    #   Asset.group_by(:author_team, return_pointers: true).count
-    #   # => {#<Parse::Pointer @parse_class="Team" @id="team1"> => 5, ...}
+    #   Document.group_by(:author_workspace, return_pointers: true).count
+    #   # => {#<Parse::Pointer @parse_class="Workspace" @id="team1"> => 5, ...}
     # @param mongo_direct [Boolean] if true, queries MongoDB directly bypassing Parse Server.
     #   Requires Parse::MongoDB to be configured. Default: false.
     def group_by(field, flatten_arrays: false, sortable: false, return_pointers: false, mongo_direct: false)
@@ -3987,16 +4060,16 @@ module Parse
     # @param return_pointers [Boolean] if true, returns Parse::Pointer objects instead of full objects.
     # @return [Hash] a hash with field values as keys and arrays of Parse objects as values.
     # @example
-    #   # Get arrays of actual Asset objects grouped by category
-    #   Asset.query.group_objects_by(:category)
+    #   # Get arrays of actual Document objects grouped by category
+    #   Document.query.group_objects_by(:category)
     #   # => {
-    #   #   "video" => [#<Asset:video1>, #<Asset:video2>, ...],
-    #   #   "image" => [#<Asset:image1>, #<Asset:image2>, ...],
-    #   #   "audio" => [#<Asset:audio1>, ...]
+    #   #   "video" => [#<Document:video1>, #<Document:video2>, ...],
+    #   #   "image" => [#<Document:image1>, #<Document:image2>, ...],
+    #   #   "audio" => [#<Document:audio1>, ...]
     #   # }
     #
     #   # Get Parse::Pointer objects instead (memory efficient)
-    #   Asset.query.group_objects_by(:category, return_pointers: true)
+    #   Document.query.group_objects_by(:category, return_pointers: true)
     #   # => {
     #   #   "video" => [#<Parse::Pointer>, #<Parse::Pointer>, ...],
     #   #   "image" => [#<Parse::Pointer>, ...],
@@ -4048,7 +4121,7 @@ module Parse
 
     # Convert query results to a formatted table display.
     # @param columns [Array<Symbol, String, Hash>] column definitions. Can be:
-    #   - Symbol/String: field name (e.g., :object_id, :name) or dot notation (e.g., "project.team.name")
+    #   - Symbol/String: field name (e.g., :object_id, :name) or dot notation (e.g., "project.workspace.name")
     #   - Hash: { field: :custom_name, header: "Custom Header" }
     #   - Hash: { block: ->(obj) { obj.some_calculation }, header: "Calculated" }
     # @param format [Symbol] output format (:ascii, :csv, :json)
@@ -4059,17 +4132,17 @@ module Parse
     #   Project.query.to_table([:object_id, :name, :address])
     #
     #   # With dot notation for related objects
-    #   Asset.query.to_table([
+    #   Document.query.to_table([
     #     :object_id,
     #     "project.name",        # Access project name through relationship
-    #     "project.team.name",   # Access team name through project->team relationship
+    #     "project.workspace.name",   # Access workspace name through project->workspace relationship
     #     :file_size
     #   ])
     #
     #   # With custom headers and calculated columns
     #   Project.query.to_table([
     #     { field: :object_id, header: "ID" },
-    #     { field: "team.name", header: "Team Name" },
+    #     { field: "workspace.name", header: "Workspace Name" },
     #     { field: :address, header: "Project Address" },
     #     { block: ->(proj) { proj.notes.count }, header: "Note Count" }
     #   ])
@@ -4119,12 +4192,12 @@ module Parse
     #   Note: This is primarily for consistency - date groupings typically use formatted date strings as keys.
     # @return [GroupByDate, SortableGroupByDate] an object that supports chaining aggregation methods.
     # @example
-    #   Capture.group_by_date(:created_at, :day).count
-    #   Asset.group_by_date(:created_at, :month).sum(:file_size)
-    #   Capture.where(:project => project_id).group_by_date(:created_at, :week).average(:duration)
+    #   Post.group_by_date(:created_at, :day).count
+    #   Document.group_by_date(:created_at, :month).sum(:file_size)
+    #   Post.where(:project => project_id).group_by_date(:created_at, :week).average(:duration)
     #
     #   # Sortable date results:
-    #   Asset.group_by_date(:created_at, :day, sortable: true).count.sort_by_value_desc
+    #   Document.group_by_date(:created_at, :day, sortable: true).count.sort_by_value_desc
     #   # => [["2024-11-25", 45], ["2024-11-24", 23], ...]
     # @param mongo_direct [Boolean] if true, queries MongoDB directly bypassing Parse Server.
     #   Requires Parse::MongoDB to be configured. Default: false.
@@ -4150,12 +4223,12 @@ module Parse
     # @return [Array] array of distinct values, with Parse pointers populated as full objects.
     # @example
     #   # Basic usage (returns raw values for non-pointer fields)
-    #   Asset.query.distinct_objects(:media_format)
+    #   Document.query.distinct_objects(:media_format)
     #   # => ["video", "audio", "photo"]
     #
     #   # Auto-populate Parse pointer objects (much faster than manual conversion)
-    #   Asset.query.distinct_objects(:author_team)
-    #   # => [#<Team:0x123 @attributes={"name"=>"Team A", ...}>, ...]
+    #   Document.query.distinct_objects(:author_workspace)
+    #   # => [#<Workspace:0x123 @attributes={"name"=>"Workspace A", ...}>, ...]
     def distinct_objects(field, return_pointers: false)
       if field.nil? || !field.respond_to?(:to_s)
         raise ArgumentError, "Invalid field name passed to `distinct_objects`."
@@ -4244,7 +4317,7 @@ module Parse
     end
 
     # Extract field value from object (similar to pluck logic).
-    # Supports dot notation for nested attributes (e.g., "project.team.name").
+    # Supports dot notation for nested attributes (e.g., "project.workspace.name").
     # @param obj [Object] object to extract from
     # @param field [Symbol, String] field name or dot-notation path
     # @return [Object] field value
@@ -4584,8 +4657,8 @@ module Parse
 
     # Check if a field is a pointer field by looking at the Parse class definition
     # @param parse_class [Class] the Parse::Object subclass
-    # @param field [Symbol, String] the original field name (e.g., :author_team)
-    # @param formatted_field [String] the formatted field name (e.g., "authorTeam")
+    # @param field [Symbol, String] the original field name (e.g., :author_workspace)
+    # @param formatted_field [String] the formatted field name (e.g., "authorWorkspace")
     # @return [Boolean] true if the field is a pointer field
     def is_pointer_field?(parse_class, field, formatted_field)
       return false unless parse_class.respond_to?(:fields)
@@ -4836,7 +4909,7 @@ module Parse
       end
     end
 
-    # Convert constraint field names to aggregation format (e.g., authorTeam -> _p_authorTeam for pointers)
+    # Convert constraint field names to aggregation format (e.g., authorWorkspace -> _p_authorWorkspace for pointers)
     # @param constraints [Hash] the constraints hash to convert
     # @return [Hash] the converted constraints with aggregation-compatible field names
     def convert_constraints_for_aggregation(constraints)
@@ -4847,8 +4920,8 @@ module Parse
         # Skip special Parse operators, but recurse into the boolean
         # combinators so a pointer-field rewrite is not bypassed when
         # the LLM (or any caller) wraps the constraint in $or/$and/$nor.
-        # Without this, `{ "$or" => [{ "team" => { "$in" => ["bare"] } }] }`
-        # would ship to MongoDB with `team` un-rewritten to `_p_team` —
+        # Without this, `{ "$or" => [{ "workspace" => { "$in" => ["bare"] } }] }`
+        # would ship to MongoDB with `workspace` un-rewritten to `_p_workspace` —
         # the canonical silent-zero pattern.
         if field.to_s.start_with?("$")
           if value.is_a?(Array) && %w[$and $or $nor].include?(field.to_s)
@@ -5607,11 +5680,11 @@ module Parse
     #     Ruby's `Hash#sort` default of sorting by key.
     # @return [self]
     # @example Biggest groups first
-    #   Asset.group_by(:category).order(value: :desc).count
+    #   Document.group_by(:category).order(value: :desc).count
     # @example Alphabetical group keys
-    #   Asset.group_by(:category).order(key: :asc).count
+    #   Document.group_by(:category).order(key: :asc).count
     # @example Groups with the most members first
-    #   Asset.group_by(:category).order(size: :desc).list
+    #   Document.group_by(:category).order(size: :desc).list
     def order(spec)
       target, direction =
         case spec
@@ -5652,8 +5725,8 @@ module Parse
     # @param direction [Symbol] `:asc` (default) or `:desc`
     # @return [self]
     # @example
-    #   Asset.group_by(:category).sort.count        # group keys ascending
-    #   Asset.group_by(:category).sort(:desc).count # group keys descending
+    #   Document.group_by(:category).sort.count        # group keys ascending
+    #   Document.group_by(:category).sort(:desc).count # group keys descending
     def sort(direction = :asc)
       order(direction)
     end
@@ -5662,8 +5735,8 @@ module Parse
     # This is useful for debugging and understanding the generated pipeline.
     # @return [Array<Hash>] the MongoDB aggregation pipeline
     # @example
-    #   Capture.where(:author_team.eq => team).group_by(:last_action).pipeline
-    #   # => [{"$match"=>{"authorTeam"=>"Team$abc123"}}, {"$group"=>{"_id"=>"$lastAction", "count"=>{"$sum"=>1}}}, {"$project"=>{"_id"=>0, "objectId"=>"$_id", "count"=>1}}]
+    #   Post.where(:author_workspace.eq => workspace).group_by(:last_action).pipeline
+    #   # => [{"$match"=>{"authorWorkspace"=>"Workspace$abc123"}}, {"$group"=>{"_id"=>"$lastAction", "count"=>{"$sum"=>1}}}, {"$project"=>{"_id"=>0, "objectId"=>"$_id", "count"=>1}}]
     def pipeline
       # This introspection builds the same shape as the count execution
       # path (`$sum: 1`), so reject order/aggregation combinations that
@@ -5774,7 +5847,7 @@ module Parse
     # Count the number of items in each group.
     # @return [Hash] a hash with group values as keys and counts as values.
     # @example
-    #   Asset.group_by(:category).count
+    #   Document.group_by(:category).count
     #   # => {"image" => 45, "video" => 23, "audio" => 12}
     def count
       execute_group_aggregation("count", { "$sum" => 1 })
@@ -5784,7 +5857,7 @@ module Parse
     # @param field [Symbol, String] the field to sum within each group.
     # @return [Hash] a hash with group values as keys and sums as values.
     # @example
-    #   Asset.group_by(:project).sum(:file_size)
+    #   Document.group_by(:project).sum(:file_size)
     #   # => {"Project1" => 1024000, "Project2" => 512000}
     def sum(field)
       if field.nil? || !field.respond_to?(:to_s)
@@ -5799,7 +5872,7 @@ module Parse
     # @param field [Symbol, String] the field to average within each group.
     # @return [Hash] a hash with group values as keys and averages as values.
     # @example
-    #   Asset.group_by(:category).average(:duration)
+    #   Document.group_by(:category).average(:duration)
     #   # => {"video" => 120.5, "audio" => 45.2}
     def average(field)
       if field.nil? || !field.respond_to?(:to_s)
@@ -5848,10 +5921,10 @@ module Parse
     # @return [Hash{Object => Array<Parse::Object>}] mapping of group key to
     #   the Parse::Object instances in that group.
     # @example
-    #   Asset.where(:status => "active").group_by(:category).list
-    #   # => {"image" => [<Asset:...>, <Asset:...>], "video" => [<Asset:...>]}
+    #   Document.where(:status => "active").group_by(:category).list
+    #   # => {"image" => [<Document:...>, <Document:...>], "video" => [<Document:...>]}
     # @example Largest groups first
-    #   Asset.group_by(:category).order(size: :desc).list
+    #   Document.group_by(:category).order(size: :desc).list
     # @note On the Parse REST `/aggregate` path there is no ACL/CLP/protectedFields
     #   enforcement — that endpoint is master-key-only. On the mongo-direct path
     #   the SDK's ACL `$match` runs before `$group`, and both ACL redaction and
@@ -6232,8 +6305,8 @@ module Parse
     # @param headers [Array<String>] custom headers (default: ["Group", "Count"])
     # @return [String] formatted table
     # @example
-    #   Asset.group_by(:category, sortable: true).count.to_table
-    #   Asset.group_by(:category).sum(:file_size).to_table(headers: ["Category", "Total Size"])
+    #   Document.group_by(:category, sortable: true).count.to_table
+    #   Document.group_by(:category).sum(:file_size).to_table(headers: ["Category", "Total Size"])
     def to_table(format: :ascii, headers: ["Group", "Count"])
       pairs = @results.to_a
 
@@ -6425,9 +6498,9 @@ module Parse
     #   - `:asc`/`:desc` shorthand for `{ key: direction }`
     # @return [self]
     # @example Newest periods first
-    #   Capture.group_by_date(:created_at, :day).order(key: :desc).count
+    #   Post.group_by_date(:created_at, :day).order(key: :desc).count
     # @example Busiest day first
-    #   Capture.group_by_date(:created_at, :day).order(value: :desc).count
+    #   Post.group_by_date(:created_at, :day).order(value: :desc).count
     def order(spec)
       target, direction =
         case spec
@@ -6466,8 +6539,8 @@ module Parse
     # This is useful for debugging and understanding the generated pipeline.
     # @return [Array<Hash>] the MongoDB aggregation pipeline
     # @example
-    #   Capture.where(:author_team.eq => team).group_by_date(:created_at, :month).pipeline
-    #   # => [{"$match"=>{"authorTeam"=>"Team$abc123"}}, {"$group"=>{"_id"=>{"year"=>{"$year"=>"$createdAt"}, "month"=>{"$month"=>"$createdAt"}}, "count"=>{"$sum"=>1}}}, {"$project"=>{"_id"=>0, "objectId"=>"$_id", "count"=>1}}]
+    #   Post.where(:author_workspace.eq => workspace).group_by_date(:created_at, :month).pipeline
+    #   # => [{"$match"=>{"authorWorkspace"=>"Workspace$abc123"}}, {"$group"=>{"_id"=>{"year"=>{"$year"=>"$createdAt"}, "month"=>{"$month"=>"$createdAt"}}, "count"=>{"$sum"=>1}}}, {"$project"=>{"_id"=>0, "objectId"=>"$_id", "count"=>1}}]
     def pipeline
       # Format the date field name
       formatted_date_field = @query.send(:format_aggregation_field, @date_field)
@@ -6511,7 +6584,7 @@ module Parse
     # Count the number of items in each time period.
     # @return [Hash] a hash with formatted date strings as keys and counts as values.
     # @example
-    #   Capture.group_by_date(:created_at, :day).count
+    #   Post.group_by_date(:created_at, :day).count
     #   # => {"2024-11-24" => 45, "2024-11-25" => 23}
     def count
       execute_date_aggregation("count", { "$sum" => 1 })
@@ -6521,7 +6594,7 @@ module Parse
     # @param field [Symbol, String] the field to sum within each time period.
     # @return [Hash] a hash with formatted date strings as keys and sums as values.
     # @example
-    #   Asset.group_by_date(:created_at, :month).sum(:file_size)
+    #   Document.group_by_date(:created_at, :month).sum(:file_size)
     #   # => {"2024-11" => 1024000, "2024-12" => 512000}
     def sum(field)
       if field.nil? || !field.respond_to?(:to_s)

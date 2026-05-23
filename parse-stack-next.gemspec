@@ -10,7 +10,7 @@ Gem::Specification.new do |spec|
   spec.email = ["adrian+parse-stack@neurosynq.net"]
 
   spec.summary = %q{Parse Server Ruby Client SDK (parse-stack-next fork)}
-  spec.description = %q{Parse Server Ruby Client. Perform Object-relational mapping between Parse Server and Ruby classes, with authentication, cloud code webhooks, push notifications and more built in.}
+  spec.description = %q{Parse Server Ruby Client. Perform Object-relational mapping between Parse Server and Ruby classes, with authentication, cloud code webhooks, push notifications and more built in. parse-stack-next is a fork of parse-stack with additional features: vector search, Atlas Search, agent ACL scopes, GraphQL, MongoDB-direct pipeline enforcement, and ongoing maintenance.}
   spec.homepage = "https://github.com/neurosynq/parse-stack-next"
   spec.license = "MIT"
 
@@ -22,13 +22,6 @@ Gem::Specification.new do |spec|
     "documentation_uri"     => "https://neurosynq.github.io/parse-stack-next/",
     "rubygems_mfa_required" => "true",
   }
-  # Prevent pushing this gem to RubyGems.org by setting 'allowed_push_host', or
-  # delete this section to allow pushing this gem to any host.
-  # if spec.respond_to?(:metadata)
-  #   spec.metadata['allowed_push_host'] = "http://www.modernistik.com"
-  # else
-  #   raise "RubyGems 2.0 or newer is required to protect against public gem pushes."
-  # end
 
   spec.files = `git ls-files -z`.split("\x0").reject { |f| f.match(%r{^(test|spec|features)/}) }
   spec.bindir = "bin"
@@ -42,6 +35,7 @@ Gem::Specification.new do |spec|
   spec.add_runtime_dependency "faraday", "~> 2.0"
   spec.add_runtime_dependency "faraday-net_http_persistent", "~> 2.0"
   spec.add_runtime_dependency "moneta", "< 2"
+  spec.add_runtime_dependency "connection_pool", ">= 2.2", "< 4"
   spec.add_runtime_dependency "rack", ">= 2.0.6", "< 4"
   spec.add_runtime_dependency "csv", "~> 3.3"
   spec.add_runtime_dependency "ostruct", "~> 0.6"
@@ -61,13 +55,20 @@ Gem::Specification.new do |spec|
   #   gem 'mongo', '~> 2.18'
   # Note: The gem is loaded at runtime only when MongoDB features are used
 
+  # Optional dependency for GraphQL schema type generation
+  # Required for: Parse::GraphQL::TypeGenerator
+  # Users can add this to their Gemfile for graphql-ruby type generation:
+  #   gem 'graphql', '~> 2.0'
+  # Note: The gem is loaded at runtime only when `require "parse/graphql"` is called.
+  spec.add_development_dependency "graphql", "~> 2.0"
+
   #   spec.post_install_message = <<UPGRADE
   #
   # ** BREAKING CHANGES **
   #  The default `has_many` association form has changed from :array to :query.
   #  To use arrays, you must now pass `through: :array` option to `has_many`.
   #
-  #  Visit: https://github.com/modernistik/parse-stack/wiki/Changes-to-has_many-in-1.5.0
+  #  Visit: https://github.com/neurosynq/parse-stack-next/wiki/Changes-to-has_many-in-1.5.0
   #
   # UPGRADE
 end

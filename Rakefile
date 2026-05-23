@@ -568,6 +568,6 @@ end
 
 YARD::Rake::YardocTask.new do |t|
   t.files = ["lib/**/*.rb"]   # optional
-  t.options = ["-o", "doc/parse-stack"] # optional
+  t.options = ["-o", "doc/parse-stack-next"] # optional
   t.stats_options = ["--list-undoc"]         # optional
 end

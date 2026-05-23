@@ -15,7 +15,7 @@ require_relative "../../../test_helper"
 class ResultFormatterPointerHintTest < Minitest::Test
   def test_format_schema_emits_query_hint_for_pointer_fields
     schema = {
-      "className" => "Membership",
+      "className" => "Subscription",
       "fields"    => {
         "objectId" => { "type" => "String" },
         "team"     => { "type" => "Pointer", "targetClass" => "Team" },

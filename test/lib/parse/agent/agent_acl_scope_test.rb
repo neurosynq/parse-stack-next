@@ -22,7 +22,8 @@ class AgentACLScopeTest < Minitest::Test
   def setup
     unless Parse::Client.client?
       Parse.setup(server_url: "http://localhost:1337/parse",
-                  application_id: "test", api_key: "test")
+                  application_id: "test", api_key: "test",
+                  master_key: "test_master_key")
     end
     @prior_suppress = Parse::Agent.suppress_master_key_warning
     Parse::Agent.suppress_master_key_warning = true

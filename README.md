@@ -1,48 +1,60 @@
-> **Note:** This gem is published as **`parse-stack-next`** under the [neurosynq](https://github.com/neurosynq/parse-stack-next) organization. The documentation below was written when the gem was named `parse-stack` — references to `parse-stack` in install instructions, code examples, and links refer to the same codebase. See HEAD on `main` for current docs.
+![parse_stack_next - The Ruby stack for Parse Server](https://raw.githubusercontent.com/neurosynq/parse-stack-next/main/assets/parse-stack-next-banner.png)
 
----
+# Parse Stack Next
 
-![Parse Stack - The Parse Server Ruby Client SDK](https://raw.githubusercontent.com/modernistik/parse-stack/master/parse-stack.png?raw=true)
+A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [parse-stack-next](https://github.com/neurosynq/parse-stack-next) is a Ruby client SDK, REST client, and Active Model ORM for [Parse Server](http://parseplatform.org/), combining a low-level API client, a query engine, an object-relational mapper (ORM), and a Cloud Code Webhooks rack application in a single gem.
 
-# Parse Stack - Extended Edition
+### What's new in 5.0
 
-A full featured Active Model ORM and Ruby REST API for Parse-Server. [Parse Stack](https://github.com/neurosynq/parse-stack-next) is the [Parse Server](http://parseplatform.org/) SDK, REST Client and ORM framework for [Ruby](https://www.ruby-lang.org/en/). It provides a client adapter, a query engine, an object relational mapper (ORM) and a Cloud Code Webhooks rack application.
+- **RAG foundation** — `:vector` property type, `Parse::Embeddings` provider registry shipping built-in adapters for OpenAI, Cohere (v3 + v4.0 Matryoshka text-mode), Voyage (incl. open-weight `voyage-4-nano` and `voyage-multimodal-3` text-mode), Jina v3/v4/v5/code, Qwen 3 (DashScope), and a generic `LocalHTTP` client for Ollama / LM Studio / vLLM / TEI. `Klass.find_similar(vector:/text:, k:)` over Atlas `$vectorSearch`, and an `embed` class macro that digest-tracks source fields so vectors only recompute when content changes
+- **`Parse::Cache::Redis`** — Moneta-compatible Redis cache wrapper with a built-in `ConnectionPool`, optional `cache_namespace:` for multi-tenant Redis sharing, and graceful degrade on pool saturation
+- **`ActiveSupport::Notifications` instrumentation** — `parse.cache.*`, `parse.mongodb.aggregate`, `parse.mongodb.find`, and `parse.embeddings.embed` events with stable, PII-safe payload schemas; in-core slow-query log via `Parse.slow_query_threshold_ms`
+- **MCP transport hardening** — Streamable HTTP `Mcp-Session-Id` header (renamed from `X-MCP-Session-Id`, **breaking**), `MCP-Protocol-Version` validation, `DELETE /` session termination, structured-content (`outputSchema`) on built-in tools, optional `health_path:` liveness probe
+- **`Parse::GraphQL::TypeGenerator`** — generate `graphql-ruby` types directly from your `Parse::Object` subclasses (no Parse Server round-trip), with `:vector` columns surfaced as `[Float]` and association registries (`has_one_associations`, `has_many_associations`) populated at DSL time
+- **LiveQuery promoted to stable** — the experimental warning is removed; `Parse.live_query_enabled = true` is retained as a network-egress safety toggle, not a stability gate
+- **Server-version deprecation warning** — one-shot warning when connecting to Parse Server below the supported floor (currently 7.0.0); silence with `Parse.suppress_server_version_warning = true`
+- **`mongo_relation_index :field, dedup: true`** — register a compound `{owningId, relatedId}` UNIQUE on relation join collections to prevent duplicate-pair subscriptions without breaking `has_many` semantics
 
-**This is an extended and enhanced fork with additional features including:**
+See [CHANGELOG.md](./CHANGELOG.md) for the full 5.0 entry, including security-hardening notes and Ruby 3.x cleanup.
+
+### Core capabilities
+
 - MongoDB Aggregation Framework support
-- **MongoDB Atlas Search** - Full-text search, autocomplete, faceted search with direct MongoDB access
-- **Direct MongoDB Queries** - Bypass Parse Server for high-performance read operations
-- **Schema Introspection & Migration** - Compare local models with server schema and generate migrations
-- **Enhanced Role Management** - Helper methods for role hierarchies, user management, and membership queries
-- **Read Preference Support** - Direct read queries to MongoDB secondary replicas
-- **Class-Level Permissions (CLP)** - Define and filter protected fields based on roles and user ownership
-- Advanced ACL query constraints (readable_by, writable_by)
-- **Owner-aware default ACL policy** (`acl_policy :owner_else_private`) — declare per-class defaults that grant read/write only to the record's owner, with secure or public fallback for server-context creates
+- **MongoDB Atlas Search** — full-text search, autocomplete, faceted search with direct MongoDB access
+- **Direct MongoDB Queries** — bypass Parse Server's REST surface for high-performance reads, with SDK-side ACL/CLP/`protectedFields` enforcement for scoped agents
+- **Schema Introspection & Migration** — compare local models with server schema and generate migrations
+- **Enhanced Role Management** — helper methods for role hierarchies, user membership, and subscription queries
+- **Read Preference Support** — route reads to MongoDB secondary replicas
+- **Class-Level Permissions (CLP)** — define and filter protected fields based on roles and user ownership
+- Advanced ACL query constraints (`readable_by`, `writable_by`)
+- **Owner-aware default ACL policy** (`acl_policy :owner_else_private`) — per-class defaults granting read/write only to the record's owner, with a secure or public fallback for server-context creates
 - Full transaction support with automatic retry
 - Comprehensive integration testing with Docker
 - Enhanced change tracking and webhooks
-- Request idempotency system with Retry-After header support
+- Request idempotency with `Retry-After` header support
 - Timezone support for date operations
 - Partial fetch with smart autofetch and serialization control
 - Multi-Factor Authentication (MFA/2FA) support
-- LiveQuery real-time subscriptions with TLS/SSL, circuit breaker, health monitoring (experimental)
-- AI/LLM Agent integration with security hardening (rate limiting, injection protection)
-- And many more improvements (see [CHANGELOG.md](./CHANGELOG.md))
+- LiveQuery real-time subscriptions with TLS/SSL, circuit breaker, and health monitoring
+- AI/LLM agent integration (MCP-spec compliant) with security hardening — rate limiting, injection protection, agent ACL scopes
 
-Below is a [quick start guide](#overview). See also the [Usage Guide](./USAGE_GUIDE.md) for practical examples covering queries, aggregation, ACLs, and more.
+Below is a [quick start guide](#overview). See also the [Usage Guide](./docs/usage_guide.md) for practical examples covering queries, aggregation, ACLs, and more.
 
-> **Note:** The [Modernistik API Reference](https://www.modernistik.com/gems/parse-stack/index.html) documents v1.9 only and does not cover features added in v2.x or v3.x.
+> **Note:** API reference docs are published at [neurosynq.github.io/parse-stack-next](https://neurosynq.github.io/parse-stack-next/index.html). Generated via YARD from the current source; covers the full 5.x surface.
 
 ### Credits
 
-This project is based on the excellent [Parse Stack framework](https://github.com/modernistik/parse-stack) originally created by [Modernistik](https://www.modernistik.com). We are grateful for their foundational work and continue to build upon it.
+This project (`parse-stack-next`) is a continuation of the [Parse Stack framework](https://github.com/modernistik/parse-stack) originally created by [Modernistik](https://www.modernistik.com). We are grateful for their foundational work and continue to build upon it under the [neurosynq](https://github.com/neurosynq) organization.
 
 ### Code Status
-[![Gem Version](https://img.shields.io/gem/v/parse-stack.svg)](https://github.com/neurosynq/parse-stack-next)
-[![Downloads](https://img.shields.io/gem/dt/parse-stack.svg)](https://rubygems.org/gems/parse-stack)
+[![Gem Version](https://img.shields.io/gem/v/parse-stack-next.svg)](https://rubygems.org/gems/parse-stack-next)
+[![Downloads](https://img.shields.io/gem/dt/parse-stack-next.svg)](https://rubygems.org/gems/parse-stack-next)
 [![Releases](https://img.shields.io/github/v/release/neurosynq/parse-stack-next)](https://github.com/neurosynq/parse-stack-next/releases)
 
 #### Tutorial Videos
+
+The following videos were recorded for the original parse-stack gem. The model, query, and association surface they cover is unchanged in parse-stack-next, so they remain a useful introduction; see the [Usage Guide](./docs/usage_guide.md) for v5.x-specific features (vector search, Redis cache, agent tools).
+
 1. Getting Started: https://youtu.be/zoYSGmciDlQ
 2. Custom Classes and Relations: https://youtu.be/tfSesotfU7w
 3. Working with Existing Schemas: https://youtu.be/EJGPT7YWyXA
@@ -55,22 +67,21 @@ Add this line to your application's `Gemfile`:
 ```ruby
 gem 'parse-stack-next'
 ```
-
-> The gem is published as `parse-stack-next` on RubyGems. Older references in this README to `parse-stack` point to the same codebase — use `parse-stack-next` in new projects.
-
 And then execute:
 ```bash
 $ bundle
 ```
 Or install it yourself as:
 ```bash
-$ gem install parse-stack
+$ gem install parse-stack-next
 ```
+
+> **Note:** The Ruby require path and module namespace are unchanged. You still `require 'parse/stack'` and reference classes under `Parse::Object`, `Parse::Query`, etc. Only the gem name on RubyGems has changed.
 ### Rack / Sinatra
 Parse-Stack API, models and webhooks easily integrate in your existing Rack/Sinatra based applications.
 
 ### Rails
-Parse-Stack comes with support for Rails by adding additional rake tasks and generators. After adding `parse-stack` as a gem dependency in your Gemfile and running `bundle`, you should run the install script:
+Parse-Stack comes with support for Rails by adding additional rake tasks and generators. After adding `parse-stack-next` as a gem dependency in your Gemfile and running `bundle`, you should run the install script:
 ```bash
 $ rails g parse_stack:install
 ```
@@ -162,148 +173,53 @@ result = Parse.call_function :myFunctionName, {param: value}
 
 ```
 
-## What's New in 3.x
+## Release History
 
-**Current version: 4.4.3** | **Ruby 3.2+ required**
+**Current version: 5.0.0** | **Ruby 3.2+ required**
 
-### 4.4.3 - Pointer-Shape Strictness & Pipeline Forward-Pass
+The 5.0 highlights (vector search / RAG, pooled Redis cache, AS::N instrumentation, MCP transport hardening, GraphQL type generation) are summarized in the [What's new in 5.0](#whats-new-in-50) section above. Earlier releases are recorded below.
 
-- **`Parse.strict_pointer_shapes`** — opt-in flag (or `PARSE_STRICT_POINTER_SHAPES=true`)
-  that converts unresolvable pointer-shape constraints from a one-shot
-  warning + silent-zero result into a `Parse::Query::PointerShapeError`
-  raise. Recommended for test/CI and any LLM-driven workload where
-  "0 results" reads as a real answer instead of a shape mismatch.
-- **Pipeline forward-pass field tracking** — the agent's pipeline
-  access-policy walker now tracks fields introduced by upstream stages
-  (`$group._id` and accumulator keys, `$addFields`/`$set` outputs,
-  `$lookup.as`). The canonical "group → match → sort → limit" pattern
-  on synthetic accumulator outputs no longer hits `:field_denied`
-  against the source class's `agent_fields` allowlist.
-- **Pointer `query_hint:` in `get_schema`** — every Pointer field
-  surfaces an inline shape hint covering equality (objectId string OR
-  full `{__type: "Pointer", ...}` hash) and `$in/$nin` (bare-id array
-  with SDK-side normalization). Hidden targets collapse to a
-  `<targetClass>` placeholder.
+Per-version detail lives in [CHANGELOG.md](./CHANGELOG.md) and on the [Releases page](https://github.com/neurosynq/parse-stack-next/releases). The compact summary below is the major-line view.
 
-### 4.4.2 - Schema-Aware Walker, Pipeline-Local Aliases
+### 4.x — MongoDB index management, agent ACL scope, CLP enforced on mongo-direct, and `parse-stack-next` debut
 
-- **Schema-aware expression-value rewriter** — the `$author` → `$_p_author`
-  pretty-name rewrite inside expression values now consults the queried
-  class's declared properties. References whose name is neither a Parse
-  property nor a universal built-in pass through verbatim, so aliases
-  introduced by an upstream `$project`/`$addFields`/`$set`/`$group`
-  stage survive into downstream stages exactly as written. Result rows
-  are keyed by the literal alias the caller used.
-- **`first_or_create!` accepts query-option keys in `synchronize:`** —
-  filter-lock fingerprint includes constraint operators
-  (`Parse::Operation` keys) so locks scoped on inequality/range
-  constraints no longer collide across distinct callers.
+- **`mongo_index` DSL** (`mongo_index`, `mongo_geo_index`, `mongo_relation_index`) with class-load validation (pointer auto-rewrite, parallel-array rejection, `_id` guard, 64-per-collection cap). `parse_reference` fields auto-register a unique-sparse index.
+- **Index migration tooling** — `Parse::MongoDB.configure_writer` (separate write connection, triple-gated), `Parse::Schema::IndexMigrator` (plan / apply with optional orphan drop), and `rake parse:mongo:indexes:plan` / `:apply`.
+- **`Model.describe`** — operator introspection aggregator (local declarations + optional server fetch covering schema, CLP, default ACLs, Atlas Search, MongoDB indexes).
+- **CLP + `protectedFields` enforced on mongo-direct** — `Parse::CLPScope` gates `Parse::MongoDB.aggregate` for scoped agents (`session_token:` / `acl_user:` / `acl_role:`) and strips protected fields from result rows. This is the only first-class enforcement surface for ACL + CLP + protectedFields on scoped reads; Parse Server's REST aggregate enforces neither.
+- **`Parse::Agent.new(acl_user:|acl_role:)`** — declared agent identity without a session token; built-in tools auto-promote to mongo-direct. Sub-agent identity must be a subset of the parent's reach.
+- **Pipeline correctness** — schema-aware `$author` → `$_p_author` rewriter respects pipeline-local aliases; forward-pass field tracking through `$group`/`$addFields`/`$set`/`$lookup.as`; pointer `query_hint:` surfaced in `get_schema`.
+- **`Parse.strict_pointer_shapes`** — opt-in flag that converts unresolvable pointer-shape constraints into a `PointerShapeError` raise (recommended for test/CI and LLM-driven workloads).
+- **`first_or_create!` / `create_lock` accept `Parse::Operation` keys** in `synchronize:`, fixing filter-lock fingerprint collisions on inequality/range constraints.
+- **Security & modernization** — Ruby 3.2 floor, Rails/ActiveSupport 6.1 floor, CI on Ruby 3.2–3.5. LiveQuery TLS hostname verification. Webhook endpoint fails closed when no key is configured. `Parse::Error.new(code, message)` two-argument constructor. `include`d pointer fields auto-added to `keys` when an allowlist is set.
+- **4.5.0 — first release of this gem.** `parse-stack-next` debuts on RubyGems under the [neurosynq](https://github.com/neurosynq) organization, continuing from the upstream `parse-stack` 4.4.x line. The Ruby require path (`require 'parse/stack'`) and the `Parse::*` namespace are unchanged from upstream — only the gem name on RubyGems is new.
 
-### 4.4.1 - Filter-Lock Compatibility
+### 3.x — Atlas Search, MongoDB-direct, CLP, AI agent, push, MFA, LiveQuery
 
-- **`create_lock` accepts `Parse::Operation` keys** — the synchronize
-  lock-key derivation handles operator-shaped query attributes
-  (`:status.gt => Date.today`) the same way `Parse::Query` does,
-  matching the filter-lock fingerprint against the resolved storage
-  fields.
+- **MongoDB Atlas Search** — full-text search, autocomplete, faceted search.
+- **Direct MongoDB queries** — `results_direct`, `first_direct`, `count_direct` bypassing Parse Server's REST surface.
+- **Schema tools** — `Parse::Schema.diff`, `Parse::Schema.migration`, plus `read_pref(:secondary)` for replica reads.
+- **Role management** — `find_or_create`, `add_users`, `add_child_role`, `all_users` (with hierarchy walks).
+- **Class-Level Permissions (CLP)** declared in models — `set_clp :find, public: true`, `protect_fields "*", [:internal_notes]`.
+- **AI/LLM agent** — `Parse::Agent` with natural-language queries over a tool interface.
+- **Push builder API** — `to_channel`, `with_alert`, `silent!`, `send!`; installation channels (`subscribe`, `unsubscribe`).
+- **Session lifecycle** — `expired?`, `time_remaining`, `logout_all!`.
+- **MFA** — TOTP and SMS two-factor authentication.
+- **LiveQuery** — real-time WebSocket subscriptions (promoted to stable in 5.0).
+- **Ruby 3.1 floor** (3.0 reached EOL March 2024).
 
-### 4.4 - MongoDB Index Management, CLP on Mongo-Direct, Agent ACL Scope
+### 2.x — aggregation, transactions, idempotency, ACL constraints
 
-- **`Model.describe`** — operator-facing introspection aggregator on every
-  `Parse::Object` subclass. Reports local model declarations, server
-  schema, CLP, default ACLs, Atlas Search indexes, and MongoDB indexes.
-  Local-only by default; opt into server fetches with `network: true`.
-  See [docs/mongodb_direct_guide.md](docs/mongodb_direct_guide.md).
-- **`mongo_index` DSL** — model-declarative MongoDB indexes:
-  `mongo_index :title, :year`, `mongo_index :vin, unique: true`,
-  `mongo_geo_index :location`, `mongo_relation_index :users, bidirectional: true`.
-  Validation (pointer auto-rewrite, parallel-array rejection, `_id` guard,
-  64-cap, idempotency) runs at class load.
-- **`parse_reference` auto-indexing** — every `parse_reference` field
-  auto-registers a `unique: true, sparse: true` index declaration.
-  Removes the operator-must-remember dedup floor. Opt out per-field
-  with `index: false` or `unique_index: false`.
-- **`Parse::MongoDB.configure_writer`** — separate write-capable
-  connection for index management (`create_index` / `drop_index` /
-  `writer_indexes`). The reader URI stays read-only. Triple-gated:
-  writer configured + `index_mutations_enabled = true` +
-  `ENV["PARSE_MONGO_INDEX_MUTATIONS"]=1` — all re-checked per call.
-- **`Parse::Schema::IndexMigrator`** — reconciles declared indexes
-  against the actual MongoDB state. Plan returns per-collection diff;
-  apply is additive by default (`drop: true` for orphan removal).
-- **`rake parse:mongo:indexes:plan` / `:apply`** — operator workflow
-  for index migrations. Plan is read-only; apply requires the triple-gate.
-- **CLP and `protectedFields` enforced on mongo-direct** — `Parse::CLPScope`
-  gates `Parse::MongoDB.aggregate` at the operation level for scoped
-  agents (`session_token:` / `acl_user:` / `acl_role:`) AND strips
-  `protectedFields` from result rows. The mongo-direct path is the
-  only first-class enforcement surface for ACL + CLP + protectedFields
-  on scoped reads (Parse Server's REST aggregate enforces NEITHER).
-- **`Parse::Agent.new(acl_user:|acl_role:)`** — declared identity
-  scope without a session token. Built-in tools auto-promote to
-  mongo-direct so SDK-side enforcement runs. Sub-agent identity must
-  be a subset of the parent's reach.
-- See [docs/mongodb_index_optimization_guide.md](docs/mongodb_index_optimization_guide.md)
-  for when to use each index type and how to budget the 64-per-collection cap.
+- **Transactions** — `Parse::Object.transaction` with automatic retry.
+- **MongoDB aggregation** — `group_by`, `count_distinct`, custom pipelines.
+- **ACL query constraints** — `readable_by`, `writable_by`, `publicly_readable`.
+- **Request idempotency** — automatic duplicate prevention, enabled by default.
+- **Change tracking** — works correctly in `after_save` hooks.
+- **Breaking from 1.x** — Ruby 3.0 floor, Faraday 2.x (no `faraday_middleware`), `distinct` returns object IDs by default (pass `return_pointers: true` for pointers), `constaint` → `constraint` typo fix.
 
-### 4.0 - Security Hardening and Modernization
-- Minimum Ruby version bumped to 3.2 (Ruby 3.1 reached EOL March 2025)
-- Minimum Rails/ActiveSupport bumped to 6.1 (was unbounded at 5.x)
-- CI tests against Ruby 3.2, 3.3, 3.4, and 3.5
-- LiveQuery TLS hostname verification (`post_connection_check`)
-- Webhook endpoint fails closed when no key is configured (opt out via `Parse::Webhooks.allow_unauthenticated = true`)
-- `Parse::Error.new(code, message)` two-argument constructor with `#code` reader
-- `include`d pointer fields now auto-added to `keys` when a key allowlist is set
+### 1.x — initial Parse Server SDK
 
-### 3.3 - Ruby Version Update
-- Minimum Ruby version bumped to 3.1 (Ruby 3.0 reached EOL March 2024)
-- CI tests against Ruby 3.1, 3.2, 3.3, and 3.4
-
-### 3.2 - Class-Level Permissions (CLP)
-Define operation permissions and protected fields directly in models:
-
-```ruby
-class Document < Parse::Object
-  set_clp :find, public: true
-  set_clp :delete, public: false, roles: ["Admin"]
-  protect_fields "*", [:internal_notes, :secret_data]
-end
-```
-
-### 3.1 - Atlas Search, MongoDB Direct, Schema Tools
-- **MongoDB Atlas Search** - Full-text search, autocomplete, faceted search
-- **Direct MongoDB Queries** - `results_direct`, `first_direct` bypassing Parse Server
-- **Schema Introspection** - `Parse::Schema.diff`, `Parse::Schema.migration`
-- **Read Preference** - `read_pref(:secondary)` for replica set reads
-- **Role Management** - `find_or_create`, `add_users`, `add_child_role`, `all_users`
-
-### 3.0 - Push, Sessions, AI Agent
-- **Push Builder API** - Fluent pattern with `to_channel`, `with_alert`, `silent!`, `send!`
-- **Session Management** - `expired?`, `time_remaining`, `logout_all!`
-- **Installation Channels** - `subscribe`, `unsubscribe`, `subscribed_to?`
-- **AI/LLM Agent** - `Parse::Agent` with natural language queries
-- **MFA Support** - TOTP and SMS-based two-factor authentication
-- **LiveQuery** (Experimental) - Real-time WebSocket subscriptions
-
-## What's New in 2.x
-
-**Ruby 3.0+ required** | See detailed docs in later sections
-
-### Key Features
-- **Transactions** - `Parse::Object.transaction` with automatic retry
-- **MongoDB Aggregation** - `group_by`, `count_distinct`, custom pipelines
-- **ACL Query Constraints** - `readable_by`, `writable_by`, `publicly_readable`
-- **Request Idempotency** - Automatic duplicate prevention (enabled by default)
-- **Enhanced Change Tracking** - Works correctly in `after_save` hooks
-- **LiveQuery** (Experimental) - Real-time subscriptions with circuit breaker
-
-### Breaking Changes from 1.x
-- Minimum Ruby 3.0+
-- `distinct` returns object IDs by default (use `return_pointers: true` for pointers)
-- Faraday 2.x (removed faraday_middleware)
-- Fixed typo "constaint" to "constraint"
-
-For complete details, see the [CHANGELOG](./CHANGELOG.md) and [Releases](https://github.com/neurosynq/parse-stack-next/releases).
+The 1.x line is the original [`modernistik/parse-stack`](https://github.com/modernistik/parse-stack) — Active Model ORM, REST client, query DSL, associations, and Cloud Code webhooks for Parse Server. `parse-stack-next` is a continuation of that work; the first release published under the new gem name is **4.5.0** (above), on RubyGems as [`parse-stack-next`](https://rubygems.org/gems/parse-stack-next).
 
 ## Table of Contents
 
@@ -448,6 +364,7 @@ For complete details, see the [CHANGELOG](./CHANGELOG.md) and [Releases](https:/
   - [Saved Audiences](#saved-audiences)
   - [Push Status Tracking](#push-status-tracking)
   - [Installation Channel Management](#installation-channel-management)
+- [Analytics](#analytics)
 - [Cloud Code Webhooks](#cloud-code-webhooks)
   - [Cloud Code Functions](#cloud-code-functions)
   - [Cloud Code Triggers](#cloud-code-triggers)
@@ -476,16 +393,16 @@ For complete details, see the [CHANGELOG](./CHANGELOG.md) and [Releases](https:/
 ## Architecture
 The architecture of `Parse::Stack` is broken into four main components.
 
-### [Parse::Client](https://www.modernistik.com/gems/parse-stack/Parse/Client.html)
+### [Parse::Client](https://neurosynq.github.io/parse-stack-next/Parse/Client.html)
 This class is the core and low level API for the Parse Server REST interface that is used by the other components. It can manage multiple sessions, which means you can have multiple client instances pointing to different Parse Server applications at the same time. It handles sending raw requests as well as providing Request/Response objects for all API handlers. The connection engine is Faraday, which means it is open to add any additional middleware for features you'd like to implement.
 
-### [Parse::Query](https://www.modernistik.com/gems/parse-stack/Parse/Query.html)
+### [Parse::Query](https://neurosynq.github.io/parse-stack-next/Parse/Query.html)
 This class implements the [Parse REST Querying](http://docs.parseplatform.org/rest/guide/#queries) interface in the [DataMapper finder syntax style](http://datamapper.org/docs/find.html). It compiles a set of query constraints and utilizes `Parse::Client` to send the request and provide the raw results. This class can be used without the need to define models.
 
-### [Parse::Object](https://www.modernistik.com/gems/parse-stack/Parse/Object.html)
+### [Parse::Object](https://neurosynq.github.io/parse-stack-next/Parse/Object.html)
 This component is main class for all object relational mapping subclasses for your application. It provides features in order to map your remote Parse records to a local ruby object. It implements the Active::Model interface to provide a lot of additional features, CRUD operations, querying, including dirty tracking, JSON serialization, save/destroy callbacks and others. While we are overlooking some functionality, for simplicity, you will mainly be working with Parse::Object as your superclass. While not required, it is highly recommended that you define a model (Parse::Object subclass) for all the Parse classes in your application.
 
-### [Parse::Webhooks](https://www.modernistik.com/gems/parse-stack/Parse/Webhooks.html)
+### [Parse::Webhooks](https://neurosynq.github.io/parse-stack-next/Parse/Webhooks.html)
 Parse provides a feature called [Cloud Code Webhooks](http://blog.parse.com/announcements/introducing-cloud-code-webhooks/). For most applications, save/delete triggers and cloud functions tend to be implemented by Parse's own hosted Javascript solution called Cloud Code. However, Parse provides the ability to have these hooks utilize your hosted solution instead of their own, since their environment is limited in terms of resources and tools.
 
 ## Field Naming Conventions
@@ -647,6 +564,10 @@ As a shortcut, if you are planning on using REDIS and have configured the use of
   Parse.setup(cache: 'redis://localhost:6379', ...)
 ```
 
+Redis is the recommended cache backend for multi-process / multi-dyno deployments: an in-memory `Moneta.new(:Memory)` store is local to a single Ruby process, so two Puma workers (or two web dynos) each hold their own cache and a write through one will not invalidate the other. A shared Redis backend gives every process the same view, and the existing PUT/POST/DELETE invalidation in `Parse::Middleware::Caching` runs against the shared store. Cache reads degrade gracefully on `Redis::CannotConnectError` / `Redis::TimeoutError` — the middleware disables caching for the failing request and lets the underlying GET pass through to Parse Server.
+
+The cache surface is opt-in at two layers. Object fetches (`Model.find(id)`, `obj.reload!` in non-write-only mode) cache by default once a store is configured. Query results do **not** cache by default — pass `cache: true` per call (e.g. `Song.all(limit: 500, cache: true)`) or set `Parse.default_query_cache = true` for opt-out behavior. Both layers honor `cache: false` / `Cache-Control: no-cache` to skip the cache for an individual request.
+
 #### `:expires`
 Sets the default cache expiration time (in seconds) for successful non-empty `GET` requests when using the caching middleware. The default value is 3 seconds. If `:expires` is set to 0, caching will be disabled. You can always clear the current state of the cache using the `clear_cache!` method on your `Parse::Client` instance.
 
@@ -771,7 +692,7 @@ You can always combine both approaches by defining special attributes before you
 
 ```
 
-## [Parse Config](https://www.modernistik.com/gems/parse-stack/Parse/API/Config.html)
+## [Parse Config](https://neurosynq.github.io/parse-stack-next/Parse/API/Config.html)
 Getting your configuration variables once you have a default client setup can be done with `Parse.config`. The first time this method is called, Parse-Stack will get the configuration from Parse Server, and cache it. To force a reload of the config, use `config!`. You
 
 ```ruby
@@ -794,7 +715,7 @@ Getting your configuration variables once you have a default client setup can be
 ## Core Classes
 While some native data types are similar to the ones supported by Ruby natively, other ones are more complex and require their dedicated classes.
 
-### [Parse::Pointer](https://www.modernistik.com/gems/parse-stack/Parse/Pointer.html)
+### [Parse::Pointer](https://neurosynq.github.io/parse-stack-next/Parse/Pointer.html)
 An important concept is the `Parse::Pointer` class. This is the superclass of `Parse::Object` and represents the pointer type in Parse. A `Parse::Pointer` only contains data about the specific Parse class and the `id` for the object. Therefore, creating an instance of any Parse::Object subclass with only the `:id` field set will be considered in "pointer" state even though its specific class is not `Parse::Pointer` type. The only case that you may have a Parse::Pointer is in the case where an object was received for one of your classes and the framework has no registered class handler for it. Using the example above, assume you have the tables `Post`, `Comment` and `Author` defined in your remote Parse application, but have only defined `Post` and `Commentary` locally.
 
 ```ruby
@@ -858,7 +779,7 @@ pointer.title # Raises Parse::AutofetchTriggeredError instead of fetching
 
 The effect is that for any unknown classes that the framework encounters, it will generate Parse::Pointer instances until you define those classes with valid properties and associations. While this might be ok for some classes you do not use, we still recommend defining all your Parse classes locally in the framework.
 
-### [Parse::File](https://www.modernistik.com/gems/parse-stack/Parse/File.html)
+### [Parse::File](https://neurosynq.github.io/parse-stack-next/Parse/File.html)
 This class represents a Parse file pointer. `Parse::File` has helper methods to upload Parse files directly to Parse and manage file associations with your classes. Using our Song class example:
 
 ```ruby
@@ -912,7 +833,7 @@ file.url # => https://www.example.com/file.png
 
 ```
 
-### [Parse::Date](https://www.modernistik.com/gems/parse-stack/Parse/Date.html)
+### [Parse::Date](https://neurosynq.github.io/parse-stack-next/Parse/Date.html)
 This class manages dates in the special JSON format it requires for properties of type `:date`. `Parse::Date` subclasses `DateTime`, which allows you to use any features or methods available to `DateTime` with `Parse::Date`. While the conversion between `Time` and `DateTime` objects to a `Parse::Date` object is done implicitly for you, you can use the added special methods, `DateTime#parse_date` and `Time#parse_date`, for special occasions.
 
 ```ruby
@@ -921,7 +842,7 @@ This class manages dates in the special JSON format it requires for properties o
   song.save # ok
 ```
 
-### [Parse::GeoPoint](https://www.modernistik.com/gems/parse-stack/Parse/GeoPoint.html)
+### [Parse::GeoPoint](https://neurosynq.github.io/parse-stack-next/Parse/GeoPoint.html)
 This class manages the GeoPoint data type that Parse provides to support geo-queries. To define a GeoPoint property, use the `:geopoint` data type. Please note that latitudes should not be between -90.0 and 90.0, and longitudes should be between -180.0 and 180.0.
 
 ```ruby
@@ -953,7 +874,7 @@ We include helper methods to calculate distances between GeoPoints: `distance_in
 	# ~180.793 km
 ```
 
-### [Parse::Bytes](https://www.modernistik.com/gems/parse-stack/Parse/Bytes.html)
+### [Parse::Bytes](https://neurosynq.github.io/parse-stack-next/Parse/Bytes.html)
 The `Bytes` data type represents the storage format for binary content in a Parse column. The content is needs to be encoded into a base64 string.
 
 ```ruby
@@ -965,7 +886,7 @@ The `Bytes` data type represents the storage format for binary content in a Pars
   decoded = bytes.decoded # same as Base64.decode64
 ```
 
-### [Parse::TimeZone](https://www.modernistik.com/gems/parse-stack/Parse/TimeZone.html)
+### [Parse::TimeZone](https://neurosynq.github.io/parse-stack-next/Parse/TimeZone.html)
 While Parse does not provide a native time zone data type, Parse-Stack provides a class to make it easier to manage time zone attributes, usually stored IANA string identifiers, with your ruby code. This is done by utilizing the features provided by [`ActiveSupport::TimeZone`](http://api.rubyonrails.org/classes/ActiveSupport/TimeZone.html). In addition to setting a column as a time zone field, we also add special validations to verify it is of the right IANA identifier.
 
 ```ruby
@@ -988,9 +909,9 @@ event.time_zone = 'Galaxy/Andromeda'
 event.time_zone.valid? # => false
 ```
 
-### [Parse::ACL](https://www.modernistik.com/gems/parse-stack/Parse/ACL.html)
+### [Parse::ACL](https://neurosynq.github.io/parse-stack-next/Parse/ACL.html)
 The `ACL` class represents the access control lists for each record. An ACL is represented by a JSON object with the keys being `Parse::User` object ids or the special key of `*`, which indicates the public access permissions.
-The value of each key in the hash is a [`Parse::ACL::Permission`](https://www.modernistik.com/gems/parse-stack/Parse/ACL/Permission.html) object which defines the boolean permission state for `read` and `write`.
+The value of each key in the hash is a [`Parse::ACL::Permission`](https://neurosynq.github.io/parse-stack-next/Parse/ACL/Permission.html) object which defines the boolean permission state for `read` and `write`.
 
 The example below illustrates a Parse ACL JSON object where there is a public read permission, but public write is prevented. In addition, the user with id `3KmCvT7Zsb` and the `Admins` role, are allowed to both read and write on this record.
 
@@ -1056,9 +977,15 @@ There are four policies:
 | Policy | When an owner is resolvable | When no owner is resolvable |
 |---|---|---|
 | `:public` | public read + write | public read + write |
+| `:public_read` | public read, master-key write | public read, master-key write |
 | `:private` | master-key only | master-key only |
 | `:owner_else_public` | owner read + write only | public read + write |
 | `:owner_else_private` | owner read + write only | master-key only |
+| `:owner_but_public_read` | owner read + write *and* public read | public read, master-key write |
+
+`:public_read` (v5.0+) stamps `{"*": {"read": true}}` — anyone can read the row, but no client can mutate it through ACL (only the master key can write). Useful for catalog / lookup / reference data.
+
+`:owner_but_public_read` (v5.0+) is the "single-author public post" case: the resolved owner gets full R/W and the rest of the world gets read-only access in the same ACL — `{"*": {"read": true}, "<ownerId>": {"read": true, "write": true}}`. When no owner resolves at save (no `as:` and no resolvable `owner:` field), it degrades to `:public_read` semantics rather than the all-or-nothing fallback used by the `:owner_else_*` family.
 
 ```ruby
 class Post < Parse::Object
@@ -1320,8 +1247,8 @@ clp.filter_fields(doc_data, user: "other_user")
 
 This also works with arrays of pointers (e.g., `owners: [user1, user2]`).
 
-### [Parse::Session](https://www.modernistik.com/gems/parse-stack/Parse/Session.html)
-This class represents the data and columns contained in the standard Parse `_Session` collection. You may add additional properties and methods to this class. See [Session API Reference](https://www.modernistik.com/gems/parse-stack/Parse/Session.html). You may call `Parse.use_shortnames!` to use `Session` in addition to `Parse::Session`.
+### [Parse::Session](https://neurosynq.github.io/parse-stack-next/Parse/Session.html)
+This class represents the data and columns contained in the standard Parse `_Session` collection. You may add additional properties and methods to this class. See [Session API Reference](https://neurosynq.github.io/parse-stack-next/Parse/Session.html). You may call `Parse.use_shortnames!` to use `Session` in addition to `Parse::Session`.
 
 You can get a specific `Parse::Session` given a session_token by using the `session` method. You can also find the user tied to a specific Parse session or session token with `Parse::User.session`.
 
@@ -1341,19 +1268,19 @@ some_object.destroy( session: user.session_token )
 
 ```
 
-### [Parse::Installation](https://www.modernistik.com/gems/parse-stack/Parse/Installation.html)
-This class represents the data and columns contained in the standard Parse `_Installation` collection. You may add additional properties and methods to this class. See [Installation API Reference](https://www.modernistik.com/gems/parse-stack/Parse/Installation.html). You may call `Parse.use_shortnames!` to use `Installation` in addition to `Parse::Installation`.
+### [Parse::Installation](https://neurosynq.github.io/parse-stack-next/Parse/Installation.html)
+This class represents the data and columns contained in the standard Parse `_Installation` collection. You may add additional properties and methods to this class. See [Installation API Reference](https://neurosynq.github.io/parse-stack-next/Parse/Installation.html). You may call `Parse.use_shortnames!` to use `Installation` in addition to `Parse::Installation`.
 
-### [Parse::Product](https://www.modernistik.com/gems/parse-stack/Parse/Product.html)
-This class represents the data and columns contained in the standard Parse `_Product` collection. You may add additional properties and methods to this class. See [Product API Reference](https://www.modernistik.com/gems/parse-stack/Parse/Product.html). You may call `Parse.use_shortnames!` to use `Product` in addition to `Parse::Product`.
+### [Parse::Product](https://neurosynq.github.io/parse-stack-next/Parse/Product.html)
+This class represents the data and columns contained in the standard Parse `_Product` collection. You may add additional properties and methods to this class. See [Product API Reference](https://neurosynq.github.io/parse-stack-next/Parse/Product.html). You may call `Parse.use_shortnames!` to use `Product` in addition to `Parse::Product`.
 
 The `_Product` collection backs the original Parse iOS SDK's `PFProduct` downloadable-content in-app-purchase flow. That feature was tied to hosted Parse and is not actively used by modern Parse Server deployments — most apps now verify in-app purchase receipts directly against the Apple App Store or Google Play. The class is retained for backwards compatibility with legacy applications that still read or write product metadata. It is also marked `agent_hidden` by default so it does not surface through MCP / agent tooling; applications that genuinely need agent access can call `Parse::Product.agent_unhidden` at boot.
 
-### [Parse::Role](https://www.modernistik.com/gems/parse-stack/Parse/Role.html)
-This class represents the data and columns contained in the standard Parse `_Role` collection. You may add additional properties and methods to this class. See [Roles API Reference](https://www.modernistik.com/gems/parse-stack/Parse/Role.html). You may call `Parse.use_shortnames!` to use `Role` in addition to `Parse::Role`.
+### [Parse::Role](https://neurosynq.github.io/parse-stack-next/Parse/Role.html)
+This class represents the data and columns contained in the standard Parse `_Role` collection. You may add additional properties and methods to this class. See [Roles API Reference](https://neurosynq.github.io/parse-stack-next/Parse/Role.html). You may call `Parse.use_shortnames!` to use `Role` in addition to `Parse::Role`.
 
 #### Default ACL (master-only)
-Parse Server requires every `_Role` row to ship with an ACL — the requirement is hard-coded in `SchemaController.requiredColumns` and cannot be disabled by config. `Parse::Role` declares `acl_policy :private`, so every role saved without an explicit ACL is stamped with `{}` (master-key only). This is intentional: anonymous and authenticated-but-non-master clients cannot enumerate role names, read membership, or walk the role hierarchy. Parse Server's internal role-membership expansion (used during ACL evaluation) runs with master context, so the master-only default does not break permission checks on other classes.
+Parse Server requires every `_Role` row to ship with an ACL — the requirement is hard-coded in `SchemaController.requiredColumns` and cannot be disabled by config. `Parse::Role` declares `acl_policy :private`, so every role saved without an explicit ACL is stamped with `{}` (master-key only). This is intentional: anonymous and authenticated-but-non-master clients cannot enumerate role names, read subscription, or walk the role hierarchy. Parse Server's internal role-subscription expansion (used during ACL evaluation) runs with master context, so the master-only default does not break permission checks on other classes.
 
 To opt into broader access, pass an explicit ACL:
 
@@ -1397,7 +1324,7 @@ admin.child_roles_count  # Direct child roles
 admin.total_users_count  # All users including child roles
 ```
 
-### [Parse::JobStatus](https://www.modernistik.com/gems/parse-stack/Parse/JobStatus.html)
+### [Parse::JobStatus](https://neurosynq.github.io/parse-stack-next/Parse/JobStatus.html)
 
 This class represents the data and columns contained in the standard Parse `_JobStatus` collection. Parse Server writes a row here every time a background job — registered server-side via `Parse.Cloud.job(...)` — runs, recording its outcome and any status/message updates emitted via `request.message(...)`.
 
@@ -1444,7 +1371,7 @@ Parse::JobStatus.cleanup_older_than!(days: 7, terminal_only: false)
 
 The helper requires master-key access (Parse Server's default `_JobStatus` CLP). Run from a periodic cron or scheduled job to keep `_JobStatus` from growing unboundedly.
 
-### [Parse::JobSchedule](https://www.modernistik.com/gems/parse-stack/Parse/JobSchedule.html)
+### [Parse::JobSchedule](https://neurosynq.github.io/parse-stack-next/Parse/JobSchedule.html)
 
 This class represents the data and columns contained in the standard Parse `_JobSchedule` collection. Rows here define recurring runs for background jobs registered via `Parse.Cloud.job(...)`. The collection is populated by the Parse Dashboard's "Schedule a Job" UI.
 
@@ -1461,8 +1388,8 @@ schedule.parsed_params # => { "dryRun" => false }  — JSON-decoded
 
 `params` is stored on the wire as a JSON-encoded **string** per Parse Server's canonical schema (Object columns reject `$` and `.` in nested keys, which would otherwise break common payload shapes). Use `#parsed_params` to decode; it returns `nil` for blank or invalid JSON instead of raising. `last_run` is a raw `Number` whose unit is scheduler-defined — most external schedulers write `Date.now()` milliseconds, but the canonical schema does not pin a unit.
 
-### [Parse::User](https://www.modernistik.com/gems/parse-stack/Parse/User.html)
-This class represents the data and columns contained in the standard Parse `_User` collection. You may add additional properties and methods to this class. See [User API Reference](https://www.modernistik.com/gems/parse-stack/Parse/User.html). You may call `Parse.use_shortnames!` to use `User` in addition to `Parse::User`.
+### [Parse::User](https://neurosynq.github.io/parse-stack-next/Parse/User.html)
+This class represents the data and columns contained in the standard Parse `_User` collection. You may add additional properties and methods to this class. See [User API Reference](https://neurosynq.github.io/parse-stack-next/Parse/User.html). You may call `Parse.use_shortnames!` to use `User` in addition to `Parse::User`.
 
 #### Signup
 You can signup new users in two ways. You can either use a class method `Parse::User.signup` to create a new user with the minimum fields of username, password and email, or create a `Parse::User` object can call the `signup!` method. If signup fails, it will raise the corresponding exception.
@@ -1931,7 +1858,7 @@ band.drummer # Artist object
 ###### `:field`
 This option allows you to set the name of the remote Parse column for this property. Using this will explicitly set the remote property name to the value of this option. The value provided for this option will affect the name of the alias method that is generated when `alias` option is used. **By default, the name of the remote column is the lower-first camel case version of the property name. As an example, for a property with key `:my_property_name`, the framework will implicitly assume that the remote column is `myPropertyName`.**
 
-#### [Has One](https://www.modernistik.com/gems/parse-stack/Parse/Associations/HasOne.html)
+#### [Has One](https://neurosynq.github.io/parse-stack-next/Parse/Associations/HasOne.html)
 The `has_one` creates a one-to-one association with another Parse class. This association says that the other class in the association contains a foreign pointer column which references instances of this class. If your model contains a column that is a Parse pointer to another class, you should use `belongs_to` for that association instead.
 
 Defining a `has_one` property generates a helper query method to fetch a particular record from a foreign class. This is useful for setting up the inverse relationship accessors of a `belongs_to`. In the case of the `has_one` relationship, the `:field` option represents the name of the column of the foreign class where the Parse pointer is stored. By default, the lower-first camel case version of the Parse class name is used.
@@ -1990,7 +1917,7 @@ user.band_by_status(false)
 
 ```
 
-#### [Has Many](https://www.modernistik.com/gems/parse-stack/Parse/Associations/HasMany.html)
+#### [Has Many](https://neurosynq.github.io/parse-stack-next/Parse/Associations/HasMany.html)
 Parse has many ways to implement one-to-many and many-to-many associations: `Array`, `Parse Relation` or through a `Query`. How you decide to implement your associations, will affect how `has_many` works in Parse-Stack. Parse natively supports one-to-many and many-to-many relationships using `Array` and `Relations`, as described in [Relational Data](http://docs.parseplatform.org/js/guide/#relational-data). Both of these methods require you define a specific column type in your Parse table that will be used to store information about the association.
 
 In addition to `Array` and `Relation`, Parse-Stack also implements the standard `has_many` behavior prevalent in other frameworks through a query where the associated class contains a foreign pointer to the local class, usually the inverse of a `belongs_to`. This requires that the associated class has a defined column
@@ -2234,7 +2161,7 @@ author.posts # => Posts where author's name is a tag
 ```
 
 ## Creating, Saving and Deleting Records
-This section provides some of the basic methods when creating, updating and deleting objects from Parse. Additional documentation for these APIs can be found under [Parse::Core::Actions](https://www.modernistik.com/gems/parse-stack/Parse/Core/Actions.html). To illustrate the various methods available for saving Parse records, we use this example class:
+This section provides some of the basic methods when creating, updating and deleting objects from Parse. Additional documentation for these APIs can be found under [Parse::Core::Actions](https://neurosynq.github.io/parse-stack-next/Parse/Core/Actions.html). To illustrate the various methods available for saving Parse records, we use this example class:
 
 ```ruby
 
@@ -2397,7 +2324,7 @@ To commit a new record or changes to an existing record to Parse, use the `#save
 The save operation can handle both creating and updating existing objects. If you do not want to update the association data of a changed object, you may use the `#update` method to only save the changed property values. In the case where you want to force update an object even though it has not changed, to possibly trigger your `before_save` hooks, you can use the `#update!` method. In addition, just like with other ActiveModel objects, you may call `reload!` to fetch the current record again from the data store.
 
 ### Saving applying User ACLs
-You may save and delete objects from Parse on behalf of a logged in user by passing the session token to the call to `save` or `destroy`. Doing so will allow Parse to apply the ACLs of this user against the record to see if the user is authorized to read or write the record. See [Parse::Actions](https://www.modernistik.com/gems/parse-stack/Parse/Core/Actions.html).
+You may save and delete objects from Parse on behalf of a logged in user by passing the session token to the call to `save` or `destroy`. Doing so will allow Parse to apply the ACLs of this user against the record to see if the user is authorized to read or write the record. See [Parse::Actions](https://neurosynq.github.io/parse-stack-next/Parse/Core/Actions.html).
 
 ```ruby
   user = Parse::User.login('myuser','pass')
@@ -2902,7 +2829,7 @@ user = User.first(keys: [:id, :first_name, :email])
 user.to_json  # Only includes id, first_name, email (plus metadata)
 
 # Useful for webhook responses - returns only requested fields
-Parse::Webhooks.route :function, :getTeamMembers do
+Parse::Webhooks.route :function, :getWorkspaceMembers do
   users = User.all(:id.in => user_ids, keys: [:id, :first_name, :icon_image])
   users  # Returns only the requested fields, no autofetch triggered
 end
@@ -3158,7 +3085,7 @@ users_by_city = User.group_objects_by(:city)
 
 # Advanced options
 User.group_by(:tags, flatten_arrays: true).count  # Flatten array fields
-User.group_by(:team, return_pointers: true).count # Use pointers for efficiency
+User.group_by(:workspace, return_pointers: true).count # Use pointers for efficiency
 ```
 
 **Available aggregation methods:** `count`, `sum(field)`, `min(field)`, `max(field)`, `avg(field)`
@@ -3168,7 +3095,7 @@ User.group_by(:team, return_pointers: true).count # Use pointers for efficiency
 Finds the distinct values for a specified field across a single collection or
 view and returns the results in an array. You may mix this with additional query constraints.
 
-**⚠️ Breaking Change in v1.12.0**: For pointer fields, `distinct` now returns object IDs directly by default instead of full pointer hash objects like `{"__type"=>"Pointer", "className"=>"Team", "objectId"=>"abc123"}`. Use `return_pointers: true` to get Parse::Pointer objects.
+**⚠️ Breaking Change in v1.12.0**: For pointer fields, `distinct` now returns object IDs directly by default instead of full pointer hash objects like `{"__type"=>"Pointer", "className"=>"Workspace", "objectId"=>"abc123"}`. Use `return_pointers: true` to get Parse::Pointer objects.
 
 ```ruby
  # Return a list of unique city names
@@ -3177,15 +3104,15 @@ view and returns the results in an array. You may mix this with additional query
  # ex. ["San Diego", "Los Angeles", "San Juan"]
 
  # For pointer fields, now returns object IDs by default (v1.12.0+)
- Asset.distinct(:author_team)
+ Document.distinct(:author_workspace)
  # => ["team1", "team2", "team3"]  # Just the object IDs
 
  # Pre-v1.12.0 behavior returned full pointer hashes:
- # [{"__type"=>"Pointer", "className"=>"Team", "objectId"=>"team1"}, ...]
+ # [{"__type"=>"Pointer", "className"=>"Workspace", "objectId"=>"team1"}, ...]
  
  # To get Parse::Pointer objects in v1.12.0+
- Asset.distinct(:author_team, return_pointers: true)
- # => [#<Parse::Pointer @parse_class="Team" @id="team1">, ...]
+ Document.distinct(:author_workspace, return_pointers: true)
+ # => [#<Parse::Pointer @parse_class="Workspace" @id="team1">, ...]
 
  # same using query instance
  query = Parse::Query.new("_User")
@@ -3195,7 +3122,7 @@ view and returns the results in an array. You may mix this with additional query
 ```
 
 ### Query Expressions
-The set of supported expressions based on what is available through the Parse REST API. _For those who don't prefer the DataMapper style syntax, we have provided method accessors for each of the expressions._ A full description of supported query  operations, please refer to the [`Parse::Query`](https://www.modernistik.com/gems/parse-stack/Parse/Query.html) API reference.
+The set of supported expressions based on what is available through the Parse REST API. _For those who don't prefer the DataMapper style syntax, we have provided method accessors for each of the expressions._ A full description of supported query  operations, please refer to the [`Parse::Query`](https://neurosynq.github.io/parse-stack-next/Parse/Query.html) API reference.
 
 #### :order
 Specify a field to sort by.
@@ -3368,6 +3295,8 @@ A true/false value. If you provided a master key as part of `Parse.setup()`, it 
 Song.all limit: 3, use_master_key: false
 ```
 
+As of v5.0, `Parse::Query` initializes `@use_master_key` to `nil` (tri-state: "no caller preference") rather than `true`. Server-mode behavior is unchanged — when nothing in the call chain expresses a preference, the request layer still sends the master key. The difference matters for `Parse.client_mode = true` processes and inside `Parse.with_session(user) { … }` blocks: the previous `true` default short-circuited those resolutions and silently master-key-stamped queries. Explicitly passing `use_master_key: true` (or calling `query.use_master_key = true`) still forces the header. `Parse::Query#assert_mongo_direct_routable!` treats a configured master key on the client as an ambient credential in server mode: direct-only constraints (Atlas Search-shaped operators, etc.) route through the mongo-direct path as long as `Parse.client_mode` is false and `use_master_key` was not explicitly set to `false`. The gate still raises `Parse::Query::MongoDirectRequired` for client-mode processes or queries that explicitly opt out of the master key without supplying a `session_token` / `.scope_to_user(user)` / `.scope_to_role(role)`.
+
 #### :session
 This will make sure that the query is performed on behalf (and with the privileges) of an authenticated user which will cause record ACLs to be enforced. If a session token is provided, caching will be disabled for this request. You may pass a string representing the session token, an authenticated `Parse::User` instance or a `Parse::Session` instance.
 
@@ -3387,7 +3316,7 @@ The `where` clause is based on utilizing a set of constraints on the defined col
 { :column.constraint => value }
 ```
 
-## [Query Constraints](https://www.modernistik.com/gems/parse-stack/Parse/Constraint.html)
+## [Query Constraints](https://neurosynq.github.io/parse-stack-next/Parse/Constraint.html)
 Most of the constraints supported by Parse are available to `Parse::Query`. Assuming you have a column named `field`, here are some examples. For an explanation of the constraints, please see [Parse Query Constraints documentation](http://docs.parseplatform.org/rest/guide/#queries). You can build your own custom query constraints by creating a `Parse::Constraint` subclass. For all these `where` clauses assume `q` is a `Parse::Query` object.
 
 #### Equals
@@ -3810,7 +3739,7 @@ songs = find_songs Artist.pointer(artist_id)
 
 ```
 
-### [Geo Queries](https://www.modernistik.com/gems/parse-stack/Parse/Constraint/NearSphereQueryConstraint.html)
+### [Geo Queries](https://neurosynq.github.io/parse-stack-next/Parse/Constraint/NearSphereQueryConstraint.html)
 Equivalent to the `$nearSphere` Parse query operation. This is only applicable if the field is of type `GeoPoint`. This will query Parse and return a list of results ordered by distance with the nearest object being first.
 
 ```ruby
@@ -3836,7 +3765,7 @@ PlaceObject.all :location.near => geopoint.max_miles(10)
 
 We will support `$maxDistanceInKilometers` (for kms) and `$maxDistanceInRadians` (for radian angle) in the future.
 
-#### [Bounding Box Constraint](https://www.modernistik.com/gems/parse-stack/Parse/Constraint/WithinGeoBoxQueryConstraint.html)
+#### [Bounding Box Constraint](https://neurosynq.github.io/parse-stack-next/Parse/Constraint/WithinGeoBoxQueryConstraint.html)
 Equivalent to the `$within` Parse query operation and `$box` geopoint constraint. The rectangular bounding box is defined by a southwest point as the first parameter, followed by the a northeast point. Please note that Geo box queries that cross the international date lines are not currently supported by Parse.
 
 ```ruby
@@ -3851,7 +3780,7 @@ ne = Parse::GeoPoint.new 36.12, -115.31 # Las Vegas
 PlaceObject.all :location.within_box => [sw,ne]
 ```
 
-#### [Polygon Area Constraint](https://www.modernistik.com/gems/parse-stack/Parse/Constraint/WithinPolygonQueryConstraint.html)
+#### [Polygon Area Constraint](https://neurosynq.github.io/parse-stack-next/Parse/Constraint/WithinPolygonQueryConstraint.html)
 Equivalent to the `$geoWithin` Parse query operation and `$polygon` geopoint constraint. The polygon area is described by a list of `Parse::GeoPoint` objects and should contain 3 or more points. This feature is only available in Parse-Server version 2.4.2 and later.
 
 ```ruby
@@ -3867,7 +3796,7 @@ Equivalent to the `$geoWithin` Parse query operation and `$polygon` geopoint con
  SunkenShip.all :location.within_polygon => [bermuda, san_juan, miami]
 ```
 
-#### [Full Text Search Constraint](https://www.modernistik.com/gems/parse-stack/Parse/Constraint/FullTextSearchQueryConstraint.html)
+#### [Full Text Search Constraint](https://neurosynq.github.io/parse-stack-next/Parse/Constraint/FullTextSearchQueryConstraint.html)
 Equivalent to the `$text` Parse query operation and `$search` parameter constraint for efficient search capabilities. By creating indexes on one or more columns your strings are turned into tokens for full text search functionality. The `$search` key can take any number of parameters in hash form. *Requires Parse Server 2.5.0 or later*
 
 ```ruby
@@ -4268,7 +4197,7 @@ Parse::Push.new
 Parse::Push.new
   .to_channels("sports", "alerts")
   .with_title("Game Alert")
-  .with_body("Your team is playing now!")
+  .with_body("Your workspace is playing now!")
   .with_badge(1)
   .with_sound("alert.caf")
   .with_data(game_id: "12345", action: "open_game")
@@ -4424,9 +4353,29 @@ push.data = { uri: "app://deep_link_path" }
 push.send
 ```
 
-## AI Agent Integration (Experimental)
+## Analytics
 
-Parse Stack includes experimental support for AI/LLM agents to interact with your Parse data through a standardized tool interface. This enables natural language querying and intelligent data exploration.
+`Parse.track_event(name, dimensions: {}, **opts)` (v5.0+) is the top-level shortcut for sending events to Parse Server's `POST /events/<name>` endpoint. The dimensions hash MUST be passed via the `dimensions:` keyword — under Ruby 3 kwarg separation, loose symbol arguments are absorbed by `**opts` and never reach the POST body. The event name is validated against `[\w\-\.]` at the SDK boundary so the value cannot escape the `/events/` path segment.
+
+```ruby
+# Server-side, master-key in process
+Parse.track_event("post_viewed", dimensions: { source: "feed", workspace: "w1" })
+
+# No dimensions
+Parse.track_event("AppOpened")
+
+# Client-mode, scoped to a session
+Parse.track_event("search",
+  dimensions: { query: "tabby cats" },
+  session_token: user.session_token, use_master_key: false,
+)
+```
+
+Parse Server's default `analyticsAdapter` is a no-op: events POST'd are accepted (HTTP 200) but are not persisted and cannot be read back through the SDK. Operators who wire in a custom adapter decide what (if anything) to do with each event. The legacy parse.com eight-dimension cap does NOT apply to Parse Server out of the box. If you need to query analytics events from the SDK, persist them to a regular `Parse::Object` subclass instead. The underlying request is a blocking HTTP POST — wrap in a thread or background job if you do not want it on the request path.
+
+## AI Agent Integration
+
+Parse Stack includes first-class support for AI/LLM agents to interact with your Parse data through a standardized tool interface, including an MCP 2025-06-18 Streamable HTTP transport. This enables natural language querying and intelligent data exploration with rate limiting, prompt-injection protection, and per-agent ACL scoping.
 
 ### Basic Usage
 
@@ -4468,6 +4417,28 @@ agent = Parse::Agent.new(permissions: :write)
 agent = Parse::Agent.new(permissions: :admin)
 ```
 
+### Client Mode (v5.0)
+
+When `Parse::Agent` is constructed against a `Parse::Client` that carries no master key and a non-empty `session_token:`, it switches to *client mode*. The dispatch ceiling is a small allowlist of session-token REST tools (`list_tools`, `get_object`, `get_objects`, `query_class`, `count_objects`, `get_sample_objects`, and — gated by `allow_mutations:` — `create_object`, `update_object`, `delete_object`). Aggregate, atlas-search, schema-introspection, explain, and generic `call_method` are refused because they require either the master key or a direct MongoDB connection.
+
+```ruby
+# An unprivileged client + a user's session token
+Parse.setup(server_url: "...", application_id: "...", api_key: "...")  # no master_key
+agent = Parse::Agent.new(session_token: user.session_token)
+
+agent.client_mode?      # => true
+agent.allow_mutations?  # => false (default in client mode)
+
+# Read tools work; Parse Server enforces ACL + CLP + protectedFields natively.
+agent.execute(:query_class, class_name: "Post", limit: 10)
+
+# Mutations are opt-in per agent:
+writer = Parse::Agent.new(session_token: user.session_token, allow_mutations: true)
+writer.execute(:create_object, class_name: "Post", fields: { title: "Hi" })
+```
+
+Custom tools default to master-key-only. Mark a registered tool eligible for client mode with `Parse::Agent::Tools.register(:my_tool, ..., client_safe: true)`; the handler is then responsible for routing through `agent.client` with `agent.session_token` (never the master key). Sub-agents cannot widen the parent's `allow_mutations:` gate.
+
 ### Agent Metadata DSL
 
 Annotate your models with agent-friendly metadata:
@@ -4479,12 +4450,12 @@ class Song < Parse::Object
 
   property :title, :string, _description: "The song title"
   property :plays, :integer, _description: "Total play count"
-  property :is_removed, :boolean
+  property :archived, :boolean
 
   # Per-class "valid state" predicate applied by default on every read tool
   # (query_class, count_objects, aggregate). Opt out per-call with
   # `apply_canonical_filter: false`.
-  agent_canonical_filter "isRemoved" => { "$ne" => true }
+  agent_canonical_filter "archived" => { "$ne" => true }
 
   # Expose methods with permission levels
   agent_readonly :find_popular, "Find songs with high play counts"
@@ -5175,7 +5146,7 @@ Song.query.writable_by_role(["Admin", "Editor"]).results(mongo_direct: true)  # 
 
 Parse-Stack provides intelligent dirty tracking for ACL objects, correctly handling in-place modifications and content comparison.
 
-**`acl_was` Captures Original State:**
+**`acl_was` Posts Original State:**
 
 When modifying an ACL in place (via `apply`, `apply_role`, etc.), `acl_was` correctly returns the state *before* any modifications:
 
@@ -5201,19 +5172,19 @@ obj.acl_changed?     # => true
 Setting an ACL to identical values does not mark the object as dirty:
 
 ```ruby
-membership = Membership.find(id)
-membership.clear_changes!
+subscription = Subscription.find(id)
+subscription.clear_changes!
 
 # Rebuild ACL to the same values (common in before_save hooks)
-membership.acl = Parse::ACL.new
-membership.acl.apply(:public, true, false)
-membership.acl.apply_role("Admin", true, true)
+subscription.acl = Parse::ACL.new
+subscription.acl.apply(:public, true, false)
+subscription.acl.apply_role("Admin", true, true)
 # ... same permissions as before ...
 
 # If content is identical, object is NOT dirty
-membership.acl_changed?  # => false
-membership.dirty?        # => false
-membership.save          # No unnecessary server request
+subscription.acl_changed?  # => false
+subscription.dirty?        # => false
+subscription.save          # No unnecessary server request
 ```
 
 **New Objects:**

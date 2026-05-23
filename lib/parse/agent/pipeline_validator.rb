@@ -51,13 +51,22 @@ module Parse
       # Validate an aggregation pipeline for security issues.
       # Delegates to {Parse::PipelineSecurity.validate_pipeline!} and
       # translates its error into {PipelineSecurityError} for backwards
-      # compatibility.
+      # compatibility. Additionally refuses Atlas-stage-0-only operators
+      # (`$search`, `$searchMeta`, `$vectorSearch`, `$listSearchIndexes`)
+      # which are legal SDK-emitted stages but must NOT appear in a
+      # caller-supplied agent pipeline — the agent surface for those is
+      # the dedicated `atlas_search` / `semantic_search` tools, and the
+      # Agent's tenant-scope `$match` prepend would push them off
+      # stage 0 anyway. See
+      # {Parse::PipelineSecurity::STAGE0_ONLY_ATLAS_STAGES}.
       #
       # @param pipeline [Array<Hash>] the aggregation pipeline stages
       # @raise [PipelineSecurityError] if pipeline contains blocked or unknown stages
       # @return [true] if pipeline is valid
       def validate!(pipeline)
         Parse::PipelineSecurity.validate_pipeline!(pipeline)
+        refuse_stage0_only_atlas_stages!(pipeline)
+        true
       rescue Parse::PipelineSecurity::Error => e
         raise PipelineSecurityError.new(
           e.message,
@@ -65,6 +74,24 @@ module Parse
           reason: e.reason,
           operator: e.operator,
         )
+      end
+
+      # @api private
+      def refuse_stage0_only_atlas_stages!(pipeline)
+        return unless pipeline.is_a?(Array)
+        pipeline.each do |stage|
+          next unless stage.is_a?(Hash)
+          stage.each_key do |k|
+            key = k.to_s
+            next unless Parse::PipelineSecurity::STAGE0_ONLY_ATLAS_STAGES.include?(key)
+            raise PipelineSecurityError.new(
+              "Stage #{key} is not allowed in caller-supplied agent pipelines. " \
+              "Use the dedicated atlas_search / semantic_search agent tool instead.",
+              stage: key,
+              reason: :stage0_only_atlas_stage,
+            )
+          end
+        end
       end
 
       # Check if a pipeline is valid without raising.

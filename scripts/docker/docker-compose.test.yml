@@ -61,6 +61,13 @@ services:
       # environment — production should keep the allowlist tight to the
       # subnets that actually host the Ruby app.
       PARSE_SERVER_MASTER_KEY_IPS: "127.0.0.1/32,::1/128,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
+      # Round-trip Parse.track_event through a real adapter so the v5.0
+      # integration test can drain the captured events back. The default
+      # adapter is a no-op, which would make the integration test
+      # indistinguishable from the wire-stub regression guard in
+      # test/lib/parse/track_event_wire_shape_test.rb. See
+      # test/cloud/analytics-adapter.js for the in-process recorder.
+      PARSE_SERVER_ANALYTICS_ADAPTER: "/parse-server/cloud/analytics-adapter.js"
     # Remove health check for now since it's causing startup delays
     # healthcheck:
     #   test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:1337/parse/health"]
@@ -68,6 +75,17 @@ services:
     #   timeout: 5s
     #   retries: 5
     #   start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: parse-stack-test-redis
+    # Loopback-only by default. Used by the cache integration test
+    # (cache_redis_integration_test.rb) and the synchronize-create lock
+    # tests. Override with `REDIS_BIND=0.0.0.0` if you need to point a
+    # remote client at it during debugging.
+    ports:
+      - "${REDIS_BIND:-127.0.0.1}:6399:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
 
   parse-dashboard:
     image: parseplatform/parse-dashboard:9

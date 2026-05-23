@@ -1915,7 +1915,7 @@ module Parse
     end
 
     # Equivalent to the `$geoWithin` Parse query operation with `$centerSphere`
-    # subconstraint. Filters a {Parse::GeoPoint} column by membership in a
+    # subconstraint. Filters a {Parse::GeoPoint} column by subscription in a
     # circular region defined by a center point and a radius. Unlike
     # `:field.near => geopoint.max_*(N)`, this constraint does NOT order
     # results by distance, which makes it cheap and composable inside `$or`
@@ -2056,20 +2056,22 @@ module Parse
       ].freeze
 
       def coerce_to_geojson(value)
+        # Ruby hash patterns only match symbol-keyed entries, so wire-shape
+        # hashes (which arrive with string keys from JSON) must be normalised
+        # before the inner case/in can deconstruct them.
         case value
-        when Parse::GeoJSON::Geometry then value.to_geojson
-        when Parse::Polygon then value.to_geojson
-        when Parse::GeoPoint then value.to_geojson
-        when Hash
-          h = value.respond_to?(:symbolize_keys) ? value.symbolize_keys : value
-          type = h[:type] || h["type"]
-          coords = h[:coordinates] || h["coordinates"]
-          unless type.is_a?(String) && ALLOWED_GEOJSON_TYPES.include?(type) && coords.is_a?(Array)
+        in Parse::GeoJSON::Geometry | Parse::Polygon | Parse::GeoPoint
+          value.to_geojson
+        in Hash => h
+          normalised = h.respond_to?(:symbolize_keys) ? h.symbolize_keys : h
+          case normalised
+          in { type: String => type, coordinates: Array => coords } if ALLOWED_GEOJSON_TYPES.include?(type)
+            { "type" => type, "coordinates" => coords }
+          else
             raise ArgumentError, "[Parse::Query] `geo_intersects` Hash must be a GeoJSON geometry " \
                                  "with one of the RFC 7946 types " \
                                  "(#{ALLOWED_GEOJSON_TYPES.join(", ")}) and an Array of coordinates."
           end
-          { "type" => type, "coordinates" => coords }
         else
           raise ArgumentError, "[Parse::Query] `geo_intersects` expects a Parse::GeoPoint, " \
                                "Parse::Polygon, Parse::GeoJSON::Geometry, or GeoJSON Hash."
@@ -2874,15 +2876,15 @@ module Parse
     # Uses MongoDB's $lookup to join collections and $expr with $ne to compare fields.
     #
     # Usage:
-    #   Asset.where(:project.does_not_equal_linked_pointer => { through: :capture, field: :project })
+    #   Document.where(:project.does_not_equal_linked_pointer => { through: :post, field: :project })
     #
     # This generates a MongoDB aggregation pipeline that:
     # 1. Uses $lookup to join the linked collection
     # 2. Uses $match with $expr and $ne to find records where fields do NOT match
     #
-    # @example Find assets where the project does not equal the capture's project
-    #   Asset.where(:project.does_not_equal_linked_pointer => {
-    #     through: :capture,
+    # @example Find assets where the project does not equal the post's project
+    #   Document.where(:project.does_not_equal_linked_pointer => {
+    #     through: :post,
     #     field: :project
     #   })
     class DoesNotEqualLinkedPointerConstraint < Constraint

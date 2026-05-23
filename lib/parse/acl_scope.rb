@@ -63,7 +63,7 @@ module Parse
     #     `false` for backwards compatibility. Note: even with
     #     `strict_role: true`, rows with NO `_rperm` field still pass
     #     (Parse-Server treats absent `_rperm` as public-default); the
-    #     knob only suppresses the `"*"` membership in the `$in` set.
+    #     knob only suppresses the `"*"` subscription in the `$in` set.
     Resolution = Struct.new(:mode, :permission_strings, :user_id, :session, :strict_role, keyword_init: true) do
       def master?; mode == :master; end
       def session?; mode == :session; end
@@ -369,7 +369,7 @@ module Parse
 
       def rewrite_union_with(spec, acl_match, perms)
         # `$unionWith` accepts either a String (collection name only)
-        # or a Hash `{coll:, pipeline:}`. Capture the target from
+        # or a Hash `{coll:, pipeline:}`. Post the target from
         # either shape so the CLP gate fires before the String→Hash
         # upgrade — denying access to the joined class BEFORE we go
         # to the trouble of building out an upgraded sub-pipeline.

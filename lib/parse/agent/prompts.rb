@@ -106,7 +106,7 @@ module Parse
         },
         {
           "name" => "count_by",
-          "description" => "Count objects in a class grouped by a field (e.g. users by team, projects by status)",
+          "description" => "Count objects in a class grouped by a field (e.g. users by workspace, projects by status)",
           "arguments" => [
             { "name" => "class_name", "description" => "Parse class to count", "required" => true },
             { "name" => "group_by", "description" => "Field to group by", "required" => true },
@@ -122,12 +122,12 @@ module Parse
         },
         {
           "name" => "find_relationship",
-          "description" => "Find objects in one class related to a given object in another (e.g. members of a team)",
+          "description" => "Find objects in one class related to a given object in another (e.g. members of a workspace)",
           "arguments" => [
-            { "name" => "parent_class", "description" => "Class of the parent object (e.g. Team)", "required" => true },
+            { "name" => "parent_class", "description" => "Class of the parent object (e.g. Workspace)", "required" => true },
             { "name" => "parent_id", "description" => "objectId of the parent", "required" => true },
             { "name" => "child_class", "description" => "Class to query (e.g. _User)", "required" => true },
-            { "name" => "pointer_field", "description" => "Field on child_class that points to parent (e.g. team)", "required" => true },
+            { "name" => "pointer_field", "description" => "Field on child_class that points to parent (e.g. workspace)", "required" => true },
           ],
         },
         {
@@ -185,7 +185,7 @@ module Parse
             { "$limit" => 25 },
           ]
           "Count #{cn} objects grouped by #{gb}. Use aggregate with class_name=\"#{cn}\" and pipeline #{pipeline.to_json}. " \
-          "If #{gb} is a pointer field, Parse returns each `_id` as the literal string \"ClassName$objectId\" (e.g. \"Team$abc123\") — strip the \"ClassName$\" prefix to recover the objectId, then optionally call get_object on a few to label them. " \
+          "If #{gb} is a pointer field, Parse returns each `_id` as the literal string \"ClassName$objectId\" (e.g. \"Workspace$abc123\") — strip the \"ClassName$\" prefix to recover the objectId, then optionally call get_object on a few to label them. " \
           "Report the top groups, call out any null/missing values, and give the total."
         },
 

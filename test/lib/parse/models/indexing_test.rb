@@ -421,6 +421,38 @@ class RelationIndexDSLTest < Minitest::Test
     end
     err = assert_raises(ArgumentError) { klass.mongo_relation_index :tags, unique: true }
     assert_match(/does not support unique/, err.message)
+    assert_match(/dedup: true/, err.message)
+  end
+
+  class RxDedup < Parse::Object
+    parse_class "RxDedup"
+    has_many :tags, through: :relation
+    mongo_relation_index :tags, dedup: true
+  end
+
+  class RxDedupBidi < Parse::Object
+    parse_class "RxDedupBidi"
+    has_many :members, through: :relation, as: :user
+    mongo_relation_index :members, bidirectional: true, dedup: true
+  end
+
+  def test_relation_index_dedup_registers_compound_unique
+    decls = RxDedup.mongo_index_declarations
+    compound = decls.find { |d| d[:keys] == { "owningId" => 1, "relatedId" => 1 } }
+    refute_nil compound, "dedup: must register a compound owningId/relatedId index"
+    assert_equal "_Join:tags:RxDedup", compound[:collection]
+    assert_equal true, compound[:options][:unique]
+  end
+
+  def test_relation_index_dedup_pairs_with_bidirectional
+    decls = RxDedupBidi.mongo_index_declarations
+    assert_equal 3, decls.size, "bidirectional + dedup: must register three declarations"
+    keys = decls.map { |d| d[:keys] }
+    assert_includes keys, { "owningId"  => 1 }
+    assert_includes keys, { "relatedId" => 1 }
+    assert_includes keys, { "owningId" => 1, "relatedId" => 1 }
+    compound = decls.find { |d| d[:keys] == { "owningId" => 1, "relatedId" => 1 } }
+    assert_equal true, compound[:options][:unique]
   end
 end
 

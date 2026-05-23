@@ -19,12 +19,12 @@ class IncludeProjectionTest < Minitest::Test
     property :email, :string
     property :icon_image, :string
     property :source_image, :string
-    property :internal_tag, :string
+    property :category, :string
     property :phone_verified, :boolean
     agent_fields :first_name, :last_name, :email, :icon_image, :source_image,
-                 :internal_tag, :phone_verified
+                 :category, :phone_verified
     agent_large_fields :icon_image, :source_image
-    agent_join_fields :first_name, :last_name, :email, :internal_tag
+    agent_join_fields :first_name, :last_name, :email, :category
   end
 
   # Joined class without agent_join_fields — falls back to
@@ -100,7 +100,7 @@ class IncludeProjectionTest < Minitest::Test
   # ============================================================
 
   def test_agent_join_fields_stores_list_as_symbols
-    assert_equal %i[first_name last_name email internal_tag],
+    assert_equal %i[first_name last_name email category],
       FixtureJoinUser.agent_join_field_list
   end
 
@@ -166,7 +166,7 @@ class IncludeProjectionTest < Minitest::Test
     assert_includes result[:project], "firstName"
     assert_includes result[:project], "lastName"
     assert_includes result[:project], "email"
-    assert_includes result[:project], "internalTag"
+    assert_includes result[:project], "category"
     refute_includes result[:project], "iconImage", "agent_large_fields excluded from join projection"
     refute_includes result[:project], "sourceImage"
     %w[objectId createdAt updatedAt].each do |sys|
@@ -225,7 +225,7 @@ class IncludeProjectionTest < Minitest::Test
     assert_includes rewritten, "user.firstName"
     assert_includes rewritten, "user.lastName"
     assert_includes rewritten, "user.email"
-    assert_includes rewritten, "user.internalTag"
+    assert_includes rewritten, "user.category"
     # Large fields are NOT appended (the join projection omits them).
     refute_includes rewritten, "user.iconImage"
     refute_includes rewritten, "user.sourceImage"

@@ -109,6 +109,20 @@ module Parse
     # @return [Model::TYPE_POINTER]
     def __type; Parse::Model::TYPE_POINTER; end
 
+    # Search/vector-search result accessors. Defined here (instead of
+    # only on Parse::Object) so that hydration paths which fall back to
+    # a Pointer — e.g. Atlas Search results whose `className` has no
+    # corresponding Ruby subclass loaded — still surface the score and
+    # highlights attached by `Parse::AtlasSearch.process_search_results`
+    # / `Parse::Core::VectorSearchable.build_vector_hits`. Each returns
+    # nil unless the instance came from the corresponding search path.
+    # @return [Float, nil]
+    def vector_score; @_vector_score; end
+    # @return [Float, nil]
+    def search_score; @_search_score; end
+    # @return [Hash, nil]
+    def search_highlights; @_search_highlights; end
+
     alias_method :className, :parse_class
     # A Parse object as a className field and objectId. In ruby, we will use the
     # id attribute method, but for usability, we will also alias it to objectId
@@ -289,9 +303,9 @@ module Parse
     # @param includes [Array<String>, nil] optional list of pointer fields to expand.
     # @return [Parse::Object] the fetched Parse::Object, nil otherwise.
     # @example Fetch pointer with caching
-    #   capture = capture_pointer.fetch_cache!
+    #   post = post_pointer.fetch_cache!
     # @example Partial fetch with caching
-    #   capture = capture_pointer.fetch_cache!(keys: [:title, :status])
+    #   post = post_pointer.fetch_cache!(keys: [:title, :status])
     # @see #fetch
     def fetch_cache!(keys: nil, includes: nil)
       fetch(keys: keys, includes: includes, cache: true)

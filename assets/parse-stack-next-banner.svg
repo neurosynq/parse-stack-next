@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="1200" height="340" role="img" aria-labelledby="title desc">
+  <title id="title">parse_stack_next</title>
+  <desc id="desc">The Ruby stack for Parse Server — wordmark with an isometric three-tier stack icon: a parse-blue slab, a gray bridge slab, and a faceted emerald-cut ruby gem on top.</desc>
+
+  <rect width="1200" height="340" fill="#15151a" rx="20"/>
+
+  <g transform="translate(195, 100) scale(2)">
+    <polygon points="55,50 69.74,39.67 69.74,61.67 55,72" fill="#0E6EAB"/>
+    <polygon points="-55,50 55,50 69.74,39.67 -40.26,39.67" fill="#2BB1F3"/>
+    <polygon points="-55,50 55,50 55,72 -55,72" fill="#169CEE"/>
+
+    <polygon points="48,28 62.74,17.67 62.74,39.67 48,50" fill="#383841"/>
+    <polygon points="-48,28 48,28 62.74,17.67 -33.26,17.67" fill="#5d5d68"/>
+    <polygon points="-48,28 48,28 48,50 -48,50" fill="#4a4a55"/>
+
+    <polygon points="51.47,10.96 50.74,8.67 33.47,19.96 33.83,21.11" fill="#3B0A11"/>
+    <polygon points="51.47,10.96 50.74,8.67 50.74,4.67 51.47,6.96" fill="#401015"/>
+    <polygon points="51.47,6.96 50.74,4.67 37.29,-2.61 37.83,-0.89" fill="#5C1019"/>
+
+    <polygon points="43.28,16.70 51.47,10.96 33.83,21.11 28.91,24.56" fill="#5C131C"/>
+    <polygon points="43.28,16.70 51.47,10.96 51.47,6.96 43.28,12.70" fill="#6E141F"/>
+    <polygon points="43.28,12.70 51.47,6.96 37.83,-0.89 32.91,2.56" fill="#8A1A2A"/>
+
+    <polygon points="36,19 43.28,16.70 28.91,24.56 25.28,25.70" fill="#7B1822"/>
+    <polygon points="36,19 43.28,16.70 43.28,12.70 36,15" fill="#931C29"/>
+    <polygon points="36,15 43.28,12.70 32.91,2.56 27.46,4.28" fill="#C42535"/>
+
+    <polygon points="-36,19 36,19 25.28,25.70 -18.72,25.70" fill="#951C28"/>
+    <polygon points="-36,19 36,19 36,15 -36,15" fill="#B82230"/>
+    <polygon points="-36,15 36,15 27.46,4.28 -22.54,4.28" fill="#E63946"/>
+
+    <polygon points="-22.54,4.28 27.46,4.28 32.91,2.56 37.83,-0.89 37.29,-2.61 -12.71,-2.61 -18.17,-0.89 -23.09,2.56" fill="#FF7A88"/>
+
+    <polygon points="-12.07,3.075 20.43,3.075 23.98,1.955 27.17,-0.286 26.82,-1.404 -5.68,-1.404 -9.24,-0.286 -12.43,1.955" fill="#E64552"/>
+  </g>
+
+  <text x="400" y="178" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="64" font-weight="500" letter-spacing="-1">
+    <tspan fill="#f0f0f0">parse_stack</tspan><tspan fill="#E63946">_next</tspan>
+  </text>
+
+  <text x="402" y="215" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="20" fill="#8a8a92" letter-spacing="0.6">
+    The Ruby stack for Parse Server
+  </text>
+</svg>

@@ -25,6 +25,7 @@ class TrackAgentFixC2Test < Minitest::Test
         server_url: "http://localhost:1337/parse",
         application_id: "test-app-id",
         api_key: "test-api-key",
+        master_key: "test-master-key",
       )
     end
     @prior_suppress = Parse::Agent.suppress_master_key_warning

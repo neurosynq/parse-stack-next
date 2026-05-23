@@ -203,14 +203,14 @@ class TestEqualsLinkedPointer < Minitest::Test
 
   def test_does_not_equal_linked_pointer_constraint_exists
     # Test that the constraint is properly registered
-    operation = :project.does_not_equal_linked_pointer({ through: :capture, field: :project })
+    operation = :project.does_not_equal_linked_pointer({ through: :post, field: :project })
     assert_instance_of Parse::Constraint::DoesNotEqualLinkedPointerConstraint, operation
   end
 
   def test_does_not_equal_constraint_build_with_valid_parameters
     constraint = Parse::Constraint::DoesNotEqualLinkedPointerConstraint.new(
       :project,
-      { through: :capture, field: :project }
+      { through: :post, field: :project }
     )
 
     result = constraint.build
@@ -229,10 +229,10 @@ class TestEqualsLinkedPointer < Minitest::Test
     # Check $lookup stage
     lookup_stage = pipeline[1]
     assert lookup_stage.key?("$lookup")
-    assert_equal "Capture", lookup_stage["$lookup"]["from"]
-    assert_equal "_p_capture", lookup_stage["$lookup"]["localField"]
+    assert_equal "Post", lookup_stage["$lookup"]["from"]
+    assert_equal "_p_post", lookup_stage["$lookup"]["localField"]
     assert_equal "_id", lookup_stage["$lookup"]["foreignField"]
-    assert_equal "capture_data", lookup_stage["$lookup"]["as"]
+    assert_equal "post_data", lookup_stage["$lookup"]["as"]
 
     # Check $match stage with $expr using $ne (not equal)
     match_stage = pipeline[2]
@@ -242,7 +242,7 @@ class TestEqualsLinkedPointer < Minitest::Test
     expr = match_stage["$match"]["$expr"]
     assert expr.key?("$ne")  # Should use $ne instead of $eq
     assert_equal 2, expr["$ne"].length
-    assert_equal({ "$arrayElemAt" => ["$capture_data._p_project", 0] }, expr["$ne"][0])
+    assert_equal({ "$arrayElemAt" => ["$post_data._p_project", 0] }, expr["$ne"][0])
     assert_equal "$_p_project", expr["$ne"][1]
   end
 
@@ -260,7 +260,7 @@ class TestEqualsLinkedPointer < Minitest::Test
   def test_does_not_equal_constraint_validation_missing_field
     constraint = Parse::Constraint::DoesNotEqualLinkedPointerConstraint.new(
       :project,
-      { through: :capture }
+      { through: :post }
     )
 
     assert_raises(ArgumentError) do
@@ -281,7 +281,7 @@ class TestEqualsLinkedPointer < Minitest::Test
 
   def test_query_with_does_not_equal_linked_pointer_constraint
     query = Parse::Query.new("Asset")
-    query.where(:project.does_not_equal_linked_pointer => { through: :capture, field: :project })
+    query.where(:project.does_not_equal_linked_pointer => { through: :post, field: :project })
 
     # Should require aggregation pipeline
     assert query.requires_aggregation_pipeline?
@@ -308,8 +308,8 @@ class TestEqualsLinkedPointer < Minitest::Test
     # Test that both constraint types work together (though this would be an unusual case)
     query = Parse::Query.new("Asset")
     query.where(:status => "active")
-    query.where(:project.equals_linked_pointer => { through: :capture, field: :owner })
-    query.where(:creator.does_not_equal_linked_pointer => { through: :capture, field: :creator })
+    query.where(:project.equals_linked_pointer => { through: :post, field: :owner })
+    query.where(:creator.does_not_equal_linked_pointer => { through: :post, field: :creator })
 
     assert query.requires_aggregation_pipeline?
 

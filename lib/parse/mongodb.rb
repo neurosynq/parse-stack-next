@@ -384,6 +384,7 @@ module Parse
         @enabled = false
         @uri = nil
         @database = nil
+        remove_instance_variable(:@gem_available) if defined?(@gem_available)
         reset_writer!
       end
 
@@ -974,7 +975,7 @@ module Parse
       ROLE_GRAPH_ID_RE = /\A[A-Za-z0-9_\-]{1,64}\z/
 
       # Resolve every role name a user inherits via a single
-      # `$graphLookup` aggregation against the Parse role-membership and
+      # `$graphLookup` aggregation against the Parse role-subscription and
       # role-inheritance join tables.
       #
       # This is the mongo-direct fast path that {Parse::Role.all_for_user}
@@ -995,7 +996,7 @@ module Parse
       # If `_Join:roles:_Role` doesn't exist (the app uses flat roles
       # without inheritance), MongoDB treats the missing collection as
       # empty and `$graphLookup` returns no parents — the result collapses
-      # to direct memberships only, matching the Parse-Server-backed walk.
+      # to direct subscriptions only, matching the Parse-Server-backed walk.
       #
       # ## Authorization contract
       #
@@ -1019,7 +1020,7 @@ module Parse
       #
       # ## Return-value contract
       # - `Set<String>` on success (possibly empty if the user has no
-      #   direct memberships).
+      #   direct subscriptions).
       # - `nil` when the fast path is unavailable (mongo gem missing,
       #   {Parse::MongoDB.available?} false). Callers fall back to the
       #   Parse-Server N+1 walk.
@@ -1367,11 +1368,11 @@ module Parse
               "from" => "_Join:users:_Role",
               "localField" => "ids",
               "foreignField" => "owningId",
-              "as" => "memberships",
+              "as" => "subscriptions",
           } },
           { "$project" => {
               "_id" => 0,
-              "user_id_candidates" => "$memberships.relatedId",
+              "user_id_candidates" => "$subscriptions.relatedId",
           } },
           # Filter tombstoned _User rows AND project only `_id` server-side
           # via pipeline-form $lookup (3.6+). Without this, a role with N
@@ -1480,7 +1481,7 @@ module Parse
       #   keep the default +false+ so attacker-controlled or user-supplied
       #   aggregate stages cannot reach internal columns.
       # @param session_token [String, nil] when provided, the SDK
-      #   resolves the token to the requesting user + role membership
+      #   resolves the token to the requesting user + role subscription
       #   (via {Parse::AtlasSearch::Session}) and prepends an
       #   `_rperm` `$match` stage to the pipeline so the result set
       #   simulates Parse Server's row-level ACL enforcement. This
@@ -1499,6 +1500,28 @@ module Parse
       #   `session_token:` nor `master: true` is supplied and
       #   {Parse::ACLScope.require_session_token} is enabled.
       def aggregate(collection_name, pipeline, max_time_ms: nil, rewrite_lookups: nil, allow_internal_fields: false, session_token: nil, master: nil, acl_user: nil, acl_role: nil, read_preference: nil)
+        # AS::N envelope. Payload is intentionally metadata-only —
+        # `stage_count`, `stage_types`, `collection`, `scope`,
+        # `result_count`, `max_time_ms`, `read_preference`. Pipeline
+        # bodies are NOT included: they routinely embed user-id
+        # strings, tenant identifiers, search terms, and other PII
+        # that has no business in a log line or an APM span. The
+        # `parse.mongodb.role_graph` notification (emitted lower in
+        # this module) nests as a child event when role expansion
+        # runs inside the surrounding aggregate. `result_count` and
+        # `scope` are seeded nil so subscribers see a stable key set
+        # even on the raise path (where the block exits before either
+        # is written).
+        instrument_payload = {
+          collection: collection_name,
+          stage_count: pipeline.is_a?(Array) ? pipeline.size : 0,
+          stage_types: __extract_stage_types(pipeline),
+          max_time_ms: max_time_ms,
+          read_preference: read_preference&.to_s,
+          scope: nil,
+          result_count: nil,
+        }
+        ActiveSupport::Notifications.instrument("parse.mongodb.aggregate", instrument_payload) do |payload|
         # Resolve auth kwargs into a Parse::ACLScope::Resolution. The
         # call MUTATES the temporary kwargs hash (popping the auth
         # entries) before the resolution; we package them into a hash
@@ -1511,6 +1534,7 @@ module Parse
           acl_role: acl_role,
         }.compact
         resolution = Parse::ACLScope.resolve!(auth_kwargs, method_name: :aggregate)
+        payload[:scope] = __scope_label(resolution)
 
         # Validate BEFORE rewrite so the security denylist is applied to the
         # caller's original pipeline (which an attacker controls), not to
@@ -1624,7 +1648,9 @@ module Parse
           Parse::CLPScope.redact_protected_fields!(results, strip_set) if strip_set.any?
         end
 
+        payload[:result_count] = results.size
         results
+        end
       rescue => e
         raise_if_timeout!(e, collection_name, max_time_ms)
         raise
@@ -1768,9 +1794,33 @@ module Parse
       #   $where, $function, or $accumulator at any depth.
       # @raise [Parse::MongoDB::ExecutionTimeout] if the query exceeds max_time_ms
       def find(collection_name, filter = {}, **options)
+        max_time_ms = options.delete(:max_time_ms)
+        # Metadata-only AS::N payload: collection, presence-of-filter
+        # (NOT body), projection keys (column names, not values), limit,
+        # max_time_ms, result_count. Filter / projection bodies are
+        # excluded because they routinely embed user-id strings,
+        # tenant IDs, and other PII that has no business in a log line
+        # or a span. The `find` payload deliberately has no `:scope`
+        # field — `Parse::MongoDB.find` takes no ACL kwargs, so there
+        # is no resolution to label. Shared subscribers that handle
+        # both event names must treat `payload[:scope]` as optional.
+        # `result_count` is seeded nil so subscribers see a stable key
+        # set even on the raise path.
+        projection_keys =
+          if options[:projection].is_a?(Hash)
+            options[:projection].keys.map(&:to_s)
+          end
+        instrument_payload = {
+          collection: collection_name,
+          has_filter: filter.is_a?(Hash) && !filter.empty?,
+          projection_keys: projection_keys,
+          limit: options[:limit],
+          max_time_ms: max_time_ms,
+          result_count: nil,
+        }
+        ActiveSupport::Notifications.instrument("parse.mongodb.find", instrument_payload) do |payload|
         allow_internal_fields = options.delete(:allow_internal_fields) || false
         assert_no_denied_operators!(filter, allow_internal_fields: allow_internal_fields)
-        max_time_ms = options.delete(:max_time_ms)
         cursor = collection(collection_name).find(filter)
         explicit_limit = options.key?(:limit)
         applied_default_limit = false
@@ -1801,7 +1851,9 @@ module Parse
                "unbounded behavior."
         end
 
+        payload[:result_count] = results.size
         results
+        end
       rescue => e
         raise_if_timeout!(e, collection_name, max_time_ms)
         raise
@@ -1981,7 +2033,7 @@ module Parse
       # dates, nested documents) but preserving all field names including +_id+.
       # Unlike {.convert_document_to_parse}, this does NOT rename +_id+ to
       # +objectId+, because aggregation +$group+ stages reuse +_id+ as the
-      # group key (e.g. a pointer string like +"Team$abc"+) rather than as a
+      # group key (e.g. a pointer string like +"Workspace$abc"+) rather than as a
       # Parse object identifier.
       #
       # @param doc [Hash] a raw MongoDB aggregation result row
@@ -2059,6 +2111,36 @@ module Parse
       end
 
       private
+
+      # Cardinality cap on the `stage_types` payload field. A
+      # pathological caller sending a 10k-stage pipeline shouldn't
+      # be able to bloat every AS::N subscriber's log line.
+      INSTRUMENT_STAGE_TYPES_LIMIT = 32
+
+      # Extract the top-level operator name from each pipeline stage
+      # (e.g. `["$match", "$lookup", "$project"]`). Returns an empty
+      # array on anything non-Array; non-Hash entries become `nil`
+      # and are pruned. Capped at {INSTRUMENT_STAGE_TYPES_LIMIT}.
+      def __extract_stage_types(pipeline)
+        return [] unless pipeline.is_a?(Array)
+        types = pipeline.first(INSTRUMENT_STAGE_TYPES_LIMIT).map do |stage|
+          stage.is_a?(Hash) ? stage.keys.first.to_s : nil
+        end
+        types.compact
+      end
+
+      # Map a {Parse::ACLScope::Resolution} to a stable, low-cardinality
+      # scope label for the AS::N payload. Four values:
+      # `:master` (master-key path), `:user` (session-token with a
+      # resolved user_id, OR `acl_user:`), `:role` (`acl_role:` —
+      # session mode but no user_id), `:anon` (public — neither
+      # token nor master supplied).
+      def __scope_label(resolution)
+        return :anon if resolution.nil?
+        return :master if resolution.master?
+        return :anon if resolution.public?
+        resolution.user_id ? :user : :role
+      end
 
       # MongoDB error code for MaxTimeMSExpired
       MONGO_MAX_TIME_MS_EXPIRED_CODE = 50

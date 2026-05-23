@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require "faraday"
 
 # Attempt to load the persistent connection adapter for better performance.
@@ -29,6 +31,7 @@ require_relative "client/batch"
 require_relative "client/body_builder"
 require_relative "client/authentication"
 require_relative "client/caching"
+require_relative "cache/redis"
 require_relative "client/logging"
 require_relative "client/profiling"
 require_relative "api/all"
@@ -392,10 +395,13 @@ module Parse
     #      Parse.setup(
     #        connection_pooling: { pool_size: 5, idle_timeout: 60, keep_alive: 60 }
     #      )
-    # @option opts [Moneta::Transformer,Moneta::Expires] :cache A caching adapter of type
+    # @option opts [Moneta::Transformer,Moneta::Expires,Parse::Cache::Redis,String] :cache A caching adapter of type
     #    {https://github.com/minad/moneta Moneta::Transformer} or
     #    {https://github.com/minad/moneta Moneta::Expires} that will be used
-    #    by the caching middleware {Parse::Middleware::Caching}.
+    #    by the caching middleware {Parse::Middleware::Caching}. You can also
+    #    pass a `redis://` URL string (an internal Moneta-Redis store will be
+    #    built for you) or a {Parse::Cache::Redis} wrapper, which adds a
+    #    connection pool and automatic namespace forwarding.
     #    Caching queries and object fetches can help improve the performance of
     #    your application, even if it is for a few seconds. Only successful GET
     #    object fetches and non-empty result queries will be cached by default.
@@ -407,6 +413,13 @@ module Parse
     #    middleware. The default value is 3 seconds. If :expires is set to 0,
     #    caching will be disabled. You can always clear the current state of the
     #    cache using the clear_cache! method on your Parse::Client instance.
+    # @option opts [String] :cache_namespace Optional prefix applied to every
+    #    cache key. Useful when two Parse apps share one Redis instance and
+    #    would otherwise collide on identical paths (e.g.
+    #    `mk:/classes/Song/abc`). Keys become `<namespace>:<existing-prefix>:<url>`,
+    #    so a `SCAN <namespace>:*` evicts a whole app cleanly. Defaults to no
+    #    namespace for backward compatibility — explicit only, never auto-derived
+    #    from `app_id`.
     # @option opts [Hash] :faraday You may pass a hash of options that will be
     #    passed to the Faraday constructor.
     # @option opts [String] :live_query_url The WebSocket URL for Parse LiveQuery server
@@ -565,8 +578,23 @@ module Parse
             unless [:key?, :[], :delete, :store].all? { |method| opts[:cache].respond_to?(method) }
               raise ArgumentError, "Parse::Client option :cache needs to be a type of Moneta store"
             end
+
+            # If the caller passed a `Parse::Cache::Redis` wrapper, let its
+            # built-in namespace flow through automatically. An explicit
+            # `cache_namespace:` still wins so callers can override.
+            if defined?(Parse::Cache::Redis) && opts[:cache].is_a?(Parse::Cache::Redis)
+              opts[:cache_namespace] ||= opts[:cache].namespace
+            end
+
             self.cache = opts[:cache]
-            conn.use Parse::Middleware::Caching, self.cache, { expires: opts[:expires].to_i }
+            conn.use Parse::Middleware::Caching, self.cache, {
+              expires: opts[:expires].to_i,
+              # Optional `cache_namespace:` prefixes every key so two Parse
+              # apps sharing one Redis don't collide on `mk:/classes/Song/abc`.
+              # Explicit only — we do NOT auto-derive from app_id to keep
+              # existing single-app deployments backward-compatible.
+              namespace: opts[:cache_namespace],
+            }
 
             # Inform about opt-in cache behavior
             unless Parse.default_query_cache
@@ -738,6 +766,22 @@ module Parse
     # @see Parse::Protocol
     # @see Parse::Request
     def request(method, uri = nil, body: nil, query: nil, headers: nil, opts: {})
+      # Kwarg-absorption guard. The `**opts` splat in API helper methods
+      # (lib/parse/api/*.rb) absorbs a caller-passed `opts: { ... }`
+      # keyword as a key named `:opts` rather than as the request options
+      # hash itself. The auth context (session_token, use_master_key)
+      # buried under :opts then never reaches the request — the call
+      # silently goes out anonymous (or master, if one is configured),
+      # which is a permission-downgrade footgun. Fail loudly here so the
+      # bug surfaces in dev/test instead of in production.
+      if opts.is_a?(Hash) && opts[:opts].is_a?(Hash)
+        raise ArgumentError, "Parse::Client#request received nested `opts: { opts: { ... } }` — " \
+                             "pass session_token: / use_master_key: directly as keywords, " \
+                             "not wrapped in an `opts:` hash. " \
+                             "Bad: Parse.client.create_object('X', body, opts: { session_token: t }) " \
+                             "Good: Parse.client.create_object('X', body, session_token: t, use_master_key: false)"
+      end
+
       _retry_count ||= self.retry_limit
 
       if opts[:retry] == false
@@ -776,11 +820,31 @@ module Parse
         headers[Parse::Middleware::Caching::CACHE_EXPIRES_DURATION] = opts[:cache].to_s
       end
 
+      # Resolve the auth context in three layers:
+      #   1. explicit per-call `use_master_key:` and `session_token:`
+      #   2. ambient session set by `Parse.with_session { ... }` (fiber-local)
+      #   3. process-wide `Parse.client_mode` flag — when true, master key is
+      #      never sent unless the caller explicitly passed `use_master_key: true`
+      explicit_master = opts.key?(:use_master_key)
+
       if opts[:use_master_key] == false
+        headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
+      elsif Parse.client_mode && opts[:use_master_key] != true
+        # client mode defaults master key OFF unless explicitly opted in
         headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
       end
 
       token = opts[:session_token]
+      # When no explicit token was passed AND the caller didn't ask to send
+      # the master key, fall through to the fiber-local ambient set by
+      # `Parse.with_session`. Explicit `use_master_key: true` is treated as
+      # a deliberate admin call and skips the ambient — otherwise an
+      # `admin.do_thing(use_master_key: true)` nested inside a
+      # `with_session(user)` block would silently downgrade.
+      if token.nil? && !(explicit_master && opts[:use_master_key] == true)
+        ambient = Parse.current_session_token
+        token = ambient if ambient.is_a?(String) && !ambient.empty?
+      end
       if token.present?
         token = token.session_token if token.respond_to?(:session_token)
         headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"

@@ -33,9 +33,22 @@ module Parse
     #   subscription.unsubscribe
     #
     class Subscription
-      # Class-level monitor for request ID generation
-      @@id_monitor = Monitor.new
-      @@request_counter = 0
+      # Class-instance state (rather than @@class_var) for request ID generation.
+      # Held on the Subscription singleton and guarded by a Monitor so concurrent
+      # subscriptions across threads cannot tear the counter. See
+      # Parse::ACLScope's `@no_acl_warned` pattern for the same convention.
+      @id_monitor = Monitor.new
+      @request_counter = 0
+
+      class << self
+        # @!visibility private
+        attr_reader :id_monitor
+
+        # @!visibility private
+        def next_request_id
+          @id_monitor.synchronize { @request_counter += 1 }
+        end
+      end
 
       # @return [Integer] unique request ID for this subscription
       attr_reader :request_id
@@ -285,9 +298,7 @@ module Parse
       # Generate a unique request ID (thread-safe)
       # @return [Integer]
       def generate_request_id
-        @@id_monitor.synchronize do
-          @@request_counter += 1
-        end
+        self.class.next_request_id
       end
     end
   end

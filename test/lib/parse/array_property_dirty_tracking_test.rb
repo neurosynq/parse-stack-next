@@ -1,13 +1,13 @@
 require_relative "../../test_helper"
 
-# Test model simulating the Capture class with traits array and boolean properties
+# Test model with a traits array and boolean properties
 class ArrayDirtyTestModel < Parse::Object
   parse_class "ArrayDirtyTestModel"
 
   property :name, :string
   property :traits, :array
-  property :is_draft, :boolean
-  property :on_timeline, :boolean
+  property :draft, :boolean
+  property :published, :boolean
   property :tags, :array, symbolize: true
 end
 
@@ -107,43 +107,43 @@ class ArrayPropertyDirtyTrackingTest < Minitest::Test
   # ============================================
 
   def test_boolean_property_change_marks_dirty
-    @model.is_draft = true
+    @model.draft = true
     @model.clear_changes!
 
-    @model.is_draft = false
+    @model.draft = false
 
     assert @model.dirty?, "Model should be dirty after boolean change"
-    assert @model.is_draft_changed?, "is_draft should be marked as changed"
+    assert @model.draft_changed?, "draft should be marked as changed"
   end
 
   def test_boolean_property_same_value_not_dirty
-    @model.is_draft = false
+    @model.draft = false
     @model.clear_changes!
 
-    @model.is_draft = false
+    @model.draft = false
 
     refute @model.dirty?, "Model should NOT be dirty when setting same value"
-    refute @model.is_draft_changed?, "is_draft should NOT be marked as changed"
+    refute @model.draft_changed?, "draft should NOT be marked as changed"
   end
 
   def test_boolean_nil_to_false_marks_dirty
-    @model.instance_variable_set(:@is_draft, nil)
+    @model.instance_variable_set(:@draft, nil)
     @model.clear_changes!
 
-    @model.is_draft = false
+    @model.draft = false
 
     assert @model.dirty?, "Model should be dirty when changing nil to false"
-    assert @model.is_draft_changed?, "is_draft should be marked as changed"
+    assert @model.draft_changed?, "draft should be marked as changed"
   end
 
   def test_boolean_nil_to_true_marks_dirty
-    @model.instance_variable_set(:@is_draft, nil)
+    @model.instance_variable_set(:@draft, nil)
     @model.clear_changes!
 
-    @model.is_draft = true
+    @model.draft = true
 
     assert @model.dirty?, "Model should be dirty when changing nil to true"
-    assert @model.is_draft_changed?, "is_draft should be marked as changed"
+    assert @model.draft_changed?, "draft should be marked as changed"
   end
 
   # ============================================
@@ -152,59 +152,59 @@ class ArrayPropertyDirtyTrackingTest < Minitest::Test
 
   def test_multiple_changes_all_tracked
     @model.traits = ["draft"]
-    @model.is_draft = true
-    @model.on_timeline = false
+    @model.draft = true
+    @model.published = false
     @model.clear_changes!
 
     # Simulate publish! logic
     @model.traits.add_unique("published") unless @model.traits.include?("published")
     @model.traits.remove("draft") if @model.traits.include?("draft")
-    @model.is_draft = false
-    @model.on_timeline = true
+    @model.draft = false
+    @model.published = true
 
     assert @model.dirty?, "Model should be dirty after multiple changes"
     assert @model.traits_changed?, "traits should be marked as changed"
-    assert @model.is_draft_changed?, "is_draft should be marked as changed"
-    assert @model.on_timeline_changed?, "on_timeline should be marked as changed"
+    assert @model.draft_changed?, "draft should be marked as changed"
+    assert @model.published_changed?, "published should be marked as changed"
   end
 
   def test_publish_scenario_already_published_only_boolean_changes
     # Scenario: already published, just need to update booleans
     @model.traits = ["published"]
-    @model.is_draft = true
-    @model.on_timeline = false
+    @model.draft = true
+    @model.published = false
     @model.clear_changes!
 
     # Simulate publish! logic - traits won't change because already published
     @model.traits.add_unique("published") unless @model.traits.include?("published")
     @model.traits.remove("draft") if @model.traits.include?("draft")
-    @model.is_draft = false
-    @model.on_timeline = true
+    @model.draft = false
+    @model.published = true
 
     assert @model.dirty?, "Model should be dirty from boolean changes"
     # traits won't be changed because the guards prevented the calls
     refute @model.traits_changed?, "traits should NOT be changed (guards prevented calls)"
-    assert @model.is_draft_changed?, "is_draft should be marked as changed"
-    assert @model.on_timeline_changed?, "on_timeline should be marked as changed"
+    assert @model.draft_changed?, "draft should be marked as changed"
+    assert @model.published_changed?, "published should be marked as changed"
   end
 
   def test_publish_scenario_no_changes_when_already_in_final_state
     # Scenario: already in published state, nothing to change
     @model.traits = ["published"]
-    @model.is_draft = false
-    @model.on_timeline = true
+    @model.draft = false
+    @model.published = true
     @model.clear_changes!
 
     # Simulate publish! logic - nothing changes
     @model.traits.add_unique("published") unless @model.traits.include?("published")
     @model.traits.remove("draft") if @model.traits.include?("draft")
-    @model.is_draft = false
-    @model.on_timeline = true
+    @model.draft = false
+    @model.published = true
 
     refute @model.dirty?, "Model should NOT be dirty when already in final state"
     refute @model.traits_changed?, "traits should NOT be changed"
-    refute @model.is_draft_changed?, "is_draft should NOT be changed"
-    refute @model.on_timeline_changed?, "on_timeline should NOT be changed"
+    refute @model.draft_changed?, "draft should NOT be changed"
+    refute @model.published_changed?, "published should NOT be changed"
   end
 
   # ============================================
@@ -285,37 +285,37 @@ class ArrayPropertyDirtyTrackingTest < Minitest::Test
 
   def test_changed_returns_array_of_changed_attributes
     @model.traits = []
-    @model.is_draft = true
+    @model.draft = true
     @model.clear_changes!
 
     @model.traits.add("new")
-    @model.is_draft = false
+    @model.draft = false
 
     changed = @model.changed
     assert_includes changed, "traits", "changed should include 'traits'"
-    assert_includes changed, "is_draft", "changed should include 'is_draft'"
+    assert_includes changed, "draft", "changed should include 'draft'"
   end
 
   def test_changes_returns_hash_with_old_and_new_values
-    @model.is_draft = true
+    @model.draft = true
     @model.clear_changes!
 
-    @model.is_draft = false
+    @model.draft = false
 
     changes = @model.changes
-    assert changes.key?("is_draft"), "changes should have is_draft key"
-    assert_equal [true, false], changes["is_draft"], "changes should show [old, new] values"
+    assert changes.key?("draft"), "changes should have draft key"
+    assert_equal [true, false], changes["draft"], "changes should show [old, new] values"
   end
 
   def test_dirty_with_field_parameter
     @model.traits = []
-    @model.is_draft = true
+    @model.draft = true
     @model.clear_changes!
 
     @model.traits.add("new")
 
     assert @model.dirty?(:traits), "dirty?(:traits) should return true"
-    refute @model.dirty?(:is_draft), "dirty?(:is_draft) should return false"
+    refute @model.dirty?(:draft), "dirty?(:draft) should return false"
   end
 
   # ============================================
@@ -453,8 +453,8 @@ class ArrayPropertyDirtyTrackingTest < Minitest::Test
     model.set_attributes!({
       "objectId" => "capture123",
       "traits" => ["draft"],
-      "is_draft" => true,
-      "on_timeline" => false,
+      "draft" => true,
+      "published" => false,
     }, false)
     model.clear_changes!
 
@@ -463,20 +463,20 @@ class ArrayPropertyDirtyTrackingTest < Minitest::Test
     # Simulate publish! logic
     model.traits.add_unique("published") unless model.traits.include?("published")
     model.traits.remove("draft") if model.traits.include?("draft")
-    model.is_draft = false
-    model.on_timeline = true
+    model.draft = false
+    model.published = true
 
     # All changes should be tracked
     assert model.dirty?, "Model should be dirty after publish changes"
     assert model.traits_changed?, "traits should be changed"
-    assert model.is_draft_changed?, "is_draft should be changed"
-    assert model.on_timeline_changed?, "on_timeline should be changed"
+    assert model.draft_changed?, "draft should be changed"
+    assert model.published_changed?, "published should be changed"
 
     # Verify the actual changes
     assert_includes model.traits.to_a, "published"
     refute_includes model.traits.to_a, "draft"
-    assert_equal false, model.is_draft
-    assert_equal true, model.on_timeline
+    assert_equal false, model.draft
+    assert_equal true, model.published
   end
 
   def test_collection_proxy_delegate_survives_clear_changes
@@ -501,18 +501,18 @@ class ArrayPropertyDirtyTrackingTest < Minitest::Test
 
   def test_clear_attribute_change_only_clears_specified_field
     @model.traits = ["new_trait"]
-    @model.is_draft = true
-    @model.on_timeline = true
+    @model.draft = true
+    @model.published = true
     @model.clear_changes!
 
     # Make multiple changes
     @model.traits.add("another")
-    @model.is_draft = false
-    @model.on_timeline = false
+    @model.draft = false
+    @model.published = false
 
     assert @model.traits_changed?, "traits should be changed"
-    assert @model.is_draft_changed?, "is_draft should be changed"
-    assert @model.on_timeline_changed?, "on_timeline should be changed"
+    assert @model.draft_changed?, "draft should be changed"
+    assert @model.published_changed?, "published should be changed"
 
     # Clear only traits - simulates direct_save for traits field
     @model.clear_attribute_change!([:traits])
@@ -521,49 +521,49 @@ class ArrayPropertyDirtyTrackingTest < Minitest::Test
     refute @model.traits_changed?, "traits should NOT be changed after clear_attribute_change!"
 
     # Other fields should STILL be dirty
-    assert @model.is_draft_changed?, "is_draft should STILL be changed"
-    assert @model.on_timeline_changed?, "on_timeline should STILL be changed"
+    assert @model.draft_changed?, "draft should STILL be changed"
+    assert @model.published_changed?, "published should STILL be changed"
     assert @model.dirty?, "Model should still be dirty (other fields changed)"
   end
 
   def test_clear_attribute_change_multiple_fields
     @model.traits = []
-    @model.is_draft = true
-    @model.on_timeline = true
+    @model.draft = true
+    @model.published = true
     @model.name = "original"
     @model.clear_changes!
 
     # Make changes to all fields
     @model.traits.add("trait")
-    @model.is_draft = false
-    @model.on_timeline = false
+    @model.draft = false
+    @model.published = false
     @model.name = "changed"
 
     assert @model.dirty?, "Model should be dirty"
 
-    # Clear traits and is_draft, but NOT on_timeline and name
-    @model.clear_attribute_change!([:traits, :is_draft])
+    # Clear traits and draft, but NOT published and name
+    @model.clear_attribute_change!([:traits, :draft])
 
     refute @model.traits_changed?, "traits should NOT be changed"
-    refute @model.is_draft_changed?, "is_draft should NOT be changed"
-    assert @model.on_timeline_changed?, "on_timeline should STILL be changed"
+    refute @model.draft_changed?, "draft should NOT be changed"
+    assert @model.published_changed?, "published should STILL be changed"
     assert @model.name_changed?, "name should STILL be changed"
     assert @model.dirty?, "Model should still be dirty"
   end
 
   def test_clear_attribute_change_with_string_field_names
     @model.traits = []
-    @model.is_draft = true
+    @model.draft = true
     @model.clear_changes!
 
     @model.traits.add("trait")
-    @model.is_draft = false
+    @model.draft = false
 
     # Clear using string field names (as might happen from direct_save)
     @model.clear_attribute_change!(["traits"])
 
     refute @model.traits_changed?, "traits should NOT be changed (string key)"
-    assert @model.is_draft_changed?, "is_draft should STILL be changed"
+    assert @model.draft_changed?, "draft should STILL be changed"
   end
 
   def test_direct_save_scenario_preserves_other_changes
@@ -572,8 +572,8 @@ class ArrayPropertyDirtyTrackingTest < Minitest::Test
     model.set_attributes!({
       "objectId" => "capture123",
       "traits" => ["draft"],
-      "is_draft" => true,
-      "on_timeline" => false,
+      "draft" => true,
+      "published" => false,
       "tags" => ["old_tag"],
     }, false)
     model.clear_changes!
@@ -581,8 +581,8 @@ class ArrayPropertyDirtyTrackingTest < Minitest::Test
     # Simulate publish! making changes
     model.traits.add_unique("published")
     model.traits.remove("draft")
-    model.is_draft = false
-    model.on_timeline = true
+    model.draft = false
+    model.published = true
 
     assert model.dirty?, "Model should be dirty after publish changes"
 
@@ -596,20 +596,20 @@ class ArrayPropertyDirtyTrackingTest < Minitest::Test
 
     # BUT all other publish! changes should still be dirty!
     assert model.traits_changed?, "traits should STILL be changed after tags direct_save"
-    assert model.is_draft_changed?, "is_draft should STILL be changed after tags direct_save"
-    assert model.on_timeline_changed?, "on_timeline should STILL be changed after tags direct_save"
+    assert model.draft_changed?, "draft should STILL be changed after tags direct_save"
+    assert model.published_changed?, "published should STILL be changed after tags direct_save"
     assert model.dirty?, "Model should STILL be dirty for non-direct_save fields"
   end
 
   def test_changed_after_partial_clear
     @model.traits = []
-    @model.is_draft = true
-    @model.on_timeline = false
+    @model.draft = true
+    @model.published = false
     @model.clear_changes!
 
     @model.traits.add("x")
-    @model.is_draft = false
-    @model.on_timeline = true
+    @model.draft = false
+    @model.published = true
 
     # Clear one field
     @model.clear_attribute_change!([:traits])
@@ -617,7 +617,7 @@ class ArrayPropertyDirtyTrackingTest < Minitest::Test
     # changed should still include the other fields
     changed_fields = @model.changed
     refute_includes changed_fields, "traits", "changed should not include traits"
-    assert_includes changed_fields, "is_draft", "changed should include is_draft"
-    assert_includes changed_fields, "on_timeline", "changed should include on_timeline"
+    assert_includes changed_fields, "draft", "changed should include draft"
+    assert_includes changed_fields, "published", "changed should include published"
   end
 end

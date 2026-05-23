@@ -37,3 +37,26 @@ Parse.Cloud.beforeSave(Parse.User, (request) => {
     console.log(`New user being created: ${request.object.get('username')}`);
   }
 });
+
+// --------------------------------------------------------------------
+// Analytics-adapter test plumbing. The adapter (loaded via
+// PARSE_SERVER_ANALYTICS_ADAPTER -> /parse-server/cloud/analytics-adapter.js)
+// pushes every trackEvent / appOpened call onto a Node-global ring
+// buffer. These two Cloud functions are the only way the Ruby
+// integration test drains and clears that buffer.
+//
+// Both require the master key — the captured records can contain
+// session tokens (we capture req.info.sessionToken so the test can
+// pin the v5.0 session_token-opt-as-header contract), and exposing
+// them to a client-mode caller would let a drive-by attacker harvest
+// every token that's hit /events on this server.
+// --------------------------------------------------------------------
+Parse.Cloud.define('getCapturedAnalyticsEvents', () => {
+  return global.__parseTestCapturedAnalytics || [];
+}, { requireMaster: true });
+
+Parse.Cloud.define('resetCapturedAnalyticsEvents', () => {
+  const prior = (global.__parseTestCapturedAnalytics || []).length;
+  global.__parseTestCapturedAnalytics = [];
+  return { cleared: prior };
+}, { requireMaster: true });

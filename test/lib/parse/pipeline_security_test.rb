@@ -271,6 +271,43 @@ class PipelineSecurityTest < Minitest::Test
     assert_equal :nested_denied_operator, err.reason
   end
 
+  # The Atlas stage-0-only operators ($search, $searchMeta,
+  # $vectorSearch, $listSearchIndexes) are present in
+  # `PipelineSecurity::ALLOWED_STAGES` so the SDK's own modules can
+  # emit them, but they must NEVER be accepted from a caller-supplied
+  # agent pipeline. The proper agent surface for those stages is the
+  # dedicated atlas_search / semantic_search tools.
+  def test_pipeline_validator_refuses_vector_search_stage
+    err = assert_raises(Parse::Agent::PipelineValidator::PipelineSecurityError) do
+      Parse::Agent::PipelineValidator.validate!([
+        { "$vectorSearch" => { "index" => "i", "path" => "embedding", "queryVector" => [0.1], "numCandidates" => 10, "limit" => 1 } },
+      ])
+    end
+    assert_equal "$vectorSearch", err.stage
+    assert_equal :stage0_only_atlas_stage, err.reason
+  end
+
+  def test_pipeline_validator_refuses_atlas_search_stages
+    %w[$search $searchMeta $listSearchIndexes].each do |op|
+      err = assert_raises(Parse::Agent::PipelineValidator::PipelineSecurityError) do
+        Parse::Agent::PipelineValidator.validate!([{ op => { "index" => "i" } }])
+      end
+      assert_equal op, err.stage
+      assert_equal :stage0_only_atlas_stage, err.reason
+    end
+  end
+
+  def test_pipeline_security_still_allows_vector_search_internally
+    # The SDK-internal validator still accepts the stage so
+    # Parse::VectorSearch / Parse::AtlasSearch's own pipelines pass
+    # any subsequent PipelineSecurity validation.
+    assert(
+      Parse::PipelineSecurity.validate_pipeline!([
+        { "$vectorSearch" => { "index" => "i", "path" => "embedding", "queryVector" => [0.1], "numCandidates" => 10, "limit" => 1 } },
+      ])
+    )
+  end
+
   # --- end-to-end DeniedOperator via Parse::MongoDB ---
 
   def test_mongodb_find_raises_denied_operator_on_where_filter

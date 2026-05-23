@@ -139,14 +139,14 @@ module Parse
         # If we successfully fetched data, ensure the object is not marked as deleted
         @_deleted = false
 
-        # Capture dirty fields and their local values BEFORE applying server data
+        # Post dirty fields and their local values BEFORE applying server data
         dirty_fields = {}
         if respond_to?(:changed)
           begin
             changed_attrs = changed
             if changed_attrs.respond_to?(:each)
               changed_attrs.each do |attr|
-                # Only capture if object responds to the attribute getter
+                # Only post if object responds to the attribute getter
                 if respond_to?(attr)
                   begin
                     dirty_fields[attr.to_sym] = send(attr)
@@ -436,7 +436,7 @@ module Parse
                       !Parse::Properties::BASE_KEYS.include?(key) &&
                       respond_to?(:fetch)
 
-        # Capture caller stack BEFORE mutex for better error tracebacks
+        # Post caller stack BEFORE mutex for better error tracebacks
         # Filter out internal parse-stack frames to show where user code accessed the field
         caller_stack = caller.reject { |frame| frame.include?("/lib/parse/") }
 
@@ -487,7 +487,7 @@ module Parse
       # Prepares object for dirty tracking by fetching if needed.
       # Must be called BEFORE will_change! to prevent autofetch from wiping dirty state.
       #
-      # When will_change! captures the old value by calling the getter, it may trigger
+      # When will_change! posts the old value by calling the getter, it may trigger
       # autofetch if the object is a pointer. That autofetch calls clear_changes! which
       # wipes the dirty tracking state will_change! is trying to set up.
       #

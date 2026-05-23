@@ -106,10 +106,10 @@ module Parse
     #   is false), only serialize fields that were actually fetched. This prevents
     #   autofetch from being triggered during serialization of partially hydrated objects.
     # @example Default - pointers for storage
-    #   capture.assets.as_json
-    #   # => [{"__type"=>"Pointer", "className"=>"Asset", "objectId"=>"abc"}, ...]
+    #   post.assets.as_json
+    #   # => [{"__type"=>"Pointer", "className"=>"Document", "objectId"=>"abc"}, ...]
     # @example Full objects for API responses (only fetched fields, no autofetch)
-    #   capture.assets.as_json(pointers_only: false)
+    #   post.assets.as_json(pointers_only: false)
     #   # => [{"objectId"=>"abc", "file"=>{...}, "caption"=>"...", ...}, ...]
     def as_json(opts = nil)
       opts ||= {}

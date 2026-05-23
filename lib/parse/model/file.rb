@@ -221,8 +221,7 @@ module Parse
 
         size_cap = max_remote_size
         timeout = remote_timeout
-        URI.open(uri,
-                 read_timeout: timeout,
+        uri.open(read_timeout: timeout,
                  open_timeout: timeout,
                  redirect: false,
                  content_length_proc: ->(len) {
@@ -479,10 +478,23 @@ module Parse
     end
 
     # Save the file by uploading it to Parse and creating a file pointer.
+    # @param session_token [String, nil] thread an authenticated user's
+    #   session token through the upload. Required when the SDK is running
+    #   in client mode against a Parse Server with
+    #   `fileUpload.enableForAuthenticatedUser` on (the typical safe
+    #   configuration). When nil, the upload uses whatever auth the
+    #   default client carries — which for client-mode builds is anonymous.
+    # @param use_master_key [Boolean, nil] explicitly opt in or out of
+    #   master-key auth for this upload. Defaults to the client's
+    #   configured behavior. Pass `false` in client-mode code to assert
+    #   that no master key is smuggled into the upload.
     # @return [Boolean] true if successfully uploaded and saved.
-    def save
+    def save(session_token: nil, use_master_key: nil)
       unless saved? || @contents.nil? || @name.nil?
-        response = client.create_file(@name, @contents, @mime_type)
+        opts = {}
+        opts[:session_token]   = session_token unless session_token.nil?
+        opts[:use_master_key]  = use_master_key unless use_master_key.nil?
+        response = client.create_file(@name, @contents, @mime_type, **opts)
         unless response.error?
           result = response.result
           @name = result[FIELD_NAME] || File.basename(result[FIELD_URL])

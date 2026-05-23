@@ -102,12 +102,17 @@ module Parse
     # names used in Parse, we will need to have a dynamic lookup system where
     # when a parse class name received, we go through all of our subclasses to determine
     # which Parse::Object subclass is responsible for handling this Parse table class.
-    # we use @@model_cache to cache the results of the algorithm since we do this frequently
-    # when encoding and decoding objects.
-    # @!visibility private
-    @@model_cache = {}
+    # The cache is held as a class-instance variable on the singleton (rather than a
+    # `@@class_var`) and guarded by a Mutex so concurrent encode/decode paths cannot
+    # tear the underlying Hash. Class-instance state also keeps the cache out of any
+    # subclass's reach, matching the per-class-state convention used elsewhere in
+    # the SDK (see Parse::ACLScope `@no_acl_warned`).
+    @model_cache = {}
+    @model_cache_mutex = Mutex.new
 
     class << self
+      # @!visibility private
+      attr_reader :model_cache, :model_cache_mutex
       # @!attribute self.raise_on_save_failure
       # By default, we return `true` or `false` for save and destroy operations.
       # If you prefer to have `Parse::Object` raise an exception instead, you
@@ -179,13 +184,24 @@ module Parse
       # legitimate findables. Rescue per-descendant so the iteration
       # continues past the unnamed-and-default-parse_class case while
       # still considering anonymous-but-overridden ones.
-      @@model_cache[str] ||= Parse::Object.descendants.find do |f|
-        begin
-          cls = f.parse_class
-        rescue StandardError
-          next false
+      # Reference Parse::Model directly: this class method is inherited by
+      # subclasses (e.g. Parse::Object.find_class), so a bare `@model_cache`
+      # would resolve on the subclass singleton — which has no cache. The
+      # cache lives on Parse::Model itself.
+      Parse::Model.model_cache_mutex.synchronize do
+        cached = Parse::Model.model_cache[str]
+        return cached if cached
+
+        result = Parse::Object.descendants.find do |f|
+          begin
+            cls = f.parse_class
+          rescue StandardError
+            next false
+          end
+          cls == str || cls == "_#{str}"
         end
-        cls == str || cls == "_#{str}"
+        Parse::Model.model_cache[str] = result if result
+        result
       end
     end
   end

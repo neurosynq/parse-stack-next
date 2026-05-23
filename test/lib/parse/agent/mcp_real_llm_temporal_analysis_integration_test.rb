@@ -74,11 +74,15 @@ class MCPLLMTemporalAnalysisTest < Minitest::Test
   ERRATIC_STUDENT   = "Diego"
 
   TREND_FIXTURE_SCORES = {
-    "Ada"   => [85, 86, 84, 87],   # stable, narrow band ±2
-    "Bao"   => [70, 78, 85, 92],   # +22 across 4 weeks — clear positive trend
-    "Cheng" => [92, 80, 70, 55],   # -37 across 4 weeks — clear negative trend (concerning)
-    "Diego" => [95, 60, 85, 70],   # high variance (~13.7), no monotonic direction
+    "Ada"   => [85, 86, 84, 87],   # stable, narrow band ±2 (range 3, stdev ~1.1)
+    "Bao"   => [70, 78, 85, 92],   # +22 across 4 weeks — clear monotonic positive (range 22, stdev ~8.2)
+    "Cheng" => [88, 82, 74, 65],   # -23 across 4 weeks — clear monotonic negative (range 23, stdev ~8.6)
+    "Diego" => [95, 60, 85, 70],   # non-monotonic, widest range (35) and highest stdev (~13.5)
   }.freeze
+  # Variance ranking (stdev): Diego 13.5 > Cheng 8.6 ~ Bao 8.2 > Ada 1.1
+  # Diego's range (35) and stdev (13.5) are strictly larger than every other student,
+  # so the "most inconsistent" answer is unambiguous. Cheng's decline is preserved as
+  # a clear negative monotonic trend without competing with Diego on variance.
 
   # NOTE: do NOT override `def setup` / `def teardown`.
   # `ParseStackIntegrationTest.included(base)` injects those via
@@ -131,7 +135,7 @@ class MCPLLMTemporalAnalysisTest < Minitest::Test
   # Test 1: Headline scenario — identify the student whose performance is
   # significantly DECLINING (the "who should we be concerned about" question).
   #
-  # Ground truth: Cheng (92 → 80 → 70 → 55, a -37 drop over four weeks).
+  # Ground truth: Cheng (88 → 82 → 74 → 65, a -23 drop over four weeks).
   # The LLM must fetch exam history ordered by date and reason about direction.
   # ==========================================================================
   def test_llm_identifies_declining_student_we_should_be_concerned_about

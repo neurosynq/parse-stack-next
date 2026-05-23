@@ -13,7 +13,7 @@ class DefaultRedeclarationTest < Parse::Object
 end
 
 class TestPropertyModule < Minitest::Test
-  TYPES = [:string, :relation, :integer, :float, :boolean, :date, :array, :file, :geopoint, :polygon, :bytes, :object, :acl, :timezone, :phone, :email].freeze
+  TYPES = [:string, :relation, :integer, :float, :boolean, :date, :array, :file, :geopoint, :polygon, :bytes, :object, :acl, :timezone, :phone, :email, :vector].freeze
   # These are the base mappings of the remote field name types.
   BASE = { objectId: :string, createdAt: :date, updatedAt: :date, ACL: :acl }.freeze
   # The list of properties that are part of all objects

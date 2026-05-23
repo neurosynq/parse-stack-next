@@ -26,11 +26,11 @@ module Parse
     #     validates :username, uniqueness: { case_sensitive: false }
     #   end
     #
-    # @example Scoped uniqueness (unique within an organization)
+    # @example Scoped uniqueness (unique within a tenant)
     #   class Employee < Parse::Object
     #     property :employee_id, :string
-    #     belongs_to :organization
-    #     validates :employee_id, uniqueness: { scope: :organization }
+    #     belongs_to :tenant
+    #     validates :employee_id, uniqueness: { scope: :tenant }
     #   end
     #
     # @example With custom message

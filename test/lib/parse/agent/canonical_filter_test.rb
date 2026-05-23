@@ -12,11 +12,11 @@ class CanonicalFilterTest < Minitest::Test
   class CFCapture < Parse::Object
     parse_class "CFCapture"
     property :title, :string
-    property :isRemoved, :boolean
-    property :onTimeline, :boolean
+    property :archived, :boolean
+    property :published, :boolean
 
-    agent_canonical_filter "isRemoved" => { "$ne" => true },
-                           "onTimeline" => true
+    agent_canonical_filter "archived" => { "$ne" => true },
+                           "published" => true
   end
 
   class CFUntouchedClass < Parse::Object
@@ -27,7 +27,7 @@ class CanonicalFilterTest < Minitest::Test
   # ---- DSL storage ---------------------------------------------------------
 
   def test_dsl_returns_filter_when_declared
-    assert_equal({ "isRemoved" => { "$ne" => true }, "onTimeline" => true },
+    assert_equal({ "archived" => { "$ne" => true }, "published" => true },
                  CFCapture.agent_canonical_filter_for_apply)
   end
 
@@ -47,7 +47,7 @@ class CanonicalFilterTest < Minitest::Test
   # ---- Registry lookup -----------------------------------------------------
 
   def test_metadata_registry_canonical_filter
-    assert_equal({ "isRemoved" => { "$ne" => true }, "onTimeline" => true },
+    assert_equal({ "archived" => { "$ne" => true }, "published" => true },
                  Parse::Agent::MetadataRegistry.canonical_filter("CFCapture"))
     assert_nil Parse::Agent::MetadataRegistry.canonical_filter("CFUntouchedClass")
     assert_nil Parse::Agent::MetadataRegistry.canonical_filter("DoesNotExist")
@@ -57,19 +57,19 @@ class CanonicalFilterTest < Minitest::Test
 
   def test_apply_to_where_when_caller_where_is_nil
     result = Parse::Agent::Tools.apply_canonical_filter_to_where(nil, "CFCapture")
-    assert_equal({ "isRemoved" => { "$ne" => true }, "onTimeline" => true }, result)
+    assert_equal({ "archived" => { "$ne" => true }, "published" => true }, result)
   end
 
   def test_apply_to_where_when_caller_where_is_empty_hash
     result = Parse::Agent::Tools.apply_canonical_filter_to_where({}, "CFCapture")
-    assert_equal({ "isRemoved" => { "$ne" => true }, "onTimeline" => true }, result)
+    assert_equal({ "archived" => { "$ne" => true }, "published" => true }, result)
   end
 
   def test_apply_to_where_composes_via_and_with_caller_where
     caller_where = { "title" => "Hello" }
     result = Parse::Agent::Tools.apply_canonical_filter_to_where(caller_where, "CFCapture")
     assert_equal [
-      { "isRemoved" => { "$ne" => true }, "onTimeline" => true },
+      { "archived" => { "$ne" => true }, "published" => true },
       { "title" => "Hello" },
     ], result["$and"]
   end
@@ -86,7 +86,7 @@ class CanonicalFilterTest < Minitest::Test
     pipeline = [{ "$group" => { "_id" => "$title" } }]
     result = Parse::Agent::Tools.apply_canonical_filter_to_pipeline(pipeline, "CFCapture")
     assert_equal 2, result.size
-    assert_equal({ "isRemoved" => { "$ne" => true }, "onTimeline" => true },
+    assert_equal({ "archived" => { "$ne" => true }, "published" => true },
                  result[0]["$match"])
     assert_equal pipeline[0], result[1]
   end
@@ -101,7 +101,7 @@ class CanonicalFilterTest < Minitest::Test
     result = Parse::Agent::Tools.apply_canonical_filter_to_pipeline(pipeline, "CFCapture")
     assert_equal 3, result.size
     assert_equal({ "orgId" => "tenant-A" }, result[0]["$match"])
-    assert_equal({ "isRemoved" => { "$ne" => true }, "onTimeline" => true }, result[1]["$match"])
+    assert_equal({ "archived" => { "$ne" => true }, "published" => true }, result[1]["$match"])
     assert_equal pipeline[1], result[2]
   end
 
@@ -149,7 +149,7 @@ class CanonicalFilterTest < Minitest::Test
     agent  = build_agent(client)
     Parse::Agent::Tools.query_class(agent, class_name: "CFCapture")
     where = JSON.parse(client.received_query[:where])
-    assert_equal({ "$ne" => true }, where["isRemoved"])
+    assert_equal({ "$ne" => true }, where["archived"])
   end
 
   def test_query_class_opt_out_does_not_apply_filter
@@ -165,7 +165,7 @@ class CanonicalFilterTest < Minitest::Test
     agent  = build_agent(client)
     Parse::Agent::Tools.count_objects(agent, class_name: "CFCapture")
     where = JSON.parse(client.received_query[:where])
-    assert_equal({ "$ne" => true }, where["isRemoved"])
+    assert_equal({ "$ne" => true }, where["archived"])
   end
 
   def test_aggregate_prepends_canonical_filter_by_default
@@ -174,7 +174,7 @@ class CanonicalFilterTest < Minitest::Test
     Parse::Agent::Tools.aggregate(agent, class_name: "CFCapture",
                                   pipeline: [{ "$group" => { "_id" => "$title" } }])
     first = client.received_pipeline.first
-    assert_equal({ "isRemoved" => { "$ne" => true }, "onTimeline" => true },
+    assert_equal({ "archived" => { "$ne" => true }, "published" => true },
                  first["$match"])
   end
 
@@ -185,7 +185,7 @@ class CanonicalFilterTest < Minitest::Test
                                   pipeline: [{ "$group" => { "_id" => "$title" } }],
                                   apply_canonical_filter: false)
     # The auto-injected $limit is appended; the canonical filter is NOT prepended.
-    refute client.received_pipeline.first.dig("$match", "isRemoved"),
+    refute client.received_pipeline.first.dig("$match", "archived"),
            "canonical filter must not appear when opted out"
   end
 
@@ -197,7 +197,7 @@ class CanonicalFilterTest < Minitest::Test
     where = JSON.parse(client.received_query[:where])
     # $and-composed: caller constraint preserved, canonical predicate also applied.
     assert where["$and"].is_a?(Array)
-    assert(where["$and"].any? { |c| c["isRemoved"] == { "$ne" => true } })
+    assert(where["$and"].any? { |c| c["archived"] == { "$ne" => true } })
     assert(where["$and"].any? { |c| c["title"] == "Hello" })
   end
 end

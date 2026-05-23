@@ -10,8 +10,8 @@ module Parse
     # subclasses. When `parse_reference` is declared on a class, every newly-
     # created instance gets a string field auto-populated with the canonical
     # `"ClassName$objectId"` form via an `after_create` callback. The value
-    # mirrors Parse Server's internal pointer-column format (`_p_team` ->
-    # `"Team$xyz"`), which makes direct MongoDB queries, `$lookup` joins, and
+    # mirrors Parse Server's internal pointer-column format (`_p_workspace` ->
+    # `"Workspace$xyz"`), which makes direct MongoDB queries, `$lookup` joins, and
     # cross-class analytics trivial: a single equality match on one column.
     #
     # Mechanics:
@@ -131,7 +131,7 @@ module Parse
       extend ActiveSupport::Concern
 
       # The separator between class name and object id. Matches Parse Server's
-      # own pointer-column format (e.g. `_p_team = "Team$abcd1234"`).
+      # own pointer-column format (e.g. `_p_workspace = "Workspace$abcd1234"`).
       SEPARATOR = "$".freeze
 
       # Length of a Parse Server objectId. Matches the format the server itself

@@ -178,4 +178,113 @@ class AtlasSearchIndexManagerTest < Minitest::Test
       assert_equal :timeout, IM.wait_for_ready("Song", "song_search", timeout: 0, interval: 0)
     end
   end
+
+  # ---- type-aware lookups -----------------------------------------------
+
+  # Pre-populate the cache with a mixed set of search + vectorSearch
+  # indexes. Shape matches what Atlas actually returns from
+  # $listSearchIndexes (confirmed against a live mongodb-atlas-local
+  # vector_prototype/Movie collection).
+  def seed_mixed_indexes
+    indexes = [
+      {
+        "name" => "song_search",
+        "type" => "search",
+        "status" => "READY",
+        "queryable" => true,
+        "latestDefinition" => { "mappings" => { "dynamic" => true } },
+      },
+      {
+        "name" => "song_no_type",  # older Atlas omits "type" — defaults to search
+        "status" => "READY",
+        "queryable" => true,
+        "latestDefinition" => { "mappings" => { "dynamic" => false } },
+      },
+      {
+        "name" => "Movie_embedding_openai_idx",
+        "type" => "vectorSearch",
+        "status" => "READY",
+        "queryable" => true,
+        "latestDefinition" => {
+          "fields" => [
+            { "type" => "vector", "path" => "embedding",
+              "numDimensions" => 1536, "similarity" => "cosine" },
+            { "type" => "filter", "path" => "wiki_id" },
+          ],
+        },
+      },
+      {
+        "name" => "Movie_summary_vec_idx",
+        "type" => "vectorSearch",
+        "status" => "READY",
+        "queryable" => true,
+        "latestDefinition" => {
+          "fields" => [
+            { "type" => "vector", "path" => "summary_vec",
+              "numDimensions" => 768, "similarity" => "dotProduct" },
+          ],
+        },
+      },
+    ]
+    IM.instance_variable_set(:@index_cache, {})
+    IM.instance_variable_get(:@index_cache)["Movie"] = {
+      indexes: indexes, cached_at: Time.now,
+    }
+  end
+
+  def test_list_search_indexes_returns_only_search_type
+    seed_mixed_indexes
+    names = IM.list_search_indexes("Movie").map { |i| i["name"] }
+    # Both explicit "search" type AND the no-type fallback must be included.
+    assert_includes names, "song_search"
+    assert_includes names, "song_no_type"
+    refute_includes names, "Movie_embedding_openai_idx"
+    refute_includes names, "Movie_summary_vec_idx"
+  end
+
+  def test_list_vector_indexes_returns_only_vectorSearch_type
+    seed_mixed_indexes
+    names = IM.list_vector_indexes("Movie").map { |i| i["name"] }
+    assert_equal %w[Movie_embedding_openai_idx Movie_summary_vec_idx].sort, names.sort
+  end
+
+  def test_find_vector_index_matches_by_field_path
+    seed_mixed_indexes
+    idx = IM.find_vector_index("Movie", field: "embedding")
+    refute_nil idx, "expected to find the embedding vector index"
+    assert_equal "Movie_embedding_openai_idx", idx["name"]
+  end
+
+  def test_find_vector_index_accepts_symbol_field
+    seed_mixed_indexes
+    idx = IM.find_vector_index("Movie", field: :summary_vec)
+    refute_nil idx
+    assert_equal "Movie_summary_vec_idx", idx["name"]
+  end
+
+  def test_find_vector_index_returns_nil_when_no_vector_field_matches
+    seed_mixed_indexes
+    # "wiki_id" is a *filter* field on the embedding index, not a vector
+    # field — find_vector_index must not match it.
+    assert_nil IM.find_vector_index("Movie", field: "wiki_id")
+  end
+
+  def test_find_vector_index_returns_nil_when_collection_has_no_vector_indexes
+    IM.instance_variable_set(:@index_cache, {})
+    IM.instance_variable_get(:@index_cache)["Song"] = {
+      indexes: [
+        { "name" => "song_search", "type" => "search", "status" => "READY",
+          "queryable" => true, "latestDefinition" => {} },
+      ],
+      cached_at: Time.now,
+    }
+    assert_nil IM.find_vector_index("Song", field: "embedding")
+    assert_empty IM.list_vector_indexes("Song")
+  end
+
+  def test_index_catalog_aliases_index_manager
+    # IndexCatalog is the public name for the type-aware lookup surface,
+    # backed by the same module so the cache is shared.
+    assert_same Parse::AtlasSearch::IndexManager, Parse::AtlasSearch::IndexCatalog
+  end
 end

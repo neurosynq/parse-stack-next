@@ -1,9 +1,6 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-require "net/http"
-require "uri"
-
 require_relative "stack/version"
 require_relative "client"
 require_relative "query"
@@ -16,12 +13,34 @@ require_relative "schema"
 require_relative "schema/index_migrator"
 require_relative "schema/search_index_migrator"
 require_relative "lookup_rewriter"
+require_relative "console"
 
 module Parse
   class Error < StandardError; end
 
   module Stack
   end
+
+  # Sentinel used by SDK methods that need to distinguish "the caller
+  # omitted this kwarg" from "the caller explicitly passed `nil`" —
+  # the latter must NOT fall through to a default that would silently
+  # re-introduce a value the caller is trying to suppress (e.g. a
+  # master-key or session-token override).
+  #
+  # Use as the default value of a keyword argument, then check with
+  # `value.equal?(Parse::NOT_PROVIDED)` to detect omission. Comparison
+  # by identity is intentional — `==` on the sentinel is meaningless.
+  #
+  # @example Distinguishing nil-pass from omission
+  #   def fetch(master_key: Parse::NOT_PROVIDED)
+  #     resolved = master_key.equal?(Parse::NOT_PROVIDED) ? config.master_key : master_key
+  #     # `fetch(master_key: nil)` here produces `nil`, not the config value
+  #   end
+  NOT_PROVIDED = Object.new.tap do |o|
+    def o.inspect
+      "Parse::NOT_PROVIDED"
+    end
+  end.freeze
 
   # Fiber-local key consulted by the authentication middleware. A truthy
   # entry suppresses the master-key header for the duration of the block
@@ -80,6 +99,199 @@ module Parse
     Fiber[MASTER_KEY_STATE_KEY] == :disabled
   end
 
+  # Fiber-local key holding the ambient session token consulted by
+  # {Parse::Client#request} when no explicit `session_token:` was
+  # passed. Set by {Parse.with_session}; nested blocks save and restore
+  # the previous value on exit.
+  SESSION_TOKEN_STATE_KEY = :__parse_session_token__
+
+  # Run +block+ with an ambient session token set for the current fiber.
+  # Inside the block, every Parse request that doesn't explicitly pass
+  # `session_token:` *and* doesn't explicitly request `use_master_key:
+  # true` will be sent with this token. Equivalent to threading
+  # `session_token:` through every call site, but block-scoped.
+  #
+  # The `token` argument may be a String, a {Parse::User} (its
+  # `session_token` is read), a {Parse::Session} (its `session_token` is
+  # read), or `nil`. Passing `nil` clears the ambient inside the block —
+  # useful for performing one anonymous call inside an otherwise
+  # session-scoped region.
+  #
+  # Fiber-local, not thread-local: concurrent fibers (and threads, since
+  # each thread starts with its own root fiber) do not share state.
+  # Survives Faraday retries — the token lives for the lifetime of the
+  # block, not just the first HTTP attempt.
+  #
+  # An explicit `session_token:` kwarg on any call still wins over the
+  # ambient. An explicit `use_master_key: true` skips the ambient and
+  # sends the master key (if configured).
+  #
+  # @param token [String, Parse::User, Parse::Session, nil]
+  # @yield runs the block with the ambient session token in place
+  # @return [Object] the block's return value
+  # @example
+  #   user = Parse::User.login!("alice", "pw")
+  #   Parse.with_session(user) do
+  #     post = Post.find(id)                # scoped to alice
+  #     post.title = "edited"
+  #     post.save                            # subject to ACL/CLP
+  #     Comment.all(post: post)              # scoped to alice
+  #   end
+  def self.with_session(token)
+    resolved = token.respond_to?(:session_token) ? token.session_token : token
+    resolved = resolved.to_s if resolved
+    previous = Fiber[SESSION_TOKEN_STATE_KEY]
+    Fiber[SESSION_TOKEN_STATE_KEY] = (resolved && !resolved.empty?) ? resolved : nil
+    yield
+  ensure
+    Fiber[SESSION_TOKEN_STATE_KEY] = previous
+  end
+
+  # The ambient session token set by {.with_session} for the current
+  # fiber, or `nil` when not inside such a block.
+  # @return [String, nil]
+  def self.current_session_token
+    Fiber[SESSION_TOKEN_STATE_KEY]
+  end
+
+  # The {Parse::User} cached alongside the ambient session set by
+  # {.login}, or `nil` when no imperative login is active. Block-scoped
+  # `{Parse.with_session}` does NOT populate this — only {.login} does.
+  # @return [Parse::User, nil]
+  def self.current_user
+    Fiber[CURRENT_USER_STATE_KEY]
+  end
+
+  # Fiber-local key holding the {Parse::User} cached by {.login} for
+  # {.current_user} lookup. Kept distinct from the session-token key so
+  # block-scoped `Parse.with_session(tok)` (which has only a token, not a
+  # user object) doesn't mis-populate it.
+  CURRENT_USER_STATE_KEY = :__parse_current_user__
+
+  # Imperative login for REPL / Rake-console use: logs in once, stashes
+  # the resulting session token as the ambient for the current fiber,
+  # and returns the {Parse::User}. Every subsequent Parse call in the
+  # session (the IRB main fiber) is then auth-scoped to that user
+  # without the caller threading `session_token:` or wrapping each
+  # statement in {.with_session}.
+  #
+  # Intended for interactive use. For scoped work in production code,
+  # prefer {.with_session} — it auto-restores prior state on exit, even
+  # if the block raises.
+  #
+  # @param username [String] the user's username.
+  # @param password [String] the user's password.
+  # @param mfa_token [String, nil] one-time MFA code (TOTP or recovery
+  #   code). When given, the credentials are submitted via the MFA
+  #   endpoint. When the server requires MFA and none is supplied,
+  #   {Parse::MFA::RequiredError} is raised so the caller can prompt
+  #   for the code and retry.
+  # @return [Parse::User] the logged-in user.
+  # @raise [Parse::Error::AuthenticationError] when credentials are rejected.
+  # @raise [Parse::MFA::RequiredError] when the server requires an MFA
+  #   token and `mfa_token:` was not provided.
+  # @raise [Parse::MFA::VerificationError] when the supplied `mfa_token:`
+  #   is invalid or expired.
+  # @example IRB / rails console
+  #   Parse.login("alice", "hunter2")
+  #   Post.all                # as alice
+  #   p = Post.find(id); p.update!(title: "edited")  # as alice
+  #   Parse.logout            # clears ambient and revokes the session
+  # @example with MFA
+  #   begin
+  #     Parse.login("alice", "hunter2")
+  #   rescue Parse::MFA::RequiredError
+  #     code = $stdin.gets.chomp
+  #     Parse.login("alice", "hunter2", mfa_token: code)
+  #   end
+  def self.login(username, password, mfa_token: nil)
+    user = if mfa_token
+        Parse::User.login_with_mfa(username, password, mfa_token)
+      else
+        Parse::User.login!(username, password)
+      end
+    unless user
+      raise Parse::Error::AuthenticationError,
+            "Parse.login: credentials rejected for #{username.inspect} (server returned no session)."
+    end
+    Fiber[SESSION_TOKEN_STATE_KEY] = user.session_token
+    Fiber[CURRENT_USER_STATE_KEY]  = user
+    user
+  end
+
+  # Imperative logout: clears the ambient session token and cached
+  # current user for the current fiber and, by default, revokes the
+  # token server-side via `POST /parse/logout`. Pair with {.login}.
+  #
+  # If you set the ambient via {.session_token=} (no server-side
+  # session to revoke), pass `revoke: false` to skip the network call.
+  #
+  # @param revoke [Boolean] when true (default), call the server-side
+  #   `/logout` endpoint to invalidate the token. When false, only
+  #   clears local fiber state.
+  # @return [Boolean] true if the local state was cleared (always); the
+  #   server-side revoke result is intentionally not surfaced — `logout`
+  #   is fire-and-forget in console use.
+  def self.logout(revoke: true)
+    token = Fiber[SESSION_TOKEN_STATE_KEY]
+    Fiber[SESSION_TOKEN_STATE_KEY] = nil
+    Fiber[CURRENT_USER_STATE_KEY]  = nil
+    if revoke && token.is_a?(String) && !token.empty?
+      begin
+        Parse::Client.client.logout(token)
+      rescue StandardError
+        # Best-effort: a failed revoke shouldn't make `logout` raise in
+        # a REPL. The local clear already happened.
+      end
+    end
+    true
+  end
+
+  # Imperative ambient-token setter, for cases where you already have a
+  # session token (e.g. read from a fixture, a test setup, a saved
+  # credential) and want to scope subsequent calls without going through
+  # the login endpoint. Set to `nil` to clear the ambient (does not
+  # revoke server-side; use {.logout} for that).
+  # @param token [String, Parse::User, Parse::Session, nil]
+  # @return [String, nil] the resolved token now in effect.
+  def self.session_token=(token)
+    resolved = token.respond_to?(:session_token) ? token.session_token : token
+    resolved = resolved.to_s if resolved
+    Fiber[SESSION_TOKEN_STATE_KEY] = (resolved && !resolved.empty?) ? resolved : nil
+    Fiber[CURRENT_USER_STATE_KEY]  = nil
+    Fiber[SESSION_TOKEN_STATE_KEY]
+  end
+
+  # Strict client mode — when true, the request layer never sends the
+  # configured master key unless the caller explicitly passes
+  # `use_master_key: true`. In combination with {Parse.with_session},
+  # this lets a same-process server+client deployment safely run a
+  # region of code "as a client" — every Parse call that isn't
+  # explicitly admin-flavored is scoped to the ambient session token (or
+  # sent anonymous if none is set), and the configured master key is
+  # ignored.
+  #
+  # **Honored ENV form:** `PARSE_CLIENT_MODE=true` at boot is equivalent
+  # to setting this to `true` before any Parse request goes out.
+  #
+  # @example Enable for the whole process
+  #   Parse.client_mode = true
+  #   Parse.with_session(user.session_token) do
+  #     Post.all                               # as alice, no master key
+  #     SecretAdminThing.find(id, use_master_key: true)  # explicit override
+  #   end
+  # @return [Boolean]
+  @client_mode = ENV["PARSE_CLIENT_MODE"] == "true"
+  def self.client_mode
+    @client_mode == true
+  end
+  def self.client_mode=(value)
+    @client_mode = (value == true)
+  end
+  def self.client_mode?
+    client_mode
+  end
+
   # Configuration for query validation warnings
   # Set to false to disable warnings about unnecessary includes
   # @example Disable query warnings
@@ -119,13 +331,14 @@ module Parse
   #   # => [Parse::Fetch] Warning: unknown keys [:nonexistent] for Song
   @validate_query_keys = true
 
-  # Configuration for experimental LiveQuery feature.
-  # LiveQuery provides real-time WebSocket subscriptions for reactive applications.
-  # This feature is experimental and not fully implemented. Enable at your own risk.
-  # @example Enable LiveQuery (experimental)
+  # Opt-in toggle for the LiveQuery WebSocket subscription feature.
+  # LiveQuery has been stable since Parse Stack 3.0.0; the toggle exists
+  # so the network-egress surface (an outbound WebSocket to the LiveQuery
+  # server) is opened only when the operator explicitly turns it on, not
+  # as a side effect of requiring the file.
+  # @example Enable LiveQuery
   #   Parse.live_query_enabled = true
   #   require 'parse/live_query'
-  # @note WebSocket client implementation is incomplete
   @live_query_enabled = false
 
   # Configuration for cache write-through on fetch operations.
@@ -281,13 +494,112 @@ module Parse
   #   Parse.synchronize_classes = ["User", "Device", "Subscription"]
   @synchronize_classes = nil
 
+  # Suppress the one-shot Parse Server version deprecation warning emitted
+  # by {Parse::API::Server#server_info} when the connected server is below
+  # the floor in {Parse::API::Server::DEPRECATED_SERVER_VERSION_BELOW}.
+  # Operators on a known-old Parse Server pinned for an explicit reason
+  # can set this once at boot; the ENV form
+  # `PARSE_SUPPRESS_SERVER_VERSION_WARNING=true` is honored equivalently.
+  # @example Silence in code
+  #   Parse.suppress_server_version_warning = true
+  @suppress_server_version_warning = false
+
+  # Slow-query threshold for the bundled slow-query subscriber. When
+  # set to a positive integer, the SDK subscribes once to
+  # `parse.mongodb.aggregate` and `parse.mongodb.find` AS::N events
+  # and emits a `[Parse::MongoDB] SLOW` warning to `Parse.logger`
+  # whenever an event's wall-clock duration exceeds the threshold (in
+  # milliseconds). The log line contains ONLY metadata — collection,
+  # scope, stage_count/stage_types (aggregate), or has_filter/
+  # projection_keys (find), result_count, max_time_ms. Pipeline
+  # bodies, filter bodies, and result rows are never included.
+  #
+  # The threshold is re-read on every event, so toggling
+  # `Parse.slow_query_threshold_ms = nil` at runtime silences the
+  # logger without unsubscribing. The ENV form
+  # `PARSE_SLOW_QUERY_THRESHOLD_MS=250` is honored equivalently and
+  # is bootstrapped at module-load (setting the ENV before `require
+  # "parse/stack"` is sufficient — no explicit setter call needed).
+  # Operators who already subscribe to the raw AS::N events from
+  # their APM/OTel layer don't need this knob.
+  # @example
+  #   Parse.slow_query_threshold_ms = 250
+  @slow_query_threshold_ms = nil
+  @slow_query_subscribed = false
+
   class << self
     attr_accessor :warn_on_query_issues, :autofetch_raise_on_missing_keys, :serialize_only_fetched_fields, :validate_query_keys,
                   :live_query_enabled, :cache_write_on_fetch, :default_query_cache, :mcp_server_enabled, :mcp_server_port, :mcp_remote_api,
                   :rewrite_lookups, :strict_property_redefinition,
                   :synchronize_create_default, :synchronize_create_options, :synchronize_create_secret,
                   :synchronize_create_store, :synchronize_classes,
-                  :strict_pointer_shapes
+                  :strict_pointer_shapes, :suppress_server_version_warning
+
+    # Check whether the Parse Server version deprecation warning is
+    # silenced. Returns true if either the in-process accessor or the
+    # `PARSE_SUPPRESS_SERVER_VERSION_WARNING` ENV is set.
+    # @return [Boolean]
+    def suppress_server_version_warning?
+      @suppress_server_version_warning == true || ENV["PARSE_SUPPRESS_SERVER_VERSION_WARNING"] == "true"
+    end
+
+    # Current slow-query threshold in milliseconds, or `nil` when
+    # unconfigured. Resolves the in-process accessor first; falls back
+    # to the `PARSE_SLOW_QUERY_THRESHOLD_MS` ENV. Non-positive values
+    # are treated as `nil` (disabled).
+    # @return [Integer, nil]
+    def slow_query_threshold_ms
+      value = @slow_query_threshold_ms
+      value = ENV["PARSE_SLOW_QUERY_THRESHOLD_MS"].to_i if value.nil? && ENV["PARSE_SLOW_QUERY_THRESHOLD_MS"]
+      value && value > 0 ? value : nil
+    end
+
+    # Set the slow-query threshold in milliseconds. When set to a
+    # positive integer, lazily attaches the bundled subscriber to
+    # `parse.mongodb.aggregate` and `parse.mongodb.find` so events
+    # exceeding the threshold log a warning to {Parse.logger}. Set
+    # to `nil` (or any non-positive value) to disable; the subscriber
+    # stays attached but becomes a cheap pass-through.
+    # @param value [Integer, nil]
+    def slow_query_threshold_ms=(value)
+      @slow_query_threshold_ms = value
+      _attach_slow_query_subscriber!
+      value
+    end
+
+    # @!visibility private
+    # Attach the slow-query subscriber exactly once per process. The
+    # subscriber re-reads {Parse.slow_query_threshold_ms} on every
+    # event so toggling the knob at runtime takes effect without a
+    # resubscribe. Safe to call repeatedly — guarded by
+    # `@slow_query_subscribed`.
+    def _attach_slow_query_subscriber!
+      return if @slow_query_subscribed
+      return unless defined?(ActiveSupport::Notifications)
+      @slow_query_subscribed = true
+      handler = lambda do |name, started, finished, _id, payload|
+        threshold = slow_query_threshold_ms
+        next if threshold.nil?
+        duration_ms = ((finished - started) * 1000.0).round(1)
+        next if duration_ms < threshold
+        logger = respond_to?(:logger) ? Parse.logger : nil
+        next unless logger
+        detail =
+          if name == "parse.mongodb.aggregate"
+            "stages=#{payload[:stage_count]} types=#{Array(payload[:stage_types]).join(',')}"
+          else
+            "filter=#{!!payload[:has_filter]} projection=#{Array(payload[:projection_keys]).join(',')}"
+          end
+        logger.warn(
+          "[Parse::MongoDB] SLOW #{name} #{duration_ms}ms " \
+          "collection=#{payload[:collection]} scope=#{payload[:scope] || 'n/a'} " \
+          "#{detail} result_count=#{payload[:result_count] || 'n/a'} " \
+          "max_time_ms=#{payload[:max_time_ms] || 'n/a'}",
+        )
+      end
+      ActiveSupport::Notifications.subscribe("parse.mongodb.aggregate", &handler)
+      ActiveSupport::Notifications.subscribe("parse.mongodb.find", &handler)
+    end
 
     # Check if LiveQuery feature is enabled
     # @return [Boolean]
@@ -333,6 +645,54 @@ module Parse
     def mcp_remote_api_configured?
       @mcp_remote_api.is_a?(Hash) && @mcp_remote_api[:api_key].present?
     end
+
+    # Send an analytics event to Parse Server's REST `/events/<name>`
+    # endpoint. Thin shortcut around {Parse::Client#send_analytics} so
+    # callers don't have to reach into `Parse.client` directly.
+    #
+    # Dimensions MUST be passed via the `dimensions:` keyword. Loose
+    # symbol-keyed arguments at the call site would otherwise be
+    # absorbed by `**opts` under Ruby 3's strict keyword separation,
+    # and the dimensions would never reach Parse Server — the POST
+    # would land with an empty body. Forwarded `**opts` is reserved
+    # for request-layer kwargs (`session_token:`, `use_master_key:`,
+    # etc.).
+    #
+    # Parse Server's default analytics adapter is a no-op — events
+    # POSTed to `/events` are accepted but neither persisted nor
+    # queryable through the SDK. Operators who configure a custom
+    # `analyticsAdapter` decide what (if anything) to do with the
+    # event and whether to cap dimension count. The legacy parse.com
+    # eight-dimension cap does NOT apply to Parse Server out of the
+    # box. If you need to read events back, persist them to a regular
+    # `Parse::Object` subclass.
+    #
+    # The underlying request is a blocking HTTP POST — wrap in a
+    # thread or background job if you don't want it on the request
+    # path.
+    #
+    # @param name [String, Symbol] event name (e.g. "post_viewed",
+    #   "AppOpened"). Restricted to word characters, hyphens, and
+    #   dots so the value cannot escape the `/events/` path segment.
+    # @param dimensions [Hash] dimension pairs. Values must be
+    #   JSON-serializable.
+    # @param opts [Hash] forwarded to {Parse::Client#request}.
+    # @return [Parse::Response] the response.
+    # @raise [ArgumentError] when `name` is empty or contains
+    #   characters outside `[\w\-\.]`.
+    # @example
+    #   Parse.track_event("post_viewed", dimensions: { source: "feed", workspace: "w1" })
+    #   Parse.track_event("AppOpened")
+    #   Parse.track_event("error", dimensions: { code: "E_RATE_LIMIT" })
+    def track_event(name, dimensions: {}, **opts)
+      event_name = name.to_s
+      unless event_name.match?(/\A[\w\-\.]+\z/)
+        raise ArgumentError,
+              "Parse.track_event: event name must contain only word characters, " \
+              "hyphens, or dots (got #{name.inspect})"
+      end
+      Parse.client.send_analytics(event_name, dimensions, **opts)
+    end
   end
 
   # Error raised when {Parse::CreateLock#synchronize} cannot acquire the
@@ -369,70 +729,6 @@ module Parse
       end
     end
   end
-
-  # Special class to support Modernistik Hyperdrive server.
-  class Hyperdrive
-    # Applies a remote JSON hash containing the ENV keys and values from a remote
-    # URL. Values from the JSON hash are only applied to the current ENV hash ONLY if
-    # it does not already have a value. Therefore local ENV values will take precedence
-    # over remote ones. By default, it uses the url in environment value in 'CONFIG_URL' or 'HYPERDRIVE_URL'.
-    # @param url [String] the remote url that responds with the JSON body.
-    # @return [Boolean] true if the JSON hash was found and applied successfully.
-    def self.config!(url = nil)
-      url ||= ENV["HYPERDRIVE_URL"] || ENV["CONFIG_URL"]
-      return false if url.blank?
-
-      begin
-        uri = URI.parse(url)
-
-        # Security: Only allow HTTPS or localhost HTTP for development
-        unless uri.is_a?(URI::HTTPS) || (uri.is_a?(URI::HTTP) && %w[localhost 127.0.0.1].include?(uri.host))
-          warn "[Parse::Stack] Security: Config URL must be HTTPS (got: #{url})"
-          return false
-        end
-
-        # Use Net::HTTP instead of open-uri to avoid command injection via pipe characters
-        http = Net::HTTP.new(uri.host, uri.port)
-        http.use_ssl = uri.scheme == "https"
-        http.open_timeout = 10
-        http.read_timeout = 10
-
-        request = Net::HTTP::Get.new(uri.request_uri)
-        response = http.request(request)
-
-        unless response.is_a?(Net::HTTPSuccess)
-          warn "[Parse::Stack] Config fetch failed: #{url} (HTTP #{response.code})"
-          return false
-        end
-
-        # Parse JSON safely
-        remote_config = JSON.parse(response.body)
-
-        unless remote_config.is_a?(Hash)
-          warn "[Parse::Stack] Config must be a JSON object: #{url}"
-          return false
-        end
-
-        remote_config.each do |key, value|
-          k = key.to_s.upcase
-          # Validate key format to prevent injection
-          next unless k.match?(/\A[A-Z][A-Z0-9_]*\z/)
-          next unless ENV[k].nil?
-          ENV[k] = value.to_s
-        end
-        true
-      rescue URI::InvalidURIError => e
-        warn "[Parse::Stack] Invalid config URL: #{url} (#{e.message})"
-        false
-      rescue JSON::ParserError => e
-        warn "[Parse::Stack] Invalid JSON in config: #{url} (#{e.message})"
-        false
-      rescue StandardError => e
-        warn "[Parse::Stack] Error loading config: #{url} (#{e.class}: #{e.message})"
-        false
-      end
-    end
-  end
 end
 
 # Startup warning: If ENV is set but programmatic flag isn't, warn the user
@@ -451,5 +747,11 @@ if Parse.synchronize_create_default && Parse.synchronize_classes.nil?
        "controlling query_attrs on a public path can hold lock keys × TTL. Set Parse.synchronize_classes = [User, …] " \
        "to restrict the surface, or audit each call site."
 end
+
+# Auto-attach the slow-query subscriber when the threshold is supplied
+# at boot via ENV. The programmatic setter handles the in-process case;
+# the ENV path needs an explicit kick because nothing else calls into
+# the setter on load.
+Parse._attach_slow_query_subscriber! if Parse.slow_query_threshold_ms
 
 require_relative "stack/railtie" if defined?(::Rails)

@@ -8,10 +8,10 @@ module Parse
     # to the Parse Agent for LLM interaction.
     #
     # @example Define a model with agent metadata
-    #   class Team < Parse::Object
+    #   class Workspace < Parse::Object
     #     agent_description "A group of users contributing to a Project"
     #
-    #     property :name, :string, description: "The team's display name"
+    #     property :name, :string, description: "The workspace's display name"
     #     property :member_count, :integer, description: "Number of active members"
     #
     #     agent_method :active_projects, "Returns projects currently in progress"
@@ -190,7 +190,7 @@ module Parse
         # Called without arguments, returns the current allowlist.
         #
         # @example Limit agent visibility to analytics-relevant fields
-        #   class Team < Parse::Object
+        #   class Workspace < Parse::Object
         #     agent_fields :name, :status, :member_count, :owner
         #   end
         #
@@ -224,9 +224,9 @@ module Parse
         # allowlist is typically the full "what the agent may see" set;
         # the join-projection list is the narrower "what's interesting when
         # I'm a foreign key" set. Example: `_User` may surface 18 fields on
-        # a direct query, but when it's joined onto a `Membership` row the
+        # a direct query, but when it's joined onto a `Subscription` row the
         # agent usually only needs `firstName`, `lastName`, `email`,
-        # `internalTag` — not the `teams[]` pointer array or the
+        # `category` — not the `workspaces[]` pointer array or the
         # `iconImage` presigned URL.
         #
         # **Subset invariant**: when both `agent_fields` and
@@ -247,7 +247,7 @@ module Parse
         # pointer.
         #
         # @example
-        #   class Membership < Parse::Object
+        #   class Subscription < Parse::Object
         #     belongs_to :user
         #     property :title, :string
         #     property :active, :boolean
@@ -257,11 +257,11 @@ module Parse
         #   # In the _User reopen / customization:
         #   class Parse::User
         #     agent_fields :first_name, :last_name, :email, :icon_image,
-        #                  :source_image, :teams, :organizations, :last_active_at,
-        #                  :internal_tag
+        #                  :source_image, :workspaces, :tenants, :last_active_at,
+        #                  :category
         #     agent_large_fields :icon_image, :source_image
         #     agent_join_fields :first_name, :last_name, :email,
-        #                      :last_active_at, :internal_tag
+        #                      :last_active_at, :category
         #   end
         #
         # @param names [Array<Symbol, String>] field names to project on join
@@ -313,8 +313,8 @@ module Parse
         # Declare a canonical "valid state" filter for this class that the
         # agent's read tools (`query_class`, `count_objects`, `aggregate`)
         # apply BY DEFAULT to every call. Closes the silently-suspect-
-        # counts gap: when a class soft-deletes via `isRemoved`, hides
-        # rows via `on_timeline: false`, or has any other always-applied
+        # counts gap: when a class soft-deletes via `archived`, hides
+        # rows via `published: false`, or has any other always-applied
         # validity predicate, the canonical filter ensures an LLM that
         # drops to raw aggregate doesn't accidentally include the
         # excluded rows.
@@ -332,11 +332,11 @@ module Parse
         # caller can reproduce it manually.
         #
         # @example
-        #   class Capture < Parse::Object
-        #     property :isRemoved, :boolean
-        #     property :onTimeline, :boolean
-        #     agent_canonical_filter "isRemoved" => { "$ne" => true },
-        #                            "onTimeline" => true
+        #   class Post < Parse::Object
+        #     property :archived, :boolean
+        #     property :published, :boolean
+        #     agent_canonical_filter "archived" => { "$ne" => true },
+        #                            "published" => true
         #   end
         #
         # @param filter [Hash, nil] a where-style hash. Pass nil to

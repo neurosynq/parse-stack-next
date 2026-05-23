@@ -48,6 +48,26 @@ module Parse
       SENSITIVE_FIELDS_SET = SENSITIVE_FIELDS.map(&:downcase).to_set.freeze
       # Placeholder used in place of redacted values.
       REDACTED_PLACEHOLDER = "[FILTERED]"
+      # Minimum length at which a numeric-only Array in a logged JSON
+      # body is compacted to a single placeholder string instead of
+      # printed verbatim. Two concerns drive this:
+      #
+      # 1. **Noise.** A 1536-float OpenAI embedding inlines as ~25 KB of
+      #    JSON per logged row. Aggregation pipelines with
+      #    `$vectorSearch.queryVector` and any save/fetch carrying a
+      #    `:vector` field would otherwise drown operator logs.
+      # 2. **Sensitivity.** Embeddings are reversible-by-similarity:
+      #    an attacker who scrapes operator logs can reconstruct
+      #    high-level features of the source text (topic, sentiment,
+      #    sometimes near-verbatim phrases for short inputs) by
+      #    nearest-neighbor lookup against a public model.
+      #
+      # Threshold rationale: 32 is well below every common embedding
+      # width (BGE-small 384, Cohere 1024, OpenAI small 1536, OpenAI
+      # large 3072) and well above any normal Parse Array property
+      # (tags, role lists, etc.). Numeric-only check additionally
+      # protects normal long arrays of strings/objects.
+      LOG_VECTOR_COMPACT_THRESHOLD = 32
       # Request headers that must never be printed verbatim in debug logs.
       # Matched case-insensitively against Faraday header keys.
       REDACTED_HEADERS = [
@@ -57,6 +77,31 @@ module Parse
         "X-Parse-JavaScript-Key",
         "Authorization",
         "Cookie",
+        # Embedding-provider credentials (Parse::Embeddings::OpenAI and
+        # forthcoming Cohere/Voyage adapters). These never touch Parse
+        # Server itself, but they share the same Faraday log path when a
+        # caller mounts the embeddings connection through Parse logging.
+        # OpenAI's official auth header is `Authorization: Bearer …`
+        # (already covered above); Organization/Project are listed here
+        # since they're account-identifying metadata operators may not
+        # want to publish. `X-Api-Key` and `Anthropic-Api-Key` are
+        # reserved for forthcoming non-OpenAI providers.
+        "X-Api-Key",
+        "OpenAI-Organization",
+        "OpenAI-Project",
+        "Anthropic-Api-Key",
+        # Cohere, Voyage, Jina, and DashScope (Qwen) use Bearer auth
+        # (covered by "Authorization" above), but some operators front
+        # them with a proxy that rewrites to a vendor-specific header.
+        # These are listed defensively so a future header-form switch
+        # doesn't silently leak keys into Faraday logs. `Api-Key` is the
+        # bare form some vendor SDKs and proxies use; covered for parity.
+        "Cohere-Api-Key",
+        "Voyage-Api-Key",
+        "Jina-Api-Key",
+        "Api-Key",
+        "X-DashScope-Api-Key",
+        "DashScope-Api-Key",
       ].map(&:downcase).freeze
 
       class << self
@@ -91,6 +136,7 @@ module Parse
         after_structural = s
         if (parsed = try_parse_json(s))
           scrubbed = scrub_sensitive!(parsed)
+          compact_vectors!(scrubbed)
           begin
             after_structural = scrubbed.to_json
           rescue StandardError
@@ -161,11 +207,59 @@ module Parse
       end
 
       # @!visibility private
+      # Recursively walk a parsed JSON structure replacing any
+      # numeric-only Array of length >= +LOG_VECTOR_COMPACT_THRESHOLD+
+      # with a compact placeholder string ("<vector dims=N>"). Mutates
+      # Hashes/Arrays in place; returns the node for chaining. Distinct
+      # pass from {scrub_sensitive!} because the criterion is shape
+      # (numeric array width), not key name.
+      #
+      # The walker does NOT descend into the replaced array — once a
+      # node is recognised as a vector its inner Numerics aren't of
+      # interest. Nested vectors (Array<Array<Numeric>>, e.g. a batched
+      # embedding response in a logged HTTP body) are caught at the
+      # inner array level on the next recursion.
+      def self.compact_vectors!(node)
+        case node
+        when Hash
+          node.each do |key, value|
+            if vector_shape?(value)
+              node[key] = "<vector dims=#{value.length}>"
+            elsif value.is_a?(Hash) || value.is_a?(Array)
+              compact_vectors!(value)
+            end
+          end
+        when Array
+          node.each_with_index do |item, i|
+            if vector_shape?(item)
+              node[i] = "<vector dims=#{item.length}>"
+            elsif item.is_a?(Hash) || item.is_a?(Array)
+              compact_vectors!(item)
+            end
+          end
+        end
+        node
+      end
+
+      # @!visibility private
+      # An Array is "vector-shaped" if it meets the compaction threshold
+      # AND every element is Numeric. The numeric check prevents long
+      # tag arrays / role lists / mixed-type arrays from being mangled.
+      # Boolean is not Numeric in Ruby, so an array of booleans (rare
+      # but possible) is left alone — also fine.
+      def self.vector_shape?(val)
+        return false unless val.is_a?(Array)
+        return false if val.length < LOG_VECTOR_COMPACT_THRESHOLD
+        val.all? { |x| x.is_a?(Numeric) }
+      end
+
+      # @!visibility private
       # If +str+ parses as JSON (object or array), scrub structurally and
       # re-encode. Otherwise return the original string unchanged.
       def self.maybe_scrub_embedded_json(str)
         return str unless (inner = try_parse_json(str))
         scrub_sensitive!(inner)
+        compact_vectors!(inner)
         begin
           inner.to_json
         rescue StandardError

@@ -318,10 +318,10 @@ module Parse
     #   to pointer format. Use this when sending data to Parse Server (saves, webhooks).
     #   When false (default), full objects are serialized for API responses.
     # @example Default - full objects for API responses
-    #   team.members.as_json
+    #   workspace.members.as_json
     #   # => [{"objectId"=>"abc", "name"=>"Alice", ...}, ...]
     # @example Pointers only for storage
-    #   team.members.as_json(pointers_only: true)
+    #   workspace.members.as_json(pointers_only: true)
     #   # => [{"__type"=>"Pointer", "className"=>"Member", "objectId"=>"abc"}, ...]
     def as_json(opts = nil)
       opts ||= {}

@@ -22,17 +22,17 @@ class TestPointerShapeStrictness < Minitest::Test
   end
 
   def test_strict_mode_raises_when_target_class_cannot_be_inferred
-    # Strict path fires when `fields[:team] == :pointer` (so
-    # `field_is_pointer?` is true) but `references[:team]` is nil
+    # Strict path fires when `fields[:workspace] == :pointer` (so
+    # `field_is_pointer?` is true) but `references[:workspace]` is nil
     # (target class unresolvable) AND no peer Pointer is in the $in
     # array to infer from. Stub a class with that exact shape.
     Parse.strict_pointer_shapes = true
 
-    # Stub a class on Parse::Model that reports `fields[:team] == :pointer`
+    # Stub a class on Parse::Model that reports `fields[:workspace] == :pointer`
     # but has no references entry.
     klass = Class.new do
       def self.fields
-        { team: :pointer }
+        { workspace: :pointer }
       end
 
       def self.references
@@ -48,14 +48,14 @@ class TestPointerShapeStrictness < Minitest::Test
 
     begin
       q = Parse::Query.new("PSSStubClass")
-      constraints = { "team" => { "$in" => ["bare1", "bare2"] } }
+      constraints = { "workspace" => { "$in" => ["bare1", "bare2"] } }
 
       err = assert_raises(Parse::Query::PointerShapeError) do
         q.send(:convert_constraints_for_aggregation, constraints)
       end
       assert_match(/pointer column/i, err.message)
       assert_match(/bare string/i, err.message)
-      assert_match(/PSSStubClass\.team/, err.message)
+      assert_match(/PSSStubClass\.workspace/, err.message)
     ensure
       Parse::Model.send(:remove_const, :PSSStubClass)
     end
@@ -140,14 +140,14 @@ class TestPointerShapeStrictness < Minitest::Test
   def test_or_branch_recurses_into_pointer_rewrite
     # The most common LLM-generated silent-zero pattern: wrapping a
     # pointer-field $in inside an $or branch. Without recursion, $or's
-    # value array was passed through verbatim, so `team` never got
-    # rewritten to `_p_team` and the bare strings never got the
-    # "Team$" prefix.
-    q = Parse::Query.new("Membership")
+    # value array was passed through verbatim, so `workspace` never got
+    # rewritten to `_p_workspace` and the bare strings never got the
+    # "Workspace$" prefix.
+    q = Parse::Query.new("Subscription")
     constraints = {
       "$or" => [
-        { "team" => { "$in" => [Parse::Pointer.new("Team", "t1"), "t2"] } },
-        { "team" => Parse::Pointer.new("Team", "t3") },
+        { "workspace" => { "$in" => [Parse::Pointer.new("Workspace", "t1"), "t2"] } },
+        { "workspace" => Parse::Pointer.new("Workspace", "t3") },
       ],
     }
 
@@ -155,48 +155,48 @@ class TestPointerShapeStrictness < Minitest::Test
 
     assert_equal({
       "$or" => [
-        { "_p_team" => { "$in" => ["Team$t1", "Team$t2"] } },
-        { "_p_team" => "Team$t3" },
+        { "_p_workspace" => { "$in" => ["Workspace$t1", "Workspace$t2"] } },
+        { "_p_workspace" => "Workspace$t3" },
       ],
     }, result)
   end
 
   def test_and_branch_recurses_into_pointer_rewrite
-    q = Parse::Query.new("Membership")
+    q = Parse::Query.new("Subscription")
     constraints = {
       "$and" => [
-        { "team" => { "$in" => [Parse::Pointer.new("Team", "x")] } },
+        { "workspace" => { "$in" => [Parse::Pointer.new("Workspace", "x")] } },
       ],
     }
 
     result = q.send(:convert_constraints_for_aggregation, constraints)
-    assert_equal({ "$and" => [{ "_p_team" => { "$in" => ["Team$x"] } }] }, result)
+    assert_equal({ "$and" => [{ "_p_workspace" => { "$in" => ["Workspace$x"] } }] }, result)
   end
 
   def test_nor_branch_recurses_into_pointer_rewrite
-    q = Parse::Query.new("Membership")
+    q = Parse::Query.new("Subscription")
     constraints = {
       "$nor" => [
-        { "team" => { "$in" => [Parse::Pointer.new("Team", "z")] } },
+        { "workspace" => { "$in" => [Parse::Pointer.new("Workspace", "z")] } },
       ],
     }
     result = q.send(:convert_constraints_for_aggregation, constraints)
-    assert_equal({ "$nor" => [{ "_p_team" => { "$in" => ["Team$z"] } }] }, result)
+    assert_equal({ "$nor" => [{ "_p_workspace" => { "$in" => ["Workspace$z"] } }] }, result)
   end
 
   def test_nested_or_and_recurses_into_pointer_rewrite
     # $or containing $and containing a pointer constraint — confirms
     # recursion holds at depth ≥ 2, not just one level.
-    q = Parse::Query.new("Membership")
+    q = Parse::Query.new("Subscription")
     constraints = {
       "$or" => [
         {
           "$and" => [
-            { "team" => { "$in" => [Parse::Pointer.new("Team", "a")] } },
+            { "workspace" => { "$in" => [Parse::Pointer.new("Workspace", "a")] } },
             { "status" => "active" },
           ],
         },
-        { "team" => Parse::Pointer.new("Team", "b") },
+        { "workspace" => Parse::Pointer.new("Workspace", "b") },
       ],
     }
     result = q.send(:convert_constraints_for_aggregation, constraints)
@@ -204,11 +204,11 @@ class TestPointerShapeStrictness < Minitest::Test
       "$or" => [
         {
           "$and" => [
-            { "_p_team" => { "$in" => ["Team$a"] } },
+            { "_p_workspace" => { "$in" => ["Workspace$a"] } },
             { "status" => "active" },
           ],
         },
-        { "_p_team" => "Team$b" },
+        { "_p_workspace" => "Workspace$b" },
       ],
     }, result)
   end
@@ -219,12 +219,12 @@ class TestPointerShapeStrictness < Minitest::Test
     # the className; bare strings then get rewritten correctly.
     Parse.strict_pointer_shapes = true
 
-    q = Parse::Query.new("Membership")
+    q = Parse::Query.new("Subscription")
     constraints = {
-      "team" => { "$in" => [Parse::Pointer.new("Team", "team1"), "bare2"] },
+      "workspace" => { "$in" => [Parse::Pointer.new("Workspace", "team1"), "bare2"] },
     }
 
     result = q.send(:convert_constraints_for_aggregation, constraints)
-    assert_equal({ "_p_team" => { "$in" => ["Team$team1", "Team$bare2"] } }, result)
+    assert_equal({ "_p_workspace" => { "$in" => ["Workspace$team1", "Workspace$bare2"] } }, result)
   end
 end

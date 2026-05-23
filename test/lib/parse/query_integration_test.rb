@@ -1155,7 +1155,7 @@ class QueryIntegrationTest < Minitest::Test
       assert object_id.present?, "Should have an object ID"
 
       # Method 1: Class-level .get() method (Ruby SDK style)
-      # This is the pattern you showed: Capture.get(c)
+      # This is the pattern you showed: Post.get(c)
       retrieved_via_class = GameScore.get(object_id)
 
       assert retrieved_via_class.present?, "Should retrieve object via class .get() method"
