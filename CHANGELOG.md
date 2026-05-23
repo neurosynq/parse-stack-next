@@ -1,5 +1,10 @@
 ## Parse-Stack Changelog
 
+### 4.5.0
+
+- **CHANGED**: Gem renamed from `parse-stack` to `parse-stack-next` and published under the `neurosynq` organization. No functional changes beyond 4.4.3.
+- **CHANGED**: Repository home is now `github.com/neurosynq/parse-stack-next`.
+
 ### 4.4.3
 
 #### Push-down ordering for group_by / group_by_date / distinct

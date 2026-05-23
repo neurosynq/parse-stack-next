@@ -13,6 +13,15 @@ Gem::Specification.new do |spec|
   spec.description = %q{Parse Server Ruby Client. Perform Object-relational mapping between Parse Server and Ruby classes, with authentication, cloud code webhooks, push notifications and more built in.}
   spec.homepage = "https://github.com/neurosynq/parse-stack-next"
   spec.license = "MIT"
+
+  spec.metadata = {
+    "homepage_uri"          => "https://github.com/neurosynq/parse-stack-next",
+    "source_code_uri"       => "https://github.com/neurosynq/parse-stack-next",
+    "changelog_uri"         => "https://github.com/neurosynq/parse-stack-next/blob/main/CHANGELOG.md",
+    "bug_tracker_uri"       => "https://github.com/neurosynq/parse-stack-next/issues",
+    "documentation_uri"     => "https://neurosynq.github.io/parse-stack-next/",
+    "rubygems_mfa_required" => "true",
+  }
   # Prevent pushing this gem to RubyGems.org by setting 'allowed_push_host', or
   # delete this section to allow pushing this gem to any host.
   # if spec.respond_to?(:metadata)

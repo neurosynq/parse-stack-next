@@ -53,8 +53,11 @@ Any other questions, please post them on StackOverflow with the proper parse-sta
 
 Add this line to your application's `Gemfile`:
 ```ruby
-gem 'parse-stack'
+gem 'parse-stack-next'
 ```
+
+> The gem is published as `parse-stack-next` on RubyGems. Older references in this README to `parse-stack` point to the same codebase — use `parse-stack-next` in new projects.
+
 And then execute:
 ```bash
 $ bundle
