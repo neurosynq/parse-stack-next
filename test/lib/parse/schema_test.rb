@@ -248,4 +248,58 @@ class TestMigration < Minitest::Test
     assert_kind_of Hash, result
     assert result.key?(:status)
   end
+
+  def test_build_schema_omits_class_level_permissions_by_default
+    diff = Parse::Schema::SchemaDiff.new(MigrationTestModel, nil)
+    migration = Parse::Schema::Migration.new(MigrationTestModel, diff, client: mock_client)
+    schema = migration.send(:build_schema)
+    refute schema.key?("classLevelPermissions"),
+           "default behavior must not attach CLPs (Parse Server defaults apply)"
+  end
+
+  def test_build_schema_uses_opt_in_default_class_level_permissions
+    locked = {
+      "find"     => { "requiresAuthentication" => true },
+      "get"      => { "requiresAuthentication" => true },
+      "count"    => { "requiresAuthentication" => true },
+      "create"   => {},
+      "update"   => {},
+      "delete"   => {},
+      "addField" => {},
+    }
+    original = Parse::Schema.default_class_level_permissions
+    begin
+      Parse::Schema.default_class_level_permissions = locked
+      diff = Parse::Schema::SchemaDiff.new(MigrationTestModel, nil)
+      migration = Parse::Schema::Migration.new(MigrationTestModel, diff, client: mock_client)
+      schema = migration.send(:build_schema)
+      assert_equal locked, schema["classLevelPermissions"]
+    ensure
+      Parse::Schema.default_class_level_permissions = original
+    end
+  end
+
+  def test_build_schema_does_not_drop_existing_fields
+    # Server schema has an `extraServerOnlyField` that the local model
+    # does not declare. The migrator must NEVER emit a drop_field op
+    # for it — extra server fields are preserved by default.
+    data = {
+      "className" => "MigrationTestModel",
+      "fields" => {
+        "objectId" => { "type" => "String" },
+        "createdAt" => { "type" => "Date" },
+        "updatedAt" => { "type" => "Date" },
+        "ACL" => { "type" => "ACL" },
+        "name" => { "type" => "String" },
+        "value" => { "type" => "Number" },
+        "extraServerOnlyField" => { "type" => "String" },
+      },
+    }
+    schema = Parse::Schema::SchemaInfo.new(data)
+    diff = Parse::Schema::SchemaDiff.new(MigrationTestModel, schema)
+    migration = Parse::Schema::Migration.new(MigrationTestModel, diff, client: mock_client)
+    ops = migration.operations
+    drop_ops = ops.select { |op| op[:action] == :drop_field || op[:action] == :remove_field }
+    assert_empty drop_ops, "migrator must not generate drop_field ops"
+  end
 end

@@ -1,6 +1,8 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
+require_relative "model/core/errors"
+
 module Parse
   # LiveQuery provides real-time data subscriptions for reactive applications.
   # It uses WebSockets to receive push notifications when data changes on the server.
@@ -48,8 +50,9 @@ module Parse
   #   client.close
   #
   module LiveQuery
-    # Base error class for LiveQuery
-    class Error < StandardError; end
+    # Base error class for LiveQuery. Inherits from Parse::Error so that
+    # `rescue Parse::Error` will also catch LiveQuery failures.
+    class Error < Parse::Error; end
     class ConnectionError < Error; end
     class SubscriptionError < Error; end
     class AuthenticationError < Error; end

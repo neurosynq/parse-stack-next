@@ -9,27 +9,61 @@
 #
 # Run tests:
 #   ATLAS_URI="mongodb://localhost:27020/parse_atlas_test?directConnection=true" ruby -Ilib:test test/lib/parse/atlas_search_integration_test.rb
+#
+# Stability notes (see commit history for context):
+#   The mongodb-atlas-local image runs a supervisor ("runner") that intentionally
+#   restarts mongod 1-2 times during startup to enable the replica set and wire
+#   in mongot (Atlas Search). Those startup SIGTERMs are NORMAL and visible in
+#   `docker logs` — do not interpret them as crashes. The container is "ready"
+#   when the runner's built-in healthcheck (`runner healthcheck`) reports healthy,
+#   which checks both mongod AND mongot. We rely on that built-in healthcheck
+#   rather than overriding it with a faster mongosh probe.
 
 services:
   atlas-local:
-    image: mongodb/mongodb-atlas-local:8.0
+    # Pinned patch tag rather than the floating :8.0 — mongodb-atlas-local has
+    # known per-patch start-up flakiness (see testcontainers/testcontainers-java#10267
+    # and MongoDB community forum 321179). Bump deliberately, not by drift.
+    image: mongodb/mongodb-atlas-local:8.0.10
     container_name: parse-stack-atlas-local
+    # `hostname` is called out by the official compose example — the embedded
+    # single-node replica set advertises this name, and a stable value makes
+    # restart-after-down work cleanly.
+    hostname: atlas-local
+    # Surface runner + mongot logs through `docker logs` so failures during the
+    # supervisor's bring-up phase are visible. Pure visibility, no behavior change.
+    environment:
+      RUNNER_LOG_FILE: /dev/stderr
+      MONGOT_LOG_FILE: /dev/stderr
+    # Loopback-only by default — Atlas Local has no auth configured.
     ports:
-      - "27020:27017"
+      - "${ATLAS_BIND:-127.0.0.1}:27020:27017"
     volumes:
+      # Persist mongod data, replset config, and — critically — the mongot
+      # Lucene index directory. Without /data/mongot persistence, every restart
+      # forces a full search re-index, which lengthens "ready" time and is a
+      # real source of test flakiness. Matches the official compose example.
       - atlas-data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
+      - atlas-configdb:/data/configdb
+      - atlas-mongot:/data/mongot
+    # Recover from genuine crashes automatically. Test runs `docker compose down`
+    # explicitly, so this does not interfere with teardown.
+    restart: unless-stopped
+    # NOTE: We deliberately do NOT override `healthcheck:` here. The image ships
+    # a built-in `runner healthcheck` (interval 30s, timeout 60s, start_period
+    # 60s, retries 3) that verifies BOTH mongod and mongot are ready. The
+    # previous mongosh ping at 5s interval was both noisier (spawns a mongosh
+    # process every 5s) and incorrect (it returned healthy as soon as mongod
+    # accepted connections, before mongot was wired in, so atlas-init could
+    # race the search-index subsystem).
 
   atlas-init:
-    image: mongodb/mongodb-atlas-local:8.0
+    image: mongodb/mongodb-atlas-local:8.0.10
     container_name: parse-stack-atlas-init
     depends_on:
       atlas-local:
+        # Uses the image's built-in healthcheck (see above), so this now waits
+        # for mongot readiness too — not just mongod accepting connections.
         condition: service_healthy
     volumes:
       - ./atlas-init.js:/atlas-init.js:ro
@@ -38,3 +72,5 @@ services:
 
 volumes:
   atlas-data:
+  atlas-configdb:
+  atlas-mongot:

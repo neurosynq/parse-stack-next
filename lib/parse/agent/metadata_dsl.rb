@@ -55,6 +55,110 @@ module Parse
           @agent_visible == true
         end
 
+        # Mark this class as hidden from agent tools. Hidden classes are
+        # filtered out of `get_all_schemas`, refused by `query_class` /
+        # `count_objects` / `get_object` / `get_objects` / `get_sample_objects` /
+        # `aggregate` / `explain_query` / `get_schema` with a sanitized
+        # `:permission_denied` error response, and excluded from the
+        # `RelationGraph` prompt diagram.
+        #
+        # Unlike `agent_visible` (which is opt-in for diagram-walking only),
+        # `agent_hidden` is a hard access denial. Use it for classes that
+        # contain PII the agent must never touch — student SSN tables,
+        # internal billing records, password reset tokens, etc.
+        #
+        # Records still exist in the database; only the agent surface is
+        # blocked. Direct application code (Parse::Object#query, Parse::MongoDB)
+        # is unaffected.
+        #
+        # @example Hide a PII class from every agent surface
+        #   class StudentSSN < Parse::Object
+        #     parse_class "StudentSSN"
+        #     property :student_name, :string
+        #     property :ssn, :string
+        #     agent_hidden
+        #   end
+        #
+        # @param except [Symbol, nil] when set to `:master_key`, session-bound
+        #   agents refuse this class but master-key agents are allowed through.
+        #   This is the "internal admin tooling can see it, user-facing agents
+        #   never can" tier — intended for collections like `_Session` where a
+        #   dev-MCP / customer-support tool may legitimately need read access
+        #   but no end-user-bound agent ever should. The field-level
+        #   `INTERNAL_FIELDS_DENYLIST` floor (sessionToken, _hashed_password,
+        #   etc.) still applies, so even master-key reads cannot exfiltrate
+        #   credential columns.
+        # @return [Boolean] true
+        def agent_hidden(except: nil)
+          @agent_hidden = true
+          @agent_hidden_except = case except
+                                 when nil    then nil
+                                 when :master_key, "master_key" then :master_key
+                                 else
+                                   raise ArgumentError,
+                                         "agent_hidden(except:) accepts only :master_key (got #{except.inspect})"
+                                 end
+          Parse::Agent::MetadataRegistry.register_hidden_class(self, except: @agent_hidden_except)
+          true
+        end
+
+        # Reverse a previous `agent_hidden` declaration on this class. Clears the
+        # per-class hidden flag and removes the class from the registry's hidden
+        # set so that every agent tool surface treats the class as visible again
+        # (subject to the per-tool `agent_fields` allowlist and other policy).
+        # The field-level `INTERNAL_FIELDS_DENYLIST` floor still strips
+        # credential columns from every response.
+        #
+        # The intended use is to opt back in to a built-in class that
+        # parse-stack marks hidden by default — for example `Parse::Product`,
+        # which is hidden in `lib/parse/agent.rb` because the `_Product`
+        # collection is a vestigial iOS IAP feature, but an application that
+        # actually does use the collection can call:
+        #
+        #   Parse::Product.agent_unhidden
+        #
+        # at boot time (after `require 'parse/stack'`) to expose it. The same
+        # mechanism applies to any application-defined class that was marked
+        # `agent_hidden` and needs to be re-enabled for a specific deployment.
+        #
+        # @return [Boolean] true if a previous `agent_hidden` declaration was
+        #   actually reversed; false when the class was not hidden to begin
+        #   with (idempotent no-op). Matches `Hash#delete?`/`Set#delete?`
+        #   "did anything change" semantics so callers can branch on the
+        #   return value.
+        def agent_unhidden
+          was_hidden = @agent_hidden == true
+          @agent_hidden = false
+          @agent_hidden_except = nil
+          Parse::Agent::MetadataRegistry.unregister_hidden_class(self)
+          # Only audit on a real state flip — calling `agent_unhidden` on a
+          # class that was never hidden is a no-op and shouldn't emit a banner
+          # that trains operators to suppress the warning globally.
+          if was_hidden && !(defined?(Parse::Agent) && Parse::Agent.respond_to?(:suppress_master_key_warning?) && Parse::Agent.suppress_master_key_warning?)
+            warn "[Parse::Agent:SECURITY] #{name} (#{respond_to?(:parse_class) ? parse_class : name}) was marked agent_unhidden — " \
+                 "this class is now reachable from every agent tool surface (query_class, aggregate, get_schema, etc.). " \
+                 "Master-key agents bypass per-row ACL/CLP enforcement, so per-class agent_fields / agent_canonical_filter / " \
+                 "tenant_id are the only remaining access boundary. Credential columns are still stripped by the " \
+                 "INTERNAL_FIELDS_DENYLIST floor regardless of class visibility. Confirm this is intentional. " \
+                 "Silence with Parse::Agent.suppress_master_key_warning = true."
+          end
+          was_hidden
+        end
+
+        # Check if this class is hidden from agent tools.
+        # @return [Boolean]
+        def agent_hidden?
+          @agent_hidden == true
+        end
+
+        # The exception scope a previous `agent_hidden(except: ...)` declared,
+        # or nil when the class is unconditionally hidden / not hidden at all.
+        # Currently the only supported value is `:master_key`.
+        # @return [Symbol, nil]
+        def agent_hidden_except
+          @agent_hidden_except
+        end
+
         # Set or get the class-level description for agent context.
         # This description helps LLMs understand what this class represents.
         #
@@ -77,6 +181,229 @@ module Parse
         # Property descriptions are stored in Parse::Properties module.
         # This method is provided there via the `property` DSL with `_description:` option.
         # @see Parse::Properties::ClassMethods#property_descriptions
+
+        # Declare which fields are surfaced to agent tools for this class.
+        # When set, agent schema enrichment trims the field list down to this
+        # allowlist (plus the always-on `objectId`/`createdAt`/`updatedAt`), and
+        # agent query/fetch tools push the allowlist into the server-side `keys`
+        # projection unless the caller passed an explicit `keys:` override.
+        # Called without arguments, returns the current allowlist.
+        #
+        # @example Limit agent visibility to analytics-relevant fields
+        #   class Team < Parse::Object
+        #     agent_fields :name, :status, :member_count, :owner
+        #   end
+        #
+        # @param names [Array<Symbol, String>] field names to allow
+        # @return [Array<Symbol>] the resulting allowlist
+        def agent_fields(*names)
+          return @agent_field_allowlist ||= [] if names.empty?
+          @agent_field_allowlist = names.flatten.map(&:to_sym).freeze
+          # If agent_join_fields was declared earlier in the class body, the
+          # subset invariant must still hold once agent_fields lands. Re-check
+          # so declaration order doesn't matter.
+          assert_agent_join_fields_subset!
+          @agent_field_allowlist
+        end
+
+        # Read-only accessor for the agent field allowlist.
+        # @return [Array<Symbol>] the allowlist (empty if not declared)
+        def agent_field_allowlist
+          @agent_field_allowlist || []
+        end
+
+        # Declare a narrower projection used when this class shows up as an
+        # included pointer on another class's query (`query_class` /
+        # `get_object` / `get_objects` / `get_sample_objects` /
+        # `export_data` + `include:`). When the agent asks for
+        # `keys: ["user", ...] + include: ["user"]`, the SDK auto-rewrites
+        # `keys` to dotted paths (`user.firstName, user.email, ...`) so the
+        # joined record is projected to exactly the fields listed here.
+        #
+        # This sits one tier tighter than `agent_fields`. The direct-query
+        # allowlist is typically the full "what the agent may see" set;
+        # the join-projection list is the narrower "what's interesting when
+        # I'm a foreign key" set. Example: `_User` may surface 18 fields on
+        # a direct query, but when it's joined onto a `Membership` row the
+        # agent usually only needs `firstName`, `lastName`, `email`,
+        # `internalTag` — not the `teams[]` pointer array or the
+        # `iconImage` presigned URL.
+        #
+        # **Subset invariant**: when both `agent_fields` and
+        # `agent_join_fields` are declared, every entry in
+        # `agent_join_fields` MUST also appear in `agent_fields`. The
+        # direct-query allowlist is the upper bound on what the agent ever
+        # sees; the join list can only tighten that, never widen it.
+        # Violations raise `ArgumentError` at class load time. Declaring
+        # `agent_join_fields` without `agent_fields` is allowed — it means
+        # "no direct-query allowlist, but on a join project to these only."
+        #
+        # When `agent_join_fields` is NOT declared, the auto-projection
+        # falls back to `agent_fields - agent_large_fields` (or, when only
+        # `agent_large_fields` is declared, to `field_map.keys -
+        # agent_large_fields`). Callers can always opt out per call by
+        # passing dotted-path keys (`keys: ["user.iconImage"]`), which
+        # signals explicit intent and suppresses auto-expansion for that
+        # pointer.
+        #
+        # @example
+        #   class Membership < Parse::Object
+        #     belongs_to :user
+        #     property :title, :string
+        #     property :active, :boolean
+        #     # …
+        #   end
+        #
+        #   # In the _User reopen / customization:
+        #   class Parse::User
+        #     agent_fields :first_name, :last_name, :email, :icon_image,
+        #                  :source_image, :teams, :organizations, :last_active_at,
+        #                  :internal_tag
+        #     agent_large_fields :icon_image, :source_image
+        #     agent_join_fields :first_name, :last_name, :email,
+        #                      :last_active_at, :internal_tag
+        #   end
+        #
+        # @param names [Array<Symbol, String>] field names to project on join
+        # @return [Array<Symbol>] the resulting join-projection list
+        def agent_join_fields(*names)
+          return @agent_join_field_list ||= [] if names.empty?
+          @agent_join_field_list = names.flatten.map(&:to_sym).freeze
+          assert_agent_join_fields_subset!
+          @agent_join_field_list
+        end
+
+        # Read-only accessor for the agent join-projection list.
+        # @return [Array<Symbol>] the list (empty if not declared)
+        def agent_join_field_list
+          @agent_join_field_list || []
+        end
+
+        # Declare fields known to carry large payloads (full text, embedded
+        # documents, base64 blobs, long descriptions). Schema introspection
+        # annotates these with `large_field: true` so an LLM client can
+        # project them away proactively in its first `query_class` call
+        # rather than discovering the size by hitting the dispatcher's
+        # response cap. Has no effect on Pointer/Relation type fields —
+        # the stored value is a small reference; size only materializes
+        # via `include:` resolution, which is a query-time concern.
+        # Called without arguments, returns the current list.
+        #
+        # @example Flag the long-text fields up-front
+        #   class Article < Parse::Object
+        #     property :title, :string
+        #     property :body, :string
+        #     property :raw_html, :string
+        #     agent_large_fields :body, :raw_html
+        #   end
+        #
+        # @param names [Array<Symbol, String>] field names known to be large
+        # @return [Array<Symbol>] the resulting list
+        def agent_large_fields(*names)
+          return @agent_large_fields ||= [] if names.empty?
+          @agent_large_fields = names.flatten.map(&:to_sym).freeze
+        end
+
+        # Read-only accessor for the large-field list.
+        # @return [Array<Symbol>] the declared large fields (empty if none)
+        def agent_large_field_list
+          @agent_large_fields || []
+        end
+
+        # Declare a canonical "valid state" filter for this class that the
+        # agent's read tools (`query_class`, `count_objects`, `aggregate`)
+        # apply BY DEFAULT to every call. Closes the silently-suspect-
+        # counts gap: when a class soft-deletes via `isRemoved`, hides
+        # rows via `on_timeline: false`, or has any other always-applied
+        # validity predicate, the canonical filter ensures an LLM that
+        # drops to raw aggregate doesn't accidentally include the
+        # excluded rows.
+        #
+        # The filter is a MongoDB-style match expression (the same shape
+        # `query_class`'s `where:` argument accepts). When applied:
+        #   - `query_class` / `count_objects`: merged with the caller's
+        #     `where:` via top-level `$and` so caller constraints
+        #     compose rather than override.
+        #   - `aggregate`: prepended as a `$match` stage at index 0
+        #     (after tenant-scope injection).
+        #
+        # Callers opt out per call with `apply_canonical_filter: false`.
+        # The filter is also surfaced via `get_schema` so an opt-out
+        # caller can reproduce it manually.
+        #
+        # @example
+        #   class Capture < Parse::Object
+        #     property :isRemoved, :boolean
+        #     property :onTimeline, :boolean
+        #     agent_canonical_filter "isRemoved" => { "$ne" => true },
+        #                            "onTimeline" => true
+        #   end
+        #
+        # @param filter [Hash, nil] a where-style hash. Pass nil to
+        #   read the current value.
+        # @return [Hash, nil] the filter, or nil when not declared.
+        def agent_canonical_filter(filter = nil)
+          return @agent_canonical_filter if filter.nil?
+          raise ArgumentError, "agent_canonical_filter expects a Hash, got #{filter.class}" unless filter.is_a?(Hash)
+          # Validate at registration time so a developer misconfiguration
+          # (e.g. `$where`, `$function`, or an internal-field key) fails at
+          # app boot rather than silently bypassing PipelineValidator at
+          # request time. The filter is treated like a permissive pipeline
+          # node: server-side JS operators and internal-field keys are refused;
+          # normal Mongo query operators ($ne, $gt, $exists, etc.) are allowed.
+          begin
+            Parse::PipelineSecurity.validate_filter!(filter)
+          rescue Parse::PipelineSecurity::Error => e
+            raise ArgumentError, "agent_canonical_filter rejected: #{e.message}"
+          end
+          @agent_canonical_filter = filter.transform_keys(&:to_s).freeze
+        end
+
+        # Read-only accessor for the canonical filter.
+        # @return [Hash, nil] the filter as String-keyed Hash, or nil
+        def agent_canonical_filter_for_apply
+          @agent_canonical_filter
+        end
+
+        # Opt this class out of the global COLLSCAN refusal check.
+        # Intended for small lookup tables (Roles, Config) where full scans
+        # are acceptable and an index is not needed.
+        #
+        # @example
+        #   class AppConfig < Parse::Object
+        #     agent_allow_collscan true
+        #   end
+        #
+        # @param value [Boolean] true to allow COLLSCANs for this class
+        # @return [Boolean] the current setting
+        def agent_allow_collscan(value = nil)
+          return @agent_allow_collscan if value.nil?
+          @agent_allow_collscan = value == true
+        end
+
+        # Check whether COLLSCANs are explicitly permitted for this class.
+        # @return [Boolean]
+        def agent_allow_collscan?
+          @agent_allow_collscan == true
+        end
+
+        # Class-level analytics usage hint, surfaced inside agent schema output.
+        # Distinct from `agent_description` (a short human summary): use this for
+        # specific guidance the LLM needs to query the class well — enum values,
+        # denormalization caveats, recommended aggregations, etc.
+        #
+        # @example
+        #   agent_usage <<~USAGE
+        #     `status` values: "active" | "archived" | "frozen".
+        #     `member_count` is denormalized; recompute via _User pointer.
+        #   USAGE
+        #
+        # @param text [String, nil] the usage text to set, or nil to read
+        # @return [String, nil] the current usage hint
+        def agent_usage(text = nil)
+          return @agent_usage unless text
+          @agent_usage = text.to_s.strip.freeze
+        end
 
         # Storage hash for agent-allowed methods.
         # Maps method names (symbols) to their metadata hashes.
@@ -109,15 +436,41 @@ module Parse
         # @example Mark a method requiring admin permission
         #   agent_method :reset_all_counts, "Reset all play counts to zero", permission: :admin
         #
+        # @example Mark a write method that explicitly supports dry-run preview
+        #   agent_method :archive, "Archive this record", permission: :admin, supports_dry_run: true
+        #   def archive(dry_run: false)
+        #     return { would_archive: id } if dry_run
+        #     self.status = "archived"; save!
+        #   end
+        #
         # @param method_name [Symbol, String] the name of the method to expose
         # @param description [String, nil] optional description for LLM context
         # @param permission [Symbol] required permission level (:readonly, :write, :admin)
+        # @param supports_dry_run [Boolean] whether the method accepts dry_run: true for
+        #   preview-only execution. When false (default), passing dry_run: true in
+        #   arguments is refused at dispatch time with :invalid_argument.
+        # @param permitted_keys [Array<Symbol,String>, nil] when provided,
+        #   +call_method+ refuses any +arguments+ key not in this list.
+        #   Without this, an LLM (or a prompt-injection payload) can
+        #   pass arbitrary keys through a method that splats with +**+,
+        #   reaching protected columns like +_hashed_password+ or +ACL+.
+        #   Highly recommended on any +agent_write+/+agent_admin+ method
+        #   that takes a kwargs splat.
+        # @param parameters [Hash, nil] when provided, a JSON Schema (as a
+        #   Ruby Hash) describing the +arguments+ object. Surfaced in
+        #   +tools/list+ so the LLM submits properly-shaped inputs and
+        #   stricter MCP clients can validate before dispatch.
         # @return [Hash] the method metadata
-        def agent_method(method_name, description = nil, permission: :readonly)
+        def agent_method(method_name, description = nil, permission: :readonly,
+                         supports_dry_run: false, permitted_keys: nil, parameters: nil)
           method_sym = method_name.to_sym
 
           unless AGENT_METHOD_PERMISSIONS.include?(permission)
             raise ArgumentError, "Invalid permission level: #{permission}. Must be one of: #{AGENT_METHOD_PERMISSIONS.join(", ")}"
+          end
+
+          if permitted_keys && !permitted_keys.is_a?(Array)
+            raise ArgumentError, "permitted_keys must be an Array of Symbol/String, got #{permitted_keys.class}"
           end
 
           # Determine if this is an instance or class method
@@ -135,6 +488,9 @@ module Parse
             description: description&.to_s&.freeze,
             type: method_type,
             permission: permission,
+            supports_dry_run: supports_dry_run == true,
+            permitted_keys: permitted_keys&.map(&:to_sym)&.freeze,
+            parameters: parameters,
           }
         end
 
@@ -187,13 +543,68 @@ module Parse
           agent_method(method_name, description, permission: :admin)
         end
 
+        # Declare a tenant scope rule for this class.
+        #
+        # When declared, every agent read tool (query_class, count_objects,
+        # get_sample_objects, export_data query-mode, aggregate, get_object,
+        # get_objects) will enforce that data access is limited to the agent's
+        # bound tenant. An agent with no tenant binding (tenant_id: nil) hitting
+        # a scoped class is refused with :access_denied unless the bypass
+        # condition is satisfied.
+        #
+        # @param field [Symbol, String] the Parse field to scope on (e.g. :org_id)
+        # @param from [Proc] callable receiving the agent, returning the scope value
+        #   (return nil to mean "this agent has no tenant binding")
+        #
+        # @example
+        #   class Order < Parse::Object
+        #     property :org_id, :string
+        #     agent_tenant_scope :org_id, from: ->(agent) { agent.tenant_id }
+        #   end
+        #
+        def agent_tenant_scope(field, from:)
+          unless from.respond_to?(:call)
+            raise ArgumentError, "agent_tenant_scope :from must be a callable (Proc/lambda)"
+          end
+          parse_class_name = respond_to?(:parse_class) ? parse_class : name
+          Parse::Agent::MetadataRegistry.register_tenant_scope(parse_class_name, field, from: from)
+        end
+
+        # Declare a bypass condition for this class's tenant scope.
+        #
+        # When the block returns truthy for the given agent, tenant scope
+        # enforcement is skipped entirely for that agent on this class.
+        # A bypass block that raises is treated as not-bypassed (fail closed).
+        #
+        # Without a bypass declaration, any agent whose tenant_id is nil
+        # hitting a scoped class is refused.
+        #
+        # @yield [agent] the agent instance
+        # @yieldreturn [Boolean] truthy to bypass, falsy to enforce
+        #
+        # @example Allow admin agents to read across tenants
+        #   class Order < Parse::Object
+        #     agent_tenant_scope :org_id, from: ->(agent) { agent.tenant_id }
+        #     agent_tenant_scope_bypass { |agent| agent.permissions == :admin }
+        #   end
+        #
+        def agent_tenant_scope_bypass(&block)
+          raise ArgumentError, "agent_tenant_scope_bypass requires a block" unless block_given?
+          parse_class_name = respond_to?(:parse_class) ? parse_class : name
+          Parse::Agent::MetadataRegistry.register_tenant_scope_bypass(parse_class_name, block)
+        end
+
         # Check if this model has any agent metadata defined.
         #
         # @return [Boolean] true if any metadata is present
         def has_agent_metadata?
           !agent_description.nil? ||
+            !agent_usage.nil? ||
             !property_descriptions.empty? ||
-            !agent_methods.empty?
+            !property_enum_descriptions.empty? ||
+            !agent_methods.empty? ||
+            !agent_field_allowlist.empty? ||
+            !agent_join_field_list.empty?
         end
 
         # Get all agent metadata as a hash for serialization.
@@ -202,10 +613,37 @@ module Parse
         def agent_metadata
           {
             description: agent_description,
+            usage: agent_usage,
             property_descriptions: property_descriptions.dup,
+            property_enum_descriptions: property_enum_descriptions.dup,
             methods: agent_methods.dup,
+            field_allowlist: agent_field_allowlist.dup,
+            join_field_list: agent_join_field_list.dup,
           }
         end
+
+        private
+
+        # @api private
+        # Subset invariant: agent_join_fields entries must all appear in
+        # agent_fields when both are declared. The direct-query allowlist
+        # is the upper bound on what the agent sees; the join list can only
+        # tighten that, never widen it. Raises ArgumentError when violated,
+        # at class-load time, so the error surfaces immediately rather than
+        # at the first agent query.
+        def assert_agent_join_fields_subset!
+          return unless @agent_join_field_list&.any?
+          return unless @agent_field_allowlist&.any?
+          extras = @agent_join_field_list - @agent_field_allowlist
+          return if extras.empty?
+          raise ArgumentError,
+                "agent_join_fields must be a subset of agent_fields on #{self}; " \
+                "#{extras.inspect} appears in agent_join_fields but not in agent_fields. " \
+                "The direct-query allowlist is the upper bound; the join-projection list " \
+                "can only tighten it."
+        end
+
+        public
 
         # Check if a specific method is allowed for agent invocation.
         #
@@ -275,6 +713,13 @@ module Parse
       # @return [Hash<Symbol, String>]
       def property_descriptions
         self.class.property_descriptions
+      end
+
+      # Instance method to access class-level per-value enum descriptions
+      #
+      # @return [Hash<Symbol, Hash{String => String}>]
+      def property_enum_descriptions
+        self.class.property_enum_descriptions
       end
 
       # Instance method to access class-level agent methods

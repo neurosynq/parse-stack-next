@@ -176,4 +176,20 @@ class AudienceTest < Minitest::Test
   def test_parse_class_is_audience
     assert_equal "_Audience", Parse::Audience.parse_class
   end
+
+  def test_installation_count_raises_when_audience_missing
+    @fetch_return = nil
+    err = assert_raises(Parse::Push::AudienceNotFound) do
+      Parse::Audience.installation_count("Ghost")
+    end
+    assert_match(/Ghost/, err.message)
+  end
+
+  def test_installations_raises_when_audience_missing
+    @fetch_return = nil
+    err = assert_raises(Parse::Push::AudienceNotFound) do
+      Parse::Audience.installations("Ghost")
+    end
+    assert_match(/Ghost/, err.message)
+  end
 end

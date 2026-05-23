@@ -54,4 +54,64 @@ class TestPointer < Minitest::Test
     assert_equal [@pointer, @pointer], [@pointer, { "className" => "_User", "objectId" => @id }].parse_pointers
     assert_equal [@pointer, @pointer], [nil, 4, "junk", { className: "_User", objectId: @id }, { "className" => "_User", "objectId" => @id }].parse_pointers
   end
+
+  def test_id_validation_accepts_alphanumeric
+    %w[abc 0123456789 abcDEF123 X aBcD1234efGH].each do |oid|
+      pointer = Parse::Pointer.new("Song", oid)
+      assert_equal oid, pointer.id
+    end
+  end
+
+  def test_id_validation_accepts_nil_and_empty
+    pointer = Parse::Pointer.new("Song", nil)
+    assert_nil pointer.id
+
+    pointer = Parse::Pointer.new("Song", "")
+    assert_equal "", pointer.id
+    refute pointer.present?
+  end
+
+  def test_id_setter_rejects_traversal_payloads
+    pointer = Parse::Pointer.new("Song", "abc123")
+    %w[
+      ../etc/passwd
+      foo/bar
+      foo\\bar
+      a?b=c
+      foo&bar
+      foo;rm
+      foo%20bar
+      "quoted"
+      foo'bar
+      foo\nbar
+      foo\rbar
+      "><script>
+    ].each do |payload|
+      assert_raises(ArgumentError, "should reject #{payload.inspect}") do
+        pointer.id = payload
+      end
+    end
+  end
+
+  def test_id_setter_rejects_overlong_value
+    pointer = Parse::Pointer.new("Song", "abc123")
+    assert_raises(ArgumentError) { pointer.id = "a" * 65 }
+  end
+
+  def test_id_setter_accepts_custom_objectid_separators
+    %w[user_abc role-test object.id u_aBc-1.2].each do |oid|
+      pointer = Parse::Pointer.new("Song", oid)
+      assert_equal oid, pointer.id, "should accept #{oid.inspect}"
+    end
+  end
+
+  def test_id_setter_accepts_subsequent_valid_assignment
+    pointer = Parse::Pointer.new("Song", "abc123")
+    pointer.id = "xyz789ABC0"
+    assert_equal "xyz789ABC0", pointer.id
+  end
+
+  def test_initialize_rejects_invalid_objectid
+    assert_raises(ArgumentError) { Parse::Pointer.new("Song", "../etc/passwd") }
+  end
 end

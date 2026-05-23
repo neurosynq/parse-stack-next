@@ -1339,18 +1339,104 @@ class PushTest < Minitest::Test
     puts "to_audience_id method exists!"
   end
 
-  # Test 67: to_audience returns self
-  def test_to_audience_returns_self
-    puts "\n=== Testing to_audience Returns Self ==="
+  # Test 67: to_audience raises AudienceNotFound on miss
+  def test_to_audience_raises_when_missing
+    puts "\n=== Testing to_audience Raises When Audience Missing ==="
 
     push = Parse::Push.new
-    # Mock the Audience.first to return nil (no audience found)
-    Parse::Audience.define_singleton_method(:first) { |*args| nil }
+    Parse::Audience.stub(:find_by_name, nil) do
+      err = assert_raises(Parse::Push::AudienceNotFound) do
+        push.to_audience("NonExistent")
+      end
+      assert_match(/NonExistent/, err.message)
+    end
 
-    result = push.to_audience("NonExistent")
-    assert_same push, result
+    puts "to_audience raises AudienceNotFound on miss!"
+  end
 
-    puts "to_audience returns self for chaining!"
+  def test_to_audience_id_raises_when_missing
+    puts "\n=== Testing to_audience_id Raises When Audience Missing ==="
+
+    push = Parse::Push.new
+    Parse::Audience.stub(:find, nil) do
+      err = assert_raises(Parse::Push::AudienceNotFound) do
+        push.to_audience_id("abc123")
+      end
+      assert_match(/abc123/, err.message)
+    end
+
+    puts "to_audience_id raises AudienceNotFound on miss!"
+  end
+
+  def test_send_refuses_unconstrained_broadcast_by_default
+    puts "\n=== Testing Unconstrained Push Refused By Default ==="
+
+    push = Parse::Push.new.with_alert("hello")
+    assert_raises(Parse::Push::BroadcastNotAllowed) { push.send! }
+    assert_raises(Parse::Push::BroadcastNotAllowed) { push.send }
+
+    puts "Unconstrained broadcast refused without opt-in!"
+  end
+
+  def test_send_allows_broadcast_with_class_flag
+    puts "\n=== Testing allow_broadcast Class Flag Opt-In ==="
+
+    push = Parse::Push.new.with_alert("hello")
+    fake_client = Object.new
+    pushed = nil
+    fake_client.define_singleton_method(:push) do |payload|
+      pushed = payload
+      Struct.new(:error?, :code, :error).new(false, 200, nil)
+    end
+    push.define_singleton_method(:client) { fake_client }
+
+    Parse::Push.allow_broadcast = true
+    begin
+      push.send!
+    ensure
+      Parse::Push.allow_broadcast = false
+    end
+
+    refute_nil pushed, "expected client.push to be invoked when allow_broadcast = true"
+    puts "Broadcast permitted with allow_broadcast = true!"
+  end
+
+  def test_send_allows_broadcast_with_per_instance_optin
+    puts "\n=== Testing #broadcast! Per-Instance Opt-In ==="
+
+    push = Parse::Push.new.with_alert("hello").broadcast!
+    fake_client = Object.new
+    pushed = nil
+    fake_client.define_singleton_method(:push) do |payload|
+      pushed = payload
+      Struct.new(:error?, :code, :error).new(false, 200, nil)
+    end
+    push.define_singleton_method(:client) { fake_client }
+
+    push.send!
+
+    refute_nil pushed, "expected client.push to be invoked after #broadcast!"
+    assert push.broadcast_allowed?
+    puts "Per-instance broadcast! opt-in works!"
+  end
+
+  def test_send_allows_targeted_push_without_optin
+    puts "\n=== Testing Targeted Push Sends Without Broadcast Opt-In ==="
+
+    push = Parse::Push.new.to_channel("news").with_alert("hello")
+    fake_client = Object.new
+    pushed = nil
+    fake_client.define_singleton_method(:push) do |payload|
+      pushed = payload
+      Struct.new(:error?, :code, :error).new(false, 200, nil)
+    end
+    push.define_singleton_method(:client) { fake_client }
+
+    push.send!
+
+    refute_nil pushed
+    assert_equal ["news"], pushed["channels"]
+    puts "Targeted push (channels) sends without broadcast opt-in!"
   end
 
   # Test 68: localized_alerts attribute

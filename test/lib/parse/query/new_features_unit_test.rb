@@ -40,6 +40,104 @@ class TestNewQueryFeatures < Minitest::Test
     assert_equal "name,category", compiled[:keys]
   end
 
+  def test_compile_auto_adds_include_top_level_to_keys_when_keys_set
+    @query.keys(:title).includes(:artist)
+    compiled = @query.compile(encode: false)
+
+    assert_includes compiled[:keys].split(","), "artist"
+    assert_equal "artist", compiled[:include]
+  end
+
+  def test_compile_auto_adds_include_independent_of_call_order
+    @query.includes(:artist).keys(:title)
+    compiled = @query.compile(encode: false)
+
+    assert_includes compiled[:keys].split(","), "artist"
+  end
+
+  def test_compile_auto_adds_top_level_for_chained_include
+    @query.keys(:title).includes("artist.manager")
+    compiled = @query.compile(encode: false)
+
+    assert_includes compiled[:keys].split(","), "artist"
+    assert_equal "artist.manager", compiled[:include]
+  end
+
+  def test_compile_does_not_set_keys_when_only_includes_provided
+    @query.includes(:artist)
+    compiled = @query.compile(encode: false)
+
+    assert_nil compiled[:keys]
+    assert_equal "artist", compiled[:include]
+  end
+
+  def test_compile_does_not_duplicate_when_include_already_in_keys
+    @query.keys(:title, :artist).includes(:artist)
+    compiled = @query.compile(encode: false)
+
+    parts = compiled[:keys].split(",")
+    assert_equal 1, parts.count("artist")
+  end
+
+  def test_compile_is_idempotent_across_repeated_calls
+    @query.keys(:title).includes(:artist)
+    first = @query.compile(encode: false)
+    second = @query.compile(encode: false)
+
+    assert_equal first[:keys], second[:keys]
+    assert_equal "title,artist", second[:keys]
+  end
+
+  def test_compile_merges_multiple_includes_into_keys
+    @query.keys(:title).includes(:artist, :album)
+    compiled = @query.compile(encode: false)
+
+    parts = compiled[:keys].split(",")
+    assert_includes parts, "artist"
+    assert_includes parts, "album"
+    assert_includes parts, "title"
+  end
+
+  def test_direct_mongodb_pipeline_merges_includes_into_project
+    @query.keys(:title).includes(:artist)
+    pipeline = @query.send(:build_direct_mongodb_pipeline)
+
+    project_stage = pipeline.find { |stage| stage.key?("$project") }
+    refute_nil project_stage, "expected pipeline to contain a $project stage"
+
+    projected_fields = project_stage["$project"].keys
+    # title should be projected; artist (the included pointer) should also be
+    # projected so the $lookup stage has the pointer field to expand.
+    assert_includes projected_fields, "title"
+    assert(
+      projected_fields.any? { |f| f == "artist" || f == "_p_artist" },
+      "expected $project to include 'artist' (got: #{projected_fields.inspect})",
+    )
+  end
+
+  def test_direct_mongodb_pipeline_chained_include_merges_top_level
+    @query.keys(:title).includes("artist.manager")
+    pipeline = @query.send(:build_direct_mongodb_pipeline)
+
+    project_stage = pipeline.find { |stage| stage.key?("$project") }
+    refute_nil project_stage
+
+    projected_fields = project_stage["$project"].keys
+    assert(
+      projected_fields.any? { |f| f == "artist" || f == "_p_artist" },
+      "expected $project to include top-level 'artist' from chained include (got: #{projected_fields.inspect})",
+    )
+  end
+
+  def test_direct_mongodb_pipeline_no_project_without_keys
+    # When no keys are set, no $project stage is added regardless of includes.
+    @query.includes(:artist)
+    pipeline = @query.send(:build_direct_mongodb_pipeline)
+
+    project_stages = pipeline.select { |stage| stage.key?("$project") }
+    assert_empty project_stages
+  end
+
   def test_group_by_creates_correct_object
     group_by = @query.group_by(:category)
 

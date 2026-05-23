@@ -43,7 +43,8 @@ module Parse
     #  the name of the property key to use when sending notifications for _will_change! and _fetch!
     #  @return [String]
 
-    attr_writer :collection
+    # The writer for :collection is defined explicitly below with dirty-tracking
+    # notification; do not declare attr_writer :collection here.
     attr_accessor :loaded, :parse_class
     attr_reader :delegate, :key
 

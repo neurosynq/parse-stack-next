@@ -52,7 +52,7 @@ opt_parser = OptionParser.new do |o|
     exit 1
   end
   o.on('-c','--config CONFIG_JSON', "Load config from a parse-dashboard.json compatible file.") do |filepath|
-    unless File.exists?(filepath)
+    unless File.exist?(filepath)
       $stderr.puts "File #{filepath} does not exist."
       exit 1
     end

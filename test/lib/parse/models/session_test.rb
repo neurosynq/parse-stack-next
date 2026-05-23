@@ -25,4 +25,12 @@ class TestSession < Minitest::Test
     assert Parse::Session.method_defined?(:user)
     assert Parse::Session.method_defined?(:installation)
   end
+
+  def test_agent_hidden_by_default
+    # _Session holds session tokens; exposing it to LLM tools risks leaking
+    # credentials and lets a confused agent enumerate active sessions. Marked
+    # agent_hidden in lib/parse/agent.rb after the MetadataDSL is mixed in.
+    assert Parse::Session.respond_to?(:agent_hidden?), "Parse::Session should expose agent_hidden? predicate"
+    assert Parse::Session.agent_hidden?, "Parse::Session should be agent_hidden by default"
+  end
 end

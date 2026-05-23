@@ -1,6 +1,24 @@
 // Atlas Local initialization script for Atlas Search integration tests
 // This script runs after the Atlas Local container is ready
 // It seeds test data and creates the Atlas Search index
+//
+// TEST-FIXTURE BANNER (ATLAS-9):
+//   The seed data below uses `_rperm: ["U1"]` to exercise the SDK's
+//   ACL injection layer (see `Parse::ACLScope` and the ACL `$match`
+//   stage Parse::AtlasSearch.search builds). "U1" is a literal Parse
+//   objectId string chosen for test convenience — it is NOT a
+//   pattern any production deployment should use.
+//
+//   In Parse Server, `_rperm` entries are either the special public
+//   token "*", a role token like "role:Admin", or a real Parse User
+//   objectId (24-char Mongo-style id). The seed rows here ship with
+//   "U1" because the SDK unit/integration tests stub a Session that
+//   reports `user_id == "U1"`, and the test assertions are easier
+//   to read when the perm string matches the test fixture's user_id.
+//
+//   Do NOT copy this fixture pattern into production seeds, schema
+//   migrations, or examples — a real `_rperm` entry must be a real
+//   Parse User objectId. Treat this file as test-only.
 
 print("=== Atlas Search Test Setup ===");
 print("Database: " + db.getName());
@@ -83,11 +101,50 @@ const songs = [
     plays: 12000000,
     _created_at: new Date(),
     _updated_at: new Date()
+  },
+  // Songs 9-11 exercise the ACL injection path of the Atlas Search
+  // integration tests. They omit _rperm (public — matched by the
+  // $exists: false branch of the ACL predicate), include a role-
+  // restricted _rperm, and include an owner-restricted _rperm.
+  // The Atlas Search ACL integration test asserts which sessions
+  // see which subset of these rows.
+  {
+    _id: "song9",
+    title: "Restricted Anthem",
+    artist: "Member Band",
+    genre: "Rock",
+    plays: 1500000,
+    _rperm: ["role:Member"],
+    _wperm: ["role:Admin"],
+    _created_at: new Date(),
+    _updated_at: new Date()
+  },
+  {
+    _id: "song10",
+    title: "Owner Only Ballad",
+    artist: "U1 Personal",
+    genre: "Acoustic",
+    plays: 100,
+    _rperm: ["U1"],
+    _wperm: ["U1"],
+    _created_at: new Date(),
+    _updated_at: new Date()
+  },
+  {
+    _id: "song11",
+    title: "Master Key Vault Track",
+    artist: "Locked Down",
+    genre: "Vault",
+    plays: 0,
+    _rperm: [],
+    _wperm: [],
+    _created_at: new Date(),
+    _updated_at: new Date()
   }
 ];
 
 db.Song.insertMany(songs);
-print("Inserted " + db.Song.countDocuments() + " songs");
+print("Inserted " + db.Song.countDocuments() + " songs (8 public, 1 role-restricted, 1 owner-restricted, 1 master-only)");
 
 // Create Atlas Search index
 print("\n3. Creating Atlas Search index...");

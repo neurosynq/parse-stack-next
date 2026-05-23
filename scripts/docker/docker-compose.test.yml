@@ -2,13 +2,16 @@ version: '3.8'
 
 services:
   mongo:
-    image: mongo:5.0
+    image: mongo:8
     container_name: parse-stack-test-mongo
+    # Bind to loopback so the test database isn't reachable from the LAN
+    # when a developer runs `docker-compose up`. Override with
+    # `MONGO_BIND=0.0.0.0` if you really want it exposed.
     ports:
-      - "27019:27017"
+      - "${MONGO_BIND:-127.0.0.1}:27019:27017"
     environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: password
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-password}
       MONGO_INITDB_DATABASE: admin
     volumes:
       - mongo-data:/data/db
@@ -19,14 +22,45 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.parse
     container_name: parse-stack-test-server
+    # Bind to loopback by default — Parse Server with the test master key
+    # has no business being reachable on a developer's LAN.
     ports:
-      - "2337:1337"
+      - "${PARSE_BIND:-127.0.0.1}:2337:1337"
+    # `host.docker.internal` is needed so Parse Server can POST to the
+    # in-process WEBrick that backs webhook integration tests. Docker
+    # Desktop on Mac/Windows resolves this natively; on Linux we map it
+    # to host-gateway. Without this, end-to-end webhook tests are skipped.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       mongo:
         condition: service_started
     volumes:
       - ../../test/cloud:/parse-server/cloud
       - ../../config:/parse-server/config
+      - ../start-parse.sh:/start-parse.sh:ro
+    environment:
+      # Application id / master key / database URI are provided to the
+      # container so `start-parse.sh` doesn't have to invent fallbacks.
+      # `start-parse.sh` will abort if any of these is unset, so any
+      # name drift here surfaces immediately rather than booting Parse
+      # Server with whatever placeholder default the SDK README documents.
+      PARSE_SERVER_APPLICATION_ID: ${PARSE_APP_ID:-myAppId}
+      PARSE_SERVER_MASTER_KEY:     ${PARSE_MASTER_KEY:-myMasterKey}
+      PARSE_SERVER_REST_API_KEY:   ${PARSE_API_KEY:-test-rest-key}
+      PARSE_SERVER_DATABASE_URI:   mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:-password}@mongo:27017/parse?authSource=admin
+      # Accept client-supplied objectId on create. Required by the
+      # `parse_reference precompute: true` DSL. The SDK only forwards
+      # client objectIds under master-key authority; for non-master
+      # enforcement across other SDKs, see the Cloud Code hook documented
+      # in lib/parse/model/core/parse_reference.rb.
+      PARSE_SERVER_ALLOW_CUSTOM_OBJECT_ID: "true"
+      # Tests connect from the docker bridge gateway (typically
+      # 172.16.0.0/12 or 192.168.x.x), not loopback. Widen the master-key
+      # allowlist accordingly. DO NOT mirror this into a deployed
+      # environment — production should keep the allowlist tight to the
+      # subnets that actually host the Ruby app.
+      PARSE_SERVER_MASTER_KEY_IPS: "127.0.0.1/32,::1/128,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
     # Remove health check for now since it's causing startup delays
     # healthcheck:
     #   test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:1337/parse/health"]
@@ -36,26 +70,31 @@ services:
     #   start_period: 30s
 
   parse-dashboard:
-    image: parseplatform/parse-dashboard:7.3.0-alpha.44
+    image: parseplatform/parse-dashboard:9
     container_name: parse-stack-test-dashboard
+    # Loopback-only by default. This compose is for `rake test:integration`
+    # and local debugging; do not expose to the network.
     ports:
-      - "4040:4040"
+      - "${DASHBOARD_BIND:-127.0.0.1}:4040:4040"
     environment:
+      # `allowInsecureHTTP` and `useEncryptedPasswords: false` are kept
+      # because this stack runs over plain HTTP on loopback. Do NOT copy
+      # these settings to a deployed environment.
       PARSE_DASHBOARD_ALLOW_INSECURE_HTTP: "1"
-      PARSE_SERVER_MASTER_KEY: myMasterKey
-      PARSE_SERVER_APPLICATION_ID: myAppId
+      PARSE_SERVER_MASTER_KEY: ${PARSE_MASTER_KEY:-myMasterKey}
+      PARSE_SERVER_APPLICATION_ID: ${PARSE_APP_ID:-myAppId}
       PARSE_SERVER_URL: http://localhost:2337/parse
       PARSE_DASHBOARD_CONFIG: |
         {
           "apps": [{
             "serverURL": "http://localhost:2337/parse",
-            "appId": "myAppId",
-            "masterKey": "myMasterKey",
+            "appId": "${PARSE_APP_ID:-myAppId}",
+            "masterKey": "${PARSE_MASTER_KEY:-myMasterKey}",
             "appName": "ParseStackTest"
           }],
           "users": [{
-            "user": "admin",
-            "pass": "admin"
+            "user": "${DASHBOARD_USER:-admin}",
+            "pass": "${DASHBOARD_PASS:-admin}"
           }],
           "useEncryptedPasswords": false,
           "allowInsecureHTTP": true

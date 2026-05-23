@@ -32,7 +32,7 @@ class ACLConstraintsIntegrationTest < Minitest::Test
   def create_test_role(name)
     # Use first_or_create! with test-specific names to avoid cross-test conflicts
     test_specific_name = "#{name}_#{self.class.name}_#{SecureRandom.hex(3)}"
-    role = Parse::Role.first_or_create!(name: test_specific_name)
+    role = Parse::Role.first_or_create!({ name: test_specific_name })
     assert role.persisted?, "Should have role #{test_specific_name}"
     @test_roles << role unless @test_roles.include?(role)
     role
@@ -813,12 +813,13 @@ class ACLConstraintsIntegrationTest < Minitest::Test
         moderator_role = create_test_role("Moderator")
         admin_role = create_test_role("Admin")
 
-        # Set up hierarchy: Admin has Moderator as child, Moderator has Editor as child
-        moderator_role.add_child_role(editor_role)
-        assert moderator_role.save, "Should save moderator role with child"
-
-        admin_role.add_child_role(moderator_role)
-        assert admin_role.save, "Should save admin role with child"
+        # Set up hierarchy: Admin inherits Moderator, Moderator inherits Editor.
+        # `inherits_capabilities_from!` (bang) performs the mutation AND saves
+        # the source role for you, so the caller doesn't have to track which
+        # underlying object got mutated. Returns self so the caller's variable
+        # stays meaningful.
+        moderator_role.inherits_capabilities_from!(editor_role)
+        admin_role.inherits_capabilities_from!(moderator_role)
 
         sleep 0.2  # Wait for role relations to propagate
 
@@ -902,9 +903,8 @@ class ACLConstraintsIntegrationTest < Minitest::Test
         admin_role.add_user(user)
         assert admin_role.save, "Should save admin role with user"
 
-        # Set up hierarchy: Admin has Editor as child
-        admin_role.add_child_role(editor_role)
-        assert admin_role.save, "Should save admin role with child role"
+        # Set up hierarchy: Admin inherits Editor's capabilities.
+        admin_role.inherits_capabilities_from!(editor_role)
 
         sleep 0.2
 
@@ -998,8 +998,9 @@ class ACLConstraintsIntegrationTest < Minitest::Test
         editor_role = create_test_role("Editor")
         admin_role = create_test_role("Admin")
 
-        admin_role.add_child_role(editor_role)
-        assert admin_role.save, "Should save admin role with child"
+        # Admin inherits Editor's capabilities — bang variant persists in
+        # one call (see role.rb docs for the inheritance-direction semantics).
+        admin_role.inherits_capabilities_from!(editor_role)
 
         sleep 0.2
 

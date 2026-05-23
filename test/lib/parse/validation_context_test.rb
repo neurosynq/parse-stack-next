@@ -83,6 +83,8 @@ class ValidationContextTest < Minitest::Test
     )
     # Simulate an existing object by setting an id
     model.instance_variable_set(:@id, "existingId123")
+    # new? also checks @created_at -- stamp it to fully simulate a persisted object
+    model.instance_variable_set(:@created_at, Time.now)
     model.disable_autofetch!
 
     # Simulate an existing object validation (what save does)
@@ -121,6 +123,8 @@ class ValidationContextTest < Minitest::Test
     # But we need to set update_only_field which IS required on :update
     model.errors.clear
     model.instance_variable_set(:@id, "existingId123")
+    # new? also checks @created_at -- stamp it to fully simulate a persisted object
+    model.instance_variable_set(:@created_at, Time.now)
     model.disable_autofetch!
     model.update_only_field = "value"
 
@@ -149,6 +153,8 @@ class ValidationContextTest < Minitest::Test
     # Existing object without update_only_field should fail
     model.errors.clear
     model.instance_variable_set(:@id, "existingId123")
+    # new? also checks @created_at -- stamp it to fully simulate a persisted object
+    model.instance_variable_set(:@created_at, Time.now)
     model.disable_autofetch!
 
     assert !model.valid?(:update),
@@ -206,6 +212,8 @@ class ValidationContextTest < Minitest::Test
 
     model = DefaultsTestModel.new(name: "Test Item")
     model.instance_variable_set(:@id, "existingId123")
+    # new? also checks @created_at -- stamp it to fully simulate a persisted object
+    model.instance_variable_set(:@created_at, Time.now)
     model.disable_autofetch!
 
     # For existing objects, before_validation on: :create should NOT run
@@ -256,6 +264,8 @@ class ValidationContextTest < Minitest::Test
       always_required_field: "value",
     )
     model.instance_variable_set(:@id, "existingId123")
+    # new? also checks @created_at -- stamp it to fully simulate a persisted object
+    model.instance_variable_set(:@created_at, Time.now)
     model.disable_autofetch!
 
     # Determine context that save() would use

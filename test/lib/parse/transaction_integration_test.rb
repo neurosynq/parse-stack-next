@@ -149,10 +149,14 @@ class TransactionIntegrationTest < Minitest::Test
             # Then modify it - this should be rolled back if transaction fails
             product.price = 35.00
 
-            # Create an object that will cause a failure by trying to save with invalid objectId
+            # Create an object that will cause a failure by trying to save with a
+            # syntactically-valid but non-existent objectId. The SDK now rejects
+            # objectIds that don't match /\A[A-Za-z0-9]{1,40}\z/ before the
+            # request leaves the client, so the previous `INVALID_ID_THAT_WILL_FAIL`
+            # never reached the server. A well-formed but unknown id forces the
+            # server-side error path the test is meant to exercise.
             invalid_product = TransactionProduct.new(name: "Invalid Product", price: 40.00, sku: "INVALID")
-            # Set an invalid objectId to force a server error
-            invalid_product.instance_variable_set(:@id, "INVALID_ID_THAT_WILL_FAIL")
+            invalid_product.instance_variable_set(:@id, "DOESNOTEXST")
             batch.add(invalid_product)
           end
         rescue Parse::Error => e

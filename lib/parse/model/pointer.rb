@@ -68,10 +68,43 @@ module Parse
   class Pointer < Model
     # The default attributes in a Parse Pointer hash.
     ATTRIBUTES = { __type: :string, className: :string, objectId: :string }.freeze
+    # Permitted character set + length for a Parse objectId. Parse Server
+    # itself generates 10-char `[A-Za-z0-9]` ids; with
+    # `allowCustomObjectId: true` apps can pass arbitrary identifiers, so
+    # we accept the wider URL-safe set `[A-Za-z0-9_.-]` and cap length
+    # at 64. Anything OUTSIDE this set (`/`, `\`, CR/LF, `?`, `&`, `#`,
+    # `%`, quotes, angle brackets, semicolons, whitespace) is rejected
+    # — those are the bytes that turn a `Pointer.id=` write into a
+    # path-traversal, header-injection, or batch-op-path-poisoning
+    # vector when interpolated into REST URLs or batch op `path` fields.
+    OBJECT_ID_FORMAT = /\A[A-Za-z0-9_.\-]{1,64}\z/.freeze
+
     # @return [String] the name of the Parse class for this pointer.
     attr_accessor :parse_class
     # @return [String] the objectId field
-    attr_accessor :id
+    attr_reader :id
+
+    # Assign the Parse objectId. Empty / nil values are permitted (Pointer
+    # in unbound state); non-empty values must match {OBJECT_ID_FORMAT}.
+    # @raise [ArgumentError] when +value+ is a non-empty string that does
+    #   not match the format.
+    def id=(value)
+      if value.nil?
+        @id = nil
+        return
+      end
+      str = value.to_s
+      if str.empty?
+        @id = str
+        return
+      end
+      unless OBJECT_ID_FORMAT.match?(str)
+        raise ArgumentError,
+          "Invalid Parse objectId #{str.inspect}: must match #{OBJECT_ID_FORMAT.source}. " \
+          "Refusing to assign a value that could be a path-traversal or injection payload."
+      end
+      @id = str
+    end
 
     # @return [Model::TYPE_POINTER]
     def __type; Parse::Model::TYPE_POINTER; end
@@ -87,7 +120,7 @@ module Parse
     # @param oid [String] The objectId
     def initialize(table, oid)
       @parse_class = table.to_s
-      @id = oid.to_s
+      self.id = oid
     end
 
     # @return [String] the name of the collection for this Pointer.
@@ -207,8 +240,15 @@ module Parse
 
         obj = klass.build(result, parse_class, fetched_keys: top_level_keys, nested_fetched_keys: nested_keys.presence)
       else
-        # Full fetch - create without partial fetch tracking
-        obj = klass.new(result)
+        # Full fetch - create without partial fetch tracking. Trusted
+        # hydration: +result+ is the server response body, which
+        # legitimately carries +createdAt+/+updatedAt+/+sessionToken+
+        # and other PROTECTED_MASS_ASSIGNMENT_KEYS. The +@_trusted_init+
+        # ivar tells {Parse::Object#initialize} to skip the protected-key
+        # filter — see that method for why we don't use a kwarg.
+        obj = klass.allocate
+        obj.instance_variable_set(:@_trusted_init, true)
+        obj.send(:initialize, result)
       end
 
       obj.clear_changes! if obj.respond_to?(:clear_changes!)

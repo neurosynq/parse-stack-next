@@ -242,4 +242,114 @@ class MFATest < Minitest::Test
     assert error.message.include?("rotp")
     assert error.message.include?("Gemfile")
   end
+
+  def test_forbidden_error
+    error = Parse::MFA::ForbiddenError.new
+    assert_equal "Not authorized to perform this MFA operation", error.message
+  end
+
+  # ==========================================================================
+  # disable_mfa_master_key! authorization gate (NEW-AUTH-8)
+  # ==========================================================================
+
+  def test_disable_mfa_master_key_requires_authorized_by
+    target = Parse::User.new(objectId: "victim")
+    assert_raises(ArgumentError) { target.disable_mfa_master_key! }
+  end
+
+  def test_disable_mfa_master_key_rejects_non_user_authorized_by
+    target = Parse::User.new(objectId: "victim")
+    assert_raises(ArgumentError) do
+      target.disable_mfa_master_key!(authorized_by: "an_admin_id")
+    end
+    assert_raises(ArgumentError) do
+      target.disable_mfa_master_key!(authorized_by: { id: "admin" })
+    end
+  end
+
+  def test_disable_mfa_master_key_rejects_unpersisted_authorized_by
+    target = Parse::User.new(objectId: "victim")
+    operator = Parse::User.new
+    assert_raises(ArgumentError) do
+      target.disable_mfa_master_key!(authorized_by: operator)
+    end
+  end
+
+  def test_disable_mfa_admin_alias_still_requires_authorized_by
+    target = Parse::User.new(objectId: "victim")
+    capture_io do
+      assert_raises(ArgumentError) { target.disable_mfa_admin! }
+    end
+  end
+
+  def test_disable_mfa_admin_alias_emits_deprecation_warning
+    target = Parse::User.new(objectId: "victim")
+    _out, err = capture_io do
+      target.disable_mfa_admin!(authorized_by: "not_a_user") rescue ArgumentError
+    end
+    assert_match(/DEPRECATION/, err)
+    assert_match(/disable_mfa_master_key!/, err)
+  end
+
+  # ==========================================================================
+  # setup_mfa! / setup_sms_mfa! TOCTOU narrowing (NEW-AUTH-3)
+  # ==========================================================================
+  #
+  # Stale in-memory state must not bypass the AlreadyEnabledError guard.
+  # The fix calls #fetch before consulting #mfa_enabled? so a re-setup
+  # attempt sees current server-side authData. This is mitigation, not
+  # elimination — the residual race window is one round-trip wide.
+
+  def test_setup_mfa_calls_fetch_before_enabled_check
+    user = Parse::User.new(objectId: "u1")
+    # In-memory auth_data is empty (no MFA from the SDK's perspective).
+    # The singleton fetch flips the ivar directly to bypass dirty
+    # tracking / autofetch, simulating a server response that says MFA
+    # is already enabled.
+    fetch_called = false
+    user.define_singleton_method(:fetch) do |*_args, **_kw|
+      fetch_called = true
+      instance_variable_set(:@auth_data, { "mfa" => { "status" => "enabled" } })
+      self
+    end
+    assert_raises(Parse::MFA::AlreadyEnabledError) do
+      user.setup_mfa!(secret: "A" * 32, token: "123456")
+    end
+    assert fetch_called, "setup_mfa! must call #fetch before consulting mfa_enabled?"
+  end
+
+  def test_setup_sms_mfa_calls_fetch_before_enabled_check
+    user = Parse::User.new(objectId: "u1")
+    fetch_called = false
+    user.define_singleton_method(:fetch) do |*_args, **_kw|
+      fetch_called = true
+      instance_variable_set(:@auth_data, { "mfa" => { "status" => "enabled" } })
+      self
+    end
+    assert_raises(Parse::MFA::AlreadyEnabledError) do
+      user.setup_sms_mfa!(mobile: "+14155551234")
+    end
+    assert fetch_called, "setup_sms_mfa! must call #fetch before consulting mfa_enabled?"
+  end
+
+  def test_setup_mfa_skips_fetch_when_user_unpersisted
+    # No objectId — nothing to fetch. The guard runs against the
+    # in-memory state (which is empty for a brand-new user), so setup
+    # proceeds to the server call (mocked away by client absence).
+    user = Parse::User.new
+    fetch_called = false
+    user.define_singleton_method(:fetch) do |*_args, **_kw|
+      fetch_called = true
+      self
+    end
+    # We expect this to fail at the client call (no objectId), not at
+    # the AlreadyEnabledError guard. The point of the assertion is just
+    # that #fetch was NOT invoked on an id-less user.
+    begin
+      user.setup_mfa!(secret: "A" * 32, token: "123456")
+    rescue StandardError
+      # Any error past the fetch decision is acceptable for this test.
+    end
+    refute fetch_called, "setup_mfa! must not call #fetch on an unpersisted user"
+  end
 end

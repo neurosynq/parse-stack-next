@@ -19,11 +19,60 @@ module Parse
   # supported in Parse and mapping them between their remote names with their local ruby named attributes.
   module Properties
     # These are the base types supported by Parse.
-    TYPES = [:string, :relation, :integer, :float, :boolean, :date, :array, :file, :geopoint, :bytes, :object, :acl, :timezone, :phone, :email].freeze
+    TYPES = [:string, :relation, :integer, :float, :boolean, :date, :array, :file, :geopoint, :polygon, :bytes, :object, :acl, :timezone, :phone, :email].freeze
     # These are the base mappings of the remote field name types.
     BASE = { objectId: :string, createdAt: :date, updatedAt: :date, ACL: :acl }.freeze
     # The list of properties that are part of all objects
     BASE_KEYS = [:id, :created_at, :updated_at].freeze
+    # Attribute names refused on the mass-assignment path
+    # (`Parse::Object#attributes=` and `apply_attributes!` with
+    # `dirty_track: true`). Internal hydration from server responses uses
+    # `dirty_track: false` and is unaffected, so server-issued
+    # sessionTokens etc. still flow through during decoding.
+    #
+    # The list intentionally covers ONLY server-managed and security-
+    # internal fields. User-facing properties like `acl` and `objectId`
+    # are deliberately omitted because constructor calls like
+    # `Document.new(acl: my_acl)` are legitimate developer code. Rails
+    # applications receiving form input should use StrongParameters
+    # (`params.permit(...)`) to filter attacker-controlled keys before
+    # passing the hash to `Model.new` or `attributes=`.
+    PROTECTED_MASS_ASSIGNMENT_KEYS = %w[
+      sessionToken session_token
+      roles _rperm _wperm
+      _hashed_password _password_history
+      authData _auth_data auth_data
+      className __type
+      createdAt created_at updatedAt updated_at
+    ].freeze
+    # Narrow subset of {PROTECTED_MASS_ASSIGNMENT_KEYS} that closes the
+    # documented authentication / authorization mass-assignment attacks
+    # (NEW-EXT-1) without breaking the legitimate "build a hydrated
+    # object" pattern (`Klass.new("objectId" => id, "createdAt" => ts,
+    # "field" => …)`). Applied by `Parse::Object#initialize` when
+    # `trusted: false` (the default) so caller-supplied hashes — even
+    # those bearing an `objectId` — cannot forge session tokens, ACL
+    # row-permissions, password hashes, OAuth auth_data, or roles.
+    #
+    # Excluded from this narrow set on purpose:
+    # - `createdAt` / `updatedAt`: timestamp integrity, not a security
+    #   boundary. App code commonly rehydrates cached objects via
+    #   `Klass.new(hash)` and expects timestamps to populate.
+    # - `className` / `__type`: routing metadata. `Parse::Object.build`
+    #   has its own className-mismatch guard; the in-memory value here
+    #   is informational only.
+    #
+    # The wider {PROTECTED_MASS_ASSIGNMENT_KEYS} list still applies to
+    # `Parse::Object#attributes=` and explicit
+    # `apply_attributes!(dirty_track: true)` calls, where Rails-form
+    # input is the expected source and timestamp forgery is also
+    # undesirable.
+    PROTECTED_INITIALIZE_KEYS = %w[
+      sessionToken session_token
+      roles _rperm _wperm
+      _hashed_password _password_history
+      authData _auth_data auth_data
+    ].freeze
     # Default hash map of local attribute name to remote column name
     BASE_FIELD_MAP = { id: :objectId, created_at: :createdAt, updated_at: :updatedAt, acl: :ACL }.freeze
     # The delete operation hash.
@@ -67,6 +116,23 @@ module Parse
       # Maps property names (symbols) to their description strings.
       def property_descriptions
         @property_descriptions ||= {}
+      end
+
+      # @return [Hash] per-value descriptions for enum-shaped string
+      # properties (used by Parse::Agent). Maps property names (symbols)
+      # to a `{ "value" => "description" }` hash. Orthogonal to the
+      # existing `enum:` option on `property` — `enum:` validates the
+      # set of allowed values, `_enum:` documents each one for an LLM.
+      #
+      # **Intended for string-typed columns only.** Value keys are
+      # stringified at declaration time and the schema response carries
+      # `{value: "1", ...}` regardless of the underlying column type.
+      # Declaring `_enum:` on an integer/boolean column will surface
+      # string-shaped values to the LLM that won't match the column
+      # in a `where:` filter — userland is responsible for keeping
+      # `_enum:` on string-typed properties.
+      def property_enum_descriptions
+        @property_enum_descriptions ||= {}
       end
 
       # Set the property fields for this class.
@@ -125,6 +191,7 @@ module Parse
         data_type = :boolean if data_type == :bool
         data_type = :timezone if data_type == :time_zone
         data_type = :geopoint if data_type == :geo_point
+        data_type = :polygon if data_type == :geo_polygon
         data_type = :integer if data_type == :int || data_type == :number
         data_type = :phone if data_type == :phone_number || data_type == :mobile || data_type == :e164
         data_type = :email if data_type == :email_address
@@ -138,13 +205,51 @@ module Parse
                  _prefix: nil,
                  _suffix: false,
                  _description: nil,  # Agent metadata: semantic description for LLMs
+                 _enum: nil,         # Agent metadata: per-value enum descriptions ({ value => description })
                  field: key.to_s.camelize(:lower) }.merge(opts)
         #By default, the remote field name is a lower-first-camelcase version of the key
         # it can be overriden by the :field parameter
         parse_field = opts[:field].to_sym
-        # if this is a custom property that is already defined, OR it is a subclass trying to define a core property
-        # then warn and exit.
+        # If this property is already defined (either as a custom property on this class or as a
+        # core property on a Parse::Object subclass), decide whether to silently apply non-structural
+        # updates, raise, or warn-and-drop. Structural changes (different data type or different
+        # remote field name) are almost always bugs — like declaring Installation#badge as :string
+        # when the server stores it as :integer — so they raise when Parse.strict_property_redefinition
+        # is enabled (the default). Non-structural redeclarations (same type, same remote field) are
+        # allowed and may refine metadata such as :default, :_description, and :_enum without warning;
+        # this covers class reopens that re-affirm an existing property after a parse-stack upgrade
+        # adds the same definition upstream, or that bolt a default value onto an inherited field.
         if (self.fields[key].present? && BASE_FIELD_MAP[key].nil?) || (self < Parse::Object && BASE_FIELD_MAP.has_key?(key))
+          existing_type = self.fields[key]
+          existing_parse_field = self.field_map[key]
+          if existing_type == data_type && existing_parse_field == parse_field
+            # Non-structural redeclaration: apply safe metadata-only updates and bail out before
+            # the rest of the method redefines getters/setters/validations/scopes.
+            if opts.key?(:default)
+              default_value = opts[:default]
+              defaults_list.push(key) unless defaults_list.include?(key)
+              define_method("#{key}_default") do
+                default_value.is_a?(Proc) ? default_value.call(self) : default_value
+              end
+            end
+            if opts[:_description].present?
+              self.property_descriptions[key] = opts[:_description].to_s.freeze
+            end
+            if opts[:_enum].is_a?(Hash) && opts[:_enum].any?
+              normalized = opts[:_enum].each_with_object({}) do |(value, desc), h|
+                h[value.to_s] = desc.to_s.freeze
+              end
+              self.property_enum_descriptions[key] = normalized.freeze
+            end
+            return true
+          end
+          if Parse.strict_property_redefinition
+            raise ArgumentError,
+                  "Property #{self}##{key} is already defined as :#{existing_type} " \
+                  "(remote field :#{existing_parse_field}); refusing to redeclare as :#{data_type} " \
+                  "(remote field :#{parse_field}). Set Parse.strict_property_redefinition = false " \
+                  "to fall back to warn-and-ignore behavior."
+          end
           warn "Property #{self}##{key} already defined with data type :#{data_type}. Will be ignored."
           return false
         end
@@ -169,6 +274,18 @@ module Parse
         # Store the property description for agent metadata if provided
         if opts[:_description].present?
           self.property_descriptions[key] = opts[:_description].to_s.freeze
+        end
+
+        # Store per-value enum descriptions for agent metadata if provided.
+        # Accepts a Hash mapping each allowed value (Symbol or String) to a
+        # description string. Stored with stringified value keys to match the
+        # wire-format shape an LLM will see in query constraints. Distinct
+        # from the existing `enum:` option, which is a validation construct.
+        if opts[:_enum].is_a?(Hash) && opts[:_enum].any?
+          normalized = opts[:_enum].each_with_object({}) do |(value, desc), h|
+            h[value.to_s] = desc.to_s.freeze
+          end
+          self.property_enum_descriptions[key] = normalized.freeze
         end
 
         # if the field is marked as required, then add validations
@@ -485,13 +602,41 @@ module Parse
     # if dirty_track: is set to false (default), attributes are set without dirty tracking.
     # Allos mass assignment of properties with a provided hash.
     # @param hash [Hash] the hash matching the property field names.
-    # @param dirty_track [Boolean] whether dirty tracking be enabled
+    # @param dirty_track [Boolean] whether dirty tracking be enabled. When true,
+    #   permission-sensitive keys ({Parse::Properties::PROTECTED_MASS_ASSIGNMENT_KEYS})
+    #   are skipped by default so attacker-controlled params cannot overwrite
+    #   acl/roles/sessionToken/etc. Set explicitly via the typed property
+    #   writers when the caller is trusted.
+    # @param filter_protected [Boolean, nil] whether to filter out
+    #   {Parse::Properties::PROTECTED_MASS_ASSIGNMENT_KEYS}. Defaults to
+    #   +dirty_track+ for backwards-compat (the historical coupling). Callers
+    #   can pass +true+ explicitly to filter even on the trusted hydration
+    #   path (used by {Parse::Object#initialize} when constructed with
+    #   +trusted: false+ but an +objectId+ is in the hash). +false+ explicitly
+    #   preserves the legacy "server response" semantics.
+    # @param protected_set [Array<String>, nil] override which key list to
+    #   filter when +filter_protected+ is true. Defaults to the wider
+    #   {Parse::Properties::PROTECTED_MASS_ASSIGNMENT_KEYS}.
+    #   {Parse::Object#initialize} passes
+    #   {Parse::Properties::PROTECTED_INITIALIZE_KEYS} here to allow
+    #   legitimate hydration patterns (`Klass.new("objectId" => …,
+    #   "createdAt" => …)`) while still refusing security-critical
+    #   forgeries (`sessionToken`, `_rperm`, `authData`, …).
     # @return [Hash]
-    def apply_attributes!(hash, dirty_track: false)
+    def apply_attributes!(hash, dirty_track: false, filter_protected: nil, protected_set: nil)
       return unless hash.is_a?(Hash)
 
-      @id ||= hash[Parse::Model::ID] || hash[Parse::Model::OBJECT_ID] || hash[:objectId]
+      filter_protected = dirty_track if filter_protected.nil?
+      protected_set ||= Parse::Properties::PROTECTED_MASS_ASSIGNMENT_KEYS
+      protected_keys = filter_protected ? protected_set : nil
+      # Internal hydration path lifts objectId out of the response hash. The
+      # mass-assignment path must not, or attacker-controlled params can
+      # overwrite the primary key of an in-memory object.
+      unless dirty_track
+        @id ||= hash[Parse::Model::ID] || hash[Parse::Model::OBJECT_ID] || hash[:objectId]
+      end
       hash.each do |key, value|
+        next if protected_keys && protected_keys.include?(key.to_s)
         method = "#{key}_set_attribute!".freeze
         send(method, value, dirty_track) if respond_to?(method)
       end
@@ -595,6 +740,8 @@ module Parse
         val = Parse::CollectionProxy.new val, delegate: self, key: key
       when :geopoint
         val = Parse::GeoPoint.new(val) unless val.blank?
+      when :polygon
+        val = Parse::Polygon.new(val) unless val.blank?
       when :file
         if val.is_a?(Hash) && val["__type"] == "File"
           val = Parse::File.new(val)

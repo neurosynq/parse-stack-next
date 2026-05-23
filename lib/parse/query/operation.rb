@@ -90,6 +90,11 @@ module Parse
     # Register a new symbol operator method mapped to a specific {Parse::Constraint}.
     def self.register(op, klass)
       Operation.operators[op.to_sym] = klass
+      # Some operator names (e.g. :size) collide with existing Symbol methods.
+      # The override is intentional - the query DSL repurposes these for
+      # constraint building. Remove the prior definition so define_method
+      # does not emit "method redefined" under ruby -W.
+      Symbol.send(:remove_method, op) if Symbol.method_defined?(op, false)
       Symbol.send :define_method, op do |value = nil|
         operation = Operation.new self, op
         value.nil? ? operation : operation.constraint(value)

@@ -91,9 +91,13 @@ class WebhookCallbacksTest < Minitest::Test
       test_object
     end
 
-    # Test Ruby-initiated before_save (should skip prepare_save!)
+    # Test Ruby-initiated before_save (should skip prepare_save!).
+    # A "trusted" Ruby-initiated request requires both the _RB_ header AND
+    # master:true. The header alone is client-controllable; honoring it
+    # without master would let a non-master client spoof the bypass.
     ruby_payload_data = {
       "triggerName" => "beforeSave",
+      "master" => true,
       "object" => { "className" => "TestObject", "objectId" => "abc123" },
       "headers" => { "x-parse-request-id" => "_RB_test_request_id" },
     }
@@ -146,6 +150,7 @@ class WebhookCallbacksTest < Minitest::Test
 
     ruby_new_payload_data = {
       "triggerName" => "afterSave",
+      "master" => true, # required alongside _RB_ for trusted Ruby-initiated
       "object" => { "className" => "TestObject", "objectId" => "new123" },
       "original" => nil,  # indicates new object
       "headers" => { "x-parse-request-id" => "_RB_new_object_test" },
@@ -196,6 +201,7 @@ class WebhookCallbacksTest < Minitest::Test
 
     ruby_existing_payload_data = {
       "triggerName" => "afterSave",
+      "master" => true, # required alongside _RB_ for trusted Ruby-initiated
       "object" => { "className" => "TestObject", "objectId" => "existing123" },
       "original" => { "className" => "TestObject", "objectId" => "existing123", "name" => "old" },
       "headers" => { "x-parse-request-id" => "_RB_existing_object_test" },
@@ -208,9 +214,15 @@ class WebhookCallbacksTest < Minitest::Test
     result = Parse::Webhooks.call_route(:after_save, "TestObject", ruby_existing_payload)
 
     refute after_create_called, "after_create should not be called for existing objects"
-    assert after_save_called, "after_save should be called for Ruby-initiated existing objects"
+    # Previously this asserted after_save WAS called, which was a bug: a
+    # ruby-initiated update would also fire after_save callbacks in the
+    # webhook on top of the local `run_callbacks :save` -- effectively
+    # sending two emails for an `after_save :send_email`. The framework
+    # now skips run_after_save_callbacks for all trusted-ruby-initiated
+    # saves regardless of is_new.
+    refute after_save_called, "after_save must NOT be called for Ruby-initiated existing objects (Ruby will fire it locally)"
     assert_equal true, result, "Should return true"
-    puts "✅ Ruby-initiated existing object calls after_save only"
+    puts "✅ Ruby-initiated existing object skips both webhook callbacks"
 
     # Reset tracking
     after_create_called = false
@@ -257,6 +269,7 @@ class WebhookCallbacksTest < Minitest::Test
     # Simulate Parse Server forwarding this request ID to webhook
     webhook_payload_data = {
       "triggerName" => "afterSave",
+      "master" => true, # trusted Ruby-initiated requires master alongside _RB_
       "object" => { "className" => "TestObject", "objectId" => "webhook123", "name" => "test object" },
       "original" => nil,
       "headers" => { "x-parse-request-id" => request_id },

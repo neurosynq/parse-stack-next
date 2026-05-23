@@ -120,7 +120,13 @@ module Parse
         # These items are added as attributes with the special data type of :pointer
         def belongs_to(key, opts = {})
           opts = { as: key, field: key.to_s.camelize(:lower), required: false }.merge(opts)
-          klassName = opts[:as].to_parse_class
+          # `opts[:class_name]` is the explicit target Parse class name; it takes
+          # precedence over the legacy `as: :symbol` shorthand (where the
+          # symbol is converted to a class name via `.to_parse_class`). The
+          # references map needs the real target class so `RelationGraph` and
+          # `Parse::Agent::Tools.assert_include_paths_accessible!` can resolve
+          # pointer paths to their model classes.
+          klassName = opts[:class_name] || opts[:as].to_parse_class
           parse_field = opts[:field].to_sym
 
           ivar = :"@#{key}"
@@ -178,7 +184,15 @@ module Parse
             if val.is_a?(Hash) && (val["__type"] == "Pointer" || val["__type"] == "Object")
               # Get nested fetched keys for this field if available
               nested_keys = nested_keys_for(association_key)
-              val = Parse::Object.build val, (val[Parse::Model::KEY_CLASS_NAME] || klassName), fetched_keys: nested_keys
+              # Always trust the declared klassName — never the className the
+              # server (or attacker-controlled mass assignment) supplied. This
+              # prevents type confusion where a pointer to a different class
+              # (e.g. _Session or _Role) gets shoved into a typed slot.
+              incoming_class = val[Parse::Model::KEY_CLASS_NAME]
+              if incoming_class && incoming_class != klassName
+                warn "[#{self.class}] belongs_to :#{association_key} expected className=#{klassName.inspect}, ignoring incoming className=#{incoming_class.inspect}"
+              end
+              val = Parse::Object.build val, klassName, fetched_keys: nested_keys
               instance_variable_set ivar, val
             end
 
@@ -213,7 +227,12 @@ module Parse
             elsif val.is_a?(Hash) && (val["__type"] == "Pointer" || val["__type"] == "Object")
               # Get nested fetched keys for this field if available
               nested_keys = nested_keys_for(key)
-              val = Parse::Object.build val, (val[Parse::Model::KEY_CLASS_NAME] || klassName), fetched_keys: nested_keys
+              # Always trust declared klassName over incoming hash className.
+              incoming_class = val[Parse::Model::KEY_CLASS_NAME]
+              if incoming_class && incoming_class != klassName
+                warn "[#{self.class}] belongs_to :#{key} expected className=#{klassName.inspect}, ignoring incoming className=#{incoming_class.inspect}"
+              end
+              val = Parse::Object.build val, klassName, fetched_keys: nested_keys
             end
 
             if track == true

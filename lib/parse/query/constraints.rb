@@ -1749,20 +1749,62 @@ module Parse
       # @example
       #  q.where :field.near => geopoint
       #  q.where :field.near => geopoint.max_miles(distance)
+      #  q.where :field.near => geopoint.max_kilometers(distance)
       # @return [NearSphereQueryConstraint]
       constraint_keyword :$nearSphere
       register :near
 
+      # Conversion factors mirror WithinSphereQueryConstraint so the cap
+      # below is unit-agnostic.
+      KM_PER_RADIAN = 6371.0
+      MILES_PER_RADIAN = 3958.8
+      # Whole-sphere cap (π radians ≈ 6371π km ≈ 3958.8π miles). A
+      # `$nearSphere` with a larger `$maxDistanceIn*` defeats the
+      # `2dsphere` early-termination optimization and degenerates to a
+      # full geo scan.
+      MAX_RADIANS = Math::PI
+
       # @return [Hash] the compiled constraint.
       def build
         point = formatted_value
-        max_miles = nil
+        max_distance = nil
+        unit = :miles
         if point.is_a?(Array) && point.count > 1
-          max_miles = point[2] if point.count == 3
+          if point.count >= 3
+            max_distance = point[2]
+            # max_kilometers / max_radians tag the array with their unit
+            # symbol in the 4th slot so we can dispatch to the right
+            # Parse operator key. max_miles leaves slot 3 nil and the
+            # default :miles applies.
+            unit = point[3] if [:km, :radians].include?(point[3])
+          end
           point = { __type: "GeoPoint", latitude: point[0], longitude: point[1] }
         end
-        if max_miles.present? && max_miles > 0
-          return { @operation.operand => { key => point, :$maxDistanceInMiles => max_miles.to_f } }
+        if max_distance.present? && max_distance > 0
+          # Cap radius at whole-sphere coverage (π radians) regardless
+          # of the chosen unit. Without this cap, an attacker-controlled
+          # `max_*` (e.g. user-supplied km) can submit a huge value and
+          # force a full-collection scan.
+          radians_for_check =
+            case unit
+            when :km then max_distance.to_f / KM_PER_RADIAN
+            when :radians then max_distance.to_f
+            else max_distance.to_f / MILES_PER_RADIAN
+            end
+          if radians_for_check > MAX_RADIANS
+            raise ArgumentError, "[Parse::Query] `near` max distance #{max_distance} #{unit} " \
+                                 "(#{radians_for_check} radians) exceeds whole-sphere coverage " \
+                                 "(π radians). A radius that large defeats the 2dsphere index " \
+                                 "and degenerates $nearSphere into a full collection scan."
+          end
+
+          distance_key =
+            case unit
+            when :km then :$maxDistanceInKilometers
+            when :radians then :$maxDistance
+            else :$maxDistanceInMiles
+            end
+          return { @operation.operand => { key => point, distance_key => max_distance.to_f } }
         end
         { @operation.operand => { key => point } }
       end
@@ -1824,10 +1866,17 @@ module Parse
     class WithinPolygonQueryConstraint < Constraint
       # @!method within_polygon
       # A registered method on a symbol to create the constraint. Maps to Parse
-      # operator "$geoWithin" with "$polygon" subconstraint. Takes an array of {Parse::GeoPoint} objects.
+      # operator "$geoWithin" with "$polygon" subconstraint. Takes either an
+      # array of {Parse::GeoPoint} objects (legacy form) or a {Parse::Polygon}
+      # instance (preferred when the polygon is already modeled).
       # @example
       #  # As many points as you want
       #  q.where :field.within_polygon => [geopoint1, geopoint2, geopoint3]
+      #
+      #  # Or pass an existing Parse::Polygon directly. Parse Server accepts
+      #  # the same `{__type: "Polygon", coordinates: [...]}` object form for
+      #  # the `$polygon` argument as the legacy GeoPoint-array form.
+      #  q.where :field.within_polygon => polygon
       # @return [WithinPolygonQueryConstraint]
       # @version 1.7.0 (requires Server v2.4.2 or later)
       constraint_keyword :$geoWithin
@@ -1835,16 +1884,251 @@ module Parse
 
       # @return [Hash] the compiled constraint.
       def build
-        geopoint_values = formatted_value
-        unless geopoint_values.is_a?(Array) &&
-               geopoint_values.all? { |point| point.is_a?(Parse::GeoPoint) } &&
-               geopoint_values.count > 2
-          raise ArgumentError, "[Parse::Query] Invalid query value parameter passed to" \
-                " `within_polygon` constraint: Value must be an array with 3" \
-                " or more `Parse::GeoPoint` objects"
+        value = formatted_value
+        if value.is_a?(Parse::Polygon)
+          # Parse Server's REST `$polygon` operator expects the legacy
+          # array-of-GeoPoint wire shape (each element a
+          # `{__type: "GeoPoint", latitude:, longitude:}` hash). The
+          # `{__type: "Polygon", coordinates: ...}` wrapper that
+          # `Parse::Polygon#as_json` produces is the storage / property
+          # shape, NOT a valid `$polygon` operand. If it reaches Parse
+          # Server it is rejected with a 500; if it ever reached raw
+          # MongoDB, `$polygon` requires `[lng, lat]` order while
+          # `Parse::Polygon.coordinates` stores `[lat, lng]` — silent
+          # axis swap. Convert here.
+          geopoints = value.coordinates.map do |(lat, lng)|
+            { __type: "GeoPoint", latitude: lat, longitude: lng }
+          end
+          return { @operation.operand => { :$geoWithin => { :$polygon => geopoints } } }
         end
 
-        { @operation.operand => { :$geoWithin => { :$polygon => geopoint_values } } }
+        unless value.is_a?(Array) &&
+               value.all? { |point| point.is_a?(Parse::GeoPoint) } &&
+               value.count > 2
+          raise ArgumentError, "[Parse::Query] Invalid query value parameter passed to" \
+                " `within_polygon` constraint: Value must be a Parse::Polygon, or an array" \
+                " with 3 or more `Parse::GeoPoint` objects."
+        end
+
+        { @operation.operand => { :$geoWithin => { :$polygon => value } } }
+      end
+    end
+
+    # Equivalent to the `$geoWithin` Parse query operation with `$centerSphere`
+    # subconstraint. Filters a {Parse::GeoPoint} column by membership in a
+    # circular region defined by a center point and a radius. Unlike
+    # `:field.near => geopoint.max_*(N)`, this constraint does NOT order
+    # results by distance, which makes it cheap and composable inside `$or`
+    # branches and aggregation pipelines.
+    #
+    # The radius is in **radians** at the wire level. For convenience the DSL
+    # accepts an Array tuple `[geopoint, distance, unit]` where `unit` may be
+    # `:radians` (default), `:km` / `:kilometers`, or `:miles`; the SDK
+    # converts to radians using mean-Earth-radius 6371 km / 3958.8 mi.
+    #
+    #  q.where :location.within_sphere => [center, 5, :km]
+    #  q.where :location.within_sphere => [center, 10, :miles]
+    #  q.where :location.within_sphere => [center, 0.001]            # radians
+    #
+    # @version 4.4.0 (requires Parse Server with `$centerSphere` support)
+    class WithinSphereQueryConstraint < Constraint
+      # @!method within_sphere
+      # A registered method on a symbol to create the constraint. Maps to
+      # Parse operator "$geoWithin" with "$centerSphere" subconstraint.
+      # @example
+      #  q.where :location.within_sphere => [center_geopoint, 5, :km]
+      # @return [WithinSphereQueryConstraint]
+      constraint_keyword :$geoWithin
+      register :within_sphere
+
+      KM_PER_RADIAN = 6371.0
+      MILES_PER_RADIAN = 3958.8
+      # Whole-sphere radius. `$centerSphere` with a radius greater than
+      # π radians covers the entire sphere — a query that returns every
+      # document in the collection and trivially defeats any `2dsphere`
+      # index. Cap here so attacker-controlled radii (e.g. URL params
+      # forwarded into the constraint) can't degenerate into a
+      # full-collection scan.
+      MAX_RADIANS = Math::PI
+
+      # @return [Hash] the compiled constraint.
+      def build
+        value = formatted_value
+        unless value.is_a?(Array) && value.length >= 2
+          raise ArgumentError, "[Parse::Query] Invalid value for `within_sphere` constraint: " \
+                               "expected [geopoint, distance, unit?]."
+        end
+
+        point, distance, unit = value[0], value[1], (value[2] || :radians)
+        unless point.is_a?(Parse::GeoPoint)
+          raise ArgumentError, "[Parse::Query] `within_sphere` first element must be a Parse::GeoPoint."
+        end
+        unless distance.is_a?(Numeric) && distance > 0
+          raise ArgumentError, "[Parse::Query] `within_sphere` distance must be a positive number."
+        end
+
+        radians =
+          case unit
+          when :radians then distance.to_f
+          when :km, :kilometers then distance.to_f / KM_PER_RADIAN
+          when :miles then distance.to_f / MILES_PER_RADIAN
+          else
+            raise ArgumentError, "[Parse::Query] `within_sphere` unit must be :radians, :km, or :miles."
+          end
+
+        if radians > MAX_RADIANS
+          raise ArgumentError, "[Parse::Query] `within_sphere` radius #{distance} #{unit} " \
+                               "(#{radians} radians) exceeds whole-sphere coverage (π radians). " \
+                               "A radius that large covers the entire sphere and degenerates " \
+                               "$centerSphere into a full-collection scan."
+        end
+
+        # MongoDB's $centerSphere expects [longitude, latitude]
+        # (GeoJSON convention), not Parse's [latitude, longitude] order.
+        center = [point.longitude, point.latitude]
+        # `$centerSphere` is a native MongoDB geo operator, not a
+        # documented Parse Server REST find operator. Mark this
+        # constraint mongo-direct-only so the query layer auto-routes
+        # to {Parse::Query#results_direct}; callers without a mongo
+        # connection or master-key/scoped auth will get
+        # `MongoDirectRequired` rather than a silently-wrong REST
+        # result.
+        {
+          @operation.operand => { :$geoWithin => { :$centerSphere => [center, radians] } },
+          "__mongo_direct_only" => true,
+        }
+      end
+    end
+
+    # MongoDB-direct `$geoIntersects` with a full `$geometry` operand —
+    # **NOT** a Parse Server REST operator. Returns documents whose stored
+    # geometry intersects the supplied GeoJSON shape. Works against any
+    # `2dsphere`-indexed column, including the `:object` columns where
+    # {Parse::GeoJSON::LineString} / {Parse::GeoJSON::MultiPolygon}
+    # geometries live.
+    #
+    # Because Parse Server's REST find layer cannot express this operator,
+    # any query using `:field.geo_intersects` auto-routes through the
+    # mongo-direct path (see {Parse::Query#requires_mongo_direct?}). The
+    # routing gate requires `use_master_key: true` on the query AND a
+    # configured {Parse::MongoDB} client — per-row ACL/CLP enforcement and
+    # `beforeFind`/`afterFind` cloud triggers do not run on the
+    # mongo-direct path. Use this constraint only when those concerns are
+    # acceptable for the call site.
+    #
+    #  route = Parse::GeoJSON::LineString.new [[-122.4, 37.7], [-122.39, 37.78]]
+    #  Region.query(:area.geo_intersects => route, :use_master_key => true).results
+    #
+    # @version 4.4.0
+    class GeoIntersectsGeometryQueryConstraint < Constraint
+      # @!method geo_intersects
+      # A registered method on a symbol to create the constraint. Maps to
+      # MongoDB's `$geoIntersects` with the `$geometry` operand. Direct-only.
+      # @example
+      #  q.where :area.geo_intersects => parse_geojson_geometry
+      # @return [GeoIntersectsGeometryQueryConstraint]
+      constraint_keyword :$geoIntersects
+      register :geo_intersects
+
+      # @return [Hash] the compiled constraint, carrying the
+      #   `__mongo_direct_only` routing marker so the query layer can
+      #   auto-route to {Parse::Query#results_direct}.
+      def build
+        geometry = coerce_to_geojson(formatted_value)
+        {
+          @operation.operand => {
+            :$geoIntersects => { :$geometry => geometry },
+          },
+          "__mongo_direct_only" => true,
+        }
+      end
+
+      private
+
+      # RFC 7946 catalogue of valid GeoJSON geometry types. Allowlisting
+      # here is defense-in-depth: MongoDB rejects unknown `$geometry`
+      # types but a typo / attacker-controlled value should never reach
+      # the wire. Forbids `$where`, `Polygon\u0000`, or any
+      # non-geometry string.
+      ALLOWED_GEOJSON_TYPES = %w[
+        Point MultiPoint LineString MultiLineString
+        Polygon MultiPolygon GeometryCollection
+      ].freeze
+
+      def coerce_to_geojson(value)
+        case value
+        when Parse::GeoJSON::Geometry then value.to_geojson
+        when Parse::Polygon then value.to_geojson
+        when Parse::GeoPoint then value.to_geojson
+        when Hash
+          h = value.respond_to?(:symbolize_keys) ? value.symbolize_keys : value
+          type = h[:type] || h["type"]
+          coords = h[:coordinates] || h["coordinates"]
+          unless type.is_a?(String) && ALLOWED_GEOJSON_TYPES.include?(type) && coords.is_a?(Array)
+            raise ArgumentError, "[Parse::Query] `geo_intersects` Hash must be a GeoJSON geometry " \
+                                 "with one of the RFC 7946 types " \
+                                 "(#{ALLOWED_GEOJSON_TYPES.join(", ")}) and an Array of coordinates."
+          end
+          { "type" => type, "coordinates" => coords }
+        else
+          raise ArgumentError, "[Parse::Query] `geo_intersects` expects a Parse::GeoPoint, " \
+                               "Parse::Polygon, Parse::GeoJSON::Geometry, or GeoJSON Hash."
+        end
+      end
+    end
+
+    # Equivalent to the `$geoIntersects` Parse query operation with `$point`
+    # subconstraint. This is the inverse of `within_polygon`: it queries a
+    # column of type `Polygon` and returns objects whose stored polygon
+    # contains the supplied {Parse::GeoPoint}. Matches `Parse.Query#polygonContains`
+    # in the JS SDK.
+    #
+    #  q.where :area.polygon_contains => geopoint
+    #
+    #  pt = Parse::GeoPoint.new 25.7823, -80.2660
+    #  Region.all :area.polygon_contains => pt
+    #
+    class PolygonContainsQueryConstraint < Constraint
+      # @!method polygon_contains
+      # A registered method on a symbol to create the constraint. Maps to
+      # Parse operator "$geoIntersects" with "$point" subconstraint. Takes a
+      # {Parse::GeoPoint} (or `[lat, lng]` array).
+      # @example
+      #  q.where :area.polygon_contains => geopoint
+      # @return [PolygonContainsQueryConstraint]
+      constraint_keyword :$geoIntersects
+      register :polygon_contains
+
+      # @return [Hash] the compiled constraint.
+      def build
+        value = formatted_value
+        point =
+          case value
+          when Parse::GeoPoint
+            { __type: "GeoPoint", latitude: value.latitude, longitude: value.longitude }
+          when Array
+            unless value.length == 2 && value[0].is_a?(Numeric) && value[1].is_a?(Numeric)
+              raise ArgumentError, "[Parse::Query] Invalid value for `polygon_contains` constraint: " \
+                                   "expected Parse::GeoPoint or [lat, lng] numeric pair."
+            end
+            { __type: "GeoPoint", latitude: value[0], longitude: value[1] }
+          when Hash
+            normalized = value.respond_to?(:symbolize_keys) ? value.symbolize_keys : value
+            type = normalized[:__type] || normalized["__type"]
+            lat = normalized[:latitude] || normalized[:lat]
+            lng = normalized[:longitude] || normalized[:lng]
+            unless type.to_s == "GeoPoint" && lat.is_a?(Numeric) && lng.is_a?(Numeric)
+              raise ArgumentError, "[Parse::Query] Invalid value for `polygon_contains` constraint: " \
+                                   "Hash must be the GeoPoint wire shape " \
+                                   "{ __type: 'GeoPoint', latitude:, longitude: }."
+            end
+            { __type: "GeoPoint", latitude: lat, longitude: lng }
+          else
+            raise ArgumentError, "[Parse::Query] Invalid value for `polygon_contains` constraint: " \
+                                 "expected Parse::GeoPoint or [lat, lng] numeric pair."
+          end
+
+        { @operation.operand => { :$geoIntersects => { :$point => point } } }
       end
     end
 
@@ -2191,6 +2475,187 @@ module Parse
       end
     end
 
+    # @!visibility private
+    # Shared helpers for the four ACL constraint subclasses
+    # (+:ACL.readable_by+, +:ACL.readable_by_role+, +:ACL.writable_by+,
+    # +:ACL.writable_by_role+). Collects a list of permission strings
+    # from a caller-supplied value of User/Role/Pointer/Array/String,
+    # using {Parse::Role.all_for_user} (user inputs) and
+    # {Parse::Role#all_parent_role_names} (role inputs) so the
+    # traversal walks the inheritance direction Parse Server actually
+    # enforces. Prior implementations inlined +role.all_child_roles+,
+    # which traverses the wrong direction and over-grants.
+    module ACLPermissions
+      module_function
+
+      # Expand a +:ACL.readable_by+ / +:ACL.writable_by+ value into a
+      # permission-string array. Uses explicit +is_a?+ calls (rather
+      # than +case/when+) so callers that pass duck-typed mocks with
+      # overridden +is_a?+ — common in the constraint test suite —
+      # continue to route correctly.
+      # @param value [Parse::User, Parse::Role, Parse::Pointer, String, Array]
+      # @return [Array<String>]
+      def collect(value)
+        if value.is_a?(Parse::User)
+          permissions_for_user(value)
+        elsif value.is_a?(Parse::Role)
+          permissions_for_role(value)
+        elsif value.is_a?(Parse::Pointer)
+          permissions_for_pointer(value)
+        elsif value.is_a?(Array)
+          value.flat_map { |item| collect_array_item(item) }
+        elsif value.is_a?(String)
+          [value == "public" ? "*" : value]
+        else
+          raise ArgumentError,
+                "ACL permission value must be a Parse::User, Parse::Role, " \
+                "Parse::Pointer, String, or Array of these (got #{value.class})"
+        end
+      end
+
+      # Expand a +:ACL.readable_by_role+ / +:ACL.writable_by_role+ value
+      # into a permission-string array. Differs from {.collect} by
+      # auto-prefixing bare strings with +"role:"+ and refusing
+      # non-role arguments.
+      # @param value [Parse::Role, Parse::Pointer, String, Array]
+      # @return [Array<String>]
+      def collect_role_only(value)
+        if value.is_a?(Parse::Role)
+          permissions_for_role(value)
+        elsif value.is_a?(Parse::Pointer)
+          klass = value.parse_class
+          if klass == Parse::Model::CLASS_ROLE || klass == "Role"
+            permissions_for_role_pointer(value)
+          else
+            raise ArgumentError,
+                  "ACL role-only value pointer must be on _Role (got #{klass.inspect})"
+          end
+        elsif value.is_a?(Array)
+          value.flat_map { |item| collect_role_only_array_item(item) }
+        elsif value.is_a?(String)
+          [value.start_with?("role:") ? value : "role:#{value}"]
+        else
+          raise ArgumentError,
+                "ACL role-only value must be a Parse::Role, Parse::Role pointer, " \
+                "String, or Array of these (got #{value.class})"
+        end
+      end
+
+      # @!visibility private
+      # Array-element variant that silently skips unrecognized entries
+      # rather than raising, matching the pre-refactor behavior where
+      # the array branch tolerated a mixed bag of types and ignored
+      # anything it didn't understand.
+      def collect_array_item(item)
+        if item.is_a?(Parse::User)
+          permissions_for_user(item)
+        elsif item.is_a?(Parse::Role)
+          permissions_for_role(item)
+        elsif item.is_a?(Parse::Pointer)
+          permissions_for_pointer(item)
+        elsif item.is_a?(String)
+          [item == "public" ? "*" : item]
+        else
+          []
+        end
+      end
+
+      # @!visibility private
+      # Array-element variant for the role-only collectors.
+      def collect_role_only_array_item(item)
+        if item.is_a?(Parse::Role)
+          permissions_for_role(item)
+        elsif item.is_a?(Parse::Pointer)
+          klass = item.parse_class
+          if klass == Parse::Model::CLASS_ROLE || klass == "Role"
+            permissions_for_role_pointer(item)
+          else
+            []
+          end
+        elsif item.is_a?(String)
+          [item.start_with?("role:") ? item : "role:#{item}"]
+        else
+          []
+        end
+      end
+
+      # Compile a final permission-string array into an aggregation
+      # pipeline match-stage on the requested permission field. The
+      # +$exists: false+ branch is appended by {Parse::ACL.read_predicate}
+      # / {Parse::ACL.write_predicate} so a missing +_rperm+/+_wperm+
+      # (treated as public by Parse Server) still matches.
+      # @param permissions [Array<String>]
+      # @param field [String] +"_rperm"+ or +"_wperm"+.
+      # @return [Hash] aggregation-pipeline wrapper compatible with
+      #   {Parse::Query}'s constraint-build contract.
+      def pipeline(permissions, field:)
+        deduped = permissions.compact.reject(&:empty?).uniq
+        if deduped.empty?
+          raise ArgumentError, "no valid permissions found in provided value"
+        end
+        predicate = if field == "_rperm"
+            Parse::ACL.read_predicate(deduped)
+          else
+            Parse::ACL.write_predicate(deduped)
+          end
+        { "__aggregation_pipeline" => [{ "$match" => predicate }] }
+      end
+
+      # @!visibility private
+      def permissions_for_user(user)
+        return [] unless user.id.present?
+        perms = [user.id]
+        begin
+          Parse::Role.all_for_user(user, max_depth: 5).each do |name|
+            perms << "role:#{name}"
+          end
+        rescue
+          # Fall through with just the user ID; role expansion is
+          # best-effort and a transient lookup failure must not turn a
+          # legitimate user query into an exception.
+        end
+        perms
+      end
+
+      # @!visibility private
+      def permissions_for_role(role)
+        return [] unless role.respond_to?(:name) && role.name.present?
+        begin
+          role.all_parent_role_names(max_depth: 5).map { |name| "role:#{name}" }
+        rescue
+          ["role:#{role.name}"]
+        end
+      end
+
+      # @!visibility private
+      def permissions_for_pointer(ptr)
+        klass = ptr.parse_class
+        if klass == Parse::Model::CLASS_USER || klass == "User"
+          return [] unless ptr.id.present?
+          perms = [ptr.id]
+          begin
+            Parse::Role.all_for_user(ptr, max_depth: 5).each do |name|
+              perms << "role:#{name}"
+            end
+          rescue
+          end
+          perms
+        elsif klass == Parse::Model::CLASS_ROLE || klass == "Role"
+          permissions_for_role_pointer(ptr)
+        else
+          []
+        end
+      end
+
+      # @!visibility private
+      def permissions_for_role_pointer(ptr)
+        role = ptr.respond_to?(:fetch) ? ptr.fetch : nil
+        permissions_for_role(role)
+      rescue
+        []
+      end
+    end
+
     # A constraint for filtering objects based on ACL read permissions.
     # This constraint queries the MongoDB _rperm field directly.
     # Strings are used as exact permission values (user IDs or "role:RoleName" format).
@@ -2215,156 +2680,21 @@ module Parse
 
       # @return [Hash] the compiled constraint using _rperm field.
       def build
-        # Use @value directly to preserve type information before formatted_value converts to pointers
+        # Use @value directly to preserve type information before
+        # formatted_value converts to pointers.
         value = @value
-        permissions_to_check = []
 
-        # Handle different input types using duck typing
-        if value.is_a?(Parse::User) || (value.respond_to?(:is_a?) && value.is_a?(Parse::User))
-          # For a user, include their ID and all their role names (with hierarchy)
-          permissions_to_check << value.id if value.respond_to?(:id) && value.id.present?
-
-          # Automatically fetch user's roles from Parse and expand hierarchy
-          begin
-            if value.respond_to?(:id) && value.id.present? && defined?(Parse::Role)
-              user_roles = Parse::Role.all(users: value)
-              user_roles.each do |role|
-                permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
-                # Expand role hierarchy - include child roles
-                if role.respond_to?(:all_child_roles)
-                  role.all_child_roles(max_depth: 5).each do |child_role|
-                    permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
-                  end
-                end
-              end
-            end
-          rescue
-            # If role fetching fails, continue with just the user ID
-          end
-        elsif value.is_a?(Parse::Role) || (value.respond_to?(:is_a?) && value.is_a?(Parse::Role))
-          # For a role object, add the role name with "role:" prefix
-          permissions_to_check << "role:#{value.name}" if value.respond_to?(:name) && value.name.present?
-
-          # Expand role hierarchy - include all child roles
-          begin
-            if value.respond_to?(:all_child_roles)
-              value.all_child_roles(max_depth: 5).each do |child_role|
-                permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
-              end
-            end
-          rescue
-            # If child role fetching fails, continue with just the direct role
-          end
-        elsif value.is_a?(Parse::Pointer) || (value.respond_to?(:parse_class) && value.respond_to?(:id))
-          # Handle pointer to User or Role
-          if value.respond_to?(:parse_class) && (value.parse_class == "User" || value.parse_class == "_User")
-            permissions_to_check << value.id if value.respond_to?(:id) && value.id.present?
-
-            # Query roles directly using the user pointer and expand hierarchy
-            begin
-              if value.respond_to?(:id) && value.id.present? && defined?(Parse::Role)
-                user_roles = Parse::Role.all(users: value)
-                user_roles.each do |role|
-                  permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
-                  # Expand role hierarchy - include child roles
-                  if role.respond_to?(:all_child_roles)
-                    role.all_child_roles(max_depth: 5).each do |child_role|
-                      permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
-                    end
-                  end
-                end
-              end
-            rescue
-              # If role fetching fails, continue with just the user ID
-            end
-          end
-        elsif value.is_a?(Array)
-          # Handle array of permission values
-          value.each do |item|
-            if item.is_a?(Parse::User) || (item.respond_to?(:is_a?) && item.is_a?(Parse::User))
-              permissions_to_check << item.id if item.respond_to?(:id) && item.id.present?
-              # Fetch user's roles and expand hierarchy
-              begin
-                if item.respond_to?(:id) && item.id.present? && defined?(Parse::Role)
-                  user_roles = Parse::Role.all(users: item)
-                  user_roles.each do |role|
-                    permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
-                    if role.respond_to?(:all_child_roles)
-                      role.all_child_roles(max_depth: 5).each do |child_role|
-                        permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
-                      end
-                    end
-                  end
-                end
-              rescue
-                # Continue with just the user ID
-              end
-            elsif item.is_a?(Parse::Role) || (item.respond_to?(:is_a?) && item.is_a?(Parse::Role))
-              permissions_to_check << "role:#{item.name}" if item.respond_to?(:name) && item.name.present?
-              # Expand role hierarchy
-              begin
-                if item.respond_to?(:all_child_roles)
-                  item.all_child_roles(max_depth: 5).each do |child_role|
-                    permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
-                  end
-                end
-              rescue
-                # Continue with just the direct role
-              end
-            elsif item.is_a?(Parse::Pointer) || (item.respond_to?(:parse_class) && item.respond_to?(:id))
-              if item.respond_to?(:parse_class) && (item.parse_class == "User" || item.parse_class == "_User")
-                permissions_to_check << item.id if item.respond_to?(:id) && item.id.present?
-              end
-            elsif item.is_a?(String)
-              # Use string as-is (exact permission value)
-              # Also accept "public" as an alias for "*"
-              permissions_to_check << (item == "public" ? "*" : item)
-            end
-          end
-        elsif value.is_a?(String)
-          if value == "none"
-            # "none" = objects with empty _rperm (master key only)
-            # Only check for empty array - if _rperm is missing/undefined, Parse treats it as public
-            # Parse Server saves empty _rperm as [] when no read permissions are set
-            pipeline = [
-              {
-                "$match" => {
-                  "_rperm" => { "$eq" => [] },
-                },
-              },
-            ]
-            return { "__aggregation_pipeline" => pipeline }
-          end
-
-          # Use string as-is (exact permission value: user ID, "role:Name", or "*")
-          # Also accept "public" as an alias for "*"
-          # Note: For role names without prefix, use readable_by_role or pass a Parse::Role object
-          permissions_to_check << (value == "public" ? "*" : value)
-        else
-          raise ArgumentError, "ACLReadableByConstraint: value must be a User, Role, String, or Array of these types"
+        # Special case: "none" matches objects whose _rperm is an empty
+        # array — master-key-only documents. Parse Server writes []
+        # when no read permission is set, and an absent _rperm is
+        # treated as public (handled by the default predicate path).
+        if value.is_a?(String) && value == "none"
+          pipeline = [{ "$match" => { "_rperm" => { "$eq" => [] } } }]
+          return { "__aggregation_pipeline" => pipeline }
         end
 
-        if permissions_to_check.empty?
-          raise ArgumentError, "ACLReadableByConstraint: no valid permissions found in provided value"
-        end
-
-        # Also include public access "*" in the check (unless already included)
-        permissions_with_public = permissions_to_check.include?("*") ? permissions_to_check : permissions_to_check + ["*"]
-
-        # Build the aggregation pipeline to match documents with _rperm field
-        # Also match documents where _rperm doesn't exist (publicly accessible)
-        pipeline = [
-          {
-            "$match" => {
-              "$or" => [
-                { "_rperm" => { "$in" => permissions_with_public } },
-                { "_rperm" => { "$exists" => false } },
-              ],
-            },
-          },
-        ]
-
-        { "__aggregation_pipeline" => pipeline }
+        permissions = ACLPermissions.collect(value)
+        ACLPermissions.pipeline(permissions, field: "_rperm")
       end
     end
 
@@ -2389,65 +2719,8 @@ module Parse
 
       # @return [Hash] the compiled constraint using _rperm field.
       def build
-        value = formatted_value
-        permissions_to_check = []
-
-        if value.is_a?(Parse::Role) || (value.respond_to?(:is_a?) && value.is_a?(Parse::Role))
-          permissions_to_check << "role:#{value.name}" if value.respond_to?(:name) && value.name.present?
-        elsif value.is_a?(Parse::Pointer) || (value.respond_to?(:parse_class) && value.respond_to?(:id))
-          # Handle pointer to Role - need to fetch it to get the name
-          if value.respond_to?(:parse_class) && (value.parse_class == "Role" || value.parse_class == "_Role")
-            begin
-              role = value.fetch if value.respond_to?(:fetch)
-              permissions_to_check << "role:#{role.name}" if role&.respond_to?(:name) && role.name.present?
-            rescue
-              # If fetching fails, skip this pointer
-            end
-          end
-        elsif value.is_a?(Array)
-          value.each do |item|
-            if item.is_a?(Parse::Role) || (item.respond_to?(:is_a?) && item.is_a?(Parse::Role))
-              permissions_to_check << "role:#{item.name}" if item.respond_to?(:name) && item.name.present?
-            elsif item.is_a?(Parse::Pointer) || (item.respond_to?(:parse_class) && item.respond_to?(:id))
-              if item.respond_to?(:parse_class) && (item.parse_class == "Role" || item.parse_class == "_Role")
-                begin
-                  role = item.fetch if item.respond_to?(:fetch)
-                  permissions_to_check << "role:#{role.name}" if role&.respond_to?(:name) && role.name.present?
-                rescue
-                  # If fetching fails, skip this pointer
-                end
-              end
-            elsif item.is_a?(String)
-              # Add role: prefix if not already present
-              permissions_to_check << (item.start_with?("role:") ? item : "role:#{item}")
-            end
-          end
-        elsif value.is_a?(String)
-          # Add role: prefix if not already present
-          permissions_to_check << (value.start_with?("role:") ? value : "role:#{value}")
-        else
-          raise ArgumentError, "ACLReadableByRoleConstraint: value must be a Role, Role Pointer, String, or Array of these types"
-        end
-
-        if permissions_to_check.empty?
-          raise ArgumentError, "ACLReadableByRoleConstraint: no valid role names found"
-        end
-
-        # Also include public access "*" in the check
-        permissions_with_public = permissions_to_check + ["*"]
-
-        pipeline = [
-          {
-            "$match" => {
-              "$or" => [
-                { "_rperm" => { "$in" => permissions_with_public } },
-                { "_rperm" => { "$exists" => false } },
-              ],
-            },
-          },
-        ]
-
-        { "__aggregation_pipeline" => pipeline }
+        permissions = ACLPermissions.collect_role_only(@value)
+        ACLPermissions.pipeline(permissions, field: "_rperm")
       end
     end
 
@@ -2475,155 +2748,19 @@ module Parse
 
       # @return [Hash] the compiled constraint using _wperm field.
       def build
-        # Use @value directly to preserve type information before formatted_value converts to pointers
+        # Use @value directly to preserve type information before
+        # formatted_value converts to pointers.
         value = @value
-        permissions_to_check = []
 
-        # Handle different input types using duck typing
-        if value.is_a?(Parse::User) || (value.respond_to?(:is_a?) && value.is_a?(Parse::User))
-          # For a user, include their ID and all their role names (with hierarchy)
-          permissions_to_check << value.id if value.respond_to?(:id) && value.id.present?
-
-          # Automatically fetch user's roles from Parse and expand hierarchy
-          begin
-            if value.respond_to?(:id) && value.id.present? && defined?(Parse::Role)
-              user_roles = Parse::Role.all(users: value)
-              user_roles.each do |role|
-                permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
-                # Expand role hierarchy - include child roles
-                if role.respond_to?(:all_child_roles)
-                  role.all_child_roles(max_depth: 5).each do |child_role|
-                    permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
-                  end
-                end
-              end
-            end
-          rescue
-            # If role fetching fails, continue with just the user ID
-          end
-        elsif value.is_a?(Parse::Role) || (value.respond_to?(:is_a?) && value.is_a?(Parse::Role))
-          # For a role object, add the role name with "role:" prefix
-          permissions_to_check << "role:#{value.name}" if value.respond_to?(:name) && value.name.present?
-
-          # Expand role hierarchy - include all child roles
-          begin
-            if value.respond_to?(:all_child_roles)
-              value.all_child_roles(max_depth: 5).each do |child_role|
-                permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
-              end
-            end
-          rescue
-            # If child role fetching fails, continue with just the direct role
-          end
-        elsif value.is_a?(Parse::Pointer) || (value.respond_to?(:parse_class) && value.respond_to?(:id))
-          # Handle pointer to User or Role
-          if value.respond_to?(:parse_class) && (value.parse_class == "User" || value.parse_class == "_User")
-            permissions_to_check << value.id if value.respond_to?(:id) && value.id.present?
-
-            # Query roles directly using the user pointer and expand hierarchy
-            begin
-              if value.respond_to?(:id) && value.id.present? && defined?(Parse::Role)
-                user_roles = Parse::Role.all(users: value)
-                user_roles.each do |role|
-                  permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
-                  # Expand role hierarchy - include child roles
-                  if role.respond_to?(:all_child_roles)
-                    role.all_child_roles(max_depth: 5).each do |child_role|
-                      permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
-                    end
-                  end
-                end
-              end
-            rescue
-              # If role fetching fails, continue with just the user ID
-            end
-          end
-        elsif value.is_a?(Array)
-          # Handle array of permission values
-          value.each do |item|
-            if item.is_a?(Parse::User) || (item.respond_to?(:is_a?) && item.is_a?(Parse::User))
-              permissions_to_check << item.id if item.respond_to?(:id) && item.id.present?
-              # Fetch user's roles and expand hierarchy
-              begin
-                if item.respond_to?(:id) && item.id.present? && defined?(Parse::Role)
-                  user_roles = Parse::Role.all(users: item)
-                  user_roles.each do |role|
-                    permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
-                    if role.respond_to?(:all_child_roles)
-                      role.all_child_roles(max_depth: 5).each do |child_role|
-                        permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
-                      end
-                    end
-                  end
-                end
-              rescue
-                # Continue with just the user ID
-              end
-            elsif item.is_a?(Parse::Role) || (item.respond_to?(:is_a?) && item.is_a?(Parse::Role))
-              permissions_to_check << "role:#{item.name}" if item.respond_to?(:name) && item.name.present?
-              # Expand role hierarchy
-              begin
-                if item.respond_to?(:all_child_roles)
-                  item.all_child_roles(max_depth: 5).each do |child_role|
-                    permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
-                  end
-                end
-              rescue
-                # Continue with just the direct role
-              end
-            elsif item.is_a?(Parse::Pointer) || (item.respond_to?(:parse_class) && item.respond_to?(:id))
-              if item.respond_to?(:parse_class) && (item.parse_class == "User" || item.parse_class == "_User")
-                permissions_to_check << item.id if item.respond_to?(:id) && item.id.present?
-              end
-            elsif item.is_a?(String)
-              # Use string as-is (exact permission value)
-              # Also accept "public" as an alias for "*"
-              permissions_to_check << (item == "public" ? "*" : item)
-            end
-          end
-        elsif value.is_a?(String)
-          if value == "none"
-            # "none" = objects with empty _wperm (master key only)
-            # Only check for empty array - if _wperm is missing/undefined, Parse treats it as public
-            # Parse Server saves empty _wperm as [] when no write permissions are set
-            pipeline = [
-              {
-                "$match" => {
-                  "_wperm" => { "$eq" => [] },
-                },
-              },
-            ]
-            return { "__aggregation_pipeline" => pipeline }
-          end
-
-          # Use string as-is (exact permission value: user ID, "role:Name", or "*")
-          # Also accept "public" as an alias for "*"
-          permissions_to_check << (value == "public" ? "*" : value)
-        else
-          raise ArgumentError, "ACLWritableByConstraint: value must be a User, Role, String, or Array of these types"
+        # Special case: "none" matches objects whose _wperm is an empty
+        # array — master-key-only documents. See {ACLReadableByConstraint#build}.
+        if value.is_a?(String) && value == "none"
+          pipeline = [{ "$match" => { "_wperm" => { "$eq" => [] } } }]
+          return { "__aggregation_pipeline" => pipeline }
         end
 
-        if permissions_to_check.empty?
-          raise ArgumentError, "ACLWritableByConstraint: no valid permissions found in provided value"
-        end
-
-        # Also include public access "*" in the check (unless already included)
-        permissions_with_public = permissions_to_check.include?("*") ? permissions_to_check : permissions_to_check + ["*"]
-
-        # Build the aggregation pipeline to match documents with _wperm field
-        # Also match documents where _wperm doesn't exist (publicly writable)
-        pipeline = [
-          {
-            "$match" => {
-              "$or" => [
-                { "_wperm" => { "$in" => permissions_with_public } },
-                { "_wperm" => { "$exists" => false } },
-              ],
-            },
-          },
-        ]
-
-        { "__aggregation_pipeline" => pipeline }
+        permissions = ACLPermissions.collect(value)
+        ACLPermissions.pipeline(permissions, field: "_wperm")
       end
     end
 
@@ -2648,65 +2785,8 @@ module Parse
 
       # @return [Hash] the compiled constraint using _wperm field.
       def build
-        value = formatted_value
-        permissions_to_check = []
-
-        if value.is_a?(Parse::Role) || (value.respond_to?(:is_a?) && value.is_a?(Parse::Role))
-          permissions_to_check << "role:#{value.name}" if value.respond_to?(:name) && value.name.present?
-        elsif value.is_a?(Parse::Pointer) || (value.respond_to?(:parse_class) && value.respond_to?(:id))
-          # Handle pointer to Role - need to fetch it to get the name
-          if value.respond_to?(:parse_class) && (value.parse_class == "Role" || value.parse_class == "_Role")
-            begin
-              role = value.fetch if value.respond_to?(:fetch)
-              permissions_to_check << "role:#{role.name}" if role&.respond_to?(:name) && role.name.present?
-            rescue
-              # If fetching fails, skip this pointer
-            end
-          end
-        elsif value.is_a?(Array)
-          value.each do |item|
-            if item.is_a?(Parse::Role) || (item.respond_to?(:is_a?) && item.is_a?(Parse::Role))
-              permissions_to_check << "role:#{item.name}" if item.respond_to?(:name) && item.name.present?
-            elsif item.is_a?(Parse::Pointer) || (item.respond_to?(:parse_class) && item.respond_to?(:id))
-              if item.respond_to?(:parse_class) && (item.parse_class == "Role" || item.parse_class == "_Role")
-                begin
-                  role = item.fetch if item.respond_to?(:fetch)
-                  permissions_to_check << "role:#{role.name}" if role&.respond_to?(:name) && role.name.present?
-                rescue
-                  # If fetching fails, skip this pointer
-                end
-              end
-            elsif item.is_a?(String)
-              # Add role: prefix if not already present
-              permissions_to_check << (item.start_with?("role:") ? item : "role:#{item}")
-            end
-          end
-        elsif value.is_a?(String)
-          # Add role: prefix if not already present
-          permissions_to_check << (value.start_with?("role:") ? value : "role:#{value}")
-        else
-          raise ArgumentError, "ACLWritableByRoleConstraint: value must be a Role, Role Pointer, String, or Array of these types"
-        end
-
-        if permissions_to_check.empty?
-          raise ArgumentError, "ACLWritableByRoleConstraint: no valid role names found"
-        end
-
-        # Also include public access "*" in the check
-        permissions_with_public = permissions_to_check + ["*"]
-
-        pipeline = [
-          {
-            "$match" => {
-              "$or" => [
-                { "_wperm" => { "$in" => permissions_with_public } },
-                { "_wperm" => { "$exists" => false } },
-              ],
-            },
-          },
-        ]
-
-        { "__aggregation_pipeline" => pipeline }
+        permissions = ACLPermissions.collect_role_only(@value)
+        ACLPermissions.pipeline(permissions, field: "_wperm")
       end
     end
 

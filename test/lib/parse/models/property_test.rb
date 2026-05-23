@@ -2,8 +2,18 @@ require_relative "../../../test_helper"
 
 class TestPropertyTypesClass < Parse::Object; end
 
+class IdenticalRedeclarationTest < Parse::Object
+  property :title, :string
+  property :title, :string
+end
+
+class DefaultRedeclarationTest < Parse::Object
+  property :status, :string
+  property :status, :string, default: "pending"
+end
+
 class TestPropertyModule < Minitest::Test
-  TYPES = [:string, :relation, :integer, :float, :boolean, :date, :array, :file, :geopoint, :bytes, :object, :acl, :timezone, :phone, :email].freeze
+  TYPES = [:string, :relation, :integer, :float, :boolean, :date, :array, :file, :geopoint, :polygon, :bytes, :object, :acl, :timezone, :phone, :email].freeze
   # These are the base mappings of the remote field name types.
   BASE = { objectId: :string, createdAt: :date, updatedAt: :date, ACL: :acl }.freeze
   # The list of properties that are part of all objects
@@ -38,6 +48,8 @@ class TestPropertyModule < Minitest::Test
   def test_redeclarations
     warn_level = $VERBOSE
     $VERBOSE = nil
+    strict_was = Parse.strict_property_redefinition
+    Parse.strict_property_redefinition = false
     BASE_FIELD_MAP.flatten.each do |field|
       refute Parse::Object.property(field), "Should not allow redeclaring property #{field} field"
     end
@@ -45,6 +57,30 @@ class TestPropertyModule < Minitest::Test
       key = "f_#{field}"
       refute Parse::Object.property(key, field: "#{field}"), "Should not allow redeclaring alias '#{field}' field. (#{key})"
     end
+  ensure
+    Parse.strict_property_redefinition = strict_was unless strict_was.nil?
     $VERBOSE = warn_level
+  end
+
+  def test_strict_redeclaration_raises_on_type_mismatch
+    strict_was = Parse.strict_property_redefinition
+    Parse.strict_property_redefinition = true
+    assert_raises(ArgumentError) do
+      Parse::Object.property(:objectId, :integer)
+    end
+  ensure
+    Parse.strict_property_redefinition = strict_was unless strict_was.nil?
+  end
+
+  def test_identical_redeclaration_is_silent
+    # The class-level redeclaration in IdenticalRedeclarationTest already happened
+    # at load time with strict_property_redefinition at its default (true). The fact
+    # that the class loaded without raising is the assertion.
+    assert_equal :string, IdenticalRedeclarationTest.fields[:title]
+  end
+
+  def test_identical_redeclaration_applies_default
+    instance = DefaultRedeclarationTest.new
+    assert_equal "pending", instance.status
   end
 end

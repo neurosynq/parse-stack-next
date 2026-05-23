@@ -18,6 +18,8 @@ class TestInstallation < Minitest::Test
     :appName => :string,
     :app_version => :string,
     :appVersion => :string,
+    :app_build_number => :string,
+    :appBuildNumber => :string,
     :badge => :integer,
     :channels => :array,
     :device_token => :string,

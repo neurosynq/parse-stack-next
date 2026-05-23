@@ -20,20 +20,78 @@ require "parse/atlas_search"
 #   atlas deployments setup local-atlas --type local
 #   ATLAS_URI="mongodb://localhost:51973/parse_atlas_test?directConnection=true" ruby -Ilib:test test/lib/parse/atlas_search_integration_test.rb
 #
+# NOTE on Apple Silicon (ARM64) flakiness: mongodb-atlas-local's internal
+# mongot (Lucene-based search engine) is unstable under sustained load on
+# ARM64. The supervisor restarts mongod when mongot crashes, producing
+# 5-10s outage windows. The `atlas_available?` probe below uses 15s
+# timeouts × 3 attempts to bridge restart cycles. See
+# atlas_search_mutations_integration_test.rb's header for a full writeup.
+#
 class AtlasSearchIntegrationTest < Minitest::Test
   # Default to Docker Atlas Local port (27020), can override with ATLAS_URI env var
   ATLAS_URI = ENV["ATLAS_URI"] || "mongodb://localhost:27020/parse_atlas_test?directConnection=true"
 
-  def setup
-    skip "Set ATLAS_URI to run Atlas Search integration tests" unless ENV["ATLAS_URI"] || atlas_available?
+  # Class methods on Parse::AtlasSearch that the per-test wrapper baseline
+  # below force-defaults `master: true` onto. The test suite predates the
+  # 4.4.0 CLP-enforcement layer and runs against a fresh Atlas Local
+  # container with no Parse Server / auth wiring — every search must run
+  # in master scope or CLP refuses the underlying `Parse::MongoDB.aggregate`.
+  SCOPED_SEARCH_METHODS = %i[search autocomplete faceted_search].freeze
 
-    Parse::MongoDB.configure(uri: ATLAS_URI, enabled: true)
+  def setup
+    unless self.class.atlas_available?
+      skip "Atlas Search not reachable at #{ATLAS_URI}. Start it with " \
+           "`docker-compose -f scripts/docker/docker-compose.atlas.yml up -d` " \
+           "or override ATLAS_URI."
+    end
+
+    Parse::MongoDB.configure(uri: ATLAS_URI, enabled: true, verify_role: false)
     Parse::AtlasSearch.configure(enabled: true, default_index: "default")
+    # allow_raw defaults to false in production — `raw: true` is then
+    # silently ignored and results are converted to Parse-format
+    # objects. This suite predates that opt-in and several tests
+    # (`test_search_raw_mode`, `test_search_with_fields`,
+    # `test_search_with_highlights`) assert against the raw Hash shape.
+    Parse::AtlasSearch.allow_raw = true
+    install_master_scope_wrappers!
   end
 
   def teardown
+    uninstall_master_scope_wrappers!
     Parse::AtlasSearch.reset!
     Parse::MongoDB.reset!
+  end
+
+  # Wrap each Parse::AtlasSearch class method so calls without an
+  # explicit scope (master:/session_token:/acl_user:/acl_role:) default
+  # to `master: true`. Aliases the original under `__test_orig_<meth>`
+  # so teardown can restore the production method.
+  def install_master_scope_wrappers!
+    sc = Parse::AtlasSearch.singleton_class
+    SCOPED_SEARCH_METHODS.each do |meth|
+      orig = "__test_orig_#{meth}".to_sym
+      next if sc.method_defined?(orig)
+      sc.send(:alias_method, orig, meth)
+      sc.send(:remove_method, meth)
+      Parse::AtlasSearch.define_singleton_method(meth) do |*args, **opts, &blk|
+        unless opts.key?(:master) || opts.key?(:session_token) ||
+               opts.key?(:acl_user) || opts.key?(:acl_role)
+          opts[:master] = true
+        end
+        send(orig, *args, **opts, &blk)
+      end
+    end
+  end
+
+  def uninstall_master_scope_wrappers!
+    sc = Parse::AtlasSearch.singleton_class
+    SCOPED_SEARCH_METHODS.each do |meth|
+      orig = "__test_orig_#{meth}".to_sym
+      next unless sc.method_defined?(orig)
+      sc.send(:remove_method, meth) if sc.method_defined?(meth)
+      sc.send(:alias_method, meth, orig)
+      sc.send(:remove_method, orig)
+    end
   end
 
   #----------------------------------------------------------------
@@ -126,7 +184,7 @@ class AtlasSearchIntegrationTest < Minitest::Test
     pipeline << { "$addFields" => { "_score" => { "$meta" => "searchScore" } } }
     pipeline << { "$limit" => 10 }
 
-    results = Parse::MongoDB.aggregate("Song", pipeline)
+    results = Parse::MongoDB.aggregate("Song", pipeline, master: true)
     refute results.empty?, "should find results with builder"
   end
 
@@ -137,7 +195,7 @@ class AtlasSearchIntegrationTest < Minitest::Test
     pipeline = [builder.build]
     pipeline << { "$limit" => 10 }
 
-    results = Parse::MongoDB.aggregate("Song", pipeline)
+    results = Parse::MongoDB.aggregate("Song", pipeline, master: true)
     assert results.any? { |r| r["title"] == "Rock and Roll" }, "should find 'Rock and Roll' with phrase search"
   end
 
@@ -400,18 +458,45 @@ class AtlasSearchIntegrationTest < Minitest::Test
 
   private
 
-  def atlas_available?
-    # Try to connect to local Atlas deployment
-    begin
-      require "mongo"
-      client = Mongo::Client.new(ATLAS_URI)
-      client.database.collection_names
-      client.close
-      true
-    rescue => e
-      puts "Atlas not available: #{e.message}"
-      false
+  # Memoized at the class level so 50 tests don't each pay the probe timeout
+  # when Atlas isn't running. The probe must bridge mongodb-atlas-local's
+  # periodic internal mongod restarts — the image's supervisor cycles
+  # mongod on replica-set sync events, producing 5-10s outage windows where
+  # any connection sees Connection refused. The 15s server-selection
+  # timeout per attempt + up to 3 attempts with 5s sleep between covers a
+  # single restart cycle without skipping the whole suite.
+  def self.atlas_available?
+    return @atlas_available if defined?(@atlas_available)
+    @atlas_available = probe_atlas_with_retries
+  end
+
+  def self.probe_atlas_with_retries(attempts: 3, sleep_between: 5)
+    require "mongo"
+    last_error = nil
+    attempts.times do |i|
+      begin
+        client = Mongo::Client.new(
+          ATLAS_URI,
+          server_selection_timeout: 15,
+          connect_timeout: 5,
+          socket_timeout: 10,
+          logger: Logger.new(IO::NULL),
+        )
+        # `$listSearchIndexes` is the discriminator: any MongoDB will answer
+        # `collection_names`, but only an Atlas-Search-capable deployment
+        # accepts this pipeline stage.
+        client.database["Song"].aggregate([{ "$listSearchIndexes" => {} }]).first
+        client.close
+        return true
+      rescue => e
+        last_error = e
+        client&.close rescue nil
+        sleep sleep_between if i < attempts - 1
+      end
     end
+    warn "[AtlasSearchIntegrationTest] Atlas Search probe failed at #{ATLAS_URI} " \
+         "after #{attempts} attempts: #{last_error.class}: #{last_error.message}"
+    false
   end
 
   # Helper to get field from either Hash or Parse::Object

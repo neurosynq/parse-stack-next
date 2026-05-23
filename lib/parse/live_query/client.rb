@@ -14,6 +14,7 @@ require "timeout"
 require_relative "health_monitor"
 require_relative "circuit_breaker"
 require_relative "event_queue"
+require_relative "../pipeline_security"
 
 module Parse
   module LiveQuery
@@ -285,6 +286,18 @@ module Parse
           where = query.compile_where
         end
 
+        # Refuse server-side-JS / data-mutating operators in the `where`
+        # filter at any nesting depth. LiveQuery subscriptions are a
+        # persistent server-evaluated channel; without this gate, a
+        # caller could plant `$where`/`$function`/`$accumulator` (or
+        # data-mutating stages nested inside) and have them re-evaluated
+        # on every matching event for the lifetime of the subscription.
+        # Permissive mode (recursive denylist only) mirrors the
+        # `Parse::MongoDB`/`Parse::AtlasSearch` filter posture so the
+        # SDK enforces one consistent set of refusals on every
+        # user-influenced filter path.
+        Parse::PipelineSecurity.validate_filter!(where) if where.is_a?(Hash) && !where.empty?
+
         subscription = Subscription.new(
           client: self,
           class_name: class_name,
@@ -366,14 +379,46 @@ module Parse
         nil
       end
 
-      # Derive WebSocket URL from Parse server URL
+      # Loopback hostnames exempt from the `ws://` refusal in
+      # {#derive_websocket_url}. These addresses can't reach the
+      # Internet, so the cleartext-credentials threat model doesn't
+      # apply — but we still emit a warning so the operator knows
+      # they're on `ws://`.
+      LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1 [::1] 0.0.0.0].freeze
+
+      # Derive WebSocket URL from Parse server URL. Refuses to
+      # synthesize a `ws://` URL from an `http://` server URL on any
+      # non-loopback host unless the LiveQuery configuration has
+      # `allow_insecure = true`. The master key and session tokens
+      # travel in the connect frame; downgrading to cleartext WebSocket
+      # on a routable host is an MITM-grade leak.
       def derive_websocket_url
         server_url = parse_client_value(:server_url)
         return nil unless server_url
 
         uri = URI.parse(server_url)
         scheme = uri.scheme == "https" ? "wss" : "ws"
-        "#{scheme}://#{uri.host}:#{uri.port || (scheme == "wss" ? 443 : 80)}"
+        host = uri.host.to_s
+
+        if scheme == "ws" && !LOOPBACK_HOSTS.include?(host)
+          if config.allow_insecure
+            warn "[Parse::LiveQuery] Deriving insecure ws:// URL for #{host} " \
+                 "(allow_insecure is enabled). Master key and session tokens " \
+                 "will traverse a cleartext socket."
+          else
+            raise ArgumentError,
+              "[Parse::LiveQuery] Refusing to derive insecure ws:// URL from " \
+              "http:// server URL (#{server_url.inspect}). The LiveQuery " \
+              "connect frame carries the master key and any session token " \
+              "in plaintext on this socket. Use an https:// Parse server URL " \
+              "(so wss:// is derived) or pass an explicit wss:// `url:` to " \
+              "Parse::LiveQuery::Client.new. To opt into cleartext for local " \
+              "development on a routable host, set " \
+              "`Parse::LiveQuery.configure { |c| c.allow_insecure = true }`."
+          end
+        end
+
+        "#{scheme}://#{host}:#{uri.port || (scheme == "wss" ? 443 : 80)}"
       end
 
       # Establish TCP/SSL connection and perform WebSocket handshake
@@ -386,37 +431,82 @@ module Parse
         # Create TCP socket
         tcp_socket = TCPSocket.new(host, port)
 
-        # Wrap with SSL if wss://
-        if uri.scheme == "wss"
-          ssl_context = OpenSSL::SSL::SSLContext.new
-          ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER
-          ssl_context.cert_store = OpenSSL::X509::Store.new
-          ssl_context.cert_store.set_default_paths
+        begin
+          # Wrap with SSL if wss://
+          if uri.scheme == "wss"
+            ssl_context = OpenSSL::SSL::SSLContext.new
+            ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER
+            ssl_context.cert_store = OpenSSL::X509::Store.new
+            ssl_context.cert_store.set_default_paths
 
-          # Apply TLS version constraints from configuration
-          cfg = config
-          if cfg.ssl_min_version
-            ssl_context.min_version = Configuration.tls_version_constant(cfg.ssl_min_version)
-          end
-          if cfg.ssl_max_version
-            ssl_context.max_version = Configuration.tls_version_constant(cfg.ssl_max_version)
+            # Apply TLS version constraints from configuration
+            cfg = config
+            if cfg.ssl_min_version
+              ssl_context.min_version = Configuration.tls_version_constant(cfg.ssl_min_version)
+            end
+            if cfg.ssl_max_version
+              ssl_context.max_version = Configuration.tls_version_constant(cfg.ssl_max_version)
+            end
+
+            @socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, ssl_context)
+            @socket.sync_close = true
+            @socket.hostname = host
+            @socket.connect
+            # SNI does not verify the cert matches the hostname; this does.
+            # Without it, any cert signed by a trusted CA for any host would be
+            # accepted, enabling MITM of LiveQuery sessions.
+            @socket.post_connection_check(host)
+          else
+            @socket = tcp_socket
           end
 
-          @socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, ssl_context)
-          @socket.sync_close = true
-          @socket.hostname = host
-          @socket.connect
-        else
-          @socket = tcp_socket
+          # Perform WebSocket handshake
+          perform_handshake(host, path)
+        rescue
+          # Clean up both sockets on any failure mid-handshake. sync_close=true
+          # would close tcp_socket via @socket.close, but if @socket wasn't yet
+          # assigned (or assignment failed), we still need to close tcp_socket.
+          if @socket
+            begin
+              @socket.close
+            rescue StandardError
+            end
+            @socket = nil
+          else
+            begin
+              tcp_socket.close
+            rescue StandardError
+            end
+          end
+          raise
         end
-
-        # Perform WebSocket handshake
-        perform_handshake(host, path)
       end
 
-      # Perform WebSocket handshake
+      # RFC 6455 §1.3 magic GUID used to derive +Sec-WebSocket-Accept+
+      # from the client-supplied +Sec-WebSocket-Key+. Server proves it
+      # spoke WebSocket (and not e.g. a confused HTTP/1.1 server that
+      # happens to return +HTTP/1.1 101+) by echoing
+      # +Base64(SHA1(key || GUID))+ back to the client.
+      WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11".freeze
+
+      # @!visibility private
+      # Cap on bytes read during the pre-handshake header phase, so a
+      # malicious server cannot stream unbounded headers and OOM the
+      # Ruby process before {Frame#read_frame}'s message-size cap kicks
+      # in.
+      HANDSHAKE_MAX_BYTES = 16 * 1024
+      # @!visibility private
+      HANDSHAKE_PER_LINE_BYTES = 8 * 1024
+
+      # Perform WebSocket handshake. Verifies the server's
+      # +Sec-WebSocket-Accept+ matches the SHA-1 of the random key +
+      # the WebSocket magic GUID, preventing cross-protocol acceptance
+      # of any HTTP/1.1 101 response from a non-WebSocket server.
       def perform_handshake(host, path)
         key = Base64.strict_encode64(SecureRandom.random_bytes(16))
+        expected_accept = Base64.strict_encode64(
+          Digest::SHA1.digest(key + WEBSOCKET_GUID)
+        )
 
         handshake = [
           "GET #{path} HTTP/1.1",
@@ -431,18 +521,75 @@ module Parse
 
         @socket.write(handshake)
 
-        # Read response
-        response = ""
-        while (line = @socket.gets)
-          response += line
+        # Read response with strict byte caps so a hostile/MITM server
+        # cannot stream unbounded header bytes pre-handshake.
+        response = +""
+        loop do
+          if response.bytesize > HANDSHAKE_MAX_BYTES
+            raise ConnectionError,
+                  "WebSocket handshake exceeded #{HANDSHAKE_MAX_BYTES} bytes"
+          end
+          line = @socket.gets("\r\n", HANDSHAKE_PER_LINE_BYTES)
+          break if line.nil?
+          response << line
           break if line == "\r\n"
         end
 
-        unless response.include?("101")
-          raise ConnectionError, "WebSocket handshake failed: #{response}"
-        end
-
+        validate_handshake_response!(response, expected_accept)
         Logging.debug("WebSocket handshake complete")
+      end
+
+      # @!visibility private
+      # Parses and validates the server handshake response per RFC 6455 §4.1.
+      # Refuses any response that does not (a) start with HTTP/1.1 101,
+      # (b) carry +Upgrade: websocket+, (c) carry +Connection: Upgrade+,
+      # and (d) carry +Sec-WebSocket-Accept: <expected>+ matching the
+      # client-derived value.
+      def validate_handshake_response!(response, expected_accept)
+        if response.empty?
+          raise ConnectionError, "WebSocket handshake: empty server response"
+        end
+        unless response =~ /\AHTTP\/1\.[01]\s+101[ \t]/
+          raise ConnectionError,
+                "WebSocket handshake: expected HTTP 101 status, got: #{response.lines.first.to_s.strip.inspect}"
+        end
+        headers = {}
+        response.lines.drop(1).each do |line|
+          break if line == "\r\n"
+          name, _, value = line.chomp.partition(":")
+          headers[name.strip.downcase] = value.strip if name && value
+        end
+        unless headers["upgrade"]&.casecmp?("websocket")
+          raise ConnectionError,
+                "WebSocket handshake: missing or wrong Upgrade header (got #{headers["upgrade"].inspect})"
+        end
+        # Connection header may be a comma-separated list; check that
+        # "upgrade" appears among the tokens.
+        conn_tokens = headers["connection"].to_s.downcase.split(",").map(&:strip)
+        unless conn_tokens.include?("upgrade")
+          raise ConnectionError,
+                "WebSocket handshake: missing Upgrade token in Connection header"
+        end
+        accept = headers["sec-websocket-accept"]
+        unless accept && secure_str_compare(accept, expected_accept)
+          raise ConnectionError,
+                "WebSocket handshake: Sec-WebSocket-Accept mismatch — refusing to treat connection as WebSocket"
+        end
+      end
+
+      # @!visibility private
+      # Constant-time string comparison. Falls back to ActiveSupport if
+      # available, otherwise rolls a short manual implementation.
+      def secure_str_compare(a, b)
+        if defined?(ActiveSupport::SecurityUtils)
+          ActiveSupport::SecurityUtils.secure_compare(a, b)
+        else
+          return false unless a.bytesize == b.bytesize
+          l = a.unpack("C*")
+          res = 0
+          b.each_byte.with_index { |byte, i| res |= byte ^ l[i] }
+          res.zero?
+        end
       end
 
       # Start background thread for reading messages

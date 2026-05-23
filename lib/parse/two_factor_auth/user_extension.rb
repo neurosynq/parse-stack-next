@@ -131,6 +131,13 @@ module Parse
       def setup_mfa!(secret:, token:)
         raise ArgumentError, "Secret is required" if secret.blank?
         raise ArgumentError, "Token is required" if token.blank?
+        # Refresh authData from the server before gating on mfa_enabled?
+        # so a stale in-memory user does not bypass the local guard. This
+        # narrows the race window from "any time the user object is alive"
+        # to "one round-trip" — it does not eliminate TOCTOU. Full
+        # elimination requires the Parse Server MFA adapter to reject
+        # re-setup when authData.mfa.status == "enabled".
+        fetch if id.present?
         raise MFA::AlreadyEnabledError if mfa_enabled?
 
         # Validate secret length (Parse Server requires minimum 20 chars)
@@ -185,6 +192,12 @@ module Parse
         end
 
         mobile = phone.to_s  # Use normalized E.164 format
+
+        # Same TOCTOU narrowing as #setup_mfa!: refresh authData before
+        # the guard so a stale in-memory user cannot bypass the check.
+        # See #setup_mfa! for the residual-risk caveat.
+        fetch if id.present?
+        raise MFA::AlreadyEnabledError if mfa_enabled?
 
         auth_data_payload = {
           mfa: {
@@ -284,22 +297,63 @@ module Parse
         true
       end
 
-      # Disable MFA using master key (admin override).
+      # Disable MFA using the configured master key. This bypasses MFA
+      # verification entirely, so the caller must prove (out-of-band) that
+      # the operator initiating the disable is authorized to do so.
       #
-      # This bypasses MFA verification and should only be used by admins
-      # with master key access.
+      # The +authorized_by:+ keyword is required and must be a
+      # {Parse::User} (or {Parse::Pointer} to a User) representing the
+      # operator performing the override. The caller is responsible for
+      # verifying that operator's privileges (e.g. via a role check). An
+      # optional +admin_role:+ argument lets this method enforce a role
+      # membership check on the operator using the existing role-hierarchy
+      # support; when given, the operator must belong to the role (or any
+      # of its child roles) or +ForbiddenError+ is raised.
       #
-      # @return [Boolean] True if disabled successfully
+      # @param authorized_by [Parse::User, Parse::Pointer] the operator
+      #   performing the override. Required.
+      # @param admin_role [Parse::Role, String, nil] optional role (or role
+      #   name) that +authorized_by+ must belong to.
+      # @return [Boolean] True if disabled successfully.
+      # @raise [ArgumentError] when +authorized_by:+ is missing or not a User.
+      # @raise [Parse::MFA::ForbiddenError] when +admin_role+ is supplied
+      #   and the operator is not a member.
       #
-      # @example
-      #   # With master key configured
-      #   user.disable_mfa_admin!
-      def disable_mfa_admin!
-        # Setting authData.mfa to null with master key
-        auth_data_payload = {
-          mfa: nil,
-        }
+      # @example Caller-verified authorization
+      #   user.disable_mfa_master_key!(authorized_by: current_admin)
+      #
+      # @example Library-enforced role check
+      #   user.disable_mfa_master_key!(authorized_by: current_admin,
+      #                                admin_role: "Admin")
+      def disable_mfa_master_key!(authorized_by:, admin_role: nil)
+        operator = authorized_by
+        unless operator.is_a?(Parse::User) ||
+               (operator.is_a?(Parse::Pointer) && operator.parse_class == Parse::User.parse_class)
+          raise ArgumentError,
+                "disable_mfa_master_key! requires authorized_by: to be a Parse::User " \
+                "or Parse::Pointer to a User (got #{operator.class})"
+        end
+        if operator.respond_to?(:id) && operator.id.blank?
+          raise ArgumentError, "authorized_by: User must be persisted (have an objectId)"
+        end
 
+        if admin_role
+          role = admin_role.is_a?(Parse::Role) ? admin_role : Parse::Role.find_by_name(admin_role.to_s)
+          if role.nil?
+            raise MFA::ForbiddenError,
+                  "authorized_by user is not authorized: admin role " \
+                  "#{admin_role.inspect} not found"
+          end
+          operator_id = operator.id
+          authorized = role.all_users.any? { |u| u.id == operator_id }
+          unless authorized
+            raise MFA::ForbiddenError,
+                  "authorized_by user #{operator_id} is not a member of " \
+                  "role #{role.name.inspect}"
+          end
+        end
+
+        auth_data_payload = { mfa: nil }
         response = client.update_user(id, { authData: auth_data_payload }, opts: { use_master_key: true })
 
         if response.error?
@@ -310,6 +364,16 @@ module Parse
         fetch
 
         true
+      end
+
+      # @deprecated Use {#disable_mfa_master_key!} with an explicit
+      #   +authorized_by:+ argument. The old name had no authorization gate
+      #   and acted as a one-call IDOR primitive when invoked on an
+      #   attacker-controlled user instance.
+      def disable_mfa_admin!(*args, **kwargs)
+        warn "[DEPRECATION] `disable_mfa_admin!` is deprecated; use " \
+             "`disable_mfa_master_key!(authorized_by: <admin user>)`."
+        disable_mfa_master_key!(*args, **kwargs)
       end
 
       # Login this user instance with password and MFA token.

@@ -24,12 +24,19 @@ module Parse
       # Class methods to be applied to {Parse::Client}
       module ClassMethods
         # Get the aggregate API path for this class.
+        #
+        # +className+ is validated to prevent path-smuggling — aggregate
+        # endpoints are master-key-only on Parse Server, so any traversal
+        # here pivots a master-key request to a different endpoint.
+        #
         # @param className [String] the name of the Parse collection.
         # @return [String] the API uri path
+        # @raise [ArgumentError] if className violates the identifier pattern.
         def aggregate_uri_path(className)
           if className.is_a?(Parse::Pointer)
             className = className.parse_class
           end
+          className = Parse::API::PathSegment.identifier!(className, kind: "className")
           "#{PATH_PREFIX}#{className}"
         end
       end

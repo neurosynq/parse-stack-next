@@ -146,6 +146,38 @@ module Parse
   # @see Parse::Object
   class User < Parse::Object
     parse_class Parse::Model::CLASS_USER
+
+    # When true (default), saving a new {Parse::User} that has a `password`
+    # value routes through Parse Server's signup endpoint (`POST /parse/users`)
+    # with the `X-Parse-Revocable-Session` header set, so the signup response
+    # returns a session token that is applied to the in-memory user object
+    # via the standard `sessionToken_set_attribute!` hydration path. Without
+    # this flag, `Parse::User.new(...).save!` left `session_token` `nil`
+    # because the underlying create path did not request a revocable session.
+    #
+    # Set to `false` to always create users without requesting a revocable
+    # session token - for example, when a master-key server-side script is
+    # provisioning user rows that will receive credentials later. New users
+    # created with no password always fall through to the standard create
+    # path regardless of this flag.
+    #
+    # `auth_data` (federated identity / OAuth) signup is deliberately NOT
+    # triggered by this flag. `POST /parse/users` treats `auth_data` as a
+    # claim against an existing account, so allowing mass-assigned `auth_data`
+    # to trigger a revocable-session signup would let attacker-controlled
+    # params plant another user's session token onto the in-memory object.
+    # Use {.autologin_service} or {.signup} (the explicit class methods) for
+    # OAuth-driven signup; both bypass the mass-assignment filter because the
+    # caller is explicitly choosing the federated-identity flow.
+    #
+    # Inherited through subclasses via {ActiveSupport::Concern}'s
+    # `class_attribute`, so an application-specific subclass may override
+    # the default without affecting `Parse::User` itself.
+    #
+    # @return [Boolean]
+    class_attribute :signup_on_save, instance_writer: false
+    self.signup_on_save = true
+
     # @return [String] The session token if this user is logged in.
     attr_reader :session_token
 
@@ -174,6 +206,15 @@ module Parse
     # @return [String] The user's username.
     property :username
 
+    # @!attribute email_verified
+    # Whether this user's email address has been verified. Set by Parse Server
+    # when the user follows the verification link delivered by the email
+    # adapter, and applied to the in-memory object by {#signup!} / signup-on-save
+    # when the server includes it in the signup response (see
+    # +SIGNUP_RESPONSE_APPLY_KEYS+).
+    # @return [Boolean]
+    property :email_verified, :boolean
+
     # @!attribute active_sessions
     # A has_many relationship to all {Parse::Session} instances for this user. This
     # will query the _Session collection for all sessions which have this user in it's `user`
@@ -188,9 +229,27 @@ module Parse
     #   self.clear_attribute_change!([:acl])
     # end
 
-    # @return [Boolean] true if this user is anonymous.
+    # `emailVerified` is server-controlled: Parse Server flips it when the
+    # user follows the verification link, and only master-key callers (e.g.
+    # a `beforeSignUp` cloud function approving an internal email domain)
+    # are meant to set it explicitly. Client writes from any platform —
+    # this Ruby SDK, iOS, JS, etc. — are silently reverted at the
+    # `_User.beforeSave` webhook boundary.
+    #
+    # This complements the SDK-side {SERVER_CONTROLLED_KEYS} strip
+    # ({strip_server_controlled_keys!}), which removes the field from
+    # outbound signup/create bodies before the request leaves the SDK.
+    # The guard is the cross-client backstop and only runs when the
+    # deployment has the Parse Server webhook callback wired to a Ruby app
+    # running the `Parse::Webhooks` middleware. Reads are unaffected — a
+    # logged-in user can still see their own `email_verified` flag.
+    guard :email_verified, :master_only
+
+    # @return [Boolean] true if this user is anonymous (i.e. created
+    #   via the +authData.anonymous+ provider rather than via signup
+    #   with a username/password or a real OAuth provider).
     def anonymous?
-      anonymous_id.nil?
+      !anonymous_id.nil?
     end
 
     # Returns the anonymous identifier only if this user is anonymous.
@@ -261,13 +320,52 @@ module Parse
       end
 
       signup_attrs = attribute_updates
-      signup_attrs.except!(*Parse::Properties::BASE_FIELD_MAP.flatten)
+      # See {#signup_create} for the rationale on the safe-pattern check.
+      if self.class.signup_body_self_only_acl_safe?(signup_attrs)
+        signup_attrs.except!(:createdAt, :updatedAt, "createdAt", "updatedAt")
+      else
+        signup_attrs.except!(*Parse::Properties::BASE_FIELD_MAP.flatten)
+      end
+      self.class.strip_server_controlled_keys!(signup_attrs)
 
       # first signup the user, then save any additional attributes
       response = client.create_user signup_attrs
 
       if response.success?
-        apply_attributes! response.result
+        # Restrict what the server can plant into the in-memory user via
+        # the signup response, matching the defense in {#signup_create}.
+        # `POST /parse/users` legitimately returns objectId, createdAt,
+        # updatedAt (extracted into @-vars directly below), sessionToken,
+        # and emailVerified. Any other key in the response body --
+        # `authData`, `_rperm`, `_wperm`, `roles`, etc. -- is dropped, so
+        # a compromised or MITM'd Parse Server cannot use this code path
+        # to plant credentials/permissions onto the user we just signed
+        # up. The previous `apply_attributes! response.result` accepted
+        # every key the server returned through the typed property
+        # writers (`authData_set_attribute!` exists because we declare
+        # `property :auth_data, :object`), which was a footgun the
+        # save-as-signup path had already addressed.
+        result = response.result
+        @id = result[Parse::Model::OBJECT_ID] || @id
+        @created_at = result["createdAt"] || @created_at
+        @updated_at = result["updatedAt"] || result["createdAt"] || @updated_at
+        set_attributes!(result.slice(*SIGNUP_RESPONSE_APPLY_KEYS))
+        # Drop the plaintext password from memory now that the server
+        # has it hashed and we no longer need it. Matches the Parse JS
+        # SDK behavior of clearing the password attribute after a
+        # successful save/signup. Uses direct ivar assignment so the
+        # dirty tracker doesn't record this clear as a pending change
+        # that would be re-sent on the next save.
+        @password = nil
+        # Mirror Parse::Object#save: a successful round-trip means the
+        # locally-set credential fields are now in sync with the server
+        # and must NOT be re-sent on the next save. Without this, a
+        # subsequent user.save! re-transmits `password`, which Parse
+        # Server treats as a password change under
+        # revokeSessionOnPasswordReset and revokes the session just
+        # minted by this signup.
+        changes_applied!
+        clear_partial_fetch_state!
         return true
       end
 
@@ -286,13 +384,59 @@ module Parse
       raise Parse::Client::ResponseError, response
     end
 
+    # Override of {Parse::Core::Actions::InstanceMethods#create} so that
+    # saving a new user that has a `password` goes through Parse Server's
+    # signup endpoint and the returned session token is applied to the
+    # in-memory object. Falls through to the inherited raw `_User` insert
+    # when the new user has no password or when {.signup_on_save} has been
+    # disabled. Like the inherited `:create` path, the `before_create` /
+    # `after_create` callback chain still fires and the method returns the
+    # response's success flag (errors propagate to {Parse::Object#save} as
+    # a `false` return, which the caller may turn into a
+    # {Parse::RecordNotSaved} via `save!` / `autoraise: true`).
+    #
+    # `auth_data`-only signups (federated-identity / OAuth flows where no
+    # password is set) are deliberately NOT routed through this path,
+    # because `POST /parse/users` treats `auth_data` as an identity claim
+    # against an existing user — accepting it from a mass-assigned hash
+    # would expose a session-token planting vector. OAuth signup is the
+    # responsibility of the explicit {#signup!} method (or
+    # {Parse::User.autologin_service}), whose call sites necessarily make
+    # the federated-identity decision themselves.
+    # @!visibility private
+    def create
+      if self.class.signup_on_save && self.password.present?
+        signup_create
+      else
+        super
+      end
+    end
+
     # Login and get a session token for this user.
     # @param passwd [String] The password for this user.
     # @return [Boolean] True/false if we received a valid session token.
     def login!(passwd = nil)
       self.password = passwd || self.password
       response = client.login(username.to_s, password.to_s)
-      apply_attributes! response.result
+      if response.success?
+        # Unlike signup, login's response is the canonical state of an
+        # existing user, including any linked authData. Applying the
+        # full response body here is intentional -- the server is
+        # telling us what the account currently looks like. (Compare
+        # signup, where we narrow to an allow-list because a brand-new
+        # account has no legitimate authData to report.)
+        apply_attributes! response.result
+        # Drop the plaintext password from memory now that the login
+        # has succeeded. Direct ivar assignment so the dirty tracker
+        # doesn't record this clear as a pending change.
+        @password = nil
+        # Clear dirty state so a subsequent user.save! does not re-send
+        # `password` (which Parse Server would treat as a password
+        # change and use to revoke the session this login just issued).
+        # See the matching note in #signup!.
+        changes_applied!
+        clear_partial_fetch_state!
+      end
       self.session_token.present?
     end
 
@@ -317,14 +461,75 @@ module Parse
     def session
       if @session.blank? && @session_token.present?
         response = client.fetch_session(@session_token)
-        @session ||= Parse::Session.new(response.result)
+        # Trusted hydration: +response.result+ is the server-side
+        # _Session row, which legitimately includes +sessionToken+,
+        # +createdAt+, +updatedAt+, and other protected keys. Route
+        # through {Parse::Object.build} which handles the trusted-init
+        # signalling.
+        @session ||= Parse::Object.build(response.result, Parse::Model::CLASS_SESSION)
       end
       @session
     end
 
+    # @!visibility private
+    # Keys that must never flow through +Parse::User.create+ from a
+    # mass-assigned hash. +authData+ on the user-signup endpoint causes
+    # Parse Server to silently log into the existing account that matches
+    # that auth_data and return ITS sessionToken — full account takeover
+    # if the caller blindly forwards client-supplied parameters.
+    # +objectId+ allows the caller to pick the user's identifier on
+    # creation, sometimes targetable depending on Parse Server config.
+    UNSAFE_CREATE_KEYS = %i[authData auth_data objectId id].freeze
+
+    # @!visibility private
+    # Fields that are server-controlled and must be stripped from any body
+    # that the SDK sends to the signup endpoint or +Parse::User.create+,
+    # regardless of who supplied them. Unlike {UNSAFE_CREATE_KEYS}, passing
+    # one of these is not refused (no exception is raised); the field is
+    # silently dropped before wire transit.
+    #
+    # +emailVerified+ is the canonical case: Parse Server's default `_User`
+    # CLP restricts writes to the master key, so a caller-supplied value
+    # would normally be rejected anyway — but the SDK strips it as
+    # defense-in-depth so signup with mass-assigned attributes cannot
+    # smuggle a verified=true onto a brand-new account if the deployment
+    # has loosened the default CLP. (Update-path coverage is handled by
+    # the {Parse::Core::FieldGuards} declaration
+    # {guard :email_verified, :master_only} below, which silently reverts
+    # client writes at the `_User.beforeSave` webhook boundary.)
+    #
+    # The underscore-prefixed entries are internal Parse Server `_User`
+    # bookkeeping columns (verify tokens, perishable tokens, the bcrypt
+    # password hash, lockout state, etc.). Parse Server rejects writes to
+    # them from non-master callers anyway, but the SDK strips them as a
+    # belt-and-suspenders measure so a mass-assigned hash from request
+    # parameters cannot reach the wire with these keys at all.
+    #
+    # The trusted signup-response apply path ({SIGNUP_RESPONSE_APPLY_KEYS})
+    # is unaffected by this strip because it uses {#set_attributes!}, not
+    # the dirty-tracked setter that {#attribute_updates} reads from.
+    SERVER_CONTROLLED_KEYS = %i[
+      emailVerified email_verified
+      _hashed_password
+      _email_verify_token _email_verify_token_expires_at
+      _perishable_token _perishable_token_expires_at
+      _password_history
+      _failed_login_count
+      _account_lockout_expires_at
+    ].freeze
+
     # Creates a new Parse::User given a hash that maps to the fields defined in your Parse::User collection.
+    #
+    # Mass-assignment of +authData+/+auth_data+/+objectId+ is refused. If you
+    # intend to create-or-login a user via federated identity, use
+    # {.autologin_service} or {.link_or_create_with_auth_data}. Passing
+    # those keys directly bypasses the SDK's federated-identity wrapper
+    # and risks returning a victim's sessionToken to whoever submitted
+    # the request.
+    #
     # @param body [Hash] The hash containing the Parse::User fields. The field `username` and `password` are required.
     # @option opts [Boolean] :master_key Whether the master key should be used for this request.
+    # @raise [ArgumentError] If +body+ contains +authData+/+auth_data+/+objectId+ — use {.autologin_service} for federated flows.
     # @raise [Parse::Error::UsernameMissingError] If username is missing.
     # @raise [Parse::Error::PasswordMissingError] If password is missing.
     # @raise [Parse::Error::UsernameTakenError] If the username has already been taken.
@@ -333,6 +538,13 @@ module Parse
     # @raise [Parse::Client::ResponseError] An unknown error occurred.
     # @return [User] Returns a successfully created Parse::User.
     def self.create(body, **opts)
+      # Consume and clear the SDK-internal trust marker before validation
+      # or wire transit. This prevents trusted-authdata flag smuggling
+      # through callers that copy hashes from a request parameter.
+      trusted = body.is_a?(Hash) ? (body.delete(:__parse_stack_trusted_authdata) ||
+                                    body.delete("__parse_stack_trusted_authdata")) : false
+      assert_create_body_safe!(body) unless trusted
+      strip_server_controlled_keys!(body)
       response = client.create_user(body, opts: opts)
       if response.success?
         body.delete :password # clear password before merging
@@ -352,6 +564,42 @@ module Parse
       raise Parse::Client::ResponseError, response
     end
 
+    # @!visibility private
+    # Silently strips {SERVER_CONTROLLED_KEYS} from +body+ in place. Used
+    # by {.create}, {#signup!}, and {#signup_create} as defense-in-depth so
+    # caller-supplied values for fields that Parse Server is meant to
+    # control (currently just +emailVerified+) never reach the wire.
+    # @return [Hash, Object] the same +body+ object, mutated.
+    def self.strip_server_controlled_keys!(body)
+      return body unless body.is_a?(Hash)
+      SERVER_CONTROLLED_KEYS.each do |k|
+        body.delete(k)
+        body.delete(k.to_s)
+      end
+      body
+    end
+
+    # @!visibility private
+    # Raises +ArgumentError+ if +body+ carries keys that would let an
+    # attacker turn +Parse::User.create+ into an account-takeover sink.
+    # Skipped when called through the SDK's federated-identity wrapper
+    # ({.autologin_service}), which deliberately supplies +authData+ and
+    # is responsible for its provenance.
+    def self.assert_create_body_safe!(body)
+      return unless body.is_a?(Hash)
+      unsafe = body.each_key.select do |k|
+        ks = k.is_a?(String) ? k.to_sym : k
+        UNSAFE_CREATE_KEYS.include?(ks)
+      end
+      unless unsafe.empty?
+        raise ArgumentError,
+              "Refusing Parse::User.create with #{unsafe.inspect}. " \
+              "These keys can be used for account takeover via federated-id " \
+              "linking. Use Parse::User.autologin_service for federated " \
+              "flows, or pass authData via that wrapper."
+      end
+    end
+
     # Automatically and implicitly signup a user if it did not already exists and
     # authenticates them (login) using third-party authentication data. May raise exceptions
     # similar to `create` depending on what you provide the _body_ parameter.
@@ -361,7 +609,14 @@ module Parse
     # @return [User] a logged in user, or nil.
     # @see User.create
     def self.autologin_service(service_name, auth_data, body: {})
-      body = body.merge({ authData: { service_name => auth_data } })
+      # Trust-mark this call so {.assert_create_body_safe!} permits the
+      # +authData+ that we are explicitly responsible for here. The
+      # marker is consumed inside {.create} before forwarding to the
+      # server.
+      body = body.merge({
+        authData: { service_name => auth_data },
+        __parse_stack_trusted_authdata: true,
+      })
       self.create(body)
     end
 
@@ -488,6 +743,201 @@ module Parse
     #   end
     def multi_session?
       active_session_count > 1
+    end
+
+    # Return the transitive upward closure of role names this user
+    # inherits permissions from.
+    #
+    # ## Authorization
+    #
+    # The role graph is privileged data: Parse Server's `_Role` class
+    # ships with `acl_policy :private` precisely so anonymous clients
+    # cannot enumerate role memberships. This method therefore routes
+    # through the mongo-direct fast path under an EXPLICIT
+    # authorization scope.
+    #
+    # By default, `as:` is set to `self` — the user instance itself,
+    # meaning "I (this user) am asking about my own roles". The scope
+    # is resolved via {Parse::ACLScope} and CLP is enforced against
+    # `_Role`: the call succeeds iff the user's permission set
+    # (`["*", user.id, "role:..."]`) is permitted to `find` on
+    # `_Role`. Under Parse Server's default `_Role` CLP (master-only,
+    # which {Parse::Role}'s `acl_policy :private` does not change),
+    # the user's scope is NOT permitted, so this call raises
+    # {Parse::CLPScope::Denied}. Apps that have explicitly opened
+    # `_Role` CLP for authenticated users (e.g. `find:
+    # { requiresAuthentication: true }`) will have the call succeed.
+    #
+    # Callers performing privileged work (computing ACL permission
+    # sets, e.g. server-side filters) should pass `master: true` to
+    # bypass the CLP check.
+    #
+    # **Breaking change:** Previously this method bypassed the
+    # authorization check entirely (callers could construct a
+    # `Parse::User` with any objectId via
+    # `Parse::User.new.tap { |u| u.id = victim_id }` and enumerate
+    # the victim's roles). The new contract is explicit-auth-required;
+    # use `master: true` for the previous behavior.
+    #
+    # @param max_depth [Integer] maximum BFS depth (default: 10).
+    # @param master [Boolean] when +true+, bypass `_Role` CLP and run
+    #   the role-graph lookup under master mode. Use for ACL-building
+    #   code paths inside the SDK or in admin tooling.
+    # @param as [Parse::User, Parse::Pointer, nil] caller-scope. When
+    #   `nil`, defaults to `self` (the user-asking-about-their-own-roles
+    #   case). Pass a different user to ask "what would this caller
+    #   see when introspecting this user's roles?"; the scope's
+    #   permission set is checked against `_Role` CLP.
+    # @return [Set<String>] role names (no +role:+ prefix). Empty set
+    #   when the user has no objectId yet or holds no roles.
+    # @raise [Parse::CLPScope::Denied] when the scope cannot `find`
+    #   on `_Role` under the current CLP.
+    # @example
+    #   # User reading their own roles (subject to _Role CLP):
+    #   permission_set = (["*", user.id] + user.acl_roles.map { |n| "role:#{n}" }).uniq
+    #   # Admin/SDK-internal code building ACL filters:
+    #   permission_set = (["*", user.id] + user.acl_roles(master: true).map { |n| "role:#{n}" }).uniq
+    def acl_roles(max_depth: 10, master: false, as: nil)
+      return Set.new unless id.is_a?(String) && !id.empty?
+      # Default `as:` to self so the common "user reading their own
+      # roles" case works without ceremony when _Role CLP permits the
+      # user. The CLP check + scope resolution happens inside
+      # Parse::Role.all_for_user → Parse::MongoDB.role_names_for_user.
+      effective_as = as.nil? && master != true ? self : as
+      Parse::Role.all_for_user(
+        self, max_depth: max_depth, master: master, as: effective_as,
+      )
+    end
+
+    private
+
+    # Keys that {#signup_create} will accept from a `POST /parse/users`
+    # response body and feed through {#set_attributes!}. `sessionToken`
+    # is the operative output of the signup endpoint; `emailVerified` is
+    # the only other field Parse Server commonly emits and is harmless to
+    # apply. All other keys are dropped, even if the server response
+    # contains them — this blocks a compromised or MITM'd Parse Server
+    # from planting `authData`, `_rperm`, `_wperm`, `roles`, or other
+    # security-sensitive fields into the in-memory user object via the
+    # save-as-signup path. `objectId`, `createdAt`, and `updatedAt` are
+    # extracted directly into the corresponding `@`-vars below and so do
+    # not need to appear in this list.
+    SIGNUP_RESPONSE_APPLY_KEYS = %w[sessionToken emailVerified].freeze
+
+    # Strict matcher for a client-supplied `objectId` that the SDK could
+    # plausibly have generated via Parse::Core::ParseReference. Used by
+    # {.signup_body_self_only_acl_safe?} to gate the narrow whitelist of
+    # client-supplied ACL+objectId pairs allowed through the signup body.
+    PARSE_OBJECT_ID_FORMAT = /\A[A-Za-z0-9]{10}\z/.freeze
+
+    # True when the signup-body `objectId` and `ACL` together describe the
+    # safe self-only ownership pattern that {acl_policy} produces under
+    # `owner: :self`: the body has a client-assigned `objectId` matching
+    # the Parse-id format, and the ACL has exactly one entry granting
+    # read+write to that same objectId. Any deviation — multiple keys, a
+    # non-self key, a `*` (public) entry, a `role:` entry, missing or
+    # extra permissions — fails the check and the strip-everything fallback
+    # in {#signup_create} / {#signup!} runs as before.
+    # @param body [Hash] signup request body, with symbol or string keys.
+    # @return [Boolean]
+    # @api private
+    def self.signup_body_self_only_acl_safe?(body)
+      return false unless body.is_a?(Hash)
+      oid = body[:objectId] || body["objectId"]
+      acl = body[:ACL] || body["ACL"]
+      return false unless oid.is_a?(String) && oid.match?(PARSE_OBJECT_ID_FORMAT)
+      return false unless acl.is_a?(Hash) && acl.size == 1
+      perms = acl[oid] || acl[oid.to_s]
+      return false unless perms.is_a?(Hash)
+      normalized = perms.transform_keys(&:to_s)
+      normalized == { "read" => true, "write" => true }
+    end
+
+    # Body of {#create} when signup-on-save applies. Mirrors the inherited
+    # Parse::Object create path but uses `create_user` (signup endpoint)
+    # instead of `create_object`, and so picks up the `sessionToken` that
+    # Parse Server only emits on the signup endpoint. Errors are not
+    # promoted to typed exceptions here (see {#signup!} for that variant);
+    # the response's success flag is returned so the caller's `save` /
+    # `save!` handles the failure via the standard `RecordNotSaved` path.
+    def signup_create
+      run_callbacks :create do
+        body = attribute_updates
+        # Strip server-managed and special fields from the request body.
+        # createdAt/updatedAt are always stripped (purely server-managed).
+        # objectId/ACL are normally stripped too (to prevent a caller
+        # planting a permissive ACL or a colliding objectId), but the
+        # narrow self-only ownership pattern produced by
+        # `acl_policy ..., owner: :self` is allowed through so the user
+        # can be created with self-R/W-only ACL in a single roundtrip.
+        if self.class.signup_body_self_only_acl_safe?(body)
+          body.except!(:createdAt, :updatedAt, "createdAt", "updatedAt")
+        else
+          body.except!(*Parse::Properties::BASE_FIELD_MAP.flatten)
+        end
+        self.class.strip_server_controlled_keys!(body)
+        # Anonymous signup: do NOT forward the caller's session token to
+        # POST /parse/users. The caller may be authenticated for an
+        # unrelated reason (e.g., an admin app session running a signup
+        # flow on behalf of someone else), but the user being created is
+        # by definition someone new. Forwarding `_session_token` makes
+        # Cloud Code `beforeSave(_User)` see `request.user = caller`,
+        # which an integrator can mistake for "the new user". The signup
+        # endpoint authenticates by the signup itself, not by a prior
+        # session — pass `nil` explicitly. Master key continues to flow
+        # via the normal authentication middleware when configured.
+        res = client.create_user(body, session_token: nil)
+        unless res.error?
+          result = res.result
+          @id = result[Parse::Model::OBJECT_ID] || @id
+          @created_at = result["createdAt"] || @created_at
+          @updated_at = result["updatedAt"] || result["createdAt"] || @updated_at
+          # Plaintext password is no longer needed locally; the server
+          # has it hashed. Direct ivar assignment avoids re-dirtying the
+          # field.
+          @password = nil
+          set_attributes!(result.slice(*SIGNUP_RESPONSE_APPLY_KEYS))
+          # Promote the freshly-applied session token into `@_session_token`
+          # so any in-flight after_create callback that calls back through
+          # the SDK authenticates as the just-signed-up user. Without this,
+          # the after_create `_assign_<field>!` callback installed by
+          # `parse_reference` (and any other after_create hook that issues
+          # an `update!`) reads `_session_token` (actions.rb:732) and finds
+          # nil — `client.update_object(..., session_token: nil)` then
+          # silently falls back to the master key under any configuration
+          # that supplies one (client.rb:682-687 only attaches the session
+          # token when `present?`; `DISABLE_MASTER_KEY` is not set on the
+          # nil branch). The result was a user-scoped PUT silently
+          # escalated to master-key authority, bypassing CLP and
+          # `request.user` checks in `beforeSave` cloud code. Promoting
+          # the new user's own session token here scopes the follow-up
+          # update to the just-created user — the appropriate authority
+          # for writes to their own row. The outer `save` zeroes
+          # `@_session_token` again at actions.rb:830, so the promotion
+          # is bounded by this in-flight save. The trust boundary here
+          # is identical to the existing `SIGNUP_RESPONSE_APPLY_KEYS`
+          # contract: the SDK already trusts `sessionToken` from a signup
+          # response (it has to, to honor the signup contract); this fix
+          # routes that same token to the in-flight auth context.
+          @_session_token = @session_token if @session_token.present?
+          # Clear dirty state BEFORE the `after_create` callback chain
+          # fires. If a subclass declares `parse_reference` (default
+          # field name with `precompute: false`), the after_create
+          # `_assign_<field>!` callback issues an `update!` from inside
+          # this `run_callbacks :create` block — and `attribute_updates`
+          # would otherwise still carry `password` as dirty with a nil
+          # current value, serializing as `password: { __op: "Delete" }`.
+          # Parse Server's `_User` write path feeds that hash to
+          # `@node-rs/bcrypt`, which raises
+          # `Value is non of these types TypedArray<u8>, String`. Same
+          # cleanup as `signup!`, just timed so the after_create
+          # callbacks see a clean dirty set.
+          changes_applied!
+          clear_partial_fetch_state!
+        end
+        puts "Error creating #{self.parse_class}: #{res.error}" if res.error?
+        res.success?
+      end
     end
   end
 end

@@ -29,7 +29,8 @@ module Parse
       # @param functionName [String] the name of the cloud code function.
       # @return [Parse::Response]
       def fetch_function(functionName)
-        request :get, "#{HOOKS_PREFIX}functions/#{functionName}"
+        safe = Parse::API::PathSegment.identifier!(functionName, kind: "function name")
+        request :get, "#{HOOKS_PREFIX}functions/#{safe}"
       end
 
       # Register a cloud code webhook function pointing to a endpoint url.
@@ -47,14 +48,16 @@ module Parse
       def update_function(functionName, url)
         # If you add _method => "PUT" to the JSON body,
         # and send it as a POST request and parse will accept it as a PUT.
-        request :put, "#{HOOKS_PREFIX}functions/#{functionName}", body: { url: url }
+        safe = Parse::API::PathSegment.identifier!(functionName, kind: "function name")
+        request :put, "#{HOOKS_PREFIX}functions/#{safe}", body: { url: url }
       end
 
       # Remove a registered cloud code webhook function.
       # @param functionName [String] the name of the cloud code function.
       # @return [Parse::Response]
       def delete_function(functionName)
-        request :put, "#{HOOKS_PREFIX}functions/#{functionName}", body: { __op: "Delete" }
+        safe = Parse::API::PathSegment.identifier!(functionName, kind: "function name")
+        request :put, "#{HOOKS_PREFIX}functions/#{safe}", body: { __op: "Delete" }
       end
 
       # Get the set of registered triggers.
@@ -71,7 +74,8 @@ module Parse
       # @see TRIGGER_NAMES
       def fetch_trigger(triggerName, className)
         triggerName = _verify_trigger(triggerName)
-        request :get, "#{HOOKS_PREFIX}triggers/#{className}/#{triggerName}"
+        safe_class = Parse::API::PathSegment.identifier!(className, kind: "class name")
+        request :get, "#{HOOKS_PREFIX}triggers/#{safe_class}/#{triggerName}"
       end
 
       # Register a new cloud code webhook trigger with an endpoint url.
@@ -94,7 +98,8 @@ module Parse
       # @see Parse::API::Hooks::TRIGGER_NAMES
       def update_trigger(triggerName, className, url)
         triggerName = _verify_trigger(triggerName)
-        request :put, "#{HOOKS_PREFIX}triggers/#{className}/#{triggerName}", body: { url: url }
+        safe_class = Parse::API::PathSegment.identifier!(className, kind: "class name")
+        request :put, "#{HOOKS_PREFIX}triggers/#{safe_class}/#{triggerName}", body: { url: url }
       end
 
       # Remove a registered cloud code webhook trigger.
@@ -104,7 +109,8 @@ module Parse
       # @see Parse::API::Hooks::TRIGGER_NAMES
       def delete_trigger(triggerName, className)
         triggerName = _verify_trigger(triggerName)
-        request :put, "#{HOOKS_PREFIX}triggers/#{className}/#{triggerName}", body: { __op: "Delete" }
+        safe_class = Parse::API::PathSegment.identifier!(className, kind: "class name")
+        request :put, "#{HOOKS_PREFIX}triggers/#{safe_class}/#{triggerName}", body: { __op: "Delete" }
       end
     end
   end

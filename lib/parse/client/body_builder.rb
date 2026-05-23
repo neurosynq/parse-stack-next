@@ -7,6 +7,8 @@ require_relative "protocol"
 require "active_support"
 require "active_support/core_ext"
 require "active_model/serializers/json"
+require "json"
+require "set"
 
 module Parse
 
@@ -33,8 +35,19 @@ module Parse
       # Maximum url length for most server requests before HTTP Method Override is used.
       MAX_URL_LENGTH = 2_000.freeze
       # Fields that should be redacted from log output.
-      SENSITIVE_FIELDS = %w[password token sessionToken session_token access_token authData].freeze
+      SENSITIVE_FIELDS = %w[
+        password token sessionToken session_token access_token authData
+        masterKey master_key apiKey api_key clientKey client_key
+        javascriptKey javascript_key refreshToken refresh_token
+      ].freeze
       SENSITIVE_PATTERN = /(#{SENSITIVE_FIELDS.join("|")})(["']?\s*[=:>]\s*["']?)([^"&\s,}\]]+)/i
+      # Lookup set of sensitive field names for structural (JSON) redaction
+      # — case-insensitive match on the key, not the value. Walks the parsed
+      # structure so nested objects like {"password":{"nested":"value"}}
+      # and escaped-quote payloads (which the regex misses) are scrubbed.
+      SENSITIVE_FIELDS_SET = SENSITIVE_FIELDS.map(&:downcase).to_set.freeze
+      # Placeholder used in place of redacted values.
+      REDACTED_PLACEHOLDER = "[FILTERED]"
       # Request headers that must never be printed verbatim in debug logs.
       # Matched case-insensitively against Faraday header keys.
       REDACTED_HEADERS = [
@@ -54,10 +67,110 @@ module Parse
       end
 
       # Redacts sensitive fields from a string for safe logging.
+      #
+      # Two passes run in sequence so that no payload shape leaks secrets:
+      #
+      # 1. **Structural pass.** If the body (after whitespace trim) parses as
+      #    JSON, the parsed structure is walked recursively. Any value whose
+      #    key matches +SENSITIVE_FIELDS_SET+ (case-insensitive) is replaced.
+      #    String values that themselves look like JSON are recursively
+      #    parsed and scrubbed — catches +{"body":"{\"password\":\"x\"}"}+
+      #    payloads.
+      #
+      # 2. **Regex pass.** The result of the structural pass (or the original
+      #    string if parsing failed) is always also run through the
+      #    +SENSITIVE_PATTERN+ regex as defense-in-depth. This catches form-
+      #    encoded bodies, partial JSON, escaped-quote payloads, and string
+      #    array elements like +["password=hunter2"]+ that the structural
+      #    walker can't redact in-place.
       # @param str [String] the string to redact.
       # @return [String] the redacted string.
       def self.redact(str)
-        str.to_s.gsub(SENSITIVE_PATTERN) { "#{$1}#{$2}[FILTERED]" }
+        s = str.to_s
+        return s if s.empty?
+        after_structural = s
+        if (parsed = try_parse_json(s))
+          scrubbed = scrub_sensitive!(parsed)
+          begin
+            after_structural = scrubbed.to_json
+          rescue StandardError
+            after_structural = s
+          end
+        end
+        after_structural.gsub(SENSITIVE_PATTERN) do
+          key_part = $1
+          sep_part = $2
+          val_part = $3
+          # Skip values that the structural pass already redacted —
+          # otherwise the regex value-class +[^"&\s,}\]]+ stops at the
+          # bracket and we end up with +[FILTERED]]+ from the trailing
+          # close-bracket left over from +"[FILTERED]"+.
+          if val_part == "[FILTERED" || val_part == REDACTED_PLACEHOLDER
+            "#{key_part}#{sep_part}#{val_part}"
+          else
+            "#{key_part}#{sep_part}#{REDACTED_PLACEHOLDER}"
+          end
+        end
+      end
+
+      # @!visibility private
+      def self.try_parse_json(str)
+        # Find first non-whitespace byte; allow leading whitespace and BOM.
+        trimmed = str.byteslice(0, 16).to_s.dup
+        trimmed.force_encoding("BINARY")
+        trimmed.sub!(/\A\xEF\xBB\xBF/n, "")
+        first = trimmed.lstrip[0]
+        return nil unless first == "{" || first == "["
+        JSON.parse(str, max_nesting: 32)
+      rescue JSON::ParserError, JSON::NestingError
+        nil
+      end
+
+      # @!visibility private
+      # Recursively walks a parsed JSON structure replacing values under any
+      # sensitive key with the redaction placeholder. Returns the same node
+      # for chaining; mutates Hashes/Arrays in place.
+      #
+      # When a value is itself a String that looks like JSON, attempt to
+      # parse-scrub-re-encode it so embedded-JSON payloads are also covered
+      # (e.g. +{"body":"{\"password\":\"x\"}"}+).
+      def self.scrub_sensitive!(node)
+        case node
+        when Hash
+          node.each do |key, value|
+            if key.is_a?(String) && SENSITIVE_FIELDS_SET.include?(key.downcase)
+              node[key] = REDACTED_PLACEHOLDER
+            elsif value.is_a?(Hash) || value.is_a?(Array)
+              scrub_sensitive!(value)
+            elsif value.is_a?(String)
+              redacted_string = maybe_scrub_embedded_json(value)
+              node[key] = redacted_string unless redacted_string.equal?(value)
+            end
+          end
+        when Array
+          node.each_with_index do |item, i|
+            if item.is_a?(Hash) || item.is_a?(Array)
+              scrub_sensitive!(item)
+            elsif item.is_a?(String)
+              redacted_string = maybe_scrub_embedded_json(item)
+              node[i] = redacted_string unless redacted_string.equal?(item)
+            end
+          end
+        end
+        node
+      end
+
+      # @!visibility private
+      # If +str+ parses as JSON (object or array), scrub structurally and
+      # re-encode. Otherwise return the original string unchanged.
+      def self.maybe_scrub_embedded_json(str)
+        return str unless (inner = try_parse_json(str))
+        scrub_sensitive!(inner)
+        begin
+          inner.to_json
+        rescue StandardError
+          str
+        end
       end
 
       # Thread-safety

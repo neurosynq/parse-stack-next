@@ -17,6 +17,7 @@ A full featured Active Model ORM and Ruby REST API for Parse-Server. [Parse Stac
 - **Read Preference Support** - Direct read queries to MongoDB secondary replicas
 - **Class-Level Permissions (CLP)** - Define and filter protected fields based on roles and user ownership
 - Advanced ACL query constraints (readable_by, writable_by)
+- **Owner-aware default ACL policy** (`acl_policy :owner_else_private`) — declare per-class defaults that grant read/write only to the record's owner, with secure or public fallback for server-context creates
 - Full transaction support with automatic retry
 - Comprehensive integration testing with Docker
 - Enhanced change tracking and webhooks
@@ -160,7 +161,96 @@ result = Parse.call_function :myFunctionName, {param: value}
 
 ## What's New in 3.x
 
-**Current version: 3.3.0** | **Ruby 3.1+ required**
+**Current version: 4.4.3** | **Ruby 3.2+ required**
+
+### 4.4.3 - Pointer-Shape Strictness & Pipeline Forward-Pass
+
+- **`Parse.strict_pointer_shapes`** — opt-in flag (or `PARSE_STRICT_POINTER_SHAPES=true`)
+  that converts unresolvable pointer-shape constraints from a one-shot
+  warning + silent-zero result into a `Parse::Query::PointerShapeError`
+  raise. Recommended for test/CI and any LLM-driven workload where
+  "0 results" reads as a real answer instead of a shape mismatch.
+- **Pipeline forward-pass field tracking** — the agent's pipeline
+  access-policy walker now tracks fields introduced by upstream stages
+  (`$group._id` and accumulator keys, `$addFields`/`$set` outputs,
+  `$lookup.as`). The canonical "group → match → sort → limit" pattern
+  on synthetic accumulator outputs no longer hits `:field_denied`
+  against the source class's `agent_fields` allowlist.
+- **Pointer `query_hint:` in `get_schema`** — every Pointer field
+  surfaces an inline shape hint covering equality (objectId string OR
+  full `{__type: "Pointer", ...}` hash) and `$in/$nin` (bare-id array
+  with SDK-side normalization). Hidden targets collapse to a
+  `<targetClass>` placeholder.
+
+### 4.4.2 - Schema-Aware Walker, Pipeline-Local Aliases
+
+- **Schema-aware expression-value rewriter** — the `$author` → `$_p_author`
+  pretty-name rewrite inside expression values now consults the queried
+  class's declared properties. References whose name is neither a Parse
+  property nor a universal built-in pass through verbatim, so aliases
+  introduced by an upstream `$project`/`$addFields`/`$set`/`$group`
+  stage survive into downstream stages exactly as written. Result rows
+  are keyed by the literal alias the caller used.
+- **`first_or_create!` accepts query-option keys in `synchronize:`** —
+  filter-lock fingerprint includes constraint operators
+  (`Parse::Operation` keys) so locks scoped on inequality/range
+  constraints no longer collide across distinct callers.
+
+### 4.4.1 - Filter-Lock Compatibility
+
+- **`create_lock` accepts `Parse::Operation` keys** — the synchronize
+  lock-key derivation handles operator-shaped query attributes
+  (`:status.gt => Date.today`) the same way `Parse::Query` does,
+  matching the filter-lock fingerprint against the resolved storage
+  fields.
+
+### 4.4 - MongoDB Index Management, CLP on Mongo-Direct, Agent ACL Scope
+
+- **`Model.describe`** — operator-facing introspection aggregator on every
+  `Parse::Object` subclass. Reports local model declarations, server
+  schema, CLP, default ACLs, Atlas Search indexes, and MongoDB indexes.
+  Local-only by default; opt into server fetches with `network: true`.
+  See [docs/mongodb_direct_guide.md](docs/mongodb_direct_guide.md).
+- **`mongo_index` DSL** — model-declarative MongoDB indexes:
+  `mongo_index :title, :year`, `mongo_index :vin, unique: true`,
+  `mongo_geo_index :location`, `mongo_relation_index :users, bidirectional: true`.
+  Validation (pointer auto-rewrite, parallel-array rejection, `_id` guard,
+  64-cap, idempotency) runs at class load.
+- **`parse_reference` auto-indexing** — every `parse_reference` field
+  auto-registers a `unique: true, sparse: true` index declaration.
+  Removes the operator-must-remember dedup floor. Opt out per-field
+  with `index: false` or `unique_index: false`.
+- **`Parse::MongoDB.configure_writer`** — separate write-capable
+  connection for index management (`create_index` / `drop_index` /
+  `writer_indexes`). The reader URI stays read-only. Triple-gated:
+  writer configured + `index_mutations_enabled = true` +
+  `ENV["PARSE_MONGO_INDEX_MUTATIONS"]=1` — all re-checked per call.
+- **`Parse::Schema::IndexMigrator`** — reconciles declared indexes
+  against the actual MongoDB state. Plan returns per-collection diff;
+  apply is additive by default (`drop: true` for orphan removal).
+- **`rake parse:mongo:indexes:plan` / `:apply`** — operator workflow
+  for index migrations. Plan is read-only; apply requires the triple-gate.
+- **CLP and `protectedFields` enforced on mongo-direct** — `Parse::CLPScope`
+  gates `Parse::MongoDB.aggregate` at the operation level for scoped
+  agents (`session_token:` / `acl_user:` / `acl_role:`) AND strips
+  `protectedFields` from result rows. The mongo-direct path is the
+  only first-class enforcement surface for ACL + CLP + protectedFields
+  on scoped reads (Parse Server's REST aggregate enforces NEITHER).
+- **`Parse::Agent.new(acl_user:|acl_role:)`** — declared identity
+  scope without a session token. Built-in tools auto-promote to
+  mongo-direct so SDK-side enforcement runs. Sub-agent identity must
+  be a subset of the parent's reach.
+- See [docs/mongodb_index_optimization_guide.md](docs/mongodb_index_optimization_guide.md)
+  for when to use each index type and how to budget the 64-per-collection cap.
+
+### 4.0 - Security Hardening and Modernization
+- Minimum Ruby version bumped to 3.2 (Ruby 3.1 reached EOL March 2025)
+- Minimum Rails/ActiveSupport bumped to 6.1 (was unbounded at 5.x)
+- CI tests against Ruby 3.2, 3.3, 3.4, and 3.5
+- LiveQuery TLS hostname verification (`post_connection_check`)
+- Webhook endpoint fails closed when no key is configured (opt out via `Parse::Webhooks.allow_unauthenticated = true`)
+- `Parse::Error.new(code, message)` two-argument constructor with `#code` reader
+- `include`d pointer fields now auto-added to `keys` when a key allowlist is set
 
 ### 3.3 - Ruby Version Update
 - Minimum Ruby version bumped to 3.1 (Ruby 3.0 reached EOL March 2024)
@@ -248,6 +338,8 @@ For complete details, see the [CHANGELOG](./CHANGELOG.md) and [Releases](https:/
   - [Parse::Installation](#parseinstallation)
   - [Parse::Product](#parseproduct)
   - [Parse::Role](#parserole)
+  - [Parse::JobStatus](#parsejobstatus)
+  - [Parse::JobSchedule](#parsejobschedule)
   - [Parse::User](#parseuser)
     - [Signup](#signup)
       - [Third-Party Services](#third-party-services)
@@ -952,6 +1044,126 @@ data = AdminData.new
 data.acl # => ACL({"role:Admin"=>{"read"=>true, "write"=>true}})
 ```
 
+#### Declarative ACL Policy (`acl_policy`)
+
+For owner-aware defaults — where the record's ACL should grant read/write to a specific user pointer at save time — declare an `acl_policy` instead of (or in addition to) `set_default_acl`. The policy is resolved by a `before_save` callback that walks `as: user` → owner-field pointer → policy fallback, and stamps the resolved ACL onto the record. Any explicit `obj.acl = …` change by the caller is always respected.
+
+There are four policies:
+
+| Policy | When an owner is resolvable | When no owner is resolvable |
+|---|---|---|
+| `:public` | public read + write | public read + write |
+| `:private` | master-key only | master-key only |
+| `:owner_else_public` | owner read + write only | public read + write |
+| `:owner_else_private` | owner read + write only | master-key only |
+
+```ruby
+class Post < Parse::Object
+  property :title, :string
+  belongs_to :author, as: :user
+
+  # Posts grant read/write to their author; server-side creates with no
+  # author resolvable fall back to master-key-only.
+  acl_policy :owner_else_private, owner: :author
+end
+
+# Owner resolved from the belongs_to pointer:
+Post.create!(title: "draft", author: current_user)
+# => ACL { "<current_user.id>": { read: true, write: true } }
+
+# Or pass the owner explicitly with `as:`:
+Post.create!(title: "draft", as: current_user)
+
+# Server-side, no owner: master-key-only fallback.
+Post.create!(title: "system note")
+# => ACL { } (only the master key can read or write)
+```
+
+Resolution order at save (only when the caller has not set the ACL):
+
+1. `obj.acl = …` or in-place mutation of `obj.acl` by the caller — always wins
+2. `as: user` passed at construction
+3. Owner pointer from the property named by `owner:`
+4. The "else" half of the policy — public R/W or master-key-only
+
+The `:as` key may be a `Parse::User`, a `Parse::Pointer` to a user, or a raw `objectId` string. It is popped from the opts hash before attributes are applied, so it never reaches `apply_attributes!` and never appears as a property.
+
+Subclasses inherit the parent's policy and owner field. Classes that already call `set_default_acl` are detected automatically and opt out of the policy resolver, so legacy callers retain pre-4.1 behavior without changes.
+
+Owner resolution is strictly type-gated. The `as:` kwarg and any `owner:` pointer accept a `Parse::User` instance, a `Parse::Pointer` whose `parse_class == "_User"`, or a raw `objectId` `String`. Pointers to non-User classes and arbitrary objects responding to `#id` are silently rejected and the policy falls through to its else-half, so a stray pointer to a non-user record cannot accidentally grant ACL access to a user record that happens to share the same `objectId`.
+
+You may not combine `acl_policy` with `set_default_acl` on the same class — the two APIs have ambiguous interactions at save time. Calling the second one raises `ArgumentError`. Pick one configuration approach per class.
+
+#### Self-Owned Users (`owner: :self`)
+
+`Parse::User` records are special: the record IS the owner. The SDK provides `owner: :self` as a Parse::User-only shorthand for "this user owns themselves." The save-time resolver pre-generates a Parse-compatible `objectId` client-side (via the same helper that backs `parse_reference precompute: true`) when none is set, then stamps the ACL as `{ <generated-id>: { read: true, write: true } }`. The signup body then carries both the `objectId` and the `ACL` in a single POST.
+
+```ruby
+class Parse::User
+  # New users: only the user can read or write their own profile.
+  acl_policy :owner_else_private, owner: :self
+end
+
+new_user = Parse::User.new(username: "alice", password: "secret")
+new_user.save
+# Single roundtrip. After save, new_user.id is a 10-char Parse id and
+# the persisted record's ACL is { "<that id>": { read: true, write: true } }.
+# Other clients (including unauthenticated) cannot see this user.
+```
+
+`owner: :self` is rejected at class-definition time on any non-User class — there's no sensible interpretation when the record's `objectId` is not a user id.
+
+The signup request body normally has `objectId` and `ACL` stripped (a security mitigation against client-planted permissive ACLs). When `owner: :self` is declared, those two fields are allowed through only when they match the narrow self-only ownership pattern: `objectId` is the 10-char Parse format, and `ACL` has exactly one entry granting `read+write` to that same `objectId`. Any deviation — multiple keys, a `*` (public) entry, a `role:` entry, half-permissions, mismatched id — still triggers the full strip and Parse Server applies its own default.
+
+`acl_policy ..., owner: :self` is orthogonal to `parse_reference precompute: true`. Both reuse `Parse::Core::ParseReference.generate_object_id` for client-side id generation; neither installs the other's side effects. Declare both if you want both the ACL self-ownership AND the canonical reference column.
+
+#### Breaking Change in v4.1: Secure-by-Default ACL Policy
+
+Starting with v4.1, the gem-wide default ACL policy for `Parse::Object` subclasses is `:owner_else_private`. Records created with no resolvable owner (no `as:` kwarg, no `owner:` field) and no class-level `acl_policy` or `set_default_acl` declaration are saved with an empty ACL — readable and writable only with the master key.
+
+**This is a behavioral change.** Pre-4.1, the same class would have produced records with public read + public write. Applications that depend on the historical default for client-side reads of unowned records will see those reads return empty result sets until they update their model declarations.
+
+Migration recipes:
+
+```ruby
+# A class whose records should remain publicly readable + writable:
+class PublicNotice < Parse::Object
+  property :body, :string
+  acl_policy :public
+end
+
+# A class whose records belong to a user:
+class JournalEntry < Parse::Object
+  property :text, :string
+  belongs_to :author, as: :user
+  acl_policy :owner_else_private, owner: :author
+end
+
+# A class whose records are written client-side but readable by anyone:
+class Post < Parse::Object
+  property :title, :string
+  belongs_to :author, as: :user
+  acl_policy :owner_else_public, owner: :author
+end
+```
+
+When a class explicitly opts into a permissive policy (`:public` or `:owner_else_public`), a one-time per-class warning is emitted on first instance creation to make the choice visible in logs:
+
+```
+[Parse::Stack security] PublicNotice uses permissive default ACL policy
+`public`. New records can be modified by anyone unless an owner is
+resolved at save. Call `acl_policy :owner_else_private` or `:private`
+in the class to silence this warning.
+```
+
+The warning fires once per class per process and is automatically suppressed for the SDK's own built-in classes (`Parse::User`, `Parse::Installation`, `Parse::Session`, `Parse::Role`, `Parse::Product`, `Parse::PushStatus`, `Parse::Audience`, `Parse::JobStatus`, `Parse::JobSchedule`). To silence it globally — for example in test suites or in applications that have reviewed and accepted permissive defaults — set either:
+
+```ruby
+Parse::Object.suppress_permissive_acl_warning = true
+# or, via the environment:
+ENV["PARSE_SUPPRESS_PERMISSIVE_ACL_WARNING"] = "1"
+```
+
 For more information about Parse record ACLs, see the documentation at  [Security](http://docs.parseplatform.org/rest/guide/#security)
 
 ### Parse::CLP (Class-Level Permissions)
@@ -1132,8 +1344,28 @@ This class represents the data and columns contained in the standard Parse `_Ins
 ### [Parse::Product](https://www.modernistik.com/gems/parse-stack/Parse/Product.html)
 This class represents the data and columns contained in the standard Parse `_Product` collection. You may add additional properties and methods to this class. See [Product API Reference](https://www.modernistik.com/gems/parse-stack/Parse/Product.html). You may call `Parse.use_shortnames!` to use `Product` in addition to `Parse::Product`.
 
+The `_Product` collection backs the original Parse iOS SDK's `PFProduct` downloadable-content in-app-purchase flow. That feature was tied to hosted Parse and is not actively used by modern Parse Server deployments — most apps now verify in-app purchase receipts directly against the Apple App Store or Google Play. The class is retained for backwards compatibility with legacy applications that still read or write product metadata. It is also marked `agent_hidden` by default so it does not surface through MCP / agent tooling; applications that genuinely need agent access can call `Parse::Product.agent_unhidden` at boot.
+
 ### [Parse::Role](https://www.modernistik.com/gems/parse-stack/Parse/Role.html)
 This class represents the data and columns contained in the standard Parse `_Role` collection. You may add additional properties and methods to this class. See [Roles API Reference](https://www.modernistik.com/gems/parse-stack/Parse/Role.html). You may call `Parse.use_shortnames!` to use `Role` in addition to `Parse::Role`.
+
+#### Default ACL (master-only)
+Parse Server requires every `_Role` row to ship with an ACL — the requirement is hard-coded in `SchemaController.requiredColumns` and cannot be disabled by config. `Parse::Role` declares `acl_policy :private`, so every role saved without an explicit ACL is stamped with `{}` (master-key only). This is intentional: anonymous and authenticated-but-non-master clients cannot enumerate role names, read membership, or walk the role hierarchy. Parse Server's internal role-membership expansion (used during ACL evaluation) runs with master context, so the master-only default does not break permission checks on other classes.
+
+To opt into broader access, pass an explicit ACL:
+
+```ruby
+acl = Parse::ACL.new
+acl.everyone(true, false) # public read, no public write
+admin = Parse::Role.find_or_create("Admin", acl: acl)
+
+# or on an instance:
+role = Parse::Role.new(name: "Editor")
+role.acl = acl
+role.save
+```
+
+The explicit ACL bypasses the policy resolver — caller-supplied ACLs are never overwritten.
 
 #### Role Management Helpers
 
@@ -1161,6 +1393,70 @@ admin.users_count        # Direct users
 admin.child_roles_count  # Direct child roles
 admin.total_users_count  # All users including child roles
 ```
+
+### [Parse::JobStatus](https://www.modernistik.com/gems/parse-stack/Parse/JobStatus.html)
+
+This class represents the data and columns contained in the standard Parse `_JobStatus` collection. Parse Server writes a row here every time a background job — registered server-side via `Parse.Cloud.job(...)` — runs, recording its outcome and any status/message updates emitted via `request.message(...)`.
+
+This Ruby SDK cannot *define* a job (cloud-code registrations live in server-side JavaScript), but you can read from `_JobStatus` to display the most recent run of a job, count failed runs, or sweep old history rows. `Parse::JobStatus` is marked `agent_hidden` by default — `_JobStatus` carries operational signal (job names, error traces, scheduler parameters) that an LLM-driven agent should not enumerate unsolicited. Applications that need agent visibility can call `Parse::JobStatus.agent_unhidden` at boot.
+
+```ruby
+# Did the nightly cleanup run today? What's the latest state?
+latest = Parse::JobStatus.latest_for("nightlyCleanup")
+puts "#{latest.status} at #{latest.created_at}"
+puts "Duration: #{latest.duration}s" if latest.finished?
+
+# Find failed jobs in the last 24h
+yesterday = Time.now - 86_400
+Parse::JobStatus.failed.where(:created_at.gt => yesterday).all
+
+# Status scopes
+Parse::JobStatus.running       # => Parse::Query
+Parse::JobStatus.succeeded     # => Parse::Query
+Parse::JobStatus.failed        # => Parse::Query
+Parse::JobStatus.recent(limit: 50)
+
+# Instance predicates
+js.running?    # status == "running"
+js.succeeded?  # status == "succeeded"
+js.failed?     # status == "failed"
+js.finished?   # finished_at present OR status terminal
+js.duration    # finished_at - created_at, or nil while in-flight
+```
+
+#### Cleanup helper
+
+Parse Server does not garbage-collect `_JobStatus` rows on its own; long-running deployments accumulate run history indefinitely. `Parse::JobStatus.cleanup_older_than!` mirrors `Parse::Installation.cleanup_stale_tokens!` for this case:
+
+```ruby
+# Default: only destroy rows in a terminal state (succeeded/failed)
+# and older than 30 days. Orphaned `status == "running"` rows (from a
+# crashed worker) are PRESERVED so an in-flight job is never reaped
+# mid-execution.
+deleted_count = Parse::JobStatus.cleanup_older_than!(days: 30)
+
+# Explicit orphan cleanup: drop the status guard.
+Parse::JobStatus.cleanup_older_than!(days: 7, terminal_only: false)
+```
+
+The helper requires master-key access (Parse Server's default `_JobStatus` CLP). Run from a periodic cron or scheduled job to keep `_JobStatus` from growing unboundedly.
+
+### [Parse::JobSchedule](https://www.modernistik.com/gems/parse-stack/Parse/JobSchedule.html)
+
+This class represents the data and columns contained in the standard Parse `_JobSchedule` collection. Rows here define recurring runs for background jobs registered via `Parse.Cloud.job(...)`. The collection is populated by the Parse Dashboard's "Schedule a Job" UI.
+
+**Note:** Parse Server itself does not auto-trigger jobs from `_JobSchedule` rows. The actual dispatch is performed by external scheduling tooling (e.g. `parse-server-scheduler`, dashboard-driven cron wrappers, or a sidecar process) that reads `_JobSchedule` and fires `POST /parse/jobs/<name>` at the appropriate times. Run-status rows then appear in `Parse::JobStatus`.
+
+`Parse::JobSchedule` is marked `agent_hidden` by default because `params` may carry credentials or destination configuration written by external schedulers.
+
+```ruby
+schedule = Parse::JobSchedule.for_job("nightlyCleanup").first
+schedule.time_of_day   # => "03:00:00"
+schedule.days_of_week  # => ["mon","tue","wed","thu","fri"]
+schedule.parsed_params # => { "dryRun" => false }  — JSON-decoded
+```
+
+`params` is stored on the wire as a JSON-encoded **string** per Parse Server's canonical schema (Object columns reject `$` and `.` in nested keys, which would otherwise break common payload shapes). Use `#parsed_params` to decode; it returns `nil` for blank or invalid JSON instead of raising. `last_run` is a raw `Number` whose unit is scheduler-defined — most external schedulers write `Date.now()` milliseconds, but the canonical schema does not pin a unit.
 
 ### [Parse::User](https://www.modernistik.com/gems/parse-stack/Parse/User.html)
 This class represents the data and columns contained in the standard Parse `_User` collection. You may add additional properties and methods to this class. See [User API Reference](https://www.modernistik.com/gems/parse-stack/Parse/User.html). You may call `Parse.use_shortnames!` to use `User` in addition to `Parse::User`.
@@ -2037,6 +2333,36 @@ song = Song.create_or_update!(
 - **Rails conventions**: `first_or_create` doesn't modify existing objects
 - **Flexible**: Separate query and attribute parameters for complex scenarios
 - **Batch friendly**: Unsaved objects can be grouped for efficient batch operations
+
+#### Concurrency-safe upsert with `synchronize:`
+
+By default `first_or_create!` and `create_or_update!` have a TOCTOU window: two concurrent callers can both find no match, both create, and both succeed — producing duplicates. Pass `synchronize: true` to serialize the find→create→save sequence through a Moneta-backed mutex (typically Redis):
+
+```ruby
+# Per-call opt-in
+User.first_or_create!({ email: e }, { name: n }, synchronize: true)
+
+# Tune the lock parameters per call
+Order.create_or_update!({ ref: r }, { status: "open" },
+                        synchronize: { ttl: 5, wait: 1.0 })
+
+# Enable globally for the whole app
+Parse.synchronize_create_default = true
+# or set ENV["PARSE_STACK_SYNCHRONIZE_CREATE"]=true at process start
+
+# Per-class default
+class User < Parse::Object
+  self.synchronize_create_default = true
+end
+
+# Pass synchronize: false to override the global / per-class default
+User.first_or_create!({ email: e }, {}, synchronize: false)
+
+# Restrict the lock surface to specific classes (recommended when enabling globally)
+Parse.synchronize_classes = [User, Device, Subscription]
+```
+
+The lock is a *latency optimization*; the durable correctness floor is a MongoDB unique index on the dedup tuple. When such an index exists, the synchronize wrapper rescues Parse code 137 (DuplicateValue) and re-queries inside the held lock to return the winner. On a process-local Moneta store (no Redis), the lock degrades to a per-key `Mutex` and emits a `[Parse::CreateLock]` warning. Configure `Parse.synchronize_create_secret` (or `ENV["PARSE_STACK_LOCK_SECRET"]`) to HMAC the lock keys against `query_attrs` content exposure via Redis MONITOR / snapshots.
 
 ### Saving
 To commit a new record or changes to an existing record to Parse, use the `#save` method. The method will automatically detect whether it is a new object or an existing one and call the appropriate workflow. The use of ActiveModel dirty tracking allows us to send only the changes that were made to the object when saving. **Saving a record will take care of both saving all the changed properties, and associations. However, any modified linked objects (ex. belongs_to) need to be saved independently.**
@@ -4112,6 +4438,13 @@ result = agent.execute(:get_all_schemas)
 result = agent.execute(:query_class, class_name: "Song", limit: 10)
 result = agent.execute(:count_objects, class_name: "Song", where: { plays: { "$gte" => 1000 } })
 
+# High-level aggregation helpers (v4.2.1) — no pipeline authoring needed
+result = agent.execute(:group_by, class_name: "Song", field: "genre",
+                       sort: "value_desc", limit: 10)
+result = agent.execute(:group_by_date, class_name: "Song", field: "createdAt",
+                       interval: "day", timezone: "America/New_York")
+result = agent.execute(:distinct, class_name: "Song", field: "artist")
+
 # Ask natural language questions (requires LLM endpoint)
 response = agent.ask("How many songs have more than 1000 plays?")
 puts response[:answer]
@@ -4143,6 +4476,12 @@ class Song < Parse::Object
 
   property :title, :string, _description: "The song title"
   property :plays, :integer, _description: "Total play count"
+  property :is_removed, :boolean
+
+  # Per-class "valid state" predicate applied by default on every read tool
+  # (query_class, count_objects, aggregate). Opt out per-call with
+  # `apply_canonical_filter: false`.
+  agent_canonical_filter "isRemoved" => { "$ne" => true }
 
   # Expose methods with permission levels
   agent_readonly :find_popular, "Find songs with high play counts"
@@ -4156,7 +4495,15 @@ end
 
 ### MCP Server
 
-Run an HTTP server for external AI agents. Requires dual-gating for safety:
+Parse Stack exposes the Model Context Protocol (MCP) so external AI agents — Claude Desktop, Cursor, Continue.dev, and any MCP-compatible client — can query schemas, run aggregations, call tools, and read prompts over a standard JSON-RPC interface. Three deployment modes are available:
+
+- **Standalone HTTP server** — a WEBrick process for dedicated MCP deployments.
+- **Rack-mountable adapter** — embed inside an existing Sinatra or Rails application behind your own auth gate.
+- **Direct in-process dispatcher** — a pure function for custom transports and unit-testable handlers.
+
+See [`docs/mcp_guide.md`](docs/mcp_guide.md) for the complete guide covering authentication, custom tool/prompt registration, rate limiting in per-request topologies, `ActiveSupport::Notifications` instrumentation, SSE progress streaming, and the security model.
+
+**Standalone server (dual-gated for safety):**
 
 ```bash
 # Step 1: Set environment variable
@@ -4167,16 +4514,58 @@ export PARSE_MCP_ENABLED=true
 # Step 2: Enable in code and start server
 Parse.mcp_server_enabled = true
 Parse::Agent.enable_mcp!(port: 3001)
+Parse::Agent::MCPServer.run(api_key: ENV["MCP_API_KEY"])
 ```
 
 Both the environment variable AND the code flag must be set. This prevents accidental enablement in production.
 
+**Embedded in Rails / Sinatra:**
+
+```ruby
+# config/routes.rb
+mount Parse::Agent.rack_app { |env|
+  token = env["HTTP_AUTHORIZATION"].to_s.delete_prefix("Bearer ")
+  user  = MyAuth.verify!(token)  # raises Parse::Agent::Unauthorized on bad token
+  Parse::Agent.new(permissions: :readonly, session_token: user.session_token)
+}, at: "/mcp"
+```
+
+The `agent_factory` block runs per request — wire it to your existing JWT, OAuth, or session-token authentication. Raising `Parse::Agent::Unauthorized` produces a sanitized 401; any other exception becomes a sanitized 500. The `enable_mcp!` and `mcp_server_enabled` prerequisites apply only to the standalone server, not to embedded mode.
+
+**Custom transports:** `Parse::Agent::MCPDispatcher.call(body:, agent:)` is a pure function returning `{status:, body:}`. Use it for stdio transports, in-process tests, or your own protocol envelope.
+
 ### Security
+
+> **Master-key default (read this first).** `Parse::Agent.new` without a
+> `session_token:` runs every tool call with the application **master key**.
+> Master-key mode **bypasses Parse ACLs and Class-Level Permissions** — the
+> only safety net is the class-, field-, and pipeline-level layer:
+> `agent_visible` / `agent_hidden`, `agent_fields`, `agent_canonical_filter`,
+> `tenant_id`, and `PipelineValidator`. Per-row enforcement is **not**
+> applied. The first master-key construction in a process emits a one-time
+> `[Parse::Agent:SECURITY]` banner to stderr; silence it with
+> `Parse::Agent.suppress_master_key_warning = true` for intentional
+> global-MCP deployments. For per-user enforcement, pass a session token
+> (the `Parse::Agent.rack_app` factory pattern above is the recommended
+> wiring):
+>
+> ```ruby
+> agent = Parse::Agent.new(session_token: user.session_token)
+> ```
 
 Built-in protections:
 - **Rate limiting**: 60 requests/minute default
 - **Pipeline validation**: Blocks dangerous aggregation stages (`$out`, `$merge`, `$function`)
 - **Permission levels**: Restrict agent capabilities (readonly/write/admin)
+- **Class/field allowlist**: `agent_visible` / `agent_hidden` / `agent_fields` per model
+- **Per-agent class allowlist** (v4.3.0): `Parse::Agent.new(classes: { only: [Ticket, Customer] })` narrows a single agent instance to a subset of classes, enforced at six dispatch sites (top-level, include resolution, `$lookup`, `$inQuery`/`$select`, post-fetch redaction, group-by). Composes with the global `agent_hidden` registry — `only:` cannot re-enable a globally hidden class.
+- **Master-key-except scope** (v4.3.0): `agent_hidden(except: :master_key)` permits master-key agents (internal admin / dev tooling) to address a class while still refusing session-bound (user-facing) agents.
+- **Credential-column floor**: `sessionToken`, `_hashed_password`, `_auth_data*`, `_rperm`/`_wperm`, etc. stripped from every response regardless of class visibility. Applied at the post-fetch walker so a deliberate `agent_unhidden` cannot leak credentials.
+- **Built-in hidden defaults** (v4.3.0): `Parse::Product` and `Parse::Session` are `agent_hidden` by default. Call `Parse::Product.agent_unhidden` or `Parse::Session.agent_hidden(except: :master_key)` to opt back in.
+- **Canonical filter**: per-class `agent_canonical_filter` prepended to every read
+- **Tenant scoping**: `tenant_id:` constructor kwarg applied to all queries
+
+See [`docs/mcp_guide.md`](docs/mcp_guide.md) for the full reference — per-agent filter composition rules, audit-payload keys (`:classes_only`, `:denial_kind`, etc.), and the dual-axis class hiding model.
 
 Configure LLM endpoint via environment:
 ```bash
@@ -4855,7 +5244,61 @@ MongoDB Atlas Search integration provides full-text search, autocomplete, and fa
 # Configure MongoDB and Atlas Search
 Parse::MongoDB.configure(uri: "mongodb+srv://...", enabled: true)
 Parse::AtlasSearch.configure(enabled: true, default_index: "default")
+
+# Recommended for new deployments — refuse calls without an explicit
+# ACL posture (session_token: or master: true). See "Session-Scoped
+# Search" below.
+Parse::AtlasSearch.require_session_token = true
 ```
+
+### Session-Scoped Search
+
+Atlas Search runs `$search` aggregations directly against MongoDB and
+therefore bypasses Parse Server's per-request ACL evaluation. To enforce
+the same `_rperm` semantics the REST API enforces, pass `session_token:`
+on the call — the SDK resolves the token to a user, expands the user's
+inherited role set, and injects a `_rperm` `$match` stage into the
+pipeline.
+
+```ruby
+# Session-scoped — results filtered to documents readable by the user
+# whose session token this is, including documents permitted by any
+# role the user inherits (Parse::Role.all_for_user).
+result = Parse::AtlasSearch.search("Song", "love",
+                                    session_token: request.session_token,
+                                    limit: 10)
+
+# Master-key-equivalent — explicit ACL bypass. Use for analytics jobs,
+# admin tooling, or anywhere ACL is enforced upstream.
+result = Parse::AtlasSearch.search("Song", "love", master: true)
+
+# Passing neither emits a one-time [Parse::AtlasSearch:SECURITY]
+# banner and falls through to public-only ACL semantics. Set
+# `Parse::AtlasSearch.require_session_token = true` to make the
+# missing-auth call an `ACLRequired` error instead.
+```
+
+Caching for session-token lookups is configurable:
+
+```ruby
+Parse::AtlasSearch.session_cache_ttl = 3600  # token → user_id
+Parse::AtlasSearch.role_cache_ttl    = 120   # user_id → role names
+
+# Force re-resolution after logout / role mutation:
+Parse::AtlasSearch::Session.invalidate(token)
+Parse::AtlasSearch::Session.invalidate_user_roles(user_id)
+```
+
+Notes:
+
+- `faceted_search` cannot ACL-filter `$searchMeta` bucket counts and
+  raises `Parse::AtlasSearch::FacetedSearchNotACLSafe` when a
+  `session_token:` is supplied. Run with `master: true` (or fall back
+  to multiple `search` calls with explicit `filter:` constraints).
+- The session resolver follows Parse Server's role-inheritance
+  direction: a user's permissions include any role whose `roles`
+  relation transitively contains a role the user directly belongs
+  to. See `Parse::Role.all_for_user` for the primitive.
 
 ### Full-Text Search
 

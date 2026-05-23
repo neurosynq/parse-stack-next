@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require_relative "client"
+require_relative "pipeline_security"
 require_relative "query/operation"
 require_relative "query/constraints"
 require_relative "query/ordering"
@@ -195,6 +196,59 @@ module Parse
 
     @field_formatter = :columnize
     @allow_scope_introspection = false
+
+    # The set of symbol keys that {#conditions} treats as query-shape
+    # options (cache TTL, ordering, limits, ACL convenience helpers,
+    # session/master-key overrides) rather than as field-name
+    # constraints. External callers that need to partition a
+    # user-supplied constraints Hash into "real constraints vs query
+    # options" — most notably `Parse::Object.first_or_create!` and
+    # `Parse::Object.create_or_update!`, which must hand a Hash
+    # containing ONLY constraint key/value pairs to
+    # `Parse::CreateLock.canonicalize_attrs` — consult this set via
+    # {.option_key?}.
+    #
+    # Keep this list in sync with the option branches at the top of
+    # {#conditions}. Anything `conditions()` extracts as a query
+    # parameter rather than a constraint belongs here.
+    QUERY_OPTION_KEYS = [
+      :order, :keys, :key, :skip, :limit,
+      :include, :includes,
+      :cache, :use_master_key, :session,
+      :read_preference,
+      :readable_by, :writable_by, :readable_by_role, :writable_by_role,
+      :publicly_readable, :publicly_writable,
+      :privately_readable, :master_key_read_only,
+      :privately_writable, :master_key_write_only,
+      :private_acl, :master_key_only,
+      :not_publicly_readable, :not_publicly_writable,
+    ].to_set.freeze
+
+    class << self
+      # Whether `key` is one of the {QUERY_OPTION_KEYS} that {#conditions}
+      # absorbs as a query-shape option rather than a field-name
+      # constraint. Accepts Symbol or String; returns false for any
+      # other type (including `Parse::Operation`, which is always a
+      # constraint).
+      #
+      # @note {QUERY_OPTION_KEYS} must be kept in sync with the
+      #   option-branch keys recognized at the top of {#conditions}.
+      #   When adding a new query option, update BOTH places — this
+      #   predicate is the public-facing source of truth for callers
+      #   that partition `query_attrs` into constraints vs options
+      #   (notably {Parse::Object.first_or_create!} and
+      #   {Parse::Object.create_or_update!} for lock canonicalization),
+      #   and the option-branch in `conditions` is what actually
+      #   absorbs the option onto the query.
+      #
+      # @param key [Object]
+      # @return [Boolean]
+      def option_key?(key)
+        return false unless key.is_a?(Symbol) || key.is_a?(String)
+        QUERY_OPTION_KEYS.include?(key.to_sym)
+      end
+    end
+
     class << self
 
       # @!attribute allow_scope_introspection
@@ -212,6 +266,12 @@ module Parse
       # @return [Symbol] The filter method to process column and field names. Default {String#columnize}.
 
       attr_accessor :field_formatter, :allow_scope_introspection
+
+      # Process-wide `[table, field]` cache for warn-once dedup in
+      # {#handle_unresolvable_pointer_in_array!}.
+      def pointer_shape_warned
+        @pointer_shape_warned ||= {}
+      end
 
       # @param str [String] the string to format
       # @return [String] formatted string using {Parse::Query.field_formatter}.
@@ -274,9 +334,27 @@ module Parse
 
       # This methods takes a set of constraints and merges them to build a final
       # `where` constraint clause for sending to the Parse backend.
+      #
+      # `__`-prefixed internal routing markers (e.g. `"__mongo_direct_only"`
+      # and `"__aggregation_pipeline"`) are stripped from the returned hash —
+      # they are SDK-internal hints that must never reach Parse REST or
+      # MongoDB. Use {compile_markers} (instance method `#compile_markers`)
+      # to retrieve them for routing decisions / pipeline assembly.
       # @param where [Array] an array of {Parse::Constraint} objects.
-      # @return [Hash] a hash representing the compiled query
+      # @return [Hash] a hash representing the compiled query, with
+      #   internal routing markers stripped.
       def compile_where(where)
+        constraint_reduce(where).reject { |k, _| k.is_a?(String) && k.start_with?("__") }
+      end
+
+      # Return the un-stripped reduced hash so the routing/pipeline layer
+      # can inspect `__`-prefixed markers (e.g. `"__mongo_direct_only"`,
+      # `"__aggregation_pipeline"`). These markers are SDK-internal hints
+      # and must never be sent to Parse REST or MongoDB — that's what
+      # {compile_where} is for.
+      # @param where [Array] an array of {Parse::Constraint} objects.
+      # @return [Hash] the reduced hash including internal markers.
+      def compile_markers(where)
         constraint_reduce(where)
       end
 
@@ -554,17 +632,45 @@ module Parse
     #  # first order by highest like_count, then by ascending name.
     #  # Note that ascending is the default if not specified (ex. `:name.asc`)
     #  Song.all :order => [:like_count.desc, :name]
-    # @param ordering [Parse::Order] an ordering
+    #
+    #  # hash form: {field => :asc | :desc | "asc" | "desc"}
+    #  Song.all :order => { :like_count => :desc, :name => :asc }
+    # @param ordering [Parse::Order, Symbol, String, Hash] one or more
+    #   ordering directives. A Hash maps field => direction. Unsupported
+    #   argument types raise +ArgumentError+ rather than being silently
+    #   dropped.
     # @return [self]
     def order(*ordering)
       @order ||= []
-      ordering.flatten.each do |order|
-        order = Order.new(order) if order.respond_to?(:to_sym)
-        if order.is_a?(Order)
-          order.field = Query.format_field(order.field)
-          @order.push order
+      # Don't flatten through Hashes — flatten only unpacks Arrays.
+      ordering.flatten.each do |entry|
+        case entry
+        when Order
+          entry.field = Query.format_field(entry.field)
+          @order.push entry
+        when Symbol, String
+          o = Order.new(entry)
+          o.field = Query.format_field(o.field)
+          @order.push o
+        when Hash
+          entry.each do |field, direction|
+            dir_sym = direction.is_a?(String) ? direction.downcase.to_sym : direction
+            unless dir_sym == :asc || dir_sym == :desc
+              raise ArgumentError,
+                    "Invalid order direction #{direction.inspect} for field " \
+                    "#{field.inspect}. Expected :asc or :desc."
+            end
+            o = Order.new(field, dir_sym)
+            o.field = Query.format_field(o.field)
+            @order.push o
+          end
+        else
+          raise ArgumentError,
+                "Invalid order argument #{entry.inspect}. Expected a Symbol, " \
+                "String, Parse::Order (e.g. :field.asc / :field.desc), or " \
+                "Hash of {field => :asc | :desc}."
         end
-      end #value.each
+      end
       @results = nil if ordering.count > 0
       self #chaining
     end #order
@@ -576,7 +682,23 @@ module Parse
     # @param amount [Integer] The number of records to skip.
     # @return [self]
     def skip(amount)
-      @skip = [0, amount.to_i].max
+      coerced =
+        case amount
+        when nil      then 0
+        when Numeric  then amount.to_i
+        when String
+          unless amount =~ /\A-?\d+\z/
+            raise ArgumentError,
+                  "Invalid skip #{amount.inspect}. Expected an Integer, " \
+                  "a numeric String, or nil."
+          end
+          amount.to_i
+        else
+          raise ArgumentError,
+                "Invalid skip #{amount.inspect}. Expected an Integer, " \
+                "a numeric String, or nil."
+        end
+      @skip = [0, coerced].max
       @results = nil
       self #chaining
     end
@@ -591,16 +713,31 @@ module Parse
     #  Song.all :limit => 1 # same as Song.first
     #  Song.all :limit => 2025 # large limits supported.
     #  Song.all :limit => :max # as many records as possible.
-    # @param count [Integer,Symbol] The number of records to return. You may pass :max
-    #  to get as many records as possible (Parse-Server dependent).
+    # @param count [Integer,Symbol,String,nil] The number of records to return.
+    #  Pass +:max+ to fetch as many records as possible (Parse-Server dependent).
+    #  Numeric strings (e.g. +"50"+) are coerced to Integer. Pass +nil+ to
+    #  explicitly clear the limit. Any other value raises +ArgumentError+
+    #  rather than silently disabling the limit.
     # @return [self]
     def limit(count)
-      if count.is_a?(Numeric)
-        @limit = [0, count.to_i].max
-      elsif count == :max
-        @limit = :max
-      else
+      case count
+      when nil
         @limit = nil
+      when Numeric
+        @limit = [0, count.to_i].max
+      when :max
+        @limit = :max
+      when String
+        unless count =~ /\A-?\d+\z/
+          raise ArgumentError,
+                "Invalid limit #{count.inspect}. Expected an Integer, :max, " \
+                "a numeric String, or nil."
+        end
+        @limit = [0, count.to_i].max
+      else
+        raise ArgumentError,
+              "Invalid limit #{count.inspect}. Expected an Integer, :max, " \
+              "a numeric String, or nil."
       end
 
       @results = nil
@@ -808,23 +945,49 @@ module Parse
     # @param field [Symbol|String] The name of the field used for filtering.
     # @param mongo_direct [Boolean] if true, queries MongoDB directly bypassing Parse Server.
     #   Requires Parse::MongoDB to be configured. Default: false.
+    # @param order [Symbol, nil] `:asc` or `:desc` to sort the distinct
+    #   values MongoDB-side via a `$sort` stage after `$group`. Default: nil
+    #   (no sort — the caller can `.sort` the returned Array in Ruby).
     # @version 1.8.0
-    def distinct(field, return_pointers: false, mongo_direct: false)
-      # Use direct MongoDB query if requested
-      return distinct_direct(field, return_pointers: return_pointers) if mongo_direct
+    def distinct(field, return_pointers: false, mongo_direct: false, order: nil)
+      # Explicit opt-in to direct MongoDB
+      if mongo_direct
+        return distinct_direct(field, return_pointers: return_pointers, order: order,
+                               **mongo_direct_auth_kwargs)
+      end
+
+      # Auto-route to mongo-direct when the compiled where contains a
+      # direct-only constraint. Same gate as #count / #results.
+      if requires_mongo_direct?
+        assert_mongo_direct_routable!
+        return distinct_direct(field, return_pointers: return_pointers, order: order,
+                               **mongo_direct_auth_kwargs)
+      end
+
+      # Auto-route scoped queries (session_token / acl_user / acl_role) to
+      # mongo-direct: Parse Server's REST `/aggregate` endpoint is
+      # master-key-only and enforces neither ACL nor CLP, so a scoped
+      # `.distinct` call against REST would silently return unscoped
+      # values. The mongo-direct path runs ACLScope + CLPScope before
+      # `$group`, so distinct values reflect only ACL-readable rows.
+      if distinct_query_is_scoped? && defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
+        return distinct_direct(field, return_pointers: return_pointers, order: order,
+                               **mongo_direct_auth_kwargs)
+      end
 
       if field.nil? || !field.respond_to?(:to_s) || field.is_a?(Hash) || field.is_a?(Array)
         raise ArgumentError, "Invalid field name passed to `distinct`."
       end
 
+      sort_dir = distinct_sort_direction(order)
+
       # Format field for aggregation
       formatted_field = format_aggregation_field(field)
 
       # Build the aggregation pipeline for distinct values
-      pipeline = [
-        { "$group" => { "_id" => "$#{formatted_field}" } },
-        { "$project" => { "_id" => 0, "value" => "$_id" } },
-      ]
+      pipeline = [{ "$group" => { "_id" => "$#{formatted_field}" } }]
+      pipeline << { "$sort" => { "_id" => sort_dir } } if sort_dir
+      pipeline << { "$project" => { "_id" => 0, "value" => "$_id" } }
 
       # Add match stage if there are where conditions
       compiled_where = compile_where
@@ -877,9 +1040,23 @@ module Parse
     # Convenience method for distinct queries that always return Parse::Pointer objects for pointer fields.
     # This is equivalent to calling distinct(field, return_pointers: true).
     # @param field [Symbol, String] the field name to get distinct values for
+    # @param order [Symbol, nil] forwarded to {#distinct}.
     # @return [Array] array of distinct values, with pointer fields converted to Parse::Pointer objects
-    def distinct_pointers(field)
-      distinct(field, return_pointers: true)
+    def distinct_pointers(field, order: nil)
+      distinct(field, return_pointers: true, order: order)
+    end
+
+    # Normalize a user-supplied `order:` value for the distinct helpers to a
+    # MongoDB `$sort` direction integer (`1`/`-1`), or `nil` for "no sort".
+    # @!visibility private
+    def distinct_sort_direction(order)
+      return nil if order.nil?
+      case order.to_sym
+      when :asc then 1
+      when :desc then -1
+      else
+        raise ArgumentError, "distinct(order: ...) must be :asc, :desc, or nil (got #{order.inspect})"
+      end
     end
 
     # Perform a count query.
@@ -897,6 +1074,13 @@ module Parse
     def count(mongo_direct: false)
       # Use direct MongoDB query if requested
       return count_direct if mongo_direct
+
+      # Auto-route to mongo-direct when the compiled where contains a
+      # direct-only constraint. Same gate as #results.
+      if requires_mongo_direct?
+        assert_mongo_direct_routable!
+        return count_direct(**mongo_direct_auth_kwargs)
+      end
 
       # Check if this query requires aggregation pipeline processing
       if requires_aggregation_pipeline?
@@ -1035,7 +1219,21 @@ module Parse
         @results = nil if @limit != fetch_count
         @limit = fetch_count
       else
-        fetch_count = limit_or_constraints.to_i
+        fetch_count =
+          case limit_or_constraints
+          when Numeric then limit_or_constraints.to_i
+          when String
+            unless limit_or_constraints =~ /\A-?\d+\z/
+              raise ArgumentError,
+                    "Invalid first() argument #{limit_or_constraints.inspect}. " \
+                    "Expected an Integer, a numeric String, or a Hash of constraints."
+            end
+            limit_or_constraints.to_i
+          else
+            raise ArgumentError,
+                  "Invalid first() argument #{limit_or_constraints.inspect}. " \
+                  "Expected an Integer, a numeric String, or a Hash of constraints."
+          end
         @results = nil if @limit != fetch_count
         @limit = fetch_count
       end
@@ -1098,7 +1296,7 @@ module Parse
 
       response = client.fetch_object(@table, object_id)
       if response.error?
-        raise Parse::Error.new(response.error_code, response.message)
+        raise Parse::Error.new(response.code, response.error)
       end
 
       Parse::Object.build(response.result, parse_class)
@@ -1238,7 +1436,20 @@ module Parse
     def results(raw: false, return_pointers: false, mongo_direct: false, &block)
       # Use direct MongoDB query if requested
       if mongo_direct
-        return results_direct(raw: raw, &block)
+        return results_direct(raw: raw, **mongo_direct_auth_kwargs, &block)
+      end
+
+      # Auto-route to mongo-direct when the compiled where contains a
+      # constraint that Parse Server's REST find layer cannot express
+      # (e.g. $geoIntersects with a full $geometry against a non-Point
+      # column). Mirrors the existing aggregation auto-route at line
+      # ~1321 below — the constraint emits a marker, the query layer
+      # detects it, and routing happens transparently. The auth
+      # context (use_master_key, scope_to_user, or session_token)
+      # decides how ACL simulation runs through mongo-direct.
+      if requires_mongo_direct?
+        assert_mongo_direct_routable!
+        return results_direct(raw: raw, **mongo_direct_auth_kwargs, &block)
       end
 
       if @results.nil?
@@ -1278,18 +1489,250 @@ module Parse
       @results
     end
 
+    # Raised when a query contains a constraint that can only be executed
+    # via the mongo-direct path but the caller hasn't enabled master-key
+    # mode (or `Parse::MongoDB` isn't configured at all). The auto-route
+    # refuses to silently bypass per-row ACL/CLP, so the developer must
+    # opt in by setting `use_master_key = true` on the query and ensuring
+    # `Parse::MongoDB.configure` has been called.
+    class MongoDirectRequired < StandardError; end
+
+    # Raised when a constraint value's shape cannot match the storage
+    # form of the targeted column — e.g. bare objectId strings inside
+    # `$in`/`$nin` arrays against a pointer column whose target class
+    # cannot be inferred. Gated by {Parse.strict_pointer_shapes?}.
+    class PointerShapeError < StandardError; end
+
+    # Check if this query contains a constraint that can only be answered
+    # via mongo-direct (e.g. `$geoIntersects` with a full `$geometry`
+    # against a non-GeoPoint column — an operator Parse Server's REST
+    # find layer does not expose). Direct-only constraints emit a
+    # `"__mongo_direct_only"` marker which this predicate detects.
+    # @return [Boolean]
+    def requires_mongo_direct?
+      return false if @where.empty?
+      # Read from the un-stripped marker hash — `compile_where` removes
+      # `__`-prefixed routing markers before they ship to Parse / Mongo.
+      markers = compile_markers
+      return true if markers.key?("__mongo_direct_only")
+      markers.values.any? do |constraint|
+        constraint.is_a?(Hash) && constraint.key?("__mongo_direct_only")
+      end
+    end
+
+    # Whether this query carries a non-master-key auth scope. Used by
+    # `#distinct` (and group_by aggregations) to decide whether to
+    # auto-promote the REST aggregate path to mongo-direct so the SDK's
+    # ACLScope / CLPScope enforcement actually runs.
+    # @return [Boolean]
+    # @api private
+    def distinct_query_is_scoped?
+      return true if @session_token.is_a?(String) && !@session_token.empty?
+      return true if @acl_user
+      return true if @acl_role
+      false
+    end
+
+    # Scope a query to a specific user's row-level ACL when it auto-routes
+    # through mongo-direct. The SDK records the user, computes the
+    # effective `_rperm` allow-set (user objectId + `"*"` + every role
+    # name the user inherits via {Parse::Role.all_for_user}), and prepends
+    # a `{ _rperm: { $in: ... } }` `$match` to the mongo-direct pipeline
+    # at execution time.
+    #
+    # **What this does NOT replicate:** class-level permissions (CLP),
+    # anonymous-user public-access nuances, `beforeFind`/`afterFind`
+    # cloud triggers, or any field-level redaction Parse Server might
+    # otherwise apply. This is a row-ACL floor, not full enforcement
+    # parity with the Parse Server REST path. The intended use case is
+    # "I need this mongo-direct-only query from a session-tokened
+    # context, and I accept the row-ACL floor as my filter."
+    #
+    # **Edge case — objects with missing `_rperm`:** Parse Server only
+    # writes `_rperm` when an explicit ACL is applied; rows saved with
+    # master-key access and no explicit ACL leave the field unset.
+    # The injected filter is `{$or: [{_rperm: {$exists: false}},
+    # {_rperm: {$in: perms}}]}`, treating missing-`_rperm` rows as
+    # public-readable. Apps that store row-level ACL on every object
+    # are unaffected by this fallback; apps that mix ACL'd and
+    # public-default rows will see both classes of row through the
+    # scoped query.
+    #
+    # The query MUST still satisfy {#assert_mongo_direct_routable!} —
+    # either `use_master_key: true` OR `scope_to_user` is set. A call to
+    # `scope_to_user` is treated as opt-in to mongo-direct routing for
+    # the direct-only constraints in the where clause.
+    #
+    # @example
+    #   Region.query(:area.geo_intersects => route)
+    #         .scope_to_user(current_user)
+    #         .results
+    #
+    # @param user [Parse::User, Parse::Pointer] the principal to scope by.
+    # @return [self]
+    def scope_to_user(user)
+      raise ArgumentError, "[Parse::Query] scope_to_user requires a Parse::User or User Pointer." \
+        unless user.respond_to?(:id) && user.id.is_a?(String)
+      @acl_user = user
+      self
+    end
+
+    # Role-based ACL scoping for service-account-style queries that
+    # need "what would a user holding this role see" without minting a
+    # session token or naming a specific user. The SDK uses
+    # `Parse::Role#all_parent_role_names` to expand the role's
+    # inheritance chain so passing `"scope:admin"` includes any role
+    # `"scope:admin"` inherits from (e.g. `"scope:user"`).
+    #
+    # The resulting permission set is `["*", "role:<name>", ...]` —
+    # no user_id slot. Documents whose `_rperm` would only grant a
+    # specific user (and not any of the role names) are filtered out
+    # of both the top-level result set and embedded sub-documents.
+    #
+    # Same routing rules as {#scope_to_user}: the query auto-routes
+    # through mongo-direct when the where clause contains a
+    # direct-only constraint, and the three-layer ACL simulation
+    # (top-level `$match`, `$lookup` rewriter, post-fetch redactor)
+    # runs through {Parse::ACLScope}.
+    #
+    # @example
+    #   Region.query(:area.geo_intersects => route)
+    #         .scope_to_role("scope:admin")
+    #         .results
+    #
+    # @param role [Parse::Role, String] role to scope by. Strings may
+    #   be supplied with or without the `"role:"` prefix; the SDK
+    #   strips it. Unknown role names raise ArgumentError at first
+    #   use.
+    # @return [self]
+    def scope_to_role(role)
+      unless role.is_a?(Parse::Role) || role.is_a?(String) || role.is_a?(Symbol)
+        raise ArgumentError, "[Parse::Query] scope_to_role requires a Parse::Role or role-name String."
+      end
+      # Normalize Symbol at the boundary so downstream
+      # Parse::ACLScope#resolve_for_role only ever sees Parse::Role or
+      # String. Without normalization, any String-only operation
+      # (e.g. #start_with?, #sub) silently NoMethodErrors on Symbol.
+      @acl_role = role.is_a?(Symbol) ? role.to_s : role
+      self
+    end
+
+    # @return [Parse::User, Parse::Pointer, nil] the user the query was
+    #   scoped to via {#scope_to_user}, or nil for unscoped queries.
+    attr_reader :acl_user
+
+    # @return [Parse::Role, String, Symbol, nil] the role the query
+    #   was scoped to via {#scope_to_role}, or nil.
+    attr_reader :acl_role
+
+    # Compute the `_rperm` allow-set for {#acl_user}: the user's
+    # objectId, `"*"` (public), and `"role:<Name>"` for every role the
+    # user inherits via {Parse::Role.all_for_user}. Used by the
+    # mongo-direct routing path to prepend the ACL `$match`.
+    # @return [Array<String>, nil] the allow-set, or nil when no user
+    #   is set.
+    # @!visibility private
+    def acl_permission_set
+      return nil if @acl_user.nil?
+      perms = [@acl_user.id, "*"]
+      begin
+        Parse::Role.all_for_user(@acl_user, max_depth: 5).each do |name|
+          perms << "role:#{name}"
+        end
+      rescue StandardError
+        # Best-effort role expansion. A transient lookup failure leaves
+        # the user with their direct objectId + "*" allow-set, which
+        # still floors the query rather than fails open.
+      end
+      perms.uniq
+    end
+
+    # Assert the conditions required to auto-route a query through
+    # mongo-direct are met: a configured mongo-direct connection AND
+    # one of three ACL contexts:
+    #
+    #   * `use_master_key: true` — full bypass (caller-responsible).
+    #   * `scope_to_user(user)` — SDK injects `_rperm` from a
+    #     pre-resolved User object.
+    #   * `session_token=` — SDK resolves the token to a user, expands
+    #     roles, injects the three-layer ACL simulation
+    #     (top-level `$match`, `$lookup` rewriter, post-fetch
+    #     redactor) via {Parse::MongoDB.aggregate}.
+    #
+    # Raises a clear {MongoDirectRequired} otherwise.
+    # @!visibility private
+    def assert_mongo_direct_routable!
+      has_session = @session_token.is_a?(String) && !@session_token.empty?
+      unless use_master_key || @acl_user || @acl_role || has_session
+        raise MongoDirectRequired,
+          "[Parse::Query] This query uses a constraint that can only run " \
+          "via mongo-direct. Mongo-direct bypasses Parse Server's enforcement, " \
+          "so it requires one of: `use_master_key: true` (full bypass — caller " \
+          "responsible for safety), `.scope_to_user(current_user)` (SDK injects " \
+          "row-level `_rperm` filter from a pre-resolved User), " \
+          "`.scope_to_role(\"admin\")` (SDK injects role-only filter with " \
+          "parent-role inheritance), or `session_token = '...'` (SDK resolves " \
+          "the token and runs the full three-layer ACL simulation). See " \
+          "Parse::Query#scope_to_user, #scope_to_role, and Parse::ACLScope."
+      end
+      require_relative "mongodb"
+      unless defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
+        raise MongoDirectRequired,
+          "[Parse::Query] This query requires mongo-direct routing but " \
+          "`Parse::MongoDB` is not enabled. Call `Parse::MongoDB.configure(...)` " \
+          "during application boot, or rewrite the query without the " \
+          "direct-only constraint."
+      end
+    end
+
+    # Compute the auth kwargs to forward when auto-routing through
+    # mongo-direct. Resolves the three-way contract between
+    # `use_master_key`, `scope_to_user`, and `session_token` so the
+    # downstream layers (Parse::MongoDB.aggregate / Parse::ACLScope)
+    # see exactly one auth mode.
+    #
+    #   * `scope_to_user` is set → forward `master: true` to skip the
+    #     new ACLScope injection (the legacy pre-build_direct injection
+    #     already adds the `_rperm` $match — we don't want to
+    #     double-inject).
+    #   * `session_token` is set → forward `session_token:` so
+    #     Parse::ACLScope runs the full three-layer simulation.
+    #   * Otherwise (master-key path) → forward `master: true`.
+    # @!visibility private
+    def mongo_direct_auth_kwargs
+      if @acl_user
+        # Pre-resolved User pointer. Hand it to Parse::ACLScope as
+        # acl_user: so the same three-layer simulation runs (top-level
+        # $match + $lookup rewriter + post-fetch redactor). This
+        # replaces the legacy direct in-pipeline injection in
+        # build_direct_mongodb_pipeline so includes-generated $lookup
+        # stages get filtered too.
+        { acl_user: @acl_user }
+      elsif @acl_role
+        # Role-only scope: no user_id, just role:<name> with parent
+        # inheritance via Parse::Role#all_parent_role_names.
+        { acl_role: @acl_role }
+      elsif @session_token.is_a?(String) && !@session_token.empty?
+        { session_token: @session_token }
+      else
+        { master: true }
+      end
+    end
+
     # Check if this query contains constraints that require aggregation pipeline processing
     # @return [Boolean] true if aggregation pipeline is required
     def requires_aggregation_pipeline?
       return false if @where.empty?
 
-      compiled_where = compile_where
+      # Markers (including __aggregation_pipeline) are stripped from the
+      # public compile_where path; consult the marker view explicitly.
+      markers = compile_markers
 
-      # Check if the compiled where itself has aggregation pipeline marker
-      return true if compiled_where.key?("__aggregation_pipeline")
+      # Check if the marker hash itself has aggregation pipeline marker
+      return true if markers.key?("__aggregation_pipeline")
 
       # Check if any of the constraint values has aggregation pipeline marker
-      compiled_where.values.any? { |constraint|
+      markers.values.any? { |constraint|
         constraint.is_a?(Hash) && constraint.key?("__aggregation_pipeline")
       }
     end
@@ -1323,14 +1766,18 @@ module Parse
     #
     # @param raw [Boolean] if true, returns raw MongoDB documents converted to Parse format
     #   instead of Parse::Object instances (default: false)
+    # @param max_time_ms [Integer, nil] optional server-side time limit in milliseconds.
+    #   When provided, MongoDB will cancel the aggregation if it exceeds this budget and
+    #   {Parse::MongoDB::ExecutionTimeout} is raised. Pass +nil+ (the default) for no cap.
     # @yield a block to iterate for each object that matched the query
     # @return [Array<Parse::Object>] if raw is false, a list of Parse::Object subclasses
     # @return [Array<Hash>] if raw is true, Parse-formatted JSON hashes
     # @raise [Parse::MongoDB::GemNotAvailable] if mongo gem is not installed
     # @raise [Parse::MongoDB::NotEnabled] if direct MongoDB is not configured
+    # @raise [Parse::MongoDB::ExecutionTimeout] if the query exceeds max_time_ms
     # @note This is a read-only operation. Direct MongoDB queries cannot modify data.
     # @see Parse::MongoDB.configure
-    def results_direct(raw: false, &block)
+    def results_direct(raw: false, max_time_ms: nil, session_token: nil, master: nil, acl_user: nil, acl_role: nil, &block)
       require_relative "mongodb"
       Parse::MongoDB.require_gem!
 
@@ -1343,8 +1790,38 @@ module Parse
       # Build the aggregation pipeline for direct MongoDB execution
       pipeline = build_direct_mongodb_pipeline
 
-      # Execute the aggregation directly on MongoDB
-      raw_results = Parse::MongoDB.aggregate(@table, pipeline)
+      # When no explicit auth kwargs are provided by the caller, derive them
+      # from the query's own auth state (session_token, acl_user, acl_role, or
+      # master key) via mongo_direct_auth_kwargs — exactly the same fallback
+      # used by distinct_direct, count_direct, and the requires_mongo_direct?
+      # auto-route in results(). Without this, a plain .results_direct call on
+      # a master-key client would resolve as anonymous and have the ACL match
+      # stage filter out every row whose _rperm is [] (the default for objects
+      # created without an explicit public-read ACL).
+      if session_token.nil? && master.nil? && acl_user.nil? && acl_role.nil?
+        auth = mongo_direct_auth_kwargs
+        session_token = auth[:session_token]
+        master        = auth[:master]
+        acl_user      = auth[:acl_user]
+        acl_role      = auth[:acl_role]
+      end
+
+      # Execute the aggregation directly on MongoDB. The pipeline was built
+      # entirely from SDK constraint translation (no user-supplied stages),
+      # so legitimate +_rperm+/+_wperm+ references emitted by
+      # {#readable_by_role} and friends are sanctioned. The DENIED_OPERATORS
+      # walk still runs at the MongoDB layer. When `session_token:` or
+      # `master:` is supplied, Parse::MongoDB.aggregate adds the
+      # three-layer ACL simulation (top-level $match, $lookup rewriter,
+      # post-fetch redactor) before/after the pipeline executes.
+      raw_results = Parse::MongoDB.aggregate(@table, pipeline,
+                                             max_time_ms: max_time_ms,
+                                             allow_internal_fields: true,
+                                             session_token: session_token,
+                                             master: master,
+                                             acl_user: acl_user,
+                                             acl_role: acl_role,
+                                             read_preference: @read_preference)
 
       # Convert MongoDB documents to Parse format
       parse_results = Parse::MongoDB.convert_documents_to_parse(raw_results, @table)
@@ -1383,7 +1860,21 @@ module Parse
         limit_or_constraints = 1
       end
 
-      count = limit_or_constraints.to_i
+      count =
+        case limit_or_constraints
+        when Numeric then limit_or_constraints.to_i
+        when String
+          unless limit_or_constraints =~ /\A-?\d+\z/
+            raise ArgumentError,
+                  "Invalid first_direct() argument #{limit_or_constraints.inspect}. " \
+                  "Expected an Integer, a numeric String, or a Hash of constraints."
+          end
+          limit_or_constraints.to_i
+        else
+          raise ArgumentError,
+                "Invalid first_direct() argument #{limit_or_constraints.inspect}. " \
+                "Expected an Integer, a numeric String, or a Hash of constraints."
+        end
       count = 1 if count <= 0
 
       # Set limit for single/few results
@@ -1413,7 +1904,7 @@ module Parse
     # @raise [Parse::MongoDB::NotEnabled] if direct MongoDB is not configured
     # @note This is a read-only operation. Direct MongoDB queries cannot modify data.
     # @see Parse::MongoDB.configure
-    def count_direct
+    def count_direct(session_token: nil, master: nil, acl_user: nil, acl_role: nil)
       require_relative "mongodb"
       Parse::MongoDB.require_gem!
 
@@ -1432,8 +1923,26 @@ module Parse
       # Add count stage
       pipeline << { "$count" => "count" }
 
-      # Execute the aggregation directly on MongoDB
-      raw_results = Parse::MongoDB.aggregate(@table, pipeline)
+      # When no explicit auth kwargs are provided, derive them from the
+      # query's own auth state — same fallback as results_direct.
+      if session_token.nil? && master.nil? && acl_user.nil? && acl_role.nil?
+        auth = mongo_direct_auth_kwargs
+        session_token = auth[:session_token]
+        master        = auth[:master]
+        acl_user      = auth[:acl_user]
+        acl_role      = auth[:acl_role]
+      end
+
+      # SDK-built pipeline only — see results_direct for rationale.
+      # ACL simulation runs inside Parse::MongoDB.aggregate when
+      # session_token: or master: is supplied.
+      raw_results = Parse::MongoDB.aggregate(@table, pipeline,
+                                             allow_internal_fields: true,
+                                             session_token: session_token,
+                                             master: master,
+                                             acl_user: acl_user,
+                                             acl_role: acl_role,
+                                             read_preference: @read_preference)
 
       # Extract count from result
       return 0 if raw_results.empty?
@@ -1458,7 +1967,8 @@ module Parse
     # @raise [Parse::MongoDB::NotEnabled] if direct MongoDB is not configured
     # @note This is a read-only operation. Direct MongoDB queries cannot modify data.
     # @see Parse::MongoDB.configure
-    def distinct_direct(field, return_pointers: false)
+    def distinct_direct(field, return_pointers: false, order: nil,
+                        session_token: nil, master: nil, acl_user: nil, acl_role: nil)
       require_relative "mongodb"
       Parse::MongoDB.require_gem!
 
@@ -1472,28 +1982,49 @@ module Parse
         raise ArgumentError, "Invalid field name passed to `distinct_direct`."
       end
 
+      sort_dir = distinct_sort_direction(order)
+
       # Convert field name for direct MongoDB access
       mongo_field = convert_field_for_direct_mongodb(Query.format_field(field))
 
       # Build the base pipeline with match constraints
       pipeline = []
 
-      # Add match stage from query constraints
+      # Add match stage from query constraints. `compile_where` already
+      # strips `__`-prefixed routing markers, so the result is safe to
+      # forward to MongoDB.
       compiled_where = compile_where
       if compiled_where.present?
-        regular_constraints = compiled_where.reject { |f, _| f == "__aggregation_pipeline" }
-        if regular_constraints.any?
-          mongo_constraints = convert_constraints_for_direct_mongodb(regular_constraints)
-          pipeline << { "$match" => mongo_constraints }
-        end
+        mongo_constraints = convert_constraints_for_direct_mongodb(compiled_where)
+        pipeline << { "$match" => mongo_constraints } if mongo_constraints.any?
       end
 
-      # Add group and project stages for distinct
+      # Add group, optional sort, and project stages for distinct
       pipeline << { "$group" => { "_id" => "$#{mongo_field}" } }
+      pipeline << { "$sort" => { "_id" => sort_dir } } if sort_dir
       pipeline << { "$project" => { "_id" => 0, "value" => "$_id" } }
 
-      # Execute the aggregation directly on MongoDB
-      raw_results = Parse::MongoDB.aggregate(@table, pipeline)
+      # SDK-built pipeline only — see results_direct for rationale.
+      # Forward auth kwargs so Parse::MongoDB.aggregate runs the
+      # three-layer ACL + CLP + protectedFields simulation for scoped
+      # agents. Without this, distinct silently returns the unscoped
+      # universe (CLP-1 enforcement asymmetry vs. #count / #results).
+      # When no explicit auth kwargs are provided, derive from the
+      # query's own auth state — same fallback as results_direct.
+      if session_token.nil? && master.nil? && acl_user.nil? && acl_role.nil?
+        auth = mongo_direct_auth_kwargs
+        session_token = auth[:session_token]
+        master        = auth[:master]
+        acl_user      = auth[:acl_user]
+        acl_role      = auth[:acl_role]
+      end
+      raw_results = Parse::MongoDB.aggregate(@table, pipeline,
+                                             allow_internal_fields: true,
+                                             read_preference: @read_preference,
+                                             session_token: session_token,
+                                             master: master,
+                                             acl_user: acl_user,
+                                             acl_role: acl_role)
 
       # Extract values from results
       values = raw_results.map { |doc| doc["value"] }.compact
@@ -1516,10 +2047,14 @@ module Parse
 
     # Convenience method for distinct_direct that always returns Parse::Pointer objects for pointer fields.
     # @param field [Symbol, String] the field name to get distinct values for
+    # @param order [Symbol, nil] forwarded to {#distinct_direct}.
     # @return [Array] array of distinct values, with pointer fields as Parse::Pointer objects
     # @see #distinct_direct
-    def distinct_direct_pointers(field)
-      distinct_direct(field, return_pointers: true)
+    def distinct_direct_pointers(field, order: nil,
+                                 session_token: nil, master: nil, acl_user: nil, acl_role: nil)
+      distinct_direct(field, return_pointers: true, order: order,
+                      session_token: session_token, master: master,
+                      acl_user: acl_user, acl_role: acl_role)
     end
 
     #----------------------------------------------------------------
@@ -1601,8 +2136,10 @@ module Parse
         pipeline << { "$skip" => skip_val } if skip_val > 0
         pipeline << { "$limit" => limit }
 
-        # Execute
-        raw_results = Parse::MongoDB.aggregate(@table, pipeline)
+        # SDK-built pipeline only — see results_direct for rationale.
+        raw_results = Parse::MongoDB.aggregate(@table, pipeline,
+                                               allow_internal_fields: true,
+                                               read_preference: @read_preference)
 
         # Convert results
         if options[:raw]
@@ -1626,6 +2163,15 @@ module Parse
         options[:class_name] = @table
         options[:limit] = limit
         options[:skip] = skip_val
+        # Forward the query's read_preference (set via `#read_pref`).
+        # Without this, Atlas Search calls reached through the Query
+        # bridge silently fall back to the client default even though
+        # the query explicitly opted in to a secondary read — the
+        # mongo-direct path (`#results_direct`) honors it, this one
+        # used to drop it on the floor.
+        if @read_preference && !options.key?(:read_preference)
+          options[:read_preference] = @read_preference
+        end
 
         Parse::AtlasSearch.search(@table, query, **options)
       end
@@ -1678,6 +2224,11 @@ module Parse
       # Use query limit if set and no explicit limit provided
       options[:limit] ||= (@limit.is_a?(Numeric) && @limit > 0 ? @limit : 10)
       options[:class_name] = @table
+      # Forward the query's read_preference (set via `#read_pref`).
+      # See #atlas_search for the parity rationale.
+      if @read_preference && !options.key?(:read_preference)
+        options[:read_preference] = @read_preference
+      end
 
       Parse::AtlasSearch.autocomplete(@table, query, field: field, **options)
     end
@@ -1730,6 +2281,11 @@ module Parse
       options[:limit] ||= (@limit.is_a?(Numeric) && @limit > 0 ? @limit : 100)
       options[:skip] ||= (@skip > 0 ? @skip : 0)
       options[:class_name] = @table
+      # Forward the query's read_preference (set via `#read_pref`).
+      # See #atlas_search for the parity rationale.
+      if @read_preference && !options.key?(:read_preference)
+        options[:read_preference] = @read_preference
+      end
 
       Parse::AtlasSearch.faceted_search(@table, query, facets, **options)
     end
@@ -1743,24 +2299,37 @@ module Parse
     def build_direct_mongodb_pipeline
       pipeline = []
 
-      # Compile the where clause and convert for direct MongoDB access
+      # Mirror the REST compile() behavior: ensure each top-level included field
+      # is also in @keys so the $project stage below does not strip the pointer
+      # that the $lookup stage is supposed to expand.
+      merge_includes_into_keys!
+
+      # Compile the where clause and convert for direct MongoDB access.
+      # `compile_where` already strips `__`-prefixed routing markers; use
+      # `compile_markers` to recover the unfiltered hash for the
+      # __aggregation_pipeline extraction below.
       compiled_where = compile_where
+      markers = compile_markers
+
+      # Note: the `_rperm` injection for scope_to_user no longer
+      # happens here. It moved to Parse::MongoDB.aggregate via the
+      # acl_user: kwarg so the same three-layer ACL simulation
+      # (top-level $match + $lookup rewriter + post-fetch redactor)
+      # runs for scope_to_user, session_token, and the public-only
+      # fallback alike. See {#mongo_direct_auth_kwargs}.
 
       if compiled_where.present?
-        # Remove aggregation pipeline marker if present
-        regular_constraints = compiled_where.reject { |field, _| field == "__aggregation_pipeline" }
+        # Convert field names and values for direct MongoDB access.
+        # `compiled_where` is already marker-free, so no further
+        # reject pass is required.
+        mongo_constraints = convert_constraints_for_direct_mongodb(compiled_where)
+        pipeline << { "$match" => mongo_constraints } if mongo_constraints.any?
+      end
 
-        if regular_constraints.any?
-          # Convert field names and values for direct MongoDB access
-          mongo_constraints = convert_constraints_for_direct_mongodb(regular_constraints)
-          pipeline << { "$match" => mongo_constraints } if mongo_constraints.any?
-        end
-
-        # Handle aggregation pipeline stages (from empty_or_nil, set_equals, etc.)
-        if compiled_where.key?("__aggregation_pipeline")
-          compiled_where["__aggregation_pipeline"].each do |stage|
-            pipeline << convert_stage_for_direct_mongodb(stage)
-          end
+      # Handle aggregation pipeline stages (from empty_or_nil, set_equals, etc.)
+      if markers.key?("__aggregation_pipeline")
+        markers["__aggregation_pipeline"].each do |stage|
+          pipeline << convert_stage_for_direct_mongodb(stage)
         end
       end
 
@@ -1954,21 +2523,31 @@ module Parse
     def convert_field_for_direct_mongodb(field)
       field_str = field.to_s
 
-      # MongoDB internal fields should pass through unchanged
-      # These start with underscore and are used internally by MongoDB/Parse
-      return field_str if field_str =~ /^_/ && %w[
-        _id _created_at _updated_at _acl _rperm _wperm
-        _hashed_password _email_verify_token _perishable_token
-        _tombstone _failed_login_count _account_lockout_expires_at _session_token
-      ].include?(field_str)
-
-      # Also preserve pointer field references (e.g., _p_artist)
-      return field_str if field_str.start_with?("_p_")
+      # Any field name starting with underscore is non-user-facing and is
+      # passed through verbatim. Parse user-facing properties never start
+      # with `_` (the SDK columnizes snake_case to camelCase before save,
+      # and Parse Server reserves the leading-underscore namespace), so a
+      # field that does is one of:
+      #   - a MongoDB/Parse Server internal column (`_id`, `_created_at`,
+      #     `_acl`, `_rperm`, `_wperm`, `_hashed_password`,
+      #     `_session_token`, `_email_verify_token`, ...)
+      #   - a Parse-on-Mongo pointer storage column (`_p_<field>`)
+      #   - an SDK-built pipeline-temp alias such as the
+      #     `_lookup_<field>_result` / `_lookup_<field>_id` aliases that
+      #     `extract_subquery_to_lookup_stages` introduces when an
+      #     `$inQuery` constraint compiles to a `$lookup` stage
+      # Columnizing any of these would corrupt the reference: the
+      # previous behavior of routing `_lookup_project_result` through
+      # `format_field` produced `lookupProjectResult` (leading underscore
+      # stripped, snake_case to camelCase), and the post-lookup
+      # `$match` then asked MongoDB for a column that didn't exist, so
+      # every document silently satisfied the constraint.
+      return field_str if field_str.start_with?("_")
 
       # Apply field formatting for regular fields
-      field_str = Query.format_field(field)
+      formatted = Query.format_field(field)
 
-      case field_str
+      case formatted
       when "objectId"
         "_id"
       when "createdAt"
@@ -1976,11 +2555,53 @@ module Parse
       when "updatedAt"
         "_updated_at"
       else
-        # Check if this is a pointer field using schema
-        if field_is_pointer?(field_str)
-          "_p_#{field_str}"
+        # Schema-aware passthrough: only rewrite names that correspond
+        # to a declared Parse property (or the universal built-ins
+        # handled above). Anything else is treated as a pipeline-local
+        # alias — `$group` accumulator name, `$project` computed field,
+        # `$addFields` output — and the literal text passes through so
+        # the reference matches the output key the upstream stage
+        # produced.
+        #
+        # Concretely: `$status` on a class that declares `status`
+        # remains `status` (`format_field` is a no-op for already-
+        # camelCase names); `$author` on a class that declares a
+        # pointer `author` becomes `$_p_author`; `$contributor_set`
+        # (an alias the caller introduced in `$group`) stays
+        # `$contributor_set` because no such property exists in the
+        # schema. Callers reading the result row by `row[alias_name]`
+        # see exactly the spelling they wrote into the pipeline.
+        #
+        # @note Two documented limitations of the schema-aware rule:
+        #
+        # 1. **Alias shadowing.** An alias whose name shadows a
+        #    declared Parse property (`$group { author: ... }` where
+        #    `author` is a pointer) is treated as the property —
+        #    downstream `$author` references resolve to `$_p_author`,
+        #    the storage column, not the alias. Avoid alias names that
+        #    collide with declared property names. The same naming
+        #    constraint MongoDB aggregation pipelines have generally;
+        #    not unique to parse-stack.
+        #
+        # 2. **Undeclared server columns.** Conversely, a `$field`
+        #    reference whose name corresponds to a column that exists
+        #    on the server but is NOT declared as a property on the
+        #    Ruby model passes through verbatim. The schema we consult
+        #    is the SDK-side property registry; we do not introspect
+        #    the live server schema on every translation. If you need
+        #    references in mongo-direct pipelines to translate
+        #    snake_case → camelCase or take a `_p_*` prefix, declare
+        #    the corresponding property on the Ruby model. Workaround
+        #    without declaring: write the storage-column name directly
+        #    (`$_p_author`, `$companyName`), which short-circuits the
+        #    walker via the leading-underscore / already-formatted
+        #    paths.
+        return field_str unless field_is_known_to_schema?(formatted)
+
+        if field_is_pointer?(formatted)
+          "_p_#{formatted}"
         else
-          field_str
+          formatted
         end
       end
     end
@@ -2034,6 +2655,19 @@ module Parse
     end
 
     # Convert an aggregation stage for direct MongoDB execution.
+    #
+    # Projection-shape stages ($project, $addFields, $set, $replaceRoot,
+    # $replaceWith) and accumulator/grouping stages ($group) carry
+    # aggregation expressions that can reference fields via $fieldName
+    # strings. These references must be rewritten to the direct-MongoDB
+    # column form (camelCase, _p_* for pointers, _id/_created_at/_updated_at
+    # for built-ins). The rewrite walks recursively into $cond / $eq /
+    # $switch / $expr argument arrays so a nested reference is not missed.
+    # See {#rewrite_expression_for_direct_mongodb}.
+    #
+    # $match is special: its top-level keys are field-name constraints
+    # (rewritten via the constraint converter), but the value of a top-level
+    # $expr is an aggregation expression that must also be walked.
     # @param stage [Hash] a single pipeline stage
     # @return [Hash] the converted stage
     # @api private
@@ -2042,15 +2676,22 @@ module Parse
 
       result = {}
       stage.each do |operator, value|
-        case operator
+        case operator.to_s
         when "$match"
-          result["$match"] = convert_constraints_for_direct_mongodb(value)
+          result[operator] = convert_match_for_direct_mongodb(value)
         when "$project"
-          result["$project"] = convert_projection_for_direct_mongodb(value)
+          result[operator] = convert_projection_for_direct_mongodb(value)
         when "$sort"
-          result["$sort"] = convert_sort_for_direct_mongodb(value)
+          result[operator] = convert_sort_for_direct_mongodb(value)
         when "$group"
-          result["$group"] = convert_group_for_direct_mongodb(value)
+          result[operator] = convert_group_for_direct_mongodb(value)
+        when "$addFields", "$set"
+          result[operator] = convert_addfields_for_direct_mongodb(value)
+        when "$replaceRoot"
+          result[operator] = convert_replace_root_for_direct_mongodb(value)
+        when "$replaceWith"
+          # $replaceWith's argument is the new-root expression directly.
+          result[operator] = rewrite_expression_for_direct_mongodb(value)
         else
           result[operator] = value
         end
@@ -2058,16 +2699,39 @@ module Parse
       result
     end
 
-    # Convert projection fields for direct MongoDB.
+    # Convert a $match stage for direct MongoDB. Rewrites top-level
+    # field-name keys via {#convert_constraints_for_direct_mongodb} and
+    # additionally walks the value of a top-level $expr as an aggregation
+    # expression so nested $fieldName references are rewritten.
+    # @api private
+    def convert_match_for_direct_mongodb(match)
+      converted = convert_constraints_for_direct_mongodb(match)
+      return converted unless converted.is_a?(Hash)
+
+      # The constraint converter passes $expr through unchanged. Rewrite
+      # its value here so e.g. {$expr: {$eq: ["$author", "$approver"]}}
+      # becomes {$expr: {$eq: ["$_p_author", "$_p_approver"]}}.
+      expr_key = converted.key?("$expr") ? "$expr" : (converted.key?(:"$expr") ? :"$expr" : nil)
+      return converted unless expr_key
+
+      result = converted.dup
+      result[expr_key] = rewrite_expression_for_direct_mongodb(converted[expr_key])
+      result
+    end
+
+    # Convert projection fields for direct MongoDB. Output-key aliases
+    # pass through verbatim — what the caller writes is what the result
+    # row will be keyed by. Values that are aggregation expressions
+    # (e.g. `{ "$cond": [...] }`) are walked recursively so nested
+    # `$fieldName` references reach the correct storage column via the
+    # schema-aware rewriter in {#convert_field_for_direct_mongodb}.
     # @api private
     def convert_projection_for_direct_mongodb(projection)
       return projection unless projection.is_a?(Hash)
 
       result = {}
       projection.each do |field, value|
-        mongo_field = convert_field_for_direct_mongodb(field)
-        result[mongo_field] = value.is_a?(String) && value.start_with?("$") ?
-          "$#{convert_field_for_direct_mongodb(value[1..-1])}" : value
+        result[field] = rewrite_expression_for_direct_mongodb(value)
       end
       result
     end
@@ -2085,40 +2749,97 @@ module Parse
       result
     end
 
-    # Convert $group stage for direct MongoDB.
+    # Convert $group stage for direct MongoDB. Output-alias keys
+    # (`_id`, accumulator names like `contributor_set`) pass through
+    # verbatim so the result row uses whatever spelling the caller
+    # wrote. Each value — the `_id` group-key expression and every
+    # accumulator expression — is walked as an aggregation expression
+    # so `$field` references inside reach the correct storage column
+    # (`_p_*` for pointers, `_id`/`_created_at`/`_updated_at` for
+    # built-ins, untouched for unknown names i.e. pipeline-local
+    # aliases) via the schema-aware
+    # {#convert_field_for_direct_mongodb}.
     # @api private
     def convert_group_for_direct_mongodb(group)
       return group unless group.is_a?(Hash)
 
       result = {}
       group.each do |field, value|
-        if field == "_id"
-          result["_id"] = convert_group_id_for_direct_mongodb(value)
-        else
-          result[field] = value
-        end
+        result[field] = rewrite_expression_for_direct_mongodb(value)
       end
       result
     end
 
-    # Convert $group _id specification for direct MongoDB.
+    # Convert a $addFields / $set stage for direct MongoDB. Same shape
+    # as $project: `{ aliasName => <expression> }`. Output aliases pass
+    # through verbatim; each value is walked as an aggregation
+    # expression so storage-column references inside reach the correct
+    # column via the schema-aware {#convert_field_for_direct_mongodb}.
     # @api private
-    def convert_group_id_for_direct_mongodb(id_spec)
-      case id_spec
+    def convert_addfields_for_direct_mongodb(spec)
+      return spec unless spec.is_a?(Hash)
+
+      result = {}
+      spec.each do |field, value|
+        result[field] = rewrite_expression_for_direct_mongodb(value)
+      end
+      result
+    end
+
+    # Convert a $replaceRoot stage for direct MongoDB. Argument shape is
+    # `{ newRoot: <expression> }`; only the newRoot value is an
+    # expression. (Use {#rewrite_expression_for_direct_mongodb} directly
+    # for $replaceWith, whose argument is the expression itself.)
+    # @api private
+    def convert_replace_root_for_direct_mongodb(spec)
+      return rewrite_expression_for_direct_mongodb(spec) unless spec.is_a?(Hash)
+
+      new_root_key = spec.key?("newRoot") ? "newRoot" : (spec.key?(:newRoot) ? :newRoot : nil)
+      return rewrite_expression_for_direct_mongodb(spec) unless new_root_key
+
+      result = spec.dup
+      result[new_root_key] = rewrite_expression_for_direct_mongodb(spec[new_root_key])
+      result
+    end
+
+    # Recursively rewrite field references inside an aggregation expression
+    # to their direct-MongoDB column names.
+    #
+    # Walks Strings, Arrays, and Hashes:
+    # - A String starting with `$` (but not `$$`, which denotes a `let`
+    #   variable or system variable like `$$ROOT`) is treated as a field
+    #   reference. Its root path segment is rewritten via
+    #   {#convert_field_for_direct_mongodb}, preserving any dot-delimited
+    #   tail. Already-rewritten `$_p_*` references pass through unchanged.
+    # - Arrays and Hashes are recursed into, with one exception: the
+    #   argument of `$literal` is a string constant, not a field
+    #   reference, and must not be rewritten.
+    # @param expr [Object] any node within an aggregation expression
+    # @return [Object] the rewritten expression (input is not mutated)
+    # @api private
+    def rewrite_expression_for_direct_mongodb(expr)
+      case expr
       when String
-        if id_spec.start_with?("$")
-          "$#{convert_field_for_direct_mongodb(id_spec[1..-1])}"
-        else
-          id_spec
-        end
+        return expr unless expr.start_with?("$")
+        # $$varName (let bindings) and $$ROOT / $$CURRENT / $$NOW etc.
+        return expr if expr.start_with?("$$")
+        # Split off the root path segment so `$user.name` rewrites only
+        # the root: `$_p_user.name`. Internal helper handles _p_* and
+        # built-in passthroughs idempotently.
+        head, sep, tail = expr[1..-1].partition(".")
+        "$#{convert_field_for_direct_mongodb(head)}#{sep}#{tail}"
+      when Array
+        expr.map { |e| rewrite_expression_for_direct_mongodb(e) }
       when Hash
         result = {}
-        id_spec.each do |k, v|
-          result[k] = convert_group_id_for_direct_mongodb(v)
+        expr.each do |k, v|
+          # `$literal` wraps a string constant; its argument is not a
+          # field reference and must be preserved verbatim.
+          result[k] = k.to_s == "$literal" ? v : rewrite_expression_for_direct_mongodb(v)
         end
         result
       else
-        id_spec
+        expr
       end
     end
 
@@ -2266,10 +2987,22 @@ module Parse
     #   # With MongoDB direct (required for $inQuery constraints in aggregation)
     #   aggregation = Asset.query.aggregate(pipeline, mongo_direct: true)
     # Pipeline stages that are blocked to prevent data exfiltration or destructive operations.
-    BLOCKED_PIPELINE_STAGES = %w[$out $merge $planCacheSetFilter $planCacheClear $function $accumulator $collMod $createIndex $dropIndex].freeze
+    # @deprecated Retained for backwards compatibility. The canonical list now lives in
+    #   {Parse::PipelineSecurity::DENIED_OPERATORS} and is enforced recursively, not only
+    #   at the top-level stage.
+    BLOCKED_PIPELINE_STAGES = Parse::PipelineSecurity::DENIED_OPERATORS
 
-    def aggregate(pipeline, verbose: nil, mongo_direct: nil)
+    def aggregate(pipeline, verbose: nil, mongo_direct: nil, rewrite_lookups: nil)
       validate_pipeline!(pipeline)
+
+      # Auto-rewrite LLM-style $lookup stages against logical Parse class
+      # names into the Parse-on-Mongo column form (_p_*/parseReference) when
+      # the foreign class declares parse_reference. Idempotent on already-
+      # rewritten input. Controlled by Parse.rewrite_lookups (default true)
+      # or the per-call `rewrite_lookups:` kwarg.
+      pipeline = Parse::LookupRewriter.auto_rewrite(
+        pipeline, class_name: @table, enabled: rewrite_lookups,
+      )
 
       # Automatically prepend query constraints as pipeline stages
       complete_pipeline = []
@@ -2277,16 +3010,19 @@ module Parse
 
       # Add $match stage from where constraints if any exist
       unless @where.empty?
-        where_clause = Parse::Query.compile_where(@where)
-        if where_clause.any?
+        # `compile_where` is marker-free; `compile_markers` carries the
+        # __aggregation_pipeline stages we need to extract below.
+        where_clause = compile_where
+        markers = compile_markers
+        if where_clause.any? || markers.key?("__aggregation_pipeline")
           # Collect match conditions and stages
           initial_match_conditions = []
           aggregation_match_conditions = []
           non_match_stages = []
           post_lookup_match = {}
 
-          # Extract regular constraints (everything except __aggregation_pipeline)
-          regular_constraints = where_clause.reject { |field, _| field == "__aggregation_pipeline" }
+          # `where_clause` is already marker-free; treat as regular constraints.
+          regular_constraints = where_clause
 
           if regular_constraints.any?
             # Handle dates first
@@ -2307,9 +3043,9 @@ module Parse
             end
           end
 
-          # Extract aggregation pipeline stages
-          if where_clause.key?("__aggregation_pipeline")
-            where_clause["__aggregation_pipeline"].each do |stage|
+          # Extract aggregation pipeline stages from the marker view.
+          if markers.key?("__aggregation_pipeline")
+            markers["__aggregation_pipeline"].each do |stage|
               if stage.is_a?(Hash) && stage.key?("$match")
                 aggregation_match_conditions << stage["$match"]
               else
@@ -2390,40 +3126,60 @@ module Parse
       # Optimize pipeline by merging consecutive $match stages
       complete_pipeline = deduplicate_consecutive_match_stages(complete_pipeline)
 
+      # When the pipeline is bound for direct MongoDB, translate every stage
+      # through the direct-MongoDB field rewriter so user-supplied stages
+      # (which use logical Parse field names like `$author`) reach the
+      # correct on-disk columns (`$_p_author`). The Parse Server route does
+      # not need this — Parse Server applies its own translation on the
+      # aggregate endpoint — so the rewrite is gated on use_mongo_direct.
+      if use_mongo_direct
+        complete_pipeline = translate_pipeline_for_direct_mongodb(complete_pipeline)
+      end
+
       Aggregation.new(self, complete_pipeline, verbose: verbose, mongo_direct: use_mongo_direct || false)
     end
 
-    # Validates that a pipeline does not contain blocked stages or dangerous operators.
+    # Apply the direct-MongoDB stage converter to every stage in a pipeline.
+    # Idempotent on already-translated input (the per-stage converter
+    # passes `_p_*` references through unchanged).
+    # @param pipeline [Array<Hash>] aggregation pipeline
+    # @return [Array<Hash>] a new pipeline with each stage translated
+    # @api private
+    def translate_pipeline_for_direct_mongodb(pipeline)
+      return pipeline unless pipeline.is_a?(Array)
+      pipeline.map { |stage| convert_stage_for_direct_mongodb(stage) }
+    end
+
+    # Validates that a pipeline does not contain dangerous operators. Uses the
+    # permissive mode of {Parse::PipelineSecurity} (recursive denylist for $where,
+    # $function, $accumulator, $out, $merge, $collMod, $createIndex, $dropIndex)
+    # so that user code passing uncommon-but-legitimate read stages like
+    # $densify or $fill continues to work. Strict allowlist validation is
+    # available via {Parse::PipelineSecurity.validate_pipeline!} for callers
+    # that want to opt in.
+    #
+    # @note Permissive mode does NOT block `$lookup`, `$graphLookup`, or
+    #   `$unionWith` — these are legitimate read stages but can cross
+    #   collection boundaries that Parse ACL/CLP does not enforce. Do not
+    #   pass raw attacker-controlled input into {#aggregate}; construct the
+    #   pipeline in SDK code and interpolate only validated values.
+    #
     # @param pipeline [Array<Hash>] the aggregation pipeline stages.
     # @raise [ArgumentError] if a blocked stage or dangerous operator is found.
     def validate_pipeline!(pipeline)
-      pipeline.each do |stage|
-        next unless stage.is_a?(Hash)
-        stage.each_key do |key|
-          if BLOCKED_PIPELINE_STAGES.include?(key.to_s)
-            raise ArgumentError, "Aggregation pipeline stage '#{key}' is blocked for security reasons"
-          end
-        end
-        # Block $where inside $match stages
-        if stage.key?("$match") && stage["$match"].is_a?(Hash)
-          validate_no_where_operator!(stage["$match"])
-        end
-      end
+      Parse::PipelineSecurity.validate_filter!(pipeline)
+    rescue Parse::PipelineSecurity::Error => e
+      raise ArgumentError, e.message
     end
 
-    # Recursively checks a hash for $where operators.
+    # @deprecated Retained for backwards compatibility. Use
+    #   {Parse::PipelineSecurity.validate_filter!} for new code.
     # @param hash [Hash] the hash to check.
-    # @raise [ArgumentError] if $where is found.
+    # @raise [ArgumentError] if $where (or any other denied operator) is found.
     def validate_no_where_operator!(hash)
-      hash.each do |key, value|
-        if key.to_s == "$where"
-          raise ArgumentError, "The $where operator is blocked for security reasons"
-        end
-        validate_no_where_operator!(value) if value.is_a?(Hash)
-        if value.is_a?(Array)
-          value.each { |v| validate_no_where_operator!(v) if v.is_a?(Hash) }
-        end
-      end
+      Parse::PipelineSecurity.validate_filter!(hash)
+    rescue Parse::PipelineSecurity::Error => e
+      raise ArgumentError, e.message
     end
 
     # Converts the current query into an aggregate pipeline and executes it.
@@ -2627,7 +3383,10 @@ module Parse
     # @return [Array] Two element array: [pipeline, has_lookup_stages]
     def build_aggregation_pipeline
       pipeline = []
+      # `compile_where` is already marker-free; `compile_markers` retains
+      # the __aggregation_pipeline marker we need to extract stages from.
       compiled_where = compile_where
+      markers = compile_markers
       has_lookup_stages = false
 
       # Collect match conditions and stages
@@ -2637,10 +3396,8 @@ module Parse
       lookup_stages = []
       post_lookup_match = {}
 
-      # Extract regular constraints (everything except __aggregation_pipeline)
-      regular_constraints = compiled_where.reject { |field, _|
-        field == "__aggregation_pipeline"
-      }
+      # `compiled_where` is already marker-free; use as-is.
+      regular_constraints = compiled_where
 
       # Process regular constraints
       if regular_constraints.any?
@@ -2664,8 +3421,8 @@ module Parse
       end
 
       # Extract aggregation pipeline stages (from empty_or_nil, set_equals, etc.)
-      if compiled_where.key?("__aggregation_pipeline")
-        compiled_where["__aggregation_pipeline"].each do |stage|
+      if markers.key?("__aggregation_pipeline")
+        markers["__aggregation_pipeline"].each do |stage|
           if stage.is_a?(Hash) && stage.key?("$match")
             # Aggregation $match conditions go after lookup
             aggregation_match_conditions << stage["$match"]
@@ -2947,6 +3704,24 @@ module Parse
 
     private :validate_includes_vs_keys
 
+    # Ensures every top-level field referenced by an `include` is also present
+    # in `keys`. Only runs when `keys` has already been set — without a keys
+    # allowlist, all fields are returned and the merge is unnecessary.
+    # @!visibility private
+    def merge_includes_into_keys!
+      return if @keys.nil? || @keys.empty?
+      return if @includes.nil? || @includes.empty?
+
+      @includes.each do |inc|
+        top = inc.to_s.split(".", 2).first
+        next if top.nil? || top.empty?
+        sym = top.to_sym
+        @keys.push(sym) unless @keys.include?(sym)
+      end
+      @keys.uniq!
+    end
+    private :merge_includes_into_keys!
+
     # Builds Parse::Pointer objects based on the set of Parse JSON hashes in an array.
     # @param list [Array<Hash>] a list of Parse JSON hashes
     # @param field [Symbol, String, nil] optional field name for schema-based conversion
@@ -3011,6 +3786,12 @@ module Parse
       # Validate includes vs keys before compiling
       validate_includes_vs_keys
 
+      # When a `keys` allowlist is set alongside `include`, the parent pointer
+      # field must also be in `keys` or Parse Server strips it before expanding
+      # the include. Auto-add the top-level segment of each include so partial
+      # fetches don't silently drop included pointers.
+      merge_includes_into_keys!
+
       run_callbacks :prepare do
         q = {} #query
         q[:limit] = @limit if @limit.is_a?(Numeric) && @limit > 0
@@ -3036,9 +3817,20 @@ module Parse
       end
     end
 
-    # @return [Hash] a hash representing just the `where` clause of this query.
+    # @return [Hash] a hash representing just the `where` clause of this
+    #   query, with SDK-internal routing markers stripped.
     def compile_where
       self.class.compile_where(@where || [])
+    end
+
+    # @return [Hash] the un-stripped reduced where hash, including any
+    #   SDK-internal markers like `"__mongo_direct_only"` and
+    #   `"__aggregation_pipeline"`. Used by the routing layer to decide
+    #   how to execute the query and by aggregation-pipeline builders
+    #   to extract stages. Never ship this hash to Parse REST or MongoDB.
+    # @!visibility private
+    def compile_markers
+      self.class.compile_markers(@where || [])
     end
 
     # Returns the aggregation pipeline for this query if it contains pipeline-based constraints
@@ -3830,6 +4622,38 @@ module Parse
       nil
     end
 
+    # Handle a constraint value that is a bare String inside `$in`/`$nin`
+    # against a column positively identified as a pointer, when the
+    # target class cannot be resolved (no local belongs_to AND no peer
+    # Pointer value to infer from). The storage form is
+    # "ClassName$objectId"; matching it against a bare objectId returns
+    # zero rows.
+    #
+    # Strict mode ({Parse.strict_pointer_shapes?}) raises
+    # {Parse::Query::PointerShapeError}. Otherwise, emit a one-shot
+    # warning via `Parse.logger` (keyed on `[table, field]`) and leave
+    # the value unchanged for backwards compatibility.
+    # @api private
+    def handle_unresolvable_pointer_in_array!(field, op, item, op_value)
+      msg = "Pointer-shape mismatch: #{@table}.#{field} is a pointer column " \
+            "but #{op} array contains bare string #{item.inspect} and no peer " \
+            "Pointer value to infer the target class. This query is " \
+            "guaranteed to return zero rows. Pass Parse::Pointer objects, " \
+            "{__type: 'Pointer', className: '<X>', objectId: '<id>'} hashes, " \
+            "or include at least one such peer in the array so the target " \
+            "class can be inferred."
+      if Parse.strict_pointer_shapes?
+        raise Parse::Query::PointerShapeError, msg
+      end
+      cache = self.class.pointer_shape_warned
+      key = [@table.to_s, field.to_s]
+      unless cache[key]
+        cache[key] = true
+        Parse.logger&.warn("[Parse::Query] #{msg}")
+      end
+      nil
+    end
+
     # Check if a field is a pointer field using schema information
     # @param field [Symbol, String] the field name to check
     # @return [Boolean] true if the field is a pointer field
@@ -3854,6 +4678,50 @@ module Parse
       rescue NameError
         # If the model class doesn't exist, fall back to checking the server schema
         fetch_and_check_server_schema(field)
+      end
+    end
+
+    # Whether the field name corresponds to a declared property of the
+    # Parse class backing this query (of any type — pointer, string,
+    # date, array, etc.) — i.e. something the on-disk MongoDB document
+    # would have a column for. Used by
+    # {#convert_field_for_direct_mongodb} to distinguish between
+    # storage-column references (which must be rewritten to their
+    # `_p_*` / camelCase form) and pipeline-local aliases introduced by
+    # `$group` / `$project` / `$addFields` / `$set` (which must pass
+    # through verbatim so a downstream `$alias` reference matches the
+    # upstream output key the caller wrote).
+    #
+    # Fails open: if the Ruby class cannot be resolved (e.g. the
+    # aggregation is running against a class that exists on the server
+    # but has no SDK model declaration in this process), returns false
+    # — unknown names then pass through unchanged, which matches the
+    # pre-4.4.2 behavior of the affected callers.
+    #
+    # @note Source of truth is the SDK-side property registry
+    #   (`parse_class.fields`). We deliberately do not introspect the
+    #   live server schema per-call — schema fetches are slow,
+    #   stateful, and would couple aggregation correctness to network
+    #   reachability. Users that need a field to round-trip through
+    #   the rewriter must declare it as a Parse property in the Ruby
+    #   model. See {#convert_field_for_direct_mongodb} for the dual
+    #   limitation (alias shadowing).
+    #
+    # @param field [Symbol, String]
+    # @return [Boolean]
+    # @api private
+    def field_is_known_to_schema?(field)
+      begin
+        parse_class = Parse::Model.const_get(@table)
+        return false unless parse_class.respond_to?(:fields)
+
+        fields_to_check = [field.to_s, field.to_sym]
+        formatted_field = Query.format_field(field)
+        fields_to_check += [formatted_field.to_s, formatted_field.to_sym]
+
+        fields_to_check.any? { |f| parse_class.fields.key?(f.to_sym) }
+      rescue NameError
+        false
       end
     end
 
@@ -3976,9 +4844,20 @@ module Parse
 
       result = {}
       constraints.each do |field, value|
-        # Skip special Parse operators
+        # Skip special Parse operators, but recurse into the boolean
+        # combinators so a pointer-field rewrite is not bypassed when
+        # the LLM (or any caller) wraps the constraint in $or/$and/$nor.
+        # Without this, `{ "$or" => [{ "team" => { "$in" => ["bare"] } }] }`
+        # would ship to MongoDB with `team` un-rewritten to `_p_team` —
+        # the canonical silent-zero pattern.
         if field.to_s.start_with?("$")
-          result[field] = value
+          if value.is_a?(Array) && %w[$and $or $nor].include?(field.to_s)
+            result[field] = value.map { |v|
+              v.is_a?(Hash) ? convert_constraints_for_aggregation(v) : v
+            }
+          else
+            result[field] = value
+          end
           next
         end
 
@@ -4050,7 +4929,11 @@ module Parse
                   if class_name
                     "#{class_name}$#{item}"
                   else
-                    # Can't determine class name - leave string as-is
+                    # Pointer column, bare objectId, target class unresolvable.
+                    # Storage form is "ClassName$objectId" so this comparison
+                    # is guaranteed to return zero rows. Raise in strict mode;
+                    # warn and pass through otherwise.
+                    handle_unresolvable_pointer_in_array!(field, op, item, op_value)
                     item
                   end
                 else
@@ -4468,11 +5351,14 @@ module Parse
     # @param pipeline [Array<Hash>] the MongoDB aggregation pipeline stages
     # @param verbose [Boolean, nil] whether to print verbose output (nil means use query's setting)
     # @param mongo_direct [Boolean] if true, uses MongoDB directly bypassing Parse Server (required for $literal)
-    def initialize(query, pipeline, verbose: nil, mongo_direct: false)
+    # @param max_time_ms [Integer, nil] optional server-side time limit in milliseconds passed to
+    #   {Parse::MongoDB.aggregate} when mongo_direct is true. Pass +nil+ (the default) for no cap.
+    def initialize(query, pipeline, verbose: nil, mongo_direct: false, max_time_ms: nil)
       @query = query
       @pipeline = pipeline
       @cached_response = nil
       @mongo_direct = mongo_direct
+      @max_time_ms = max_time_ms
       # Use provided verbose setting, or fall back to query's verbose_aggregate setting
       @verbose = verbose.nil? ? @query.instance_variable_get(:@verbose_aggregate) : verbose
     end
@@ -4513,10 +5399,13 @@ module Parse
     end
 
     # Execute aggregation directly on MongoDB
+    # @param max_time_ms [Integer, nil] optional server-side time limit (milliseconds).
+    #   Defaults to the value passed to {#initialize} via the +max_time_ms:+ keyword.
     # @return [Array<Hash>] raw MongoDB results
-    def execute_direct!
+    def execute_direct!(max_time_ms: @max_time_ms)
       table = @query.instance_variable_get(:@table)
-      Parse::MongoDB.aggregate(table, @pipeline)
+      auth_kwargs = @query.send(:mongo_direct_auth_kwargs)
+      Parse::MongoDB.aggregate(table, @pipeline, max_time_ms: max_time_ms, **auth_kwargs)
     end
 
     # Returns processed results from the aggregation.
@@ -4530,10 +5419,14 @@ module Parse
       response = execute!
 
       if @mongo_direct && defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
-        # For MongoDB direct, convert raw results to Parse objects or AggregationResult
+        # For MongoDB direct, branch per-row on the *raw* document: real Parse
+        # docs always carry _created_at / _updated_at, while $group rows reuse
+        # _id as the group key. We must not feed group rows through
+        # convert_document_to_parse, which would rename _id → objectId and
+        # fool the Parse-document heuristic.
         return [] if response.nil? || response.empty?
-        converted = Parse::MongoDB.convert_documents_to_parse(response, @query.instance_variable_get(:@table))
-        items = converted.map { |item| convert_aggregation_item(item) }
+        table = @query.instance_variable_get(:@table)
+        items = response.map { |raw| convert_direct_aggregation_item(raw, table) }
       else
         return [] if response.error?
         items = response.result.map { |item| convert_aggregation_item(item) }
@@ -4554,6 +5447,32 @@ module Parse
       else
         AggregationResult.new(item)
       end
+    end
+
+    # Convert a raw MongoDB aggregation row from the mongo_direct path. Decides
+    # based on the presence of Parse-document markers in the *raw* document.
+    # @param raw [Hash] the raw MongoDB document (with _id, _created_at, etc.)
+    # @param table [String] the Parse class name
+    # @return [Parse::Object, AggregationResult]
+    def convert_direct_aggregation_item(raw, table)
+      if raw_is_parse_document?(raw)
+        parse_doc = Parse::MongoDB.convert_document_to_parse(raw, table)
+        @query.send(:decode, [parse_doc]).first
+      else
+        AggregationResult.new(Parse::MongoDB.convert_aggregation_document(raw))
+      end
+    end
+
+    # A raw MongoDB document is a real Parse object only if it carries the
+    # internal timestamp fields Parse Server enforces on every row. $group /
+    # $project rows that drop these are aggregation results, regardless of
+    # whether _id is present.
+    # @param raw [Hash] the raw MongoDB document
+    # @return [Boolean]
+    def raw_is_parse_document?(raw)
+      return false unless raw.is_a?(Hash)
+      raw.key?("_created_at") || raw.key?(:_created_at) ||
+        raw.key?("_updated_at") || raw.key?(:_updated_at)
     end
 
     # Check if a hash looks like a standard Parse document
@@ -4668,6 +5587,75 @@ module Parse
       @flatten_arrays = flatten_arrays
       @return_pointers = return_pointers
       @mongo_direct = mongo_direct
+      @sort_target = nil    # nil | :key | :value | :size
+      @sort_direction = nil # :asc | :desc
+    end
+
+    # Order grouped results by the group key, the aggregated value, or
+    # (for {#list}) the size of the per-group array. The ordering is pushed
+    # down into the aggregation pipeline as a `$sort` stage (plus a
+    # `$addFields` helper for `:size`), so MongoDB does the sort and the
+    # returned Hash preserves the order via Ruby's insertion semantics.
+    #
+    # @param spec [Hash, Symbol] one of:
+    #   - `{ key: :asc | :desc }`  — sort by the group key
+    #   - `{ value: :asc | :desc }` — sort by the aggregated value
+    #     (count/sum/avg/min/max)
+    #   - `{ size: :asc | :desc }` — sort by the length of the pushed
+    #     array (only meaningful with {#list})
+    #   - `:asc` or `:desc` — shorthand for `{ key: direction }`, matching
+    #     Ruby's `Hash#sort` default of sorting by key.
+    # @return [self]
+    # @example Biggest groups first
+    #   Asset.group_by(:category).order(value: :desc).count
+    # @example Alphabetical group keys
+    #   Asset.group_by(:category).order(key: :asc).count
+    # @example Groups with the most members first
+    #   Asset.group_by(:category).order(size: :desc).list
+    def order(spec)
+      target, direction =
+        case spec
+        when Symbol
+          [:key, spec]
+        when Hash
+          unless spec.size == 1
+            raise ArgumentError, "order(...) expects a single pair, e.g. {value: :desc} (got #{spec.inspect})"
+          end
+          k, v = spec.first
+          [k.to_sym, v.to_sym]
+        else
+          raise ArgumentError, "order(...) expects {key:|value:|size: => :asc|:desc} or :asc/:desc (got #{spec.inspect})"
+        end
+
+      unless %i[key value size].include?(target)
+        raise ArgumentError, "order(...) target must be :key, :value, or :size (got #{target.inspect})"
+      end
+      unless %i[asc desc].include?(direction)
+        raise ArgumentError, "order(...) direction must be :asc or :desc (got #{direction.inspect})"
+      end
+
+      @sort_target = target
+      @sort_direction = direction
+      self
+    end
+
+    # Sort grouped results by the group key. Alias for `order(key: direction)`,
+    # mirroring Ruby's `Hash#sort` default. For value-based ordering use
+    # {#order} explicitly (e.g. `.order(value: :desc)`).
+    #
+    # Note the asymmetry with chaining: `.sort.count` pushes the sort into
+    # the aggregation pipeline and returns a `Hash` keyed by group, while
+    # `.count.sort` first materializes the Hash and then calls `Hash#sort`,
+    # which returns an `Array<[key, value]>`. Both order by key ascending
+    # by default; this method exists so the pipeline form is also available.
+    #
+    # @param direction [Symbol] `:asc` (default) or `:desc`
+    # @return [self]
+    # @example
+    #   Asset.group_by(:category).sort.count        # group keys ascending
+    #   Asset.group_by(:category).sort(:desc).count # group keys descending
+    def sort(direction = :asc)
+      order(direction)
     end
 
     # Returns the MongoDB aggregation pipeline that would be used for a count operation.
@@ -4677,21 +5665,30 @@ module Parse
     #   Capture.where(:author_team.eq => team).group_by(:last_action).pipeline
     #   # => [{"$match"=>{"authorTeam"=>"Team$abc123"}}, {"$group"=>{"_id"=>"$lastAction", "count"=>{"$sum"=>1}}}, {"$project"=>{"_id"=>0, "objectId"=>"$_id", "count"=>1}}]
     def pipeline
+      # This introspection builds the same shape as the count execution
+      # path (`$sum: 1`), so reject order/aggregation combinations that
+      # the count path would reject at runtime — otherwise the preview
+      # silently produces a pipeline the SDK would never actually run.
+      validate_sort_target_for_operation!("count")
+
       # Format the group field name
       formatted_group_field = @query.send(:format_aggregation_field, @group_field)
 
       # Build the aggregation pipeline (same logic as execute_group_aggregation)
       pipeline = []
 
-      # Add match stage if there are where conditions
+      # Add match stage if there are where conditions. `compile_where`
+      # is already marker-free; use `compile_markers` to extract
+      # __aggregation_pipeline stages.
       compiled_where = @query.send(:compile_where)
-      if compiled_where.present?
+      markers = @query.send(:compile_markers)
+      if compiled_where.present? || markers.key?("__aggregation_pipeline")
         # Collect all match conditions to merge into a single $match stage
         match_conditions = []
         non_match_stages = []
 
-        # Extract regular constraints (everything except __aggregation_pipeline)
-        regular_constraints = compiled_where.reject { |k, _| k == "__aggregation_pipeline" }
+        # `compiled_where` is marker-free already.
+        regular_constraints = compiled_where
         if regular_constraints.present?
           aggregation_where = @query.send(:convert_constraints_for_aggregation, regular_constraints)
           stringified_where = @query.send(:convert_dates_for_aggregation, aggregation_where)
@@ -4699,8 +5696,8 @@ module Parse
         end
 
         # Extract aggregation pipeline stages and merge $match stages
-        if compiled_where.key?("__aggregation_pipeline")
-          compiled_where["__aggregation_pipeline"].each do |stage|
+        if markers.key?("__aggregation_pipeline")
+          markers["__aggregation_pipeline"].each do |stage|
             if stage.is_a?(Hash) && stage.key?("$match")
               # Extract the $match condition for merging
               match_conditions << stage["$match"]
@@ -4730,22 +5727,28 @@ module Parse
         pipeline << { "$unwind" => "$#{formatted_group_field}" }
       end
 
-      # Add group and project stages (using count as example aggregation)
-      pipeline.concat([
-        {
-          "$group" => {
-            "_id" => "$#{formatted_group_field}",
-            "count" => { "$sum" => 1 },
-          },
+      # Add group stage (using count as example aggregation)
+      pipeline << {
+        "$group" => {
+          "_id" => "$#{formatted_group_field}",
+          "count" => { "$sum" => 1 },
         },
-        {
-          "$project" => {
-            "_id" => 0,
-            "objectId" => "$_id",
-            "count" => 1,
-          },
+      }
+
+      # Add $addFields + $sort stages if ordering was configured. Sort happens
+      # before $project so we can reference `_id` (pre-rename) for :key sorts.
+      add_fields = size_addfields_stage
+      pipeline << add_fields if add_fields
+      sort = sort_stage
+      pipeline << sort if sort
+
+      pipeline << {
+        "$project" => {
+          "_id" => 0,
+          "objectId" => "$_id",
+          "count" => 1,
         },
-      ])
+      }
 
       pipeline
     end
@@ -4833,19 +5836,88 @@ module Parse
       execute_group_aggregation("max", { "$max" => "$#{formatted_field}" })
     end
 
+    # Collect every document of each group into an array of Parse::Object
+    # instances. Implemented as `$push: "$$ROOT"`, so each group's value is
+    # the full set of underlying records (subject to the query's `where`
+    # constraints).
+    #
+    # Use this when you want the actual records per group, not just an
+    # aggregated scalar. Combine with `.order(size: :desc)` to surface the
+    # largest groups first.
+    #
+    # @return [Hash{Object => Array<Parse::Object>}] mapping of group key to
+    #   the Parse::Object instances in that group.
+    # @example
+    #   Asset.where(:status => "active").group_by(:category).list
+    #   # => {"image" => [<Asset:...>, <Asset:...>], "video" => [<Asset:...>]}
+    # @example Largest groups first
+    #   Asset.group_by(:category).order(size: :desc).list
+    # @note On the Parse REST `/aggregate` path there is no ACL/CLP/protectedFields
+    #   enforcement — that endpoint is master-key-only. On the mongo-direct path
+    #   the SDK's ACL `$match` runs before `$group`, and both ACL redaction and
+    #   protectedFields stripping recurse into pushed arrays, so scoped agents
+    #   get correctly filtered records. The Array recursion that makes this
+    #   safe lives in Parse::ACLScope#redact_subdocs! (lib/parse/acl_scope.rb)
+    #   and Parse::CLPScope#walk_and_delete! (lib/parse/clp_scope.rb); if you
+    #   change either of those, re-verify `.list` still strips correctly.
+    def list
+      table = @query.instance_variable_get(:@table)
+      # `$push: "$$ROOT"` pushes the raw MongoDB-storage-format document
+      # into the result array on BOTH the REST and mongo-direct paths —
+      # Parse Server's aggregate envelope only rewrites the outermost row's
+      # `_id` to `objectId`, not nested arrays. So `_id`, `_p_<field>`
+      # pointer strings, `_acl`/`_rperm`/`_wperm`, and `_created_at`/
+      # `_updated_at` all survive into the pushed docs and have to be
+      # normalized to Parse shape before `Parse::Object.build` will produce
+      # an instance with the right id, associations, ACL, and timestamps.
+      require_relative "mongodb"
+      build_object = lambda do |doc|
+        parse_doc = Parse::MongoDB.convert_document_to_parse(doc, table)
+        parse_doc ? Parse::Object.build(parse_doc, table) : nil
+      end
+
+      execute_group_aggregation("list", { "$push" => "$$ROOT" }) do |docs|
+        next [] unless docs.is_a?(Array)
+        docs.map(&build_object).compact
+      end
+    end
+
     private
 
     # Execute a group aggregation operation.
     # @param operation [String] the operation name for debugging.
     # @param aggregation_expr [Hash] the MongoDB aggregation expression.
+    # @yieldparam raw_value [Object] the value MongoDB returned for the group
+    #   (a scalar for count/sum/avg/min/max, an Array for `$push`-style
+    #   accumulators). The yielded value replaces the row value in the
+    #   returned Hash. When no block is given, the raw value is used as-is.
     # @return [Hash] the grouped results.
-    def execute_group_aggregation(operation, aggregation_expr)
+    def execute_group_aggregation(operation, aggregation_expr, &value_transformer)
+      # Fail closed on order/aggregation combinations that MongoDB would
+      # otherwise reject (or silently do the wrong thing) at runtime. The
+      # alternatives are "$size on a non-array" (server error) and
+      # lexicographic array compare (silently wrong), neither of which is
+      # what the caller meant.
+      validate_sort_target_for_operation!(operation)
+
       # Format the group field name
       formatted_group_field = @query.send(:format_aggregation_field, @group_field)
 
-      # Use direct MongoDB if enabled
-      if @mongo_direct
-        return execute_group_aggregation_direct(operation, aggregation_expr, formatted_group_field)
+      # Auto-promote scoped queries to mongo-direct so the SDK's three-layer
+      # enforcement (ACLScope `$match` injection, CLP find-permits, and
+      # protectedFields stripping) actually runs. Parse Server's REST
+      # `/aggregate` endpoint is master-key-only and enforces neither ACL
+      # nor CLP — calling it with a session_token / acl_user / acl_role
+      # query would silently return unscoped rows. The agent dispatcher
+      # already does this auto-promotion (lib/parse/agent/tools.rb), this
+      # is the equivalent at the Query layer for direct SDK callers.
+      use_mongo_direct = @mongo_direct
+      if !use_mongo_direct && query_is_scoped? && parse_mongodb_available?
+        use_mongo_direct = true
+      end
+
+      if use_mongo_direct
+        return execute_group_aggregation_direct(operation, aggregation_expr, formatted_group_field, &value_transformer)
       end
 
       # Build the aggregation pipeline
@@ -4858,22 +5930,25 @@ module Parse
         pipeline << { "$unwind" => "$#{formatted_group_field}" }
       end
 
-      # Add group and project stages
-      pipeline.concat([
-        {
-          "$group" => {
-            "_id" => "$#{formatted_group_field}",
-            "count" => aggregation_expr,
-          },
+      pipeline << {
+        "$group" => {
+          "_id" => "$#{formatted_group_field}",
+          "count" => aggregation_expr,
         },
-        {
-          "$project" => {
-            "_id" => 0,
-            "objectId" => "$_id",
-            "count" => 1,
-          },
+      }
+
+      add_fields = size_addfields_stage
+      pipeline << add_fields if add_fields
+      sort = sort_stage
+      pipeline << sort if sort
+
+      pipeline << {
+        "$project" => {
+          "_id" => 0,
+          "objectId" => "$_id",
+          "count" => 1,
         },
-      ])
+      }
 
       # Use the Aggregation class to execute
       aggregation = @query.aggregate(pipeline, verbose: @query.instance_variable_get(:@verbose_aggregate))
@@ -4883,9 +5958,14 @@ module Parse
       if raw_results.is_a?(Array)
         result_hash = {}
         raw_results.each do |item|
-          # Parse Server returns group key as "objectId" with $project stage
-          key = item["objectId"]
+          # Parse Server's REST aggregate endpoint renames `_id` to `objectId`
+          # in the response envelope; the MongoDB direct route does not.
+          # When `aggregate` auto-fires mongo_direct (e.g., pipelines with
+          # $lookup stages) the same group_by call returns `_id`-keyed rows
+          # instead of `objectId`-keyed rows, so read both shapes.
+          key = item["objectId"] || item["_id"]
           value = item["count"]
+          value = value_transformer.call(value) if value_transformer
 
           # Handle null/nil group keys
           if key.nil?
@@ -4912,8 +5992,9 @@ module Parse
     # @param operation [String] the operation name for debugging.
     # @param aggregation_expr [Hash] the MongoDB aggregation expression.
     # @param formatted_group_field [String] the formatted group field name.
+    # @yieldparam raw_value [Object] see {#execute_group_aggregation}.
     # @return [Hash] the grouped results.
-    def execute_group_aggregation_direct(operation, aggregation_expr, formatted_group_field)
+    def execute_group_aggregation_direct(operation, aggregation_expr, formatted_group_field, &value_transformer)
       require_relative "mongodb"
       Parse::MongoDB.require_gem!
 
@@ -4929,14 +6010,13 @@ module Parse
       # Build the pipeline with match constraints
       pipeline = []
 
-      # Add match stage from query constraints
+      # Add match stage from query constraints. `compile_where` is
+      # already marker-free, so the reject below is a no-op kept for
+      # readability.
       compiled_where = @query.send(:compile_where)
       if compiled_where.present?
-        regular_constraints = compiled_where.reject { |f, _| f == "__aggregation_pipeline" }
-        if regular_constraints.any?
-          mongo_constraints = @query.send(:convert_constraints_for_direct_mongodb, regular_constraints)
-          pipeline << { "$match" => mongo_constraints }
-        end
+        mongo_constraints = @query.send(:convert_constraints_for_direct_mongodb, compiled_where)
+        pipeline << { "$match" => mongo_constraints } if mongo_constraints.any?
       end
 
       # Add unwind stage if flatten_arrays is enabled
@@ -4947,31 +6027,42 @@ module Parse
       # Convert aggregation expression field references for direct MongoDB
       converted_expr = convert_aggregation_expr_for_direct(aggregation_expr)
 
-      # Add group and project stages
-      pipeline.concat([
-        {
-          "$group" => {
-            "_id" => "$#{mongo_group_field}",
-            "count" => converted_expr,
-          },
+      pipeline << {
+        "$group" => {
+          "_id" => "$#{mongo_group_field}",
+          "count" => converted_expr,
         },
-        {
-          "$project" => {
-            "_id" => 0,
-            "value" => "$_id",
-            "count" => 1,
-          },
-        },
-      ])
+      }
 
-      # Execute directly on MongoDB
-      raw_results = Parse::MongoDB.aggregate(@query.instance_variable_get(:@table), pipeline)
+      add_fields = size_addfields_stage
+      pipeline << add_fields if add_fields
+      sort = sort_stage
+      pipeline << sort if sort
+
+      pipeline << {
+        "$project" => {
+          "_id" => 0,
+          "value" => "$_id",
+          "count" => 1,
+        },
+      }
+
+      # SDK-built pipeline only — see Parse::Query#results_direct for rationale.
+      # Forward auth kwargs derived from the parent query so the
+      # three-layer ACL + CLP simulation runs for scoped agents
+      # (CLP-1 fix).
+      auth_kwargs = @query.send(:mongo_direct_auth_kwargs)
+      raw_results = Parse::MongoDB.aggregate(@query.instance_variable_get(:@table),
+                                             pipeline,
+                                             allow_internal_fields: true,
+                                             **auth_kwargs)
 
       # Convert array of results to hash
       result_hash = {}
       raw_results.each do |item|
         key = item["value"]
         value = item["count"]
+        value = value_transformer.call(value) if value_transformer
 
         # Handle null/nil group keys
         if key.nil?
@@ -5004,6 +6095,82 @@ module Parse
         end
       end
       result
+    end
+
+    # Build a `$sort` stage from the configured order, or nil if no
+    # ordering was requested. Always sits between `$group` and `$project`
+    # so we can reference the unrenamed `_id` (for :key) and the grouped
+    # `count` field (for :value / :size).
+    def sort_stage
+      return nil unless @sort_target
+      field =
+        case @sort_target
+        when :key then "_id"
+        when :value then "count"
+        when :size then "__order_size"
+        end
+      { "$sort" => { field => @sort_direction == :desc ? -1 : 1 } }
+    end
+
+    # Build the `$addFields` stage that precedes `$sort` when ordering by
+    # `:size`. Computes `$size` of the grouped `count` field (which is
+    # an array for `.list`). The synthetic `__order_size` field is dropped
+    # by the explicit `$project` that follows.
+    def size_addfields_stage
+      return nil unless @sort_target == :size
+      { "$addFields" => { "__order_size" => { "$size" => "$count" } } }
+    end
+
+    # Reject configured `.order(target:)` settings that are incompatible
+    # with the about-to-run aggregation. MongoDB would otherwise either
+    # raise (`$size` on a scalar) or silently do the wrong thing
+    # (lexicographic compare on an array), so fail closed at the SDK with
+    # a message the caller can act on.
+    #
+    # @param operation [String] the aggregation operation name passed to
+    #   {#execute_group_aggregation} (e.g. "count", "sum", "list").
+    def validate_sort_target_for_operation!(operation)
+      return unless @sort_target
+
+      if @sort_target == :size && operation != "list"
+        raise ArgumentError,
+          "order(size:) is only valid with .list — the grouped value " \
+          "for `#{operation}` is a scalar, not an array. Use " \
+          "order(value:) to sort by the aggregated number, or chain " \
+          ".list before .order(size:)."
+      end
+
+      if @sort_target == :value && operation == "list"
+        raise ArgumentError,
+          "order(value:) is not supported with .list — the grouped " \
+          "value is an array of objects and would be compared " \
+          "lexicographically. Use order(size:) to sort groups by " \
+          "their member count, or order(key:) to sort by group name."
+      end
+    end
+
+    # Whether the parent query carries any non-master-key auth scope. A
+    # session_token, acl_user, or acl_role means the caller expects the
+    # results to be filtered by ACL — which only happens on the SDK's
+    # mongo-direct path. Used to decide whether to auto-promote the REST
+    # aggregation path to mongo-direct.
+    def query_is_scoped?
+      st = @query.session_token
+      return true if st.is_a?(String) && !st.empty?
+      return true if @query.instance_variable_get(:@acl_user)
+      return true if @query.instance_variable_get(:@acl_role)
+      false
+    end
+
+    # Whether Parse::MongoDB is loaded and configured to accept direct
+    # queries. Wrapped so the auto-promote check fails closed (stays on
+    # the REST path) if the integrator hasn't opted in to mongo-direct,
+    # rather than raising NotEnabled at execution time.
+    def parse_mongodb_available?
+      require_relative "mongodb"
+      defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
+    rescue LoadError, StandardError
+      false
     end
   end
 
@@ -5219,6 +6386,13 @@ module Parse
       results = super
       GroupedResult.new(results)
     end
+
+    # Collect Parse::Object instances per group.
+    # @return [GroupedResult] a sortable result object.
+    def list
+      results = super
+      GroupedResult.new(results)
+    end
   end
 
   # Helper class for handling group_by_date aggregations with method chaining.
@@ -5236,6 +6410,56 @@ module Parse
       @return_pointers = return_pointers
       @timezone = timezone
       @mongo_direct = mongo_direct
+      @sort_target = nil    # nil | :key | :value (no :size — date groupings have no list accumulator yet)
+      @sort_direction = nil # :asc | :desc
+    end
+
+    # Order date-grouped results by the date key or by the aggregated value.
+    # When no ordering is configured the default is chronological by date
+    # (the original behavior). The configured order is pushed into the
+    # pipeline as a `$sort` stage.
+    #
+    # @param spec [Hash, Symbol] one of:
+    #   - `{ key: :asc | :desc }`  — date order (asc is chronological)
+    #   - `{ value: :asc | :desc }` — by aggregated value (count/sum/...)
+    #   - `:asc`/`:desc` shorthand for `{ key: direction }`
+    # @return [self]
+    # @example Newest periods first
+    #   Capture.group_by_date(:created_at, :day).order(key: :desc).count
+    # @example Busiest day first
+    #   Capture.group_by_date(:created_at, :day).order(value: :desc).count
+    def order(spec)
+      target, direction =
+        case spec
+        when Symbol
+          [:key, spec]
+        when Hash
+          unless spec.size == 1
+            raise ArgumentError, "order(...) expects a single pair, e.g. {value: :desc} (got #{spec.inspect})"
+          end
+          k, v = spec.first
+          [k.to_sym, v.to_sym]
+        else
+          raise ArgumentError, "order(...) expects {key:|value: => :asc|:desc} or :asc/:desc (got #{spec.inspect})"
+        end
+
+      unless %i[key value].include?(target)
+        raise ArgumentError, "order(...) target must be :key or :value for date groupings (got #{target.inspect})"
+      end
+      unless %i[asc desc].include?(direction)
+        raise ArgumentError, "order(...) direction must be :asc or :desc (got #{direction.inspect})"
+      end
+
+      @sort_target = target
+      @sort_direction = direction
+      self
+    end
+
+    # Sort date-grouped results by date key (Ruby `Hash#sort` default).
+    # @param direction [Symbol] `:asc` (default, chronological) or `:desc`
+    # @return [self]
+    def sort(direction = :asc)
+      order(direction)
     end
 
     # Returns the MongoDB aggregation pipeline that would be used for a count operation.
@@ -5263,7 +6487,7 @@ module Parse
       # Create date grouping expression based on interval using shared method
       date_expr = build_date_group_expression(formatted_date_field)
 
-      # Add group and project stages (using count as example aggregation)
+      # Add group, sort, and project stages (using count as example aggregation)
       pipeline.concat([
         {
           "$group" => {
@@ -5271,6 +6495,7 @@ module Parse
             "count" => { "$sum" => 1 },
           },
         },
+        sort_stage,
         {
           "$project" => {
             "_id" => 0,
@@ -5355,15 +6580,26 @@ module Parse
       # Format the date field name
       formatted_date_field = @query.send(:format_aggregation_field, @date_field)
 
-      # Use direct MongoDB if enabled
-      if @mongo_direct
+      # Auto-promote scoped queries to mongo-direct. See the matching
+      # block in `GroupBy#execute_group_aggregation` for the full
+      # rationale — REST `/aggregate` is master-key-only and unscoped, so
+      # session_token / acl_user / acl_role queries need the SDK's
+      # mongo-direct enforcement layers to actually filter results.
+      use_mongo_direct = @mongo_direct
+      if !use_mongo_direct && query_is_scoped? && parse_mongodb_available?
+        use_mongo_direct = true
+      end
+
+      if use_mongo_direct
         return execute_date_aggregation_direct(operation, aggregation_expr, formatted_date_field)
       end
 
       # Build the date grouping expression based on interval
       date_group_expr = build_date_group_expression(formatted_date_field)
 
-      # Build the aggregation pipeline
+      # Build the aggregation pipeline. The $sort stage defaults to
+      # chronological-ascending on the date `_id`, but is overridden by
+      # any explicit `.order(...)` configuration.
       pipeline = [
         {
           "$group" => {
@@ -5371,8 +6607,7 @@ module Parse
             "count" => aggregation_expr,
           },
         },
-        # Sort by date to get chronological order
-        { "$sort" => { "_id" => 1 } },
+        sort_stage,
         {
           "$project" => {
             "_id" => 0,
@@ -5415,8 +6650,12 @@ module Parse
       if response.success? && response.result.is_a?(Array)
         result_hash = {}
         response.result.each do |item|
-          # Parse Server returns group key as "objectId" with $project stage
-          date_key = item["objectId"]
+          # Parse Server's REST aggregate endpoint renames `_id` to `objectId`
+          # in the response envelope; the MongoDB direct route does not.
+          # When `aggregate` auto-fires mongo_direct (e.g., pipelines with
+          # $lookup stages) the same group_by_date call returns `_id`-keyed
+          # rows instead of `objectId`-keyed rows, so read both shapes.
+          date_key = item["objectId"] || item["_id"]
           value = item["count"]
 
           # Format the date key for display
@@ -5456,17 +6695,16 @@ module Parse
       # Build the pipeline with match constraints
       pipeline = []
 
-      # Add match stage from query constraints
+      # Add match stage from query constraints. `compile_where` strips
+      # `__`-prefixed markers already.
       compiled_where = @query.send(:compile_where)
       if compiled_where.present?
-        regular_constraints = compiled_where.reject { |f, _| f == "__aggregation_pipeline" }
-        if regular_constraints.any?
-          mongo_constraints = @query.send(:convert_constraints_for_direct_mongodb, regular_constraints)
-          pipeline << { "$match" => mongo_constraints }
-        end
+        mongo_constraints = @query.send(:convert_constraints_for_direct_mongodb, compiled_where)
+        pipeline << { "$match" => mongo_constraints } if mongo_constraints.any?
       end
 
-      # Add group, sort, and project stages
+      # Add group, sort, and project stages. The $sort defaults to
+      # chronological-ascending on `_id` and is overridden by .order(...).
       pipeline.concat([
         {
           "$group" => {
@@ -5474,7 +6712,7 @@ module Parse
             "count" => converted_expr,
           },
         },
-        { "$sort" => { "_id" => 1 } },
+        sort_stage,
         {
           "$project" => {
             "_id" => 0,
@@ -5484,8 +6722,15 @@ module Parse
         },
       ])
 
-      # Execute directly on MongoDB
-      raw_results = Parse::MongoDB.aggregate(@query.instance_variable_get(:@table), pipeline)
+      # SDK-built pipeline only — see Parse::Query#results_direct for rationale.
+      # Forward auth kwargs derived from the parent query so the
+      # three-layer ACL + CLP simulation runs for scoped agents
+      # (CLP-1 fix).
+      auth_kwargs = @query.send(:mongo_direct_auth_kwargs)
+      raw_results = Parse::MongoDB.aggregate(@query.instance_variable_get(:@table),
+                                             pipeline,
+                                             allow_internal_fields: true,
+                                             **auth_kwargs)
 
       # Convert array of results to hash with formatted date strings
       result_hash = {}
@@ -5583,6 +6828,41 @@ module Parse
         end
       end
       result
+    end
+
+    # Build the `$sort` stage for the date grouping pipeline. Defaults to
+    # `{ "_id" => 1 }` for chronological order, but is replaced when
+    # `.order(...)` has been called.
+    def sort_stage
+      field = @sort_target == :value ? "count" : "_id"
+      dir =
+        if @sort_target.nil?
+          1
+        else
+          @sort_direction == :desc ? -1 : 1
+        end
+      { "$sort" => { field => dir } }
+    end
+
+    # Mirror of {GroupBy#query_is_scoped?}. A session_token, acl_user, or
+    # acl_role on the parent query means the caller expects ACL filtering,
+    # which only the mongo-direct path provides — Parse Server REST
+    # `/aggregate` is master-key-only and unscoped.
+    def query_is_scoped?
+      st = @query.session_token
+      return true if st.is_a?(String) && !st.empty?
+      return true if @query.instance_variable_get(:@acl_user)
+      return true if @query.instance_variable_get(:@acl_role)
+      false
+    end
+
+    # Mirror of {GroupBy#parse_mongodb_available?}. Fails closed to the
+    # REST path when Parse::MongoDB isn't configured.
+    def parse_mongodb_available?
+      require_relative "mongodb"
+      defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
+    rescue LoadError, StandardError
+      false
     end
 
     # Build the MongoDB date grouping expression based on the interval.

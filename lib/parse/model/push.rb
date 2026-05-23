@@ -19,10 +19,7 @@ module Parse
   # options not listed here.
   #
   # @example Traditional API
-  #   push = Parse::Push.new
-  #   push.send("Hello World!") # to everyone
-  #
-  #   # simple channel push
+  #   # simple channel push (targeted, sends without opt-in)
   #   push = Parse::Push.new
   #   push.channels = ["addicted2salsa"]
   #   push.send "You are subscribed to Addicted2Salsa!"
@@ -34,6 +31,10 @@ module Parse
   #   push.sound = "soundfile.caf"
   #   push.data = { uri: "app://deep_link_path" }
   #   push.send
+  #
+  #   # broadcast to every Installation (requires explicit opt-in)
+  #   Parse::Push.new.broadcast!.send("Hello World!")
+  #   # or set process-wide: Parse::Push.allow_broadcast = true
   #
   # @example Builder Pattern API (Fluent Interface)
   #   # Simple channel push with builder pattern
@@ -67,6 +68,37 @@ module Parse
   #
   class Push
     include Client::Connectable
+
+    # Raised when a {Parse::Push} would broadcast to every Installation
+    # because no `where` constraints and no `channels` are set, and the
+    # caller did not explicitly opt in via {Parse::Push.allow_broadcast}
+    # or per-instance {#broadcast!}.
+    #
+    # This is a fail-closed guard against the +to_audience+ /
+    # +to_audience_id+ class of footguns where a typo, deleted audience,
+    # or unset-param silently degrades a targeted push into a global one.
+    class BroadcastNotAllowed < StandardError; end
+
+    # Raised when {#to_audience} or {#to_audience_id} cannot resolve the
+    # requested audience. Previously these methods warned and returned
+    # +self+, which let the subsequent +send!+ silently broadcast to every
+    # Installation. They now raise so typos and renames surface at the
+    # call site instead.
+    class AudienceNotFound < ArgumentError; end
+
+    # @!attribute [rw] allow_broadcast
+    #   Whether {Parse::Push} permits an unconstrained push (no `where`,
+    #   no `channels`) to broadcast to every Installation. Defaults to
+    #   +false+ — sending an unconstrained push raises {BroadcastNotAllowed}.
+    #
+    #   Set to +true+ at boot for apps that legitimately broadcast (e.g.,
+    #   `Parse::Push.allow_broadcast = true`). Or opt in per-instance with
+    #   {#broadcast!}, which is auditable in code review.
+    #   @return [Boolean]
+    class << self
+      attr_accessor :allow_broadcast
+    end
+    self.allow_broadcast = false
 
     # Device types that support push notifications.
     # These are the device types that Parse Server has push adapters for.
@@ -329,11 +361,54 @@ module Parse
 
     # helper method to send a message
     # @param message [String] the message to send
+    # @raise [BroadcastNotAllowed] if the push has no `where` constraints
+    #   and no `channels`, and neither {Parse::Push.allow_broadcast} nor
+    #   per-instance {#broadcast!} was set.
     def send(message = nil)
       @alert = message if message.is_a?(String)
       @data = message if message.is_a?(Hash)
+      assert_broadcast_allowed!
       client.push(payload.as_json)
     end
+
+    # Opt this specific push in to broadcasting to every Installation.
+    # Use when you legitimately want a global push and have not set the
+    # process-wide {Parse::Push.allow_broadcast}. The explicit call site
+    # is the audit trail.
+    # @return [self] for chaining
+    # @example
+    #   Parse::Push.new.broadcast!.with_alert("Maintenance window").send!
+    def broadcast!
+      @broadcast_allowed = true
+      self
+    end
+
+    # @return [Boolean] true when broadcasting is allowed for this push,
+    #   either via the class-level {Parse::Push.allow_broadcast} flag or
+    #   the per-instance {#broadcast!} opt-in.
+    def broadcast_allowed?
+      @broadcast_allowed == true || self.class.allow_broadcast == true
+    end
+
+    private
+
+    # Raise {BroadcastNotAllowed} when the assembled payload would
+    # broadcast (no `where`, no `channels`) and neither the class-level
+    # nor the per-instance opt-in is set. Called from {#send} and {#send!}.
+    def assert_broadcast_allowed!
+      return if broadcast_allowed?
+      compiled = payload
+      has_where = compiled[:where].is_a?(Hash) && !compiled[:where].empty?
+      has_channels = compiled[:channels].is_a?(Array) && !compiled[:channels].empty?
+      return if has_where || has_channels
+      raise BroadcastNotAllowed,
+            "Refusing to broadcast push to every Installation: no `where` " \
+            "constraints and no `channels` are set. Add targeting (channels, " \
+            "to_audience, to_user, to_query), or opt in explicitly via " \
+            "Parse::Push.allow_broadcast = true or per-instance #broadcast!."
+    end
+
+    public
 
     # =========================================================================
     # Builder Pattern Methods (Fluent Interface)
@@ -517,10 +592,14 @@ module Parse
     # Send the push notification, raising an error on failure.
     # This is the bang version that raises {Parse::Error} if the push fails.
     # @return [Parse::Response] the response from the Parse server
+    # @raise [BroadcastNotAllowed] if the push has no `where` constraints
+    #   and no `channels`, and neither {Parse::Push.allow_broadcast} nor
+    #   per-instance {#broadcast!} was set.
     # @raise [Parse::Error] if the push notification fails
     # @example
     #   push.with_alert("Hello!").send!
     def send!
+      assert_broadcast_allowed!
       response = client.push(payload.as_json)
       if response.error?
         raise Parse::Error.new(response.code, response.error)
@@ -626,7 +705,10 @@ module Parse
     # @param audience_name [String] the name of the saved audience
     # @param cache [Boolean] whether to use audience cache (default: true)
     # @return [self] returns self for method chaining
-    # @raise [ArgumentError] if audience is not found and strict mode is enabled
+    # @raise [AudienceNotFound] if no audience exists with the given name.
+    #   Previously this method emitted a `warn` and returned `self`, which
+    #   let the subsequent `send!` broadcast to every Installation. The
+    #   raise makes typos and renames loud at the call site.
     # @example
     #   push.to_audience("VIP Users").with_alert("Exclusive offer!").send!
     # @note The audience must exist in the _Audience collection
@@ -635,8 +717,8 @@ module Parse
       audience = Parse::Audience.find_by_name(audience_name, cache: cache)
 
       if audience.nil?
-        warn "[Parse::Push] Warning: Audience '#{audience_name}' not found"
-        return self
+        raise AudienceNotFound,
+              "Audience '#{audience_name}' not found in _Audience collection"
       end
 
       if audience.query_constraint.present?
@@ -651,11 +733,16 @@ module Parse
     # Target a saved audience by its object ID.
     # @param audience_id [String] the objectId of the saved audience
     # @return [self] returns self for method chaining
+    # @raise [AudienceNotFound] if no audience exists with the given id.
     # @example
     #   push.to_audience_id("abc123").with_alert("Hello!").send!
     def to_audience_id(audience_id)
       audience = Parse::Audience.find(audience_id)
-      if audience && audience.query_constraint.present?
+      if audience.nil?
+        raise AudienceNotFound,
+              "Audience id '#{audience_id}' not found in _Audience collection"
+      end
+      if audience.query_constraint.present?
         audience.query_constraint.each do |key, value|
           query.where(key.to_sym => value)
         end

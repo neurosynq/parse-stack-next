@@ -20,8 +20,9 @@ module Parse
       # @param className [String] the name of the remote Parse collection.
       # @return [Parse::Response]
       def schema(className)
+        safe = Parse::API::PathSegment.identifier!(className, kind: "class name")
         opts = { cache: false }
-        request :get, "#{SCHEMAS_PATH}/#{className}", opts: opts
+        request :get, "#{SCHEMAS_PATH}/#{safe}", opts: opts
       end
 
       # Create a new collection with the specific schema.
@@ -30,7 +31,8 @@ module Parse
       #  Parse.
       # @return [Parse::Response]
       def create_schema(className, schema)
-        request :post, "#{SCHEMAS_PATH}/#{className}", body: schema
+        safe = Parse::API::PathSegment.identifier!(className, kind: "class name")
+        request :post, "#{SCHEMAS_PATH}/#{safe}", body: schema
       end
 
       # Update the schema for a collection.
@@ -39,7 +41,8 @@ module Parse
       #  Parse.
       # @return [Parse::Response]
       def update_schema(className, schema)
-        request :put, "#{SCHEMAS_PATH}/#{className}", body: schema
+        safe = Parse::API::PathSegment.identifier!(className, kind: "class name")
+        request :put, "#{SCHEMAS_PATH}/#{safe}", body: schema
       end
     end #Schema
   end #API

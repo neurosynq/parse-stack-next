@@ -5,7 +5,8 @@ require_relative "support/test_server"
 # Integration test helper that can work with a real Parse Server
 module ParseStackIntegrationTest
   def self.included(base)
-    # Start Docker containers before all tests if configured
+    # Start Docker containers before all tests if configured.
+    # This runs once at include time, not per-test.
     if ENV["PARSE_TEST_USE_DOCKER"] == "true"
       puts "Starting Docker containers for integration tests..."
       Parse::Test::DockerHelper.ensure_available!
@@ -13,42 +14,46 @@ module ParseStackIntegrationTest
       Parse::Test::DockerHelper.setup_exit_handler
       puts "Docker containers started successfully"
     end
+  end
 
-    # Add setup method to the including class
-    base.define_method :setup do
-      # Call super first to handle any parent setup
-      begin
-        super()
-      rescue NoMethodError
-        # No super method, continue
-      end
+  # Real instance methods so that `super` from a subclass setup/teardown chains
+  # correctly up the ancestor stack.  The old `base.define_method :setup` pattern
+  # installed the method directly on the test class, which caused a subclass
+  # `def setup` to silently replace it — `super` then went to Minitest::Test#setup
+  # (a no-op) instead of running Parse::Client.setup and DB reset.
 
-      @test_context = Parse::Test::Context.new
-
-      puts "Setting up Parse server connection..."
-      # Setup Parse server connection
-      unless Parse::Test::ServerHelper.setup
-        skip "Could not connect to Parse Server"
-      end
-      puts "Parse server connection established"
-
-      # Reset database to ensure clean test data
-      puts "Resetting database for clean test environment..."
-      Parse::Test::ServerHelper.reset_database!
-      puts "Database reset completed"
+  def setup
+    begin
+      super
+    rescue NoMethodError
+      # Minitest::Test#setup is a no-op and does not raise, but guard anyway.
     end
 
-    # Add teardown method to the including class
-    base.define_method :teardown do
-      @test_context.cleanup! if @test_context
+    @test_context = Parse::Test::Context.new
 
-      # Force garbage collection to free memory
-      GC.start
+    puts "Setting up Parse server connection..."
+    unless Parse::Test::ServerHelper.setup
+      skip "Could not connect to Parse Server"
+    end
+    puts "Parse server connection established"
 
-      # Longer delay to let any pending operations complete and server stabilize
-      sleep 1
+    puts "Resetting database for clean test environment..."
+    Parse::Test::ServerHelper.reset_database!
+    puts "Database reset completed"
+  end
 
-      super() if defined?(super)
+  def teardown
+    @test_context.cleanup! if @test_context
+
+    GC.start
+
+    # Allow any pending operations and the server to stabilize between tests.
+    sleep 1
+
+    begin
+      super
+    rescue NoMethodError
+      # No further teardown in the chain.
     end
   end
 
@@ -58,7 +63,12 @@ module ParseStackIntegrationTest
   end
 
   def create_test_object(class_name, attributes = {})
-    obj = Parse::Object.new(attributes.merge("className" => class_name))
+    # className is on the mass-assignment denylist now, so setting it
+    # through the attributes hash no longer overrides Parse::Object's
+    # own parse_class ("Parse::Object"). Resolve to the registered
+    # subclass instead so the create routes through the right table.
+    klass = Parse::Object.find_class(class_name) || Parse::Object
+    obj = klass.new(attributes)
     obj.save
     @test_context.track(obj)
     obj

@@ -6,6 +6,7 @@ require "active_support"
 require "active_support/inflector"
 require "active_support/core_ext/object"
 require "active_support/core_ext"
+require "active_support/security_utils"
 require "active_model/serializers/json"
 require "rack"
 require "ostruct"
@@ -15,6 +16,7 @@ require_relative "client"
 require_relative "model/object"
 require_relative "webhooks/payload"
 require_relative "webhooks/registration"
+require_relative "webhooks/replay_protection"
 
 module Parse
   class Object
@@ -171,16 +173,49 @@ module Parse
         return unless routes[type].present? && routes[type][className].present?
         registry = routes[type][className]
 
-        # Add ruby_initiated flag to payload for intelligent callback handling
+        # Track the header-derived ruby_initiated flag on the payload so
+        # user code can introspect it (`payload.ruby_initiated?`). For the
+        # framework's own callback-deduplication logic below we use the
+        # stricter `trusted_ruby_initiated`, which additionally requires the
+        # master key. The X-Parse-Request-Id header is client-controllable,
+        # so honoring `_RB_` alone would let any client send `_RB_attacker`
+        # and trick the framework into skipping server-side callbacks.
+        # Server-side Parse-Stack saves use the master key by default, so
+        # the AND is a safe condition for legitimate Ruby-initiated traffic.
         if payload
           request_id = payload&.raw&.dig(:headers, "x-parse-request-id") ||
                        payload&.raw&.dig("headers", "x-parse-request-id") ||
                        payload&.raw&.dig(:headers, "X-Parse-Request-Id") ||
                        payload&.raw&.dig("headers", "X-Parse-Request-Id")
-          ruby_initiated = request_id&.start_with?("_RB_")
+          ruby_initiated = request_id&.start_with?("_RB_") || false
           payload.instance_variable_set(:@ruby_initiated, ruby_initiated)
+          trusted_ruby_initiated = ruby_initiated && (payload.master? == true)
         else
           ruby_initiated = false
+          trusted_ruby_initiated = false
+        end
+
+        # Pre-block: apply declarative write protection (guard :field, :mode)
+        # to the parse_object that the handler will receive. Running BEFORE
+        # the handler block means trusted server-side writes performed inside
+        # the block are preserved -- only client-supplied values for guarded
+        # fields are reverted.
+        #
+        # Notably we do NOT gate this on ruby_initiated. That flag derives
+        # from a client-controlled X-Parse-Request-Id header, so trusting it
+        # to bypass write protection would allow a one-header attack. Master
+        # key requests still bypass via the master:/payload.master? check.
+        if type == :before_save && payload && payload.object?
+          klass = (className.present? && className != "*") ? Parse::Object.find_class(className) : nil
+          if klass && klass.respond_to?(:field_guards) && klass.field_guards.any?
+            pre_obj = payload.parse_object # memoized; the handler sees this same instance
+            if pre_obj.respond_to?(:apply_field_guards!)
+              pre_obj.apply_field_guards!(
+                master: payload.master? || false,
+                is_new: payload.original.blank?
+              )
+            end
+          end
         end
 
         if registry.is_a?(Array)
@@ -193,8 +228,11 @@ module Parse
           # if it is a Parse::Object, we will call the registered ActiveModel callbacks
           if type == :before_save
             # returning false from the callback block only runs the before_* callback
-            # Skip prepare_save! for Ruby-initiated requests to prevent redundant preparation
-            unless ruby_initiated
+            # Skip prepare_save! when this request is trusted-Ruby-initiated
+            # (both `_RB_` header AND master key), since Parse-Stack already
+            # ran ActiveModel before_save callbacks locally. A client-spoofed
+            # `_RB_` without master falls through and runs them here.
+            unless trusted_ruby_initiated
               prepare_result = result.prepare_save!
               # If prepare_save! returns false (callback chain was halted), throw an error
               if prepare_result == false
@@ -213,14 +251,47 @@ module Parse
         elsif type == :before_save && (result == true || result.nil?)
           # Open Source Parse server does not accept true results on before_save hooks.
           result = {}
-        elsif type == :after_save && (result == true || result.nil?) && payload&.parse_object.present? && payload.parse_object.is_a?(Parse::Object)
-          # Handle after_save callbacks intelligently based on request origin
-          is_new = payload.original.nil?
+        end
 
-          # Only run Ruby callbacks for NON-Ruby-initiated requests
-          # This prevents callback loops while ensuring client-initiated operations trigger Ruby business logic
-          payload.parse_object.run_after_create_callbacks if is_new && !ruby_initiated
-          payload.parse_object.run_after_save_callbacks unless (is_new && ruby_initiated)
+        # Guard-injection: when a handler returns a Hash (or true/nil normalized
+        # to {}) for a class with field_guards, Parse Server would otherwise
+        # merge the response with the client's original payload and persist
+        # the client-supplied values for guarded fields. Inject the pre-built
+        # parse_object's changes_payload entries for any guarded field so the
+        # response carries the appropriate revert (Delete op on create, prior
+        # value on update). The Parse::Object return path already runs through
+        # changes_payload on the same memoized instance and therefore needs no
+        # extra injection.
+        if type == :before_save && result.is_a?(Hash) && payload && payload.object?
+          guard_klass = (className.present? && className != "*") ? Parse::Object.find_class(className) : nil
+          if guard_klass && guard_klass.respond_to?(:field_guards) && guard_klass.field_guards.any?
+            pre_obj = payload.parse_object # same memoized instance the pre-block step mutated
+            if pre_obj.respond_to?(:changes_payload)
+              guard_payload = pre_obj.changes_payload
+              field_map = guard_klass.respond_to?(:field_map) ? guard_klass.field_map : {}
+              guard_klass.field_guards.each_key do |field|
+                remote = (field_map[field.to_sym] || field).to_s
+                result[remote] = guard_payload[remote] if guard_payload.key?(remote)
+              end
+            end
+          end
+        end
+
+        if type == :after_save && (result == true || result.nil?) && payload&.parse_object.present? && payload.parse_object.is_a?(Parse::Object)
+          # Handle after_save callbacks intelligently based on request origin.
+          # For trusted-Ruby-initiated saves (both `_RB_` header AND master
+          # key), Parse Stack's local `run_callbacks :save` will fire
+          # after_create and after_save callbacks after the REST response
+          # returns; firing them again here would double-fire any side
+          # effect (e.g. an `after_save :send_email` would send two emails
+          # per save). For everything else -- client-initiated saves, or a
+          # spoofed `_RB_` from a non-master client -- Parse Stack never had
+          # a chance to run callbacks, so we fire them here.
+          is_new = payload.original.nil?
+          unless trusted_ruby_initiated
+            payload.parse_object.run_after_create_callbacks if is_new
+            payload.parse_object.run_after_save_callbacks
+          end
           result = true
         end
 
@@ -245,10 +316,43 @@ module Parse
       # Returns the configured webhook key if available. By default it will use
       # the value of ENV['PARSE_SERVER_WEBHOOK_KEY'] if not configured.
       # @return [String]
-      attr_writer :key
+      def key=(value)
+        @key = value
+        # Reset the warn-once flag so a deployment that configures the key
+        # after startup gets a clean state if the key is later cleared.
+        @missing_key_warned = nil
+      end
 
       def key
         @key ||= ENV["PARSE_SERVER_WEBHOOK_KEY"] || ENV["PARSE_WEBHOOK_KEY"]
+      end
+
+      # When no webhook key is configured, the endpoint refuses requests by
+      # default. Set this to true (or set PARSE_WEBHOOK_ALLOW_UNAUTHENTICATED=true)
+      # to opt into the legacy permissive behavior for local development.
+      # @return [Boolean]
+      attr_writer :allow_unauthenticated
+
+      def allow_unauthenticated
+        return @allow_unauthenticated unless @allow_unauthenticated.nil?
+        ENV["PARSE_WEBHOOK_ALLOW_UNAUTHENTICATED"] == "true"
+      end
+
+      # When set, {Parse::Webhooks::Registration#assert_webhook_url_safe!}
+      # skips the DNS resolution and private/internal CIDR refusal. Other
+      # checks (scheme, userinfo, host presence) still apply. Intended for
+      # integration tests that register webhooks at Docker bridge hosts
+      # (e.g. +host.docker.internal+) which only resolve from inside the
+      # Parse Server container. May also be enabled via
+      # +PARSE_WEBHOOK_ALLOW_PRIVATE_URLS=true+. Do not enable in
+      # production: the resolution guard is what blocks attacker-driven
+      # webhook redirection to internal hosts.
+      # @return [Boolean]
+      attr_writer :allow_private_webhook_urls
+
+      def allow_private_webhook_urls
+        return @allow_private_webhook_urls unless @allow_private_webhook_urls.nil?
+        ENV["PARSE_WEBHOOK_ALLOW_PRIVATE_URLS"] == "true"
       end
 
       # Standard Rack call method. This method processes an incoming cloud code
@@ -276,9 +380,29 @@ module Parse
             response.write error("Invalid Parse Webhook Key")
             return response.finish
           end
+        elsif !self.allow_unauthenticated
+          # Fail closed: without a configured webhook key, any host on the
+          # network could fire authenticated cloud triggers. Set
+          # PARSE_SERVER_WEBHOOK_KEY (matching the Parse Server config) or
+          # opt in to permissive mode via PARSE_WEBHOOK_ALLOW_UNAUTHENTICATED=true.
+          # Log the warning only once; otherwise an attacker hammering the
+          # endpoint can fill disk with repeated warnings. The flag lives on
+          # the original Parse::Webhooks class (not the per-request dup created
+          # by `call`), so it persists across requests.
+          unless Parse::Webhooks.instance_variable_get(:@missing_key_warned)
+            Parse::Webhooks.instance_variable_set(:@missing_key_warned, true)
+            warn "[Parse::Webhooks] Refusing requests: no webhook key configured. " \
+                 "Set PARSE_SERVER_WEBHOOK_KEY or Parse::Webhooks.allow_unauthenticated = true."
+          end
+          response.write error("Webhook key not configured.")
+          return response.finish
         end
 
-        unless request.content_type.present? && request.content_type.include?(CONTENT_TYPE)
+        # Use Rack's media_type (strips parameters/whitespace and lowercases)
+        # so the comparison is exact. The previous substring check on the raw
+        # Content-Type header accepted look-alikes like "application/jsonp"
+        # or "text/application/json" that should be rejected.
+        unless request.media_type == CONTENT_TYPE
           response.write error("Invalid content-type format. Should be application/json.")
           return response.finish
         end
@@ -289,6 +413,21 @@ module Parse
           response.write error("Payload too large.")
           return response.finish
         end
+
+        # NEW-EXT-4: reject in-window replays and (when configured)
+        # require a fresh HMAC over the body. Done before JSON parsing so
+        # a malformed payload can't bypass dedup, and before any handler
+        # runs so side effects aren't repeated.
+        replay_error = ReplayProtection.verify!(
+          request.env,
+          body_str,
+          request.env["HTTP_X_PARSE_REQUEST_ID"]
+        )
+        if replay_error
+          response.write error(replay_error)
+          return response.finish
+        end
+
         begin
           payload = Parse::Webhooks::Payload.new body_str
         rescue => e
@@ -322,7 +461,10 @@ module Parse
             generic_result = Parse::Webhooks.call_route(payload.trigger_name, "*", payload)
             result = generic_result if generic_result.present? && result.nil?
           else
-            puts "[Webhooks] --> Could not find mapping route for #{payload.to_json}"
+            if self.logging.present?
+              puts "[Webhooks] --> Could not find mapping route for " \
+                   "#{Parse::Middleware::BodyBuilder.redact(payload.to_json)}"
+            end
           end
 
           result = true if result.nil?
@@ -350,3 +492,19 @@ module Parse
     end #class << self
   end # Webhooks
 end # Parse
+
+# Load-order fixup for {Parse::Core::FieldGuards}: classes that declared
+# `guard` in their class body (e.g. {Parse::User}) ran before this file
+# was required, so their `ensure_field_guards_webhook!` call short-circuited
+# with a "Parse::Webhooks not yet defined" guard. Walk every Parse::Object
+# subclass that ended up with a non-empty `field_guards` hash and register
+# the stub route now that {Parse::Webhooks} exists. Application code that
+# uses `guard` from its own model files (which are required after this
+# file) hits the normal path and bypasses this fixup.
+if defined?(Parse::Object) && Parse::Object.respond_to?(:descendants)
+  Parse::Object.descendants.each do |klass|
+    next unless klass.respond_to?(:field_guards) && klass.field_guards.any?
+    next unless klass.respond_to?(:ensure_field_guards_webhook!)
+    klass.ensure_field_guards_webhook!
+  end
+end

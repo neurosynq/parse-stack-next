@@ -88,6 +88,19 @@ class TestGeoPoint < Minitest::Test
     assert_equal @san_diego.max_miles(nil), [@san_diego.latitude, @san_diego.longitude, 0]
   end
 
+  def test_max_kilometers
+    expected = [@san_diego.latitude, @san_diego.longitude, 5, :km]
+    assert_equal @san_diego.max_kilometers(5), expected
+    assert_equal @san_diego.max_km(5), expected
+    assert_equal @san_diego.max_kilometers(nil), [@san_diego.latitude, @san_diego.longitude, 0, :km]
+  end
+
+  def test_max_radians
+    expected = [@san_diego.latitude, @san_diego.longitude, 0.0015, :radians]
+    assert_equal @san_diego.max_radians(0.0015), expected
+    assert_equal @san_diego.max_radians(nil), [@san_diego.latitude, @san_diego.longitude, 0, :radians]
+  end
+
   def test_haversine_distance_miles
     miles_between_sd_la = 112.33994506861293
     assert_equal @san_diego.distance_in_miles(@los_angeles), miles_between_sd_la
@@ -121,5 +134,49 @@ class TestGeoPoint < Minitest::Test
     assert_equal @san_diego_estimated.lat, lat
     assert_equal @san_diego_estimated.lng, lng
     assert_equal @san_diego.estimated(0).max_miles(50), [lat, lng, 50]
+  end
+
+  def test_from_geojson_round_trip
+    # Standard GeoJSON Point with [lng, lat] axis order.
+    gp = Parse::GeoPoint.from_geojson("type" => "Point", "coordinates" => [-117.6542, 32.8233])
+    assert_in_delta gp.latitude, 32.8233, 1e-9
+    assert_in_delta gp.longitude, -117.6542, 1e-9
+  end
+
+  def test_from_geojson_rejects_non_numeric_coords
+    # TRACK-QUERY-4: silent coercion of non-numeric coords to 0.0 via
+    # `.to_f` produced a null-island point that matched unrelated
+    # proximity queries. Now raises.
+    assert_raises(ArgumentError) do
+      Parse::GeoPoint.from_geojson("type" => "Point", "coordinates" => ["evil", nil])
+    end
+    assert_raises(ArgumentError) do
+      Parse::GeoPoint.from_geojson("type" => "Point", "coordinates" => [{ "$where" => "1" }, 0])
+    end
+    assert_raises(ArgumentError) do
+      Parse::GeoPoint.from_geojson("type" => "Point", "coordinates" => [nil, nil])
+    end
+  end
+
+  def test_from_geojson_rejects_nan_and_infinity
+    # TRACK-QUERY-5: NaN.is_a?(Numeric) is true; finite? check needed.
+    assert_raises(ArgumentError) do
+      Parse::GeoPoint.from_geojson("type" => "Point", "coordinates" => [Float::NAN, 0])
+    end
+    assert_raises(ArgumentError) do
+      Parse::GeoPoint.from_geojson("type" => "Point", "coordinates" => [0, Float::INFINITY])
+    end
+  end
+
+  def test_from_geojson_rejects_wrong_type
+    assert_raises(ArgumentError) do
+      Parse::GeoPoint.from_geojson("type" => "Polygon", "coordinates" => [-117.6542, 32.8233])
+    end
+  end
+
+  def test_from_geojson_rejects_wrong_arity
+    assert_raises(ArgumentError) do
+      Parse::GeoPoint.from_geojson("type" => "Point", "coordinates" => [1, 2, 3])
+    end
   end
 end

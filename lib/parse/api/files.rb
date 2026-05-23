@@ -17,9 +17,10 @@ module Parse
       # @param content_type [String] the mime-type of the file.
       # @return [Parse::Response]
       def create_file(fileName, data = {}, content_type = nil)
+        safe = Parse::API::PathSegment.file!(fileName, kind: "file name")
         headers = {}
         headers.merge!({ Parse::Protocol::CONTENT_TYPE => content_type.to_s }) if content_type.present?
-        response = request :post, "#{FILES_PATH}/#{fileName}", body: data, headers: headers
+        response = request :post, "#{FILES_PATH}/#{safe}", body: data, headers: headers
         response.parse_class = Parse::Model::TYPE_FILE
         response
       end

@@ -90,6 +90,57 @@ class TestLiveQueryClient < Minitest::Test
     refute_empty subscription.query
   end
 
+  def test_client_subscribe_refuses_where_in_filter
+    client = Parse::LiveQuery::Client.new(
+      url: "wss://test.example.com",
+      application_id: "test_app_id",
+      client_key: "test_key",
+      auto_connect: false,
+    )
+
+    assert_raises(Parse::PipelineSecurity::Error) do
+      client.subscribe("Song", where: { "$where" => "this.title.length > 0" })
+    end
+  end
+
+  def test_client_subscribe_refuses_function_operator_at_any_depth
+    client = Parse::LiveQuery::Client.new(
+      url: "wss://test.example.com",
+      application_id: "test_app_id",
+      client_key: "test_key",
+      auto_connect: false,
+    )
+
+    assert_raises(Parse::PipelineSecurity::Error) do
+      client.subscribe("Song", where: { "title" => { "$function" => { "body" => "x", "args" => [], "lang" => "js" } } })
+    end
+  end
+
+  def test_client_subscribe_refuses_internal_field_reference
+    client = Parse::LiveQuery::Client.new(
+      url: "wss://test.example.com",
+      application_id: "test_app_id",
+      client_key: "test_key",
+      auto_connect: false,
+    )
+
+    assert_raises(Parse::PipelineSecurity::Error) do
+      client.subscribe("_User", where: { "_hashed_password" => { "$exists" => true } })
+    end
+  end
+
+  def test_client_subscribe_allows_empty_where
+    client = Parse::LiveQuery::Client.new(
+      url: "wss://test.example.com",
+      application_id: "test_app_id",
+      client_key: "test_key",
+      auto_connect: false,
+    )
+
+    subscription = client.subscribe("Song")
+    assert_instance_of Parse::LiveQuery::Subscription, subscription
+  end
+
   def test_client_state_methods
     client = Parse::LiveQuery::Client.new(
       url: "wss://test.example.com",

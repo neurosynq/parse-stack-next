@@ -44,3 +44,6 @@ bin/config.json
 /bin/parse-dashboard-config.json
 logs
 *.md
+!docs/mcp_guide.md
+!docs/mongodb_direct_guide.md
+!docs/mongodb_index_optimization_guide.md

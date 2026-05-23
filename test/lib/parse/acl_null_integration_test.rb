@@ -5,6 +5,11 @@ class ACLNullTest < Minitest::Test
 
   class TestDoc < Parse::Object
     parse_class "TestDocNullACL"
+    # This test verifies SDK behavior when documents have null/undefined
+    # _rperm/_wperm. The 4.1.0 default policy stamps {} on every save, so
+    # we opt into the legacy public default to preserve the null-ACL
+    # signal this test was written to exercise.
+    acl_policy :public
     property :title, :string
   end
 
@@ -23,7 +28,7 @@ class ACLNullTest < Minitest::Test
       assert doc_no_acl.save, "Should save document without ACL"
 
       # Create a document with explicit ACL
-      test_role = Parse::Role.first_or_create!(name: "TestRoleNullTest")
+      test_role = Parse::Role.first_or_create!({ name: "TestRoleNullTest" })
       doc_with_acl = TestDoc.new(title: "With ACL Document")
       doc_with_acl.acl = Parse::ACL.new
       doc_with_acl.acl.apply_role(test_role.name, read: true, write: true)

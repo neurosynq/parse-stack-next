@@ -7,5 +7,6 @@
   "mountPath": "/parse",
   "cloud": "/parse-server/cloud/main.js",
   "logLevel": "info",
-  "allowClientClassCreation": true
+  "allowClientClassCreation": true,
+  "allowCustomObjectId": true
 }

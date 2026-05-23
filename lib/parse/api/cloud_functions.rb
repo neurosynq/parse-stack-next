@@ -14,7 +14,8 @@ module Parse
       # @option opts [String] :master_key Whether to use the master key for this request.
       # @return [Parse::Response]
       def call_function(name, body = {}, opts: {})
-        request :post, "functions/#{name}", body: body, opts: opts
+        safe = Parse::API::PathSegment.identifier!(name, kind: "function name")
+        request :post, "functions/#{safe}", body: body, opts: opts
       end
 
       # Trigger a job.
@@ -25,7 +26,8 @@ module Parse
       # @option opts [String] :master_key Whether to use the master key for this request.
       # @return [Parse::Response]
       def trigger_job(name, body = {}, opts: {})
-        request :post, "jobs/#{name}", body: body, opts: opts
+        safe = Parse::API::PathSegment.identifier!(name, kind: "job name")
+        request :post, "jobs/#{safe}", body: body, opts: opts
       end
 
       # Call a cloud function with a specific session token.

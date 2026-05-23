@@ -63,6 +63,36 @@ class MongoDirectPrivateNote < Parse::Object
   property :category, :string
 end
 
+# Model for testing ACL simulation in mongo-direct paths. Has a
+# pointer field so we can also exercise the $lookup ACL rewriter via
+# includes:.
+class MongoDirectAclNote < Parse::Object
+  parse_class "MongoDirectAclNote"
+
+  property :content, :string
+  property :owner_id, :string
+  belongs_to :author, as: :pointer, class_name: "_User"
+end
+
+# Plain class for $lookup-rewriter testing — using a custom class
+# instead of _User avoids Parse Server's special-case ACL handling on
+# the user collection (the test wants to exercise the SDK rewriter, not
+# Parse Server's user-ACL quirks).
+class MongoDirectAclOwner < Parse::Object
+  parse_class "MongoDirectAclOwner"
+
+  property :name, :string
+end
+
+# Polygon-bearing model for testing the mongo-direct auto-route on
+# `:field.geo_intersects => geometry`.
+class MongoDirectRegion < Parse::Object
+  parse_class "MongoDirectRegion"
+
+  property :name, :string
+  property :area, :polygon
+end
+
 class MongoDBDirectIntegrationTest < Minitest::Test
   include ParseStackIntegrationTest
 
@@ -1467,12 +1497,16 @@ class MongoDBDirectIntegrationTest < Minitest::Test
           category: "Personal",
         )
 
-        # Set ACL permissions
-        note.acl = Parse::ACL.new
-        note.acl.permissions = {
+        # Set ACL permissions. Construct via the hash constructor so values
+        # are normalized into ACL::Permission objects; the bare
+        # `acl.permissions = hash` path is a raw attr_writer that skips
+        # normalization and dirty tracking and so the assignment never
+        # persists. Explicit braces are required under Ruby 3's strict
+        # keyword separation (`owner:` is the only kwarg).
+        note.acl = Parse::ACL.new({
           "*" => { "read" => true, "write" => false },
           "role:Admin" => { "read" => true, "write" => true },
-        }
+        })
 
         assert note.save, "Failed to save note with ACL"
 
@@ -1582,32 +1616,32 @@ class MongoDBDirectIntegrationTest < Minitest::Test
       with_timeout(30, "readable_by/writable_by direct test") do
         puts "\n=== Testing readable_by/writable_by with mongo_direct ==="
 
-        # Create notes with different ACL permissions
+        # Create notes with different ACL permissions. Construct via the
+        # hash constructor (with explicit braces) so values are normalized
+        # into ACL::Permission objects; the bare `acl.permissions =` path
+        # skips normalization and dirty tracking and so the assignment
+        # never persists.
         # Note 1: Public read, Admin write
         note1 = MongoDirectPrivateNote.new(content: "Public Note", category: "Public")
-        note1.acl = Parse::ACL.new
-        note1.acl.permissions = { "*" => { "read" => true } }
+        note1.acl = Parse::ACL.new({ "*" => { "read" => true } })
         assert note1.save, "Failed to save note1"
 
         # Note 2: Admin only (read + write)
         note2 = MongoDirectPrivateNote.new(content: "Admin Only Note", category: "Admin")
-        note2.acl = Parse::ACL.new
-        note2.acl.permissions = { "role:Admin" => { "read" => true, "write" => true } }
+        note2.acl = Parse::ACL.new({ "role:Admin" => { "read" => true, "write" => true } })
         assert note2.save, "Failed to save note2"
 
         # Note 3: Moderator read, Admin write
         note3 = MongoDirectPrivateNote.new(content: "Moderator Note", category: "Moderator")
-        note3.acl = Parse::ACL.new
-        note3.acl.permissions = {
+        note3.acl = Parse::ACL.new({
           "role:Moderator" => { "read" => true },
           "role:Admin" => { "read" => true, "write" => true },
-        }
+        })
         assert note3.save, "Failed to save note3"
 
         # Note 4: Specific user access
         note4 = MongoDirectPrivateNote.new(content: "User Specific Note", category: "User")
-        note4.acl = Parse::ACL.new
-        note4.acl.permissions = { "user123" => { "read" => true, "write" => true } }
+        note4.acl = Parse::ACL.new({ "user123" => { "read" => true, "write" => true } })
         assert note4.save, "Failed to save note4"
 
         sleep 0.5
@@ -1816,6 +1850,54 @@ class MongoDBDirectIntegrationTest < Minitest::Test
         puts "  ✅ Group count matches!"
 
         puts "=== Aggregate Group Count Tests PASSED ==="
+      end
+
+      teardown_mongodb_direct
+    end
+  end
+
+  # Regression: $group with a non-nil _id (e.g. group by a real field) used to
+  # be decoded as a Parse::Object because convert_documents_to_parse renamed
+  # _id → objectId and the heuristic only checked for a non-nil objectId. The
+  # row must come back as an AggregationResult with the group key accessible
+  # via _id and the accumulator fields preserved.
+  def test_aggregate_group_by_genre_returns_aggregation_result
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      skip "MongoDB direct tests require mongo gem" unless setup_mongodb_direct
+
+      with_timeout(30, "aggregate group-by regression test") do
+        data = [
+          { title: "GB1", artist: "GroupBy Artist", genre: "Rock", plays: 10 },
+          { title: "GB2", artist: "GroupBy Artist", genre: "Rock", plays: 30 },
+          { title: "GB3", artist: "GroupBy Artist", genre: "Pop",  plays: 20 },
+        ]
+        data.each { |s| assert MongoDirectSong.new(s).save }
+        sleep 0.5
+
+        pipeline = [
+          { "$group" => { "_id" => "$genre", "count" => { "$sum" => 1 }, "total" => { "$sum" => "$plays" } } },
+        ]
+
+        direct_results = MongoDirectSong.query(:artist => "GroupBy Artist")
+                                        .aggregate(pipeline, mongo_direct: true)
+                                        .results
+
+        assert_equal 2, direct_results.length, "should return one row per genre"
+        direct_results.each do |row|
+          assert_kind_of Parse::AggregationResult, row,
+                         "group rows must be wrapped as AggregationResult, not decoded as Parse::Object"
+          refute_nil row["_id"], "_id (group key) must be preserved"
+          assert ["Rock", "Pop"].include?(row["_id"]), "_id should be a genre value"
+        end
+
+        rock = direct_results.find { |r| r["_id"] == "Rock" }
+        pop  = direct_results.find { |r| r["_id"] == "Pop" }
+        assert_equal 2, rock["count"], "Rock count must survive the conversion"
+        assert_equal 40, rock["total"], "Rock total must survive the conversion"
+        assert_equal 1, pop["count"]
+        assert_equal 20, pop["total"]
       end
 
       teardown_mongodb_direct
@@ -2518,8 +2600,11 @@ class MongoDBDirectIntegrationTest < Minitest::Test
         assert direct_results.length >= 1, "Should have at least 1 date group"
 
         result = direct_results.first
-        date_id = result["objectId"]
-        assert date_id.is_a?(Hash), "objectId should be a hash with date components"
+        # AggregationResult preserves the raw `_id` from $group rather than
+        # renaming it to `objectId` (per the 4.1.0 fix to stop conflating
+        # group keys with Parse object ids).
+        date_id = result["_id"]
+        assert date_id.is_a?(Hash), "_id should be a hash with date components"
         assert date_id.key?("day"), "Should have day component"
         assert date_id.key?("month"), "Should have month component"
         assert date_id.key?("year"), "Should have year component"
@@ -2618,6 +2703,436 @@ class MongoDBDirectIntegrationTest < Minitest::Test
         puts "  ✅ Custom release_date comparison works!"
 
         puts "=== Aggregate Match Date Comparison Tests PASSED ==="
+      end
+
+      teardown_mongodb_direct
+    end
+  end
+
+  # ==========================================================================
+  # TEST BATCH: geo_intersects auto-route end-to-end
+  # ==========================================================================
+  # Exercises `Parse::Query#requires_mongo_direct?` / `assert_mongo_direct_routable!`
+  # / the `__mongo_direct_only` marker strip / the `_rperm` injection
+  # under `scope_to_user`, against a real Parse + Mongo stack.
+
+  def test_geo_intersects_auto_routes_through_mongo_direct
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      skip "MongoDB direct tests require mongo gem" unless setup_mongodb_direct
+
+      with_timeout(30, "geo_intersects auto-route test") do
+        # Seed two regions: one whose polygon contains the test query
+        # geometry, one that does not. Save through the normal Parse REST
+        # path so Parse Server populates `_rperm` and indexes the column.
+        bermuda = MongoDirectRegion.new(name: "Bermuda Triangle")
+        bermuda.area = [
+          [32.3078, -64.7505], # Bermuda
+          [25.7823, -80.2660], # Miami
+          [18.3848, -66.0934], # San Juan
+        ]
+        assert bermuda.save, "Bermuda region should save"
+
+        pacific = MongoDirectRegion.new(name: "Pacific Coast")
+        pacific.area = [
+          [37.7749, -122.4194], # San Francisco
+          [34.0522, -118.2437], # Los Angeles
+          [32.7157, -117.1611], # San Diego
+        ]
+        assert pacific.save, "Pacific region should save"
+
+        sleep 0.5
+
+        # Query polygon roughly overlapping the Bermuda Triangle. Using a
+        # `Parse::GeoJSON::MultiPolygon` exercises the GeoJSON-native
+        # axis order path: stored polygons are `[lat, lng]`, MultiPolygon
+        # is `[lng, lat]`, and `convert_value_to_parse` plus the
+        # constraint's `coerce_to_geojson` must keep both straight.
+        query_geom = Parse::GeoJSON::MultiPolygon.new([
+          [[[-75.0, 26.0], [-65.0, 26.0], [-65.0, 30.0], [-75.0, 30.0], [-75.0, 26.0]]],
+        ])
+
+        # Auto-route fires because :geo_intersects emits the
+        # __mongo_direct_only marker; default use_master_key is true so
+        # the gate passes; results_direct executes the pipeline.
+        results = MongoDirectRegion.query(:area.geo_intersects => query_geom).results
+
+        names = results.map(&:name)
+        assert_includes names, "Bermuda Triangle",
+          "Region whose stored polygon intersects the query should match"
+        refute_includes names, "Pacific Coast",
+          "Region whose stored polygon does not intersect the query must not match"
+
+        bermuda.destroy
+        pacific.destroy
+      end
+
+      teardown_mongodb_direct
+    end
+  end
+
+  def test_geo_intersects_master_key_disabled_without_scope_raises
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      skip "MongoDB direct tests require mongo gem" unless setup_mongodb_direct
+
+      poly = Parse::Polygon.new([[0, 0], [0, 1], [1, 0]])
+      q = MongoDirectRegion.query(:area.geo_intersects => poly)
+      q.use_master_key = false
+
+      assert_raises(Parse::Query::MongoDirectRequired) { q.results }
+
+      teardown_mongodb_direct
+    end
+  end
+
+  # ==========================================================================
+  # TEST BATCH: Parse::ACLScope end-to-end against live Parse + Mongo
+  # ==========================================================================
+  # Exercises the four scope modes (master, acl_user, acl_role, session_token),
+  # the $lookup rewriter (via includes:), and the post-fetch redactor.
+
+  def make_acl(read_perms)
+    acl = Parse::ACL.new
+    Array(read_perms).each do |perm|
+      case perm
+      when "*"
+        acl.apply(:public, read: true)
+      when /\Arole:(.+)\z/
+        acl.apply_role($1, read: true)
+      else
+        acl.apply(perm, read: true)
+      end
+    end
+    acl
+  end
+
+  def test_acl_scope_master_mode_sees_everything
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      skip "MongoDB direct tests require mongo gem" unless setup_mongodb_direct
+      with_timeout(30, "acl_scope master test") do
+        public_note = MongoDirectAclNote.new(content: "public").tap { |n| n.acl = make_acl("*"); n.save }
+        admin_note = MongoDirectAclNote.new(content: "admin-only").tap { |n| n.acl = make_acl("role:scope:admin"); n.save }
+        sleep 0.3
+
+        results = Parse::MongoDB.aggregate("MongoDirectAclNote", [], master: true)
+        contents = results.map { |r| r["content"] }
+        assert_includes contents, "public"
+        assert_includes contents, "admin-only"
+
+        public_note.destroy
+        admin_note.destroy
+      end
+      teardown_mongodb_direct
+    end
+  end
+
+  def test_acl_scope_user_filters_public_plus_user_only_rows
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      skip "MongoDB direct tests require mongo gem" unless setup_mongodb_direct
+      with_timeout(30, "acl_scope user test") do
+        alice = Parse::User.new(username: "alice_#{Time.now.to_i}", password: "pw")
+        assert alice.save
+        bob = Parse::User.new(username: "bob_#{Time.now.to_i}", password: "pw")
+        assert bob.save
+
+        public_note = MongoDirectAclNote.new(content: "public").tap { |n| n.acl = make_acl("*"); n.save }
+        alice_note = MongoDirectAclNote.new(content: "alice-only").tap { |n| n.acl = make_acl(alice.id); n.save }
+        bob_note = MongoDirectAclNote.new(content: "bob-only").tap { |n| n.acl = make_acl(bob.id); n.save }
+        sleep 0.3
+
+        alice_ptr = Parse::Pointer.new("_User", alice.id)
+        results = Parse::MongoDB.aggregate("MongoDirectAclNote", [], acl_user: alice_ptr)
+        contents = results.map { |r| r["content"] }
+
+        assert_includes contents, "public",     "alice should see public rows"
+        assert_includes contents, "alice-only", "alice should see her own rows"
+        refute_includes contents, "bob-only",   "alice should NOT see bob's rows"
+
+        [public_note, alice_note, bob_note].each(&:destroy)
+        alice.destroy
+        bob.destroy
+      end
+      teardown_mongodb_direct
+    end
+  end
+
+  def test_acl_scope_role_with_inheritance
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      skip "MongoDB direct tests require mongo gem" unless setup_mongodb_direct
+      with_timeout(45, "acl_scope role test") do
+        # Build the inheritance: scope:admin inherits scope:user's
+        # capabilities. In Parse Server's role model, "P.roles
+        # contains C" means C inherits P's capabilities — so to make
+        # admin inherit user, scope:user must list scope:admin in its
+        # roles relation (admin is a child of user in Parse's
+        # terminology, which is confusing but documented on
+        # Parse::Role#add_child_role).
+        user_role = Parse::Role.find_or_create("scope:user")
+        admin_role = Parse::Role.find_or_create("scope:admin")
+        user_role.add_child_role(admin_role)
+        assert user_role.save
+
+        public_note = MongoDirectAclNote.new(content: "public").tap { |n| n.acl = make_acl("*"); n.save }
+        user_note = MongoDirectAclNote.new(content: "user-readable").tap { |n| n.acl = make_acl("role:scope:user"); n.save }
+        admin_note = MongoDirectAclNote.new(content: "admin-only").tap { |n| n.acl = make_acl("role:scope:admin"); n.save }
+        unrelated_note = MongoDirectAclNote.new(content: "unrelated").tap { |n| n.acl = make_acl("role:scope:editor"); n.save }
+        sleep 0.3
+
+        results = Parse::MongoDB.aggregate("MongoDirectAclNote", [], acl_role: "scope:admin")
+        contents = results.map { |r| r["content"] }
+
+        assert_includes contents, "public",         "admin scope should see public rows"
+        assert_includes contents, "admin-only",     "admin scope should see admin-only rows"
+        assert_includes contents, "user-readable",  "admin should inherit scope:user permissions"
+        refute_includes contents, "unrelated",      "admin should NOT see scope:editor rows"
+
+        [public_note, user_note, admin_note, unrelated_note].each(&:destroy)
+        admin_role.destroy
+        user_role.destroy
+      end
+      teardown_mongodb_direct
+    end
+  end
+
+  def test_acl_scope_lookup_rewriter_filters_included_pointer
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      skip "MongoDB direct tests require mongo gem" unless setup_mongodb_direct
+      with_timeout(45, "acl_scope $lookup rewriter test") do
+        # Two MongoDirectAclOwner rows with different ACLs. A public
+        # MongoDirectAclNote points to each. Alice queries with a
+        # $lookup mirroring what includes: would emit. The rewriter
+        # should filter the looked-up rows so the master-only owner
+        # drops out — even though both top-level Note rows are
+        # publicly visible.
+        public_owner = MongoDirectAclOwner.new(name: "public-owner").tap do |o|
+          o.acl = make_acl("*")
+          o.save
+        end
+        master_only_owner = MongoDirectAclOwner.new(name: "master-only-owner").tap do |o|
+          # Empty ACL = master-key only. Parse::ACL.new with no
+          # apply calls produces this.
+          o.acl = Parse::ACL.new
+          o.save
+        end
+
+        note_a = MongoDirectAclNote.new(content: "points-to-public").tap do |n|
+          n.acl = make_acl("*")
+          n.owner_id = public_owner.id
+          n.save
+        end
+        note_b = MongoDirectAclNote.new(content: "points-to-master").tap do |n|
+          n.acl = make_acl("*")
+          n.owner_id = master_only_owner.id
+          n.save
+        end
+        sleep 0.3
+
+        # Plain Mongo $lookup joining on a string field — no Parse
+        # pointer encoding involved, so the only translation
+        # affecting the pipeline is our ACL rewriter. Note Parse
+        # stores property `:owner_id` under the camelCase column
+        # name `ownerId` on the Mongo side.
+        pipeline = [
+          { "$lookup" => {
+              "from" => "MongoDirectAclOwner",
+              "localField" => "ownerId",
+              "foreignField" => "_id",
+              "as" => "owner_obj",
+          } },
+        ]
+        results = Parse::MongoDB.aggregate("MongoDirectAclNote", pipeline,
+                                           acl_user: Parse::Pointer.new("_User", "anyone"),
+                                           rewrite_lookups: false)
+
+        note_a_row = results.find { |r| r["content"] == "points-to-public" }
+        note_b_row = results.find { |r| r["content"] == "points-to-master" }
+
+        assert note_a_row, "public-owner note should be in results"
+        assert note_b_row, "master-owner note should be in results (top-level is public)"
+        assert_equal note_a_row["owner_obj"].length, 1,
+                     "public-owner should resolve through the rewritten $lookup"
+        assert_equal note_b_row["owner_obj"].length, 0,
+                     "master-only owner must be filtered by the rewritten $lookup sub-pipeline. " \
+                     "Got: #{note_b_row["owner_obj"].inspect}"
+
+        [note_a, note_b, public_owner, master_only_owner].each(&:destroy)
+      end
+      teardown_mongodb_direct
+    end
+  end
+
+  def test_acl_scope_filters_array_of_embedded_owner_subdocs
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      skip "MongoDB direct tests require mongo gem" unless setup_mongodb_direct
+      with_timeout(45, "embedded-array redact test") do
+        # Build a $lookup that joins multiple Owner rows in one Note's
+        # `owner_obj` array (no foreign key filter — pulls every Owner
+        # row into each Note's owner_obj). The rewriter prepends a
+        # _rperm match inside the sub-pipeline, so the joined array
+        # should contain only ACL-permitted Owner rows.
+        public_a = MongoDirectAclOwner.new(name: "public-a").tap { |o| o.acl = make_acl("*"); o.save }
+        public_b = MongoDirectAclOwner.new(name: "public-b").tap { |o| o.acl = make_acl("*"); o.save }
+        master_only = MongoDirectAclOwner.new(name: "master-only").tap { |o| o.acl = Parse::ACL.new; o.save }
+
+        note = MongoDirectAclNote.new(content: "with-array").tap do |n|
+          n.acl = make_acl("*")
+          n.save
+        end
+        sleep 0.3
+
+        pipeline = [
+          { "$match" => { "content" => "with-array" } },
+          { "$lookup" => {
+              "from" => "MongoDirectAclOwner",
+              "pipeline" => [],          # no filter — pull all rows into the array
+              "as" => "owner_obj",
+          } },
+        ]
+        results = Parse::MongoDB.aggregate("MongoDirectAclNote", pipeline,
+                                           acl_user: Parse::Pointer.new("_User", "alice_id"),
+                                           rewrite_lookups: false)
+
+        assert_equal results.length, 1
+        owners = results.first["owner_obj"]
+        names = owners.map { |o| o["name"] }
+        assert_includes names, "public-a", "public Owner should pass through the rewritten $lookup"
+        assert_includes names, "public-b", "public Owner should pass through the rewritten $lookup"
+        refute_includes names, "master-only",
+                        "master-only Owner must be filtered out of the joined array " \
+                        "by the ACLScope $lookup rewriter. Got: #{names.inspect}"
+
+        [note, public_a, public_b, master_only].each(&:destroy)
+      end
+      teardown_mongodb_direct
+    end
+  end
+
+  def test_acl_scope_post_fetch_redacts_array_of_embedded_subdocs
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      skip "MongoDB direct tests require mongo gem" unless setup_mongodb_direct
+      with_timeout(30, "post-fetch redact test") do
+        # `:object` columns can store an array of embedded sub-docs,
+        # each carrying its own `_rperm`. Parse Server doesn't
+        # auto-filter those server-side, but our post-fetch redactor
+        # walks the result tree and drops failing sub-docs.
+        note = MongoDirectAclNote.new(content: "embedded-list").tap do |n|
+          n.acl = make_acl("*")
+          n.save
+        end
+
+        # Inject the embedded sub-doc array directly via mongo-direct
+        # since the SDK doesn't expose a way to write raw _rperm
+        # inside an :object column. (We're testing the redactor
+        # against a structure Parse Server can't itself produce in
+        # the normal flow, so the direct write models that case.)
+        client = Parse::MongoDB.client
+        client[:MongoDirectAclNote].update_one(
+          { "_id" => note.id },
+          { "$set" => { "embedded_list" => [
+              { "_rperm" => ["*"],            "label" => "public" },
+              { "_rperm" => ["someone_else"], "label" => "denied" },
+              { "_rperm" => ["alice_id"],     "label" => "alice-only" },
+          ] } },
+        )
+        sleep 0.2
+
+        results = Parse::MongoDB.aggregate("MongoDirectAclNote",
+                                           [{ "$match" => { "content" => "embedded-list" } }],
+                                           acl_user: Parse::Pointer.new("_User", "alice_id"))
+
+        labels = results.first["embedded_list"].map { |e| e["label"] }
+        assert_includes labels, "public"
+        assert_includes labels, "alice-only"
+        refute_includes labels, "denied",
+                        "post-fetch redactor must drop array elements whose _rperm does not match. " \
+                        "Got: #{labels.inspect}"
+
+        note.destroy
+      end
+      teardown_mongodb_direct
+    end
+  end
+
+  def test_acl_scope_require_session_token_strict_raises
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      skip "MongoDB direct tests require mongo gem" unless setup_mongodb_direct
+      Parse::ACLScope.reset_warning_state!
+      original = Parse::ACLScope.require_session_token
+      Parse::ACLScope.require_session_token = true
+      with_timeout(15, "strict require_session_token") do
+        assert_raises(Parse::ACLScope::ACLRequired) do
+          Parse::MongoDB.aggregate("MongoDirectAclNote", [])
+        end
+      end
+    ensure
+      Parse::ACLScope.require_session_token = original if defined?(original)
+      teardown_mongodb_direct
+    end
+  end
+
+  def test_geo_intersects_with_scope_to_user_injects_rperm_filter
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      skip "MongoDB direct tests require mongo gem" unless setup_mongodb_direct
+
+      with_timeout(30, "geo_intersects scope_to_user test") do
+        # Master-key-saved-with-no-ACL leaves `_rperm: []` (master-only),
+        # so the scope_to_user injection would (correctly) exclude both
+        # rows. Set explicit public ACL so `_rperm: ["*"]` is stored and
+        # the user's `["test_user_xyz", "*"]` allow-set matches.
+        public_acl = Parse::ACL.new.tap { |a| a.apply(:public, read: true) }
+
+        a = MongoDirectRegion.new(name: "Public A")
+        a.area = [[10.0, 10.0], [10.0, 20.0], [20.0, 10.0]]
+        a.acl = public_acl
+        assert a.save
+        b = MongoDirectRegion.new(name: "Public B")
+        b.area = [[50.0, 50.0], [50.0, 60.0], [60.0, 50.0]]
+        b.acl = public_acl
+        assert b.save
+        sleep 0.3
+
+        # The query polygon overlaps "Public A" only.
+        query_geom = Parse::GeoJSON::MultiPolygon.new([
+          [[[5.0, 5.0], [25.0, 5.0], [25.0, 25.0], [5.0, 25.0], [5.0, 5.0]]],
+        ])
+
+        # scope_to_user runs the row-ACL injection: `_rperm IN
+        # [user.id, "*"]`. Both saved rows have public ACL (`_rperm`
+        # contains `"*"`), so they remain visible to the scoped query.
+        # The geo filter narrows to "Public A".
+        fake_user = Parse::Pointer.new("_User", "test_user_xyz")
+
+        q = MongoDirectRegion.query(:area.geo_intersects => query_geom)
+        q.scope_to_user(fake_user)
+        results = q.results
+
+        names = results.map(&:name)
+        assert_includes names, "Public A",
+          "Public-ACL row inside the query polygon should be visible to scoped user"
+        refute_includes names, "Public B",
+          "Public-ACL row outside the query polygon must not match"
+
+        a.destroy
+        b.destroy
       end
 
       teardown_mongodb_direct

@@ -184,11 +184,18 @@ module Parse
       # Get the count of installations matching an audience's query.
       # @param audience_name [String] the audience name
       # @return [Integer] the count of matching installations
+      # @raise [Parse::Push::AudienceNotFound] if no audience exists with the
+      #   given name. Previously returned 0 on miss, which was indistinguishable
+      #   from "audience exists but matches nothing."
       # @example
       #   count = Parse::Audience.installation_count("VIP Users")
       def installation_count(audience_name)
         audience = find_by_name(audience_name)
-        return 0 unless audience && audience.query.present?
+        if audience.nil?
+          raise Parse::Push::AudienceNotFound,
+                "Audience '#{audience_name}' not found in _Audience collection"
+        end
+        return 0 unless audience.query.present?
 
         q = Parse::Installation.query
         audience.query.each do |key, value|
@@ -200,12 +207,21 @@ module Parse
       # Get a query for installations matching an audience.
       # @param audience_name [String] the audience name
       # @return [Parse::Query] a query for matching installations
+      # @raise [Parse::Push::AudienceNotFound] if no audience exists with the
+      #   given name. Previously returned an unconstrained Installation query
+      #   on miss, which silently elevated the result set from "matches this
+      #   audience" to "every Installation" — the same fail-open footgun as
+      #   {Parse::Push#to_audience}.
       # @example
       #   installations = Parse::Audience.installations("VIP Users").all
       def installations(audience_name)
         audience = find_by_name(audience_name)
+        if audience.nil?
+          raise Parse::Push::AudienceNotFound,
+                "Audience '#{audience_name}' not found in _Audience collection"
+        end
         q = Parse::Installation.query
-        if audience && audience.query.present?
+        if audience.query.present?
           audience.query.each do |key, value|
             q.where(key.to_sym => value)
           end

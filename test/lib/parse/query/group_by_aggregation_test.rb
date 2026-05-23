@@ -180,6 +180,31 @@ class TestGroupByAggregation < Minitest::Test
     @mock_client.verify
   end
 
+  # Regression: when the SDK auto-fires mongo_direct for the underlying
+  # aggregate (e.g. pipelines with $lookup constraints), the response
+  # comes back through the MongoDB driver, which preserves the raw `_id`
+  # group key. The Parse Server REST aggregate endpoint rewrites that
+  # key to `objectId`. The reader must accept either shape so the same
+  # group_by(...).count call survives a route swap.
+  def test_group_by_reads_id_when_response_uses_underscore_id
+    group_by = Parse::GroupBy.new(@query, :status)
+
+    mock_response = Minitest::Mock.new
+    mock_response.expect :success?, true
+    mock_response.expect :result, [
+      { "_id" => "active",   "count" => 2 },
+      { "_id" => "archived", "count" => 1 },
+    ]
+
+    @mock_client.expect :aggregate_pipeline, mock_response do |table, pipeline, **_kwargs|
+      table == "Asset" && pipeline.is_a?(Array)
+    end
+
+    result = group_by.count
+    assert_equal({ "active" => 2, "archived" => 1 }, result)
+    @mock_client.verify
+  end
+
   # Test handling of nil/null group keys
   def test_group_by_handles_null_keys
     group_by = Parse::GroupBy.new(@query, :optional_field)
@@ -211,6 +236,34 @@ class TestGroupByAggregation < Minitest::Test
       assert_equal interval, group_by_date.instance_variable_get(:@interval)
       assert_kind_of Parse::GroupByDate, group_by_date
     end
+  end
+
+  # Regression: same route-difference issue as test_group_by_reads_id_..,
+  # but on the date variant. Auto-mongo_direct on a pipeline with $lookup
+  # returns `_id`-keyed rows (the raw `{year, month, day}` document) where
+  # the REST aggregate route would have rewritten the key to `objectId`.
+  def test_group_by_date_reads_id_when_response_uses_underscore_id
+    group_by_date = Parse::GroupByDate.new(@query, :created_at, :month)
+
+    mock_response = Minitest::Mock.new
+    mock_response.expect :success?, true
+    # GroupByDate#execute_date_aggregation reads `response.result` twice
+    # (once for the iteration, once is OK to no-op); mirror the
+    # multi-expect pattern from test_group_by_date_builds_correct_pipeline.
+    mock_response.expect :result, [
+      { "_id" => { "year" => 2024, "month" => 11 }, "count" => 45 },
+    ]
+    mock_response.expect :result, [
+      { "_id" => { "year" => 2024, "month" => 11 }, "count" => 45 },
+    ]
+
+    @mock_client.expect :aggregate_pipeline, mock_response do |table, pipeline, **_kwargs|
+      table == "Asset" && pipeline.is_a?(Array)
+    end
+
+    result = group_by_date.count
+    assert_equal({ "2024-11" => 45 }, result)
+    @mock_client.verify
   end
 
   def test_group_by_date_builds_correct_pipeline

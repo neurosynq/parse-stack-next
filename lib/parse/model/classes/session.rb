@@ -72,9 +72,16 @@ module Parse
     class << self
       # Return the Session record for this session token.
       # @param token [String] the session token
+      # @param opts [Hash] additional keyword options forwarded to the
+      #   underlying client request (e.g. +cache: false+,
+      #   +use_master_key: false+, +headers:+).
       # @return [Session] the session for this token, otherwise nil.
       def session(token, **opts)
-        response = client.fetch_session(token, opts)
+        # A stray :session_token in opts would be forwarded into the request
+        # stack and silently override the positional token argument. Drop it
+        # so the explicit token always wins.
+        opts.delete(:session_token)
+        response = client.fetch_session(token, **opts)
         if response.success?
           return Parse::Session.build response.result
         end

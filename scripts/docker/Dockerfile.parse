@@ -1,4 +1,4 @@
-FROM parseplatform/parse-server:8.4.0
+FROM parseplatform/parse-server:9
 
 # Switch to root to copy and set permissions
 USER root

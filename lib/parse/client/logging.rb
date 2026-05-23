@@ -159,9 +159,15 @@ module Parse
         return unless headers
         logger = self.class.current_logger
         headers.each do |key, value|
-          # Don't log sensitive headers
-          next if key.to_s =~ /master.*key|api.*key|session.*token/i
-          logger.debug "  [#{prefix} Header] #{key}: #{value}"
+          # Don't log sensitive headers. Reuses the canonical denylist on
+          # Parse::Middleware::BodyBuilder so Authorization, Cookie, and
+          # X-Parse-JavaScript-Key are also redacted (the prior regex only
+          # caught master-key / api-key / session-token shaped names).
+          if Parse::Middleware::BodyBuilder::REDACTED_HEADERS.include?(key.to_s.downcase)
+            logger.debug "  [#{prefix} Header] #{key}: [FILTERED]"
+          else
+            logger.debug "  [#{prefix} Header] #{key}: #{value}"
+          end
         end
       end
 

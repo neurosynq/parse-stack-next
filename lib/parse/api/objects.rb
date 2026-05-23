@@ -3,6 +3,7 @@
 
 require "active_support"
 require "active_support/core_ext"
+require_relative "path_segment"
 
 module Parse
   module API
@@ -19,6 +20,14 @@ module Parse
                      session: "sessions", _session: "sessions" }.freeze
 
       # @!visibility private
+      # Parse Server objectId format: 1-40 characters of alphanumerics.
+      # The default custom objectId generator in Parse Server uses a
+      # 10-char alphanumeric string; we permit up to 40 to cover apps that
+      # have configured a longer length but still refuse anything outside
+      # this character class.
+      OBJECT_ID_PATTERN = /\A[A-Za-z0-9]{1,40}\z/.freeze
+
+      # @!visibility private
       def self.included(base)
         base.extend(ClassMethods)
       end
@@ -26,13 +35,32 @@ module Parse
       # Class methods to be applied to {Parse::Client}
       module ClassMethods
         # Get the API path for this class.
+        #
+        # Both +className+ and +id+ are validated to prevent path-smuggling
+        # attacks where an attacker-controlled string traverses to a
+        # different REST endpoint (e.g. +"../sessions/me"+) with whatever
+        # auth the outer request carries — typically the master key.
+        #
         # @param className [String] the name of the Parse collection.
-        # @param id [String] optional objectId to add at the end of the path.
+        # @param id [String, nil] optional objectId to add at the end of the path.
         # @return [String] the API uri path
+        # @raise [ArgumentError] if className or id violates the strict
+        #   identifier / objectId patterns.
         def uri_path(className, id = nil)
           if className.is_a?(Parse::Pointer)
             id = className.id
             className = className.parse_class
+          end
+          className = Parse::API::PathSegment.identifier!(className, kind: "className")
+          if id
+            id_str = id.to_s
+            unless OBJECT_ID_PATTERN.match?(id_str)
+              raise ArgumentError,
+                    "objectId #{id_str.inspect} contains characters not " \
+                    "allowed in a Parse objectId. Must match " \
+                    "/\\A[A-Za-z0-9]{1,40}\\z/."
+            end
+            id = id_str
           end
           uri = "#{CLASS_PATH_PREFIX}#{className}"
           class_prefix = className.downcase.to_sym

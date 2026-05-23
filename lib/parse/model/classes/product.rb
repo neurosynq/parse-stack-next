@@ -6,7 +6,14 @@
 
 module Parse
   # This class represents the data and columns contained in the standard Parse `_Product` collection.
-  # These records are usually used when implementing in-app purchases in mobile applications.
+  # These records were used when implementing in-app purchases in mobile applications via the
+  # original Parse iOS SDK's `PFProduct` downloadable-content flow.
+  #
+  # @note This Parse feature is effectively deprecated. The `PFProduct` IAP integration was tied
+  #   to hosted Parse and is not actively used by modern Parse Server deployments. Most apps now
+  #   verify in-app purchase receipts directly against the Apple App Store or Google Play. The
+  #   `_Product` collection and this class are retained for backwards compatibility with legacy
+  #   applications that still read or write product metadata in this table.
   #
   # The default schema for {Product} is as follows:
   #
@@ -24,6 +31,14 @@ module Parse
   # @see Parse::Object
   class Product < Parse::Object
     parse_class Parse::Model::CLASS_PRODUCT
+
+    # Note: This class is marked `agent_hidden` after `Parse::Agent::MetadataDSL`
+    # is mixed into `Parse::Object`. The mixin happens in `lib/parse/agent.rb`,
+    # which is required after this file via `lib/parse/stack.rb`, so calling
+    # `agent_hidden` here in the class body would raise NameError. See the
+    # corresponding `Parse::Product.agent_hidden` call at the bottom of
+    # `lib/parse/agent.rb`.
+
     # @!attribute download
     # @return [String] the file payload for this product download.
     property :download, :file

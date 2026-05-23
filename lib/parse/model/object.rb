@@ -15,6 +15,8 @@ require_relative "../client"
 require_relative "model"
 require_relative "pointer"
 require_relative "geopoint"
+require_relative "polygon"
+require_relative "geojson"
 require_relative "file"
 require_relative "bytes"
 require_relative "date"
@@ -25,13 +27,19 @@ require_relative "acl"
 require_relative "clp"
 require_relative "push"
 require_relative "core/actions"
+require_relative "core/create_lock"
 require_relative "core/fetching"
 require_relative "core/querying"
 require_relative "core/schema"
+require_relative "core/describe"
+require_relative "core/indexing"
+require_relative "core/search_indexing"
 require_relative "core/properties"
 require_relative "core/errors"
 require_relative "core/builder"
 require_relative "core/enhanced_change_tracking"
+require_relative "core/field_guards"
+require_relative "core/parse_reference"
 require_relative "validations"
 require_relative "associations/has_one"
 require_relative "associations/belongs_to"
@@ -133,11 +141,16 @@ module Parse
   class Object < Pointer
     include Properties
     include Core::EnhancedChangeTracking
+    include Core::FieldGuards
+    include Core::ParseReference
     include Associations::HasOne
     include Associations::BelongsTo
     include Associations::HasMany
     extend Core::Querying
     extend Core::Schema
+    extend Core::Describe
+    extend Core::Indexing
+    extend Core::SearchIndexing
     include Core::Fetching
     include Core::Actions
     # @!visibility private
@@ -279,6 +292,23 @@ module Parse
     class << self
       attr_writer :parse_class
 
+      # @!attribute [rw] suppress_permissive_acl_warning
+      # When set on `Parse::Object` itself, suppresses the one-time per-class
+      # warning emitted when a class's effective {acl_policy_setting} is
+      # `:public` or `:owner_else_public`. Useful in test suites or apps that
+      # have deliberately reviewed and accepted permissive defaults.
+      # Defaults to `true` when `ENV["PARSE_SUPPRESS_PERMISSIVE_ACL_WARNING"]`
+      # is set to a truthy value (`1`, `true`, `yes`).
+      # @return [Boolean]
+      # @version 4.1.0
+      attr_writer :suppress_permissive_acl_warning
+
+      def suppress_permissive_acl_warning
+        return @suppress_permissive_acl_warning unless @suppress_permissive_acl_warning.nil?
+        env = ENV["PARSE_SUPPRESS_PERMISSIVE_ACL_WARNING"].to_s.downcase
+        %w[1 true yes].include?(env)
+      end
+
       # @!attribute [rw] default_acl_private
       # When set to true, new instances of this class will have a private ACL
       # (no public access, master key only) instead of the default public read/write.
@@ -333,7 +363,11 @@ module Parse
       # @see Parse::ACL.private
       # @return [Parse::ACL] the current default ACLs for this class.
       def default_acls
-        @default_acls ||= default_acl_private ? Parse::ACL.private : Parse::ACL.everyone
+        @default_acls ||= case acl_policy_setting
+                          when :public, :owner_else_public then Parse::ACL.everyone
+                          when :private, :owner_else_private then Parse::ACL.private
+                          else Parse::ACL.everyone
+                          end
       end
 
       # A method to set default ACLs to be applied for newly created
@@ -364,12 +398,204 @@ module Parse
         unless id.present?
           raise ArgumentError, "Invalid argument applying #{self}.default_acls : must be either objectId, role or :public"
         end
+        # Mixing the declarative `acl_policy` DSL with the legacy additive
+        # `set_default_acl` API on the same class produces ambiguous behavior
+        # (which one wins at save time? which fields get which permissions?).
+        # Pick one and stick with it.
+        if defined?(@acl_policy_setting) && @acl_policy_setting
+          raise ArgumentError,
+            "#{self}: cannot combine `set_default_acl` with `acl_policy`. " \
+            "This class already declares `acl_policy #{@acl_policy_setting.inspect}`. " \
+            "Use the declarative DSL for the entire ACL configuration, or remove " \
+            "`acl_policy` and use only `set_default_acl` (the legacy additive API)."
+        end
+        # Mark the class as using the legacy additive ACL API. The save-time
+        # policy resolver respects this and leaves the init-stamped default
+        # ACL alone, preserving pre-4.1 behavior for classes that customize
+        # via set_default_acl.
+        @acl_default_customized_by_set_default_acl = true
         role ? default_acls.apply_role(id, read, write) : default_acls.apply(id, read, write)
+      end
+
+      # @!visibility private
+      # True when {set_default_acl} has been invoked on this class. Used by
+      # the save-time policy resolver to skip classes that have opted into
+      # the legacy additive default-ACL API.
+      def acl_default_customized_by_set_default_acl?
+        defined?(@acl_default_customized_by_set_default_acl) && @acl_default_customized_by_set_default_acl
       end
 
       # @!visibility private
       def acl(acls, owner: nil)
         raise "[#{self}.acl DEPRECATED] - Use `#{self}.default_acl` instead."
+      end
+
+      # Valid ACL policies that can be passed to {acl_policy}.
+      VALID_ACL_POLICIES = [:public, :private, :owner_else_public, :owner_else_private].freeze
+
+      # Declarative ACL policy applied to newly-created instances of this class.
+      # The policy is resolved at save time so that explicit ACL changes by the
+      # caller (`obj.acl = …`, `as:` kwarg, owner-field assignment after `.new`)
+      # always take precedence over the default.
+      #
+      # Resolution order at save (only when caller has not overridden):
+      # 1. Explicit `as: user` passed at construction → owner R/W only
+      # 2. Owner pointer resolved from the declared `owner:` field → owner R/W only
+      # 3. The else-half of the policy: `:public` → public R/W, `:private` → master-key only
+      #
+      # @param policy [Symbol] one of `:public`, `:private`, `:owner_else_public`, `:owner_else_private`.
+      # @param owner [Symbol,nil] the name of the property/belongs_to whose pointer designates the owner user.
+      #   Only meaningful for `:owner_else_*` policies.
+      # @example
+      #   class Post < Parse::Object
+      #     acl_policy :owner_else_private, owner: :author
+      #   end
+      #
+      #   # server-side: no owner resolvable → master-key-only fallback
+      #   Post.create!(title: "draft")
+      #
+      #   # owner pointer set → ACL granting R/W to that user only
+      #   Post.create!(title: "live", author: current_user)
+      #
+      #   # explicit caller override (works regardless of `author` field)
+      #   Post.create!({ title: "x" }, as: current_user)
+      # @raise [ArgumentError] if `policy` is not one of {VALID_ACL_POLICIES}.
+      # @see VALID_ACL_POLICIES
+      # @version 4.1.0
+      def acl_policy(policy, owner: nil)
+        unless VALID_ACL_POLICIES.include?(policy)
+          raise ArgumentError, "Invalid acl_policy #{policy.inspect}; must be one of #{VALID_ACL_POLICIES.inspect}"
+        end
+        # Symmetric to the guard in set_default_acl: pick one API per class.
+        if defined?(@acl_default_customized_by_set_default_acl) && @acl_default_customized_by_set_default_acl
+          raise ArgumentError,
+            "#{self}: cannot combine `acl_policy` with `set_default_acl`. " \
+            "This class already calls `set_default_acl`. Use the declarative " \
+            "DSL for the entire ACL configuration, or remove `acl_policy` and " \
+            "use only `set_default_acl`."
+        end
+        # `owner: :self` is a special marker meaning "the record itself is
+        # its own owner" — only meaningful for Parse::User and subclasses,
+        # where the record IS a user. The save-time resolver pre-generates
+        # `@id` via Parse::Core::ParseReference.generate_object_id when
+        # blank so the ACL can grant R/W to the record's own objectId in
+        # a single roundtrip. Non-User classes have no sensible
+        # interpretation (a Post's objectId is not a user id).
+        if owner == :self && !(self <= Parse::User)
+          raise ArgumentError,
+            "#{self}: `owner: :self` is only supported on Parse::User and " \
+            "its subclasses (the record IS the owner). For other classes, " \
+            "declare a belongs_to pointer to the owning user."
+        end
+        if owner && !policy.to_s.start_with?("owner_")
+          warn "[#{self}] `owner:` is ignored when acl_policy is #{policy.inspect}; only :owner_else_public and :owner_else_private use it."
+        end
+        if owner.nil? && policy.to_s.start_with?("owner_")
+          fallback = (policy == :owner_else_public) ? "public R/W" : "master-key-only"
+          warn "[#{self}] acl_policy #{policy.inspect} declared without `owner:` field; ACL resolution will always use the fallback (#{fallback}). Pass `as:` at construction to override."
+        end
+        @acl_policy_setting = policy
+        @acl_owner_field = owner
+        # Reset materialized default_acls so it picks up the new policy's fallback half.
+        @default_acls = nil
+        # Re-arm the permissive-default warning so a subsequent change is re-evaluated.
+        @_permissive_default_warned = nil
+        policy
+      end
+
+      # The effective ACL policy for this class. Inherits from the superclass
+      # when not explicitly declared. The gem-wide default is
+      # `:owner_else_private` — records grant read/write to the resolved
+      # owner (from `as:` or the class's `owner:` field) when one is
+      # supplied, and fall back to master-key-only when no owner is
+      # resolvable. `default_acl_private = true` is honored as `:private`.
+      # Classes that need public access for new records should declare
+      # `acl_policy :public` or `:owner_else_public` explicitly, or use
+      # the legacy `set_default_acl` additive API.
+      # @return [Symbol] one of {VALID_ACL_POLICIES}.
+      # @version 4.1.0
+      def acl_policy_setting
+        return @acl_policy_setting if defined?(@acl_policy_setting) && @acl_policy_setting
+        return :private if default_acl_private
+        if self == Parse::Object
+          :owner_else_private
+        elsif superclass.respond_to?(:acl_policy_setting)
+          superclass.acl_policy_setting
+        else
+          :owner_else_private
+        end
+      end
+
+      # The name of the property/belongs_to designating the owner user for
+      # `:owner_else_*` ACL policies. Inherited from the superclass when not
+      # explicitly declared via {acl_policy}.
+      # @return [Symbol,nil]
+      # @version 4.1.0
+      def acl_owner_field
+        return @acl_owner_field if defined?(@acl_owner_field) && @acl_owner_field
+        if self != Parse::Object && superclass.respond_to?(:acl_owner_field)
+          superclass.acl_owner_field
+        else
+          nil
+        end
+      end
+
+      # SDK-provided Parse model class names that the policy resolver and
+      # init-time default-ACL stamp both skip. Parse Server applies its own
+      # per-class defaults for these classes when the save body omits the
+      # `ACL` field — most importantly, `_User` gets `{"<user-id>": R/W,
+      # "*": R}` so the newly created user can edit their own profile.
+      # Stamping any ACL from the SDK side (even `{}`) overrides those
+      # server-side defaults and is almost always wrong.
+      BUILTIN_PARSE_CLASS_NAMES = %w[
+        Parse::User Parse::Installation Parse::Session Parse::Role
+        Parse::Product Parse::PushStatus Parse::Audience
+        Parse::JobStatus Parse::JobSchedule
+      ].freeze
+
+      # @!visibility private
+      # True when this class is one of the SDK's built-in Parse model
+      # classes ({BUILTIN_PARSE_CLASS_NAMES}). Mostly used internally to
+      # decide whether the SDK should bypass its default-ACL stamping.
+      def builtin_parse_class?
+        BUILTIN_PARSE_CLASS_NAMES.include?(name)
+      end
+
+      # @!visibility private
+      # True when this class is a built-in AND the application has not
+      # customized its ACL configuration via either `acl_policy` or
+      # `set_default_acl`. Under these conditions the SDK leaves `obj.acl`
+      # nil so the save body omits the `ACL` field and Parse Server applies
+      # its own per-class defaults (most importantly, `_User` → self R/W +
+      # public read). If the application has called `acl_policy` or
+      # `set_default_acl` on the built-in, the SDK respects that
+      # customization and runs the normal stamp / resolver path.
+      def builtin_acl_default_active?
+        return false unless builtin_parse_class?
+        return false if defined?(@acl_policy_setting) && @acl_policy_setting
+        return false if defined?(@acl_default_customized_by_set_default_acl) &&
+                        @acl_default_customized_by_set_default_acl
+        true
+      end
+
+      # @!visibility private
+      # Emits a one-time warning per class when the effective default ACL policy
+      # is permissive (`:public` or `:owner_else_public`). Suppressed for the
+      # Parse::Object base class and the SDK's built-in Parse model classes.
+      # Set `Parse::Object.suppress_permissive_acl_warning = true` globally (or
+      # via the `PARSE_SUPPRESS_PERMISSIVE_ACL_WARNING` env var) to disable.
+      def _warn_permissive_acl_default_once
+        return if defined?(@_permissive_default_warned) && @_permissive_default_warned
+        @_permissive_default_warned = true
+        return if self == Parse::Object
+        return if BUILTIN_PARSE_CLASS_NAMES.include?(name)
+        return if Parse::Object.suppress_permissive_acl_warning
+        policy = acl_policy_setting
+        return unless policy == :public || policy == :owner_else_public
+        warn "[Parse::Stack security] #{self} uses permissive default ACL policy " \
+             "`#{policy}`. New records can be modified by anyone unless an owner " \
+             "is resolved at save. Call `acl_policy :owner_else_private` or " \
+             "`:private` in the class to silence this warning."
       end
 
       # @!group Class-Level Permissions (CLP)
@@ -516,6 +742,112 @@ module Parse
 
       alias_method :set_class_permission, :set_clp
 
+      # Lock every CLP operation to master-key access only. Use as a starting
+      # point when a class should be entirely hidden from clients; you can
+      # then selectively open specific operations with {set_clp} or
+      # {set_class_access} afterward.
+      #
+      # @example Hide a class entirely from clients
+      #   class AuditLog < Parse::Object
+      #     master_only_class!
+      #   end
+      #
+      # @example Hide everything, then open create+get for clients
+      #   class Invitation < Parse::Object
+      #     master_only_class!
+      #     set_clp :create, public: true
+      #     set_clp :get, public: true
+      #   end
+      #
+      # @return [void]
+      def master_only_class!
+        Parse::CLP::OPERATIONS.each { |op| set_clp(op) }
+        nil
+      end
+
+      # Restrict `find` and `count` to master-key only, leaving the other
+      # operations (`get`, `create`, `update`, `delete`, `addField`) at their
+      # current settings. This is the canonical "Installation-style" pattern:
+      # clients can interact with individual records but cannot enumerate or
+      # count them.
+      #
+      # @example Mirror _Installation semantics
+      #   class Invitation < Parse::Object
+      #     unlistable_class!
+      #     # clients can still get/create/update/delete by objectId
+      #   end
+      #
+      # @return [void]
+      def unlistable_class!
+        set_clp(:find)
+        set_clp(:count)
+        nil
+      end
+
+      # Set CLP for multiple operations in one call, choosing a coarse access
+      # mode per operation. Each value can be:
+      #
+      # * `:master` / `:master_only` / `nil` / `false` -- master key only
+      #   (Parse Server's empty `{}` permission for that op)
+      # * `:public` / `true`                            -- wildcard `*` access
+      # * `:authenticated`                              -- requiresAuthentication
+      # * a String or Symbol                            -- a single role name
+      #   (the `role:` prefix is added automatically)
+      # * an Array of Strings/Symbols                   -- multiple role names
+      #
+      # Operations not listed in the hash are left at their current setting.
+      # For finer control (mixed roles, users, pointer-fields,
+      # requires_authentication) use {set_clp} directly.
+      #
+      # @example The _Installation pattern -- get-by-id and create, but no listing
+      #   class Invitation < Parse::Object
+      #     set_class_access(
+      #       find:     :master,        # nobody can list
+      #       count:    :master,        # nobody can count
+      #       get:      :public,        # anyone with the id can fetch
+      #       create:   :authenticated, # logged-in users may create
+      #       update:   :master,        # only server may update
+      #       delete:   :master,        # only server may delete
+      #     )
+      #   end
+      #
+      # @example Admin-only writes, public reads
+      #   class Article < Parse::Object
+      #     set_class_access(
+      #       find: :public, get: :public,
+      #       create: "Admin", update: "Admin", delete: "Admin",
+      #     )
+      #   end
+      #
+      # @param ops_to_access [Hash{Symbol => Symbol,String,Array,Boolean,nil}]
+      # @return [void]
+      def set_class_access(**ops_to_access)
+        ops_to_access.each do |op, access|
+          op = op.to_sym
+          unless Parse::CLP::OPERATIONS.include?(op)
+            raise ArgumentError,
+                  "Unknown CLP operation #{op.inspect}. Allowed: #{Parse::CLP::OPERATIONS.inspect}"
+          end
+          case access
+          when :master, :master_only, nil, false
+            set_clp(op)
+          when :public, true
+            set_clp(op, public: true)
+          when :authenticated
+            set_clp(op, requires_authentication: true)
+          when Array
+            set_clp(op, roles: access.map(&:to_s))
+          when String, Symbol
+            set_clp(op, roles: [access.to_s])
+          else
+            raise ArgumentError,
+                  "Unknown class_access value for :#{op}: #{access.inspect}. " \
+                  "Use :master, :public, :authenticated, a role name, or an array of roles."
+          end
+        end
+        nil
+      end
+
       # Define protected fields that should be hidden from certain users/roles.
       # This is used to implement field-level security.
       #
@@ -592,6 +924,92 @@ module Parse
       end
 
       alias_method :set_protected_fields, :protect_fields
+
+      # Introspect the locally-configured access surface for this class.
+      # Combines the CLP operations, protectedFields read-side hiding, and
+      # the write-side protections installed via the field_guards DSL into
+      # a single hash, so it's easy to audit who can do what to which
+      # fields without reading three separate parts of the class body.
+      #
+      # The hash is built from the Parse-Stack model declarations only. It
+      # does NOT round-trip the Parse Server schema; if you've configured
+      # CLPs on the server side that haven't been mirrored locally, those
+      # won't appear here. Conversely, calling `update_clp!` pushes what
+      # this method reflects.
+      #
+      # @example
+      #   class Post < Parse::Object
+      #     property :title, :string
+      #     property :owner, :string
+      #     guard :owner, :master_only
+      #     parse_reference
+      #     set_class_access(find: :public, create: :authenticated, update: "Admin")
+      #   end
+      #
+      #   Post.describe_access
+      #   # =>
+      #   # {
+      #   #   operations: {
+      #   #     find:   { "*" => true },
+      #   #     create: { "requiresAuthentication" => true },
+      #   #     update: { "role:Admin" => true },
+      #   #     ...
+      #   #   },
+      #   #   read_user_fields:  [],
+      #   #   write_user_fields: [],
+      #   #   fields: {
+      #   #     title:           { write: :open,        read: :open },
+      #   #     owner:           { write: :master_only, read: :open },
+      #   #     parse_reference: { write: :set_once,    read: { hidden_from: ["*"] } },
+      #   #   },
+      #   # }
+      #
+      # @return [Hash]
+      def describe_access
+        perms = class_permissions
+        protected_by_pattern = perms.respond_to?(:protected_fields) ? perms.protected_fields : {}
+        guards_map = respond_to?(:field_guards) && field_guards ? field_guards : {}
+
+        # Per-field access summary. Iterate `field_map` (local -> remote)
+        # rather than `fields`, because `fields` redundantly stores BOTH
+        # the local key (e.g. :full_name) and the remote key (:fullName)
+        # for every property. That redundancy would cause multi-word
+        # properties to appear twice in the output.
+        per_field = {}
+        field_map.each do |local_sym, remote_sym|
+          local_sym = local_sym.to_sym
+          next if Parse::Properties::CORE_FIELDS.key?(local_sym)
+          data_type = fields[local_sym]
+          remote = remote_sym.to_s
+
+          # Read protection -- collect every protectedFields pattern that
+          # lists this field (under either its local or remote name).
+          hidden_from = protected_by_pattern.each_with_object([]) do |(pattern, hidden_fields), acc|
+            acc << pattern if hidden_fields.include?(remote) || hidden_fields.include?(local_sym.to_s)
+          end
+
+          per_field[local_sym] = {
+            write: guards_map[local_sym] || :open,
+            read:  hidden_from.empty? ? :open : { hidden_from: hidden_from },
+            type:  data_type,
+          }
+        end
+
+        # Deep-copy the operations hash so callers mutating the result
+        # don't accidentally mutate the live class_permissions state.
+        operations = if perms.respond_to?(:permissions)
+            perms.permissions.transform_values { |v| v.is_a?(Hash) ? v.dup : v }
+          else
+            {}
+          end
+
+        {
+          operations:        operations,
+          read_user_fields:  perms.respond_to?(:read_user_fields)  ? perms.read_user_fields  : [],
+          write_user_fields: perms.respond_to?(:write_user_fields) ? perms.write_user_fields : [],
+          fields:            per_field,
+        }
+      end
 
       # Fetch the current CLP from the Parse Server for this class.
       # @param client [Parse::Client] optional client to use
@@ -834,21 +1252,80 @@ module Parse
     #    post = Post.new title: "My Title"
     #    post.title # => "My Title"
     #
-    #   @param hash [Hash] the hash representing the object
+    #   @param hash [Hash] the hash representing the object.
+    #     Untrusted by default: keys in
+    #     {Parse::Properties::PROTECTED_INITIALIZE_KEYS} (+sessionToken+,
+    #     +_rperm+, +_wperm+, +_hashed_password+, +authData+, +roles+)
+    #     are filtered out even when an +objectId+ is present. This
+    #     closes the mass-assignment hole where +klass.new(attacker_params)+
+    #     on a hash that happens to include +objectId+ would overwrite
+    #     session tokens, ACLs, and auth data. Use {Parse::Object.build}
+    #     for trusted hydration from server JSON; it bypasses the filter.
     # @return [Parse::Object] a the corresponding Parse::Object or subclass.
     def initialize(opts = {})
+      # Trusted hydration is signalled by the +@_trusted_init+ instance
+      # variable rather than by a +trusted:+ keyword argument. Using a
+      # keyword would break subclasses that override +initialize(*args)+
+      # and call +super+ — Ruby 3 keyword-arg semantics would convert the
+      # kwarg into a positional Hash through the variadic +*args+ splat
+      # and the subsequent +super+ would arrive at this method with two
+      # positional args. The internal hydration paths
+      # ({Parse::Object.build}, {Parse::Pointer} autofetch,
+      # {Parse::User#session}) +allocate+ the object, set the ivar, then
+      # invoke +initialize+ so subclass overrides still fire and pick up
+      # the trust signal here.
+      trusted = @_trusted_init == true
+      @_trusted_init = nil
+      acl_owner_override = nil
       if opts.is_a?(String) #then it's the objectId
         @id = opts.to_s
       elsif opts.is_a?(Hash)
+        # Pop the `:as` option (also accepts string key) before applying
+        # attributes so it is not mistaken for a model property. This holds
+        # the caller-supplied owner user for save-time ACL resolution.
+        acl_owner_override = opts.delete(:as) || opts.delete("as")
         #if the objectId is provided we will consider the object pristine
         #and not track dirty items
         dirty_track = opts[Parse::Model::OBJECT_ID] || opts[:objectId] || opts[:id]
-        apply_attributes!(opts, dirty_track: !dirty_track)
+        # Always filter the narrow PROTECTED_INITIALIZE_KEYS set unless
+        # the caller is a trusted hydration path. Decoupled from
+        # dirty_track so an objectId-bearing hash from a controller,
+        # JSON params, or cache rehydrator cannot mass-assign
+        # sessionToken / _rperm / _wperm / _hashed_password / authData /
+        # roles. The narrow list deliberately allows createdAt /
+        # updatedAt / className / __type through so the legitimate
+        # +Klass.new("objectId" => id, "createdAt" => ts, …)+
+        # cache-rehydrate pattern keeps working.
+        apply_attributes!(opts,
+                          dirty_track: !dirty_track,
+                          filter_protected: !trusted,
+                          protected_set: Parse::Properties::PROTECTED_INITIALIZE_KEYS)
       end
 
-      # if no ACLs, then apply the class default acls
-      # ACL.typecast will auto convert of Parse::ACL
-      self.acl = self.class.default_acls.as_json if self.acl.nil?
+      # If the caller did not set an ACL via opts, stamp the class default ACL
+      # (the policy's fallback half) so `obj.acl` reads sensibly pre-save.
+      # We mark the object as "ACL-pristine": the save-time resolver
+      # (#_resolve_default_acl) may upgrade this to an owner-only ACL if an
+      # `as:` user or owner field is resolvable. Any explicit caller change
+      # via `acl=` flips pristine off via #acl_will_change!.
+      #
+      # Built-in Parse classes (User, Installation, Session, Role, …) are
+      # exempt: the SDK leaves their `acl` untouched (nil) so the save body
+      # omits the `ACL` field and Parse Server applies its own per-class
+      # defaults. Most importantly this lets `_User` get the standard
+      # self-write-plus-public-read ACL on signup; stamping any value from
+      # the SDK side (even `{}`) overrides that and locks the new user out
+      # of editing their own profile without the master key.
+      acl_was_user_supplied = !self.acl.nil?
+      unless self.class.builtin_acl_default_active?
+        self.acl = self.class.default_acls.as_json if self.acl.nil?
+      end
+      @_acl_pristine = !acl_was_user_supplied
+      @_acl_owner_override = acl_owner_override
+
+      # One-time per-class permissive-default warning. Fires only when the
+      # effective policy is :public or :owner_else_public.
+      self.class._warn_permissive_acl_default_once
 
       # do not apply defaults on a pointer because it will stop it from being
       # a pointer and will cause its field to be autofetched (for sync).
@@ -923,11 +1400,18 @@ module Parse
       @_acl_snapshot_before_change = nil
     end
 
-    # An object is considered new if it has no id. This is the method to use
-    # in a webhook beforeSave when checking if this object is new.
-    # @return [Boolean] true if the object has no id.
+    # An object is considered new until it has been successfully persisted to
+    # the server. "Persisted" means the server has returned a `createdAt`
+    # timestamp, which only happens after a successful create. Checking
+    # @id alone is not sufficient: the `parse_reference precompute: true`
+    # path assigns @id client-side in a `before_create` callback, so an
+    # @id-only check would flip mid-callback-chain and confuse user code
+    # (validation `on: :create / :update`, beforeSave handlers, etc.).
+    # Treating an object as "new" until createdAt arrives keeps semantics
+    # stable from the first `before_save` through the end of `after_create`.
+    # @return [Boolean] true if the object has not yet been persisted.
     def new?
-      @id.blank?
+      @id.blank? || @created_at.nil?
     end
 
     # Override valid? to run validation callbacks.
@@ -1193,12 +1677,33 @@ module Parse
     # @param nested_fetched_keys [Hash] optional map of field names to their fetched keys for nested objects.
     # @return [Parse::Object] an instance of the Parse subclass
     def self.build(json, table = nil, fetched_keys: nil, nested_fetched_keys: nil)
+      # Precedence (most → least authoritative):
+      # 1. Caller-supplied +table+ — caller knows the expected class
+      #    (e.g. webhook payload routed to a typed handler, has_many that
+      #    knows its declared target class).
+      # 2. The subclass +parse_class+ when invoked on a Parse::Object
+      #    subclass directly (Song.build(json)).
+      # 3. The className inside the JSON — only trusted when neither of
+      #    the above is available (e.g. base-class +Parse::Object.build+
+      #    on untyped JSON).
+      # Warn on mismatch between an explicit caller class and the
+      # payload-supplied className so type-confusion attacks surface in
+      # logs.
+      incoming_class = nil
+      if json.is_a?(Hash)
+        incoming_class = json[Parse::Model::KEY_CLASS_NAME] || json[:className]
+      end
       className = table
-      className ||= (json[Parse::Model::KEY_CLASS_NAME] || json[:className]) if json.is_a?(Hash)
+      if className.nil? && parse_class != BASE_OBJECT_CLASS
+        className = parse_class
+      end
+      className ||= incoming_class
+      if className && incoming_class && incoming_class != className
+        warn "[Parse::Object.build] expected className=#{className.inspect}, ignoring incoming className=#{incoming_class.inspect}"
+      end
       if json.is_a?(Hash) && json["error"].present? && json["code"].present?
         warn "[Parse::Object] Detected object hash with 'error' and 'code' set. : #{json}"
       end
-      className = parse_class unless parse_class == BASE_OBJECT_CLASS
       return if className.nil?
       # we should do a reverse lookup on who is registered for a different class type
       # than their name with parse_class
@@ -1221,6 +1726,14 @@ module Parse
           o.instance_variable_set(:@_fetched_keys, processed_keys)
         end
 
+        # Trusted hydration: this path runs on server-side JSON (response
+        # bodies, webhook payloads that have already been scrubbed,
+        # autofetch results). Server responses legitimately include
+        # protected keys like +sessionToken+, +_rperm+ that must populate
+        # the in-memory object. Untrusted +klass.new(hash)+ callers
+        # default to filter those keys. The +@_trusted_init+ ivar is the
+        # signal — see {#initialize} for why we don't use a kwarg.
+        o.instance_variable_set(:@_trusted_init, true)
         o.send(:initialize, json)
       else
         o = Parse::Pointer.new className, (json[Parse::Model::OBJECT_ID] || json[:objectId])
@@ -1248,10 +1761,122 @@ module Parse
     #  @return [ACL] the access control list (permissions) object for this record.
     property :acl, :acl, field: :ACL
 
+    # Save-time resolver for the declarative {acl_policy} default ACL.
+    # Runs as a `before_save` callback. If the caller has not overridden the
+    # ACL (no `acl=` since the init-time default stamp), resolves an owner
+    # from `@_acl_owner_override` (the `as:` kwarg) or from the class's
+    # declared owner field, and applies an owner-only ACL. Falls back to
+    # the policy's else-half (`:public` or `:private`) when no owner is
+    # resolvable.
+    # @api private
+    def _resolve_default_acl
+      return true unless defined?(@_acl_pristine) && @_acl_pristine
+      # Legacy classes that customize defaults via set_default_acl opt out
+      # of the policy resolver: the init-time stamp already reflects the
+      # caller's intent and we must not overwrite it.
+      return true if self.class.acl_default_customized_by_set_default_acl?
+      # Built-in Parse classes (User, Installation, Session, …) are exempt
+      # by default; see the matching guard in #initialize. Parse Server
+      # applies its own ACL defaults when the save body omits the `ACL`
+      # field, and those defaults (e.g. `_User` → self-write + public read)
+      # are the right answer in nearly every case. Applications that need
+      # to customize a built-in's ACL policy do so by calling `acl_policy`
+      # or `set_default_acl` on the class — that flips
+      # `builtin_acl_default_active?` to false and re-enables both the
+      # init-time stamp and this resolver for that class.
+      return true if self.class.builtin_acl_default_active?
+      policy = self.class.acl_policy_setting
+
+      owner = @_acl_owner_override if defined?(@_acl_owner_override)
+      if owner.nil? && (field = self.class.acl_owner_field)
+        owner = if field == :self
+          # Self-referential ownership (Parse::User only — enforced at
+          # declaration time). Pre-generate a Parse-compatible objectId
+          # client-side so the ACL grant can reference the record's own
+          # id in the same POST body that creates it. Skipped when the id
+          # is already set (e.g. when re-saving an existing user, or when
+          # parse_reference precompute already ran).
+          @id = Parse::Core::ParseReference.generate_object_id if @id.blank?
+          @id
+        elsif respond_to?(field)
+          send(field)
+        end
+      end
+      owner_id = _resolve_acl_owner_id(owner)
+
+      target_acl = case policy
+                   when :public
+                     Parse::ACL.everyone(true, true)
+                   when :private
+                     Parse::ACL.private
+                   when :owner_else_public
+                     if owner_id
+                       acl = Parse::ACL.new
+                       acl.apply(owner_id, true, true)
+                       acl
+                     else
+                       Parse::ACL.everyone(true, true)
+                     end
+                   when :owner_else_private
+                     if owner_id
+                       acl = Parse::ACL.new
+                       acl.apply(owner_id, true, true)
+                       acl
+                     else
+                       Parse::ACL.private
+                     end
+                   end
+
+      # Only re-stamp if the resolved ACL differs from the init-time stamp;
+      # this avoids an unnecessary dirty mark on the acl field for `:public`
+      # / `:private` policies where the init stamp already matches.
+      if @acl.nil? || @acl.as_json != target_acl.as_json
+        self.acl = target_acl.as_json
+      end
+      # @_acl_pristine is now false via #acl_will_change! (when re-stamped)
+      # or it remains true (when nothing needed to change); either way the
+      # resolver has done its job and need not run again. Return a non-false
+      # value so the save callback chain is not halted by the model's
+      # terminator (`result_lambda.call == false`).
+      @_acl_pristine = false
+      true
+    end
+
+    # @api private
+    # Resolves an `as:` value or owner-field pointer to an objectId string.
+    # Strictly type-gated to Parse::User-shaped inputs to prevent accidental
+    # ACL grants to non-user records (Roles use `role:` ACL keys, not raw
+    # objectIds; pointers to non-User classes would silently grant access to
+    # whatever record happens to share that objectId in the User collection).
+    # Accepted forms:
+    #   - Parse::User instance
+    #   - Parse::Pointer with parse_class == "_User"
+    #   - Raw objectId String (caller's responsibility to ensure it is a user id)
+    # Anything else returns nil and the policy falls through to its else-half.
+    def _resolve_acl_owner_id(owner)
+      return nil if owner.nil?
+      return nil if owner.respond_to?(:empty?) && owner.empty?
+      if owner.is_a?(Parse::Pointer)
+        return nil unless owner.parse_class == Parse::Model::CLASS_USER
+        return owner.id if owner.id.present?
+        return nil
+      end
+      return owner if owner.is_a?(String) && owner.present?
+      nil
+    end
+
+    set_callback :save, :before, :_resolve_default_acl
+
     # Override acl_will_change! to capture a snapshot of the ACL before modification.
     # This is necessary because ACL is a mutable object that can be modified in place
     # (via apply, apply_role, etc.). Without this, acl_was would return a reference
     # to the same object as acl, making them appear identical after in-place changes.
+    #
+    # Also clears the ACL-pristine flag so the save-time default-ACL resolver
+    # leaves caller-set ACLs alone. The initial default stamp performed in
+    # {#initialize} is excluded by re-asserting `@_acl_pristine = true` after
+    # the stamp, so this hook can safely treat any subsequent change as a
+    # caller intent to override.
     # @api private
     def acl_will_change!
       # Only capture snapshot on the first change (before any modifications)
@@ -1259,8 +1884,16 @@ module Parse
         # Deep copy the ACL by creating a new one from its JSON representation
         @_acl_snapshot_before_change = @acl ? Parse::ACL.new(@acl.as_json) : Parse::ACL.new
       end
+      @_acl_pristine = false if defined?(@_acl_pristine)
       super
     end
+
+    # EnhancedChangeTracking defines acl_was via define_method when
+    # `property :acl` is processed above. Remove that definition so the
+    # explicit override below does not emit "method redefined" under ruby -W.
+    # The override is intentional - ACL needs snapshot-based dirty tracking
+    # because it is a mutable object.
+    remove_method(:acl_was) if method_defined?(:acl_was, false)
 
     # Override acl_was to return the captured snapshot instead of the reference
     # stored by ActiveModel's dirty tracking.
@@ -1382,15 +2015,36 @@ class Array
   # This helper method selects or converts all objects in an array that are either inherit from
   # Parse::Pointer or are a JSON Parse hash. If it is a hash, a Pare::Object will be built from it
   # if it constrains the proper fields. Non-convertible objects will be removed.
-  # If the className is not contained or known, you can pass a table name as an argument
-  # @param className [String] the name of the Parse class if it could not be detected.
+  #
+  # When +className+ is provided by the caller, it is treated as authoritative
+  # — incoming hash +className+ values are ignored. This blocks attacker-
+  # controlled type confusion when this helper is invoked from typed
+  # associations (+has_many+, +belongs_to+) that already know the expected
+  # class.
+  #
+  # When +className+ is +nil+ (caller is doing untyped array conversion),
+  # the helper falls back to the hash-supplied className for compatibility
+  # with raw JSON deserialization callers.
+  #
+  # @param className [String, nil] the authoritative Parse class name.
   # @return [Array<Parse::Object>] an array of Parse::Object subclasses.
   def parse_objects(className = nil)
     f = Parse::Model::KEY_CLASS_NAME
     map do |m|
       next m if m.is_a?(Parse::Pointer)
-      if m.is_a?(Hash) && (m[f] || m[:className] || className)
-        next Parse::Object.build m, (m[f] || m[:className] || className)
+      if m.is_a?(Hash)
+        resolved = if className
+                     # Caller knows the type; warn on mismatch but always
+                     # use the declared className.
+                     incoming = m[f] || m[:className]
+                     if incoming && incoming != className
+                       warn "[Parse::Array#parse_objects] expected className=#{className.inspect}, ignoring incoming className=#{incoming.inspect}"
+                     end
+                     className
+                   else
+                     m[f] || m[:className]
+                   end
+        next Parse::Object.build(m, resolved) if resolved
       end
       nil
     end.compact
@@ -1405,6 +2059,8 @@ end
 # Load all the core classes.
 require_relative "classes/audience"
 require_relative "classes/installation"
+require_relative "classes/job_schedule"
+require_relative "classes/job_status"
 require_relative "classes/product"
 require_relative "classes/push_status"
 require_relative "classes/role"

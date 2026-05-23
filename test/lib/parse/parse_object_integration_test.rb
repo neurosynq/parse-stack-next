@@ -6,7 +6,6 @@ class TestObject < Parse::Object
   property :test, :string
   property :foo, :string
   property :adventure, :string
-  property :location, :string
   property :coordinates, :geopoint
   property :a_bool, :boolean
   property :counter, :integer
@@ -29,6 +28,7 @@ class TestObject < Parse::Object
   property :date_field, :date
   property :location, :geopoint
   property :avatar, :file
+  property :region, :polygon
 end
 
 class Item < Parse::Object
@@ -689,6 +689,84 @@ class ParseObjectIntegrationTest < Minitest::Test
 
       # Clean up
       object_again.destroy
+    end
+  end
+
+  def test_polygon_save_and_retrieve
+    with_parse_server do
+      object = TestObject.new
+      object[:test] = "Polygon Save"
+      # Bermuda Triangle as [lat, lng] vertices.
+      object[:region] = [
+        [32.3078, -64.7505],
+        [25.7823, -80.2660],
+        [18.3848, -66.0934],
+      ]
+
+      assert object.save, "Should save object with Polygon"
+
+      retrieved = TestObject.query.get(object.id)
+      polygon = retrieved[:region]
+
+      assert polygon.is_a?(Parse::Polygon), "Should retrieve Parse::Polygon (got #{polygon.class})"
+      # Parse Server auto-closes the ring, so length is original + 1.
+      assert polygon.coordinates.length >= 3, "Polygon should have at least 3 vertices"
+      assert_in_delta polygon.coordinates.first[0], 32.3078, 0.0001
+      assert_in_delta polygon.coordinates.first[1], -64.7505, 0.0001
+
+      retrieved.destroy
+    end
+  end
+
+  def test_polygon_serialization_round_trip
+    with_parse_server do
+      polygon = Parse::Polygon.new(
+        "__type" => "Polygon",
+        "coordinates" => [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
+      )
+
+      object = TestObject.new
+      object[:test] = "Polygon RT"
+      object[:region] = polygon
+      assert object.save
+
+      retrieved = TestObject.query.get(object.id)
+      assert retrieved[:region].is_a?(Parse::Polygon)
+      assert_equal retrieved[:region].coordinates.first, [0.0, 0.0]
+
+      retrieved.destroy
+    end
+  end
+
+  def test_polygon_contains_query
+    with_parse_server do
+      inside = TestObject.new
+      inside[:test] = "Inside Bermuda"
+      inside[:region] = [
+        [32.3078, -64.7505],
+        [25.7823, -80.2660],
+        [18.3848, -66.0934],
+      ]
+      assert inside.save
+
+      outside = TestObject.new
+      outside[:test] = "Pacific Triangle"
+      outside[:region] = [
+        [37.7749, -122.4194],
+        [34.0522, -118.2437],
+        [32.7157, -117.1611],
+      ]
+      assert outside.save
+
+      point = Parse::GeoPoint.new(26.0, -71.0)
+      results = TestObject.all(:region.polygon_contains => point)
+
+      ids = results.map(&:id)
+      assert ids.include?(inside.id), "Should match polygon that contains the point"
+      refute ids.include?(outside.id), "Should not match polygon that does not contain the point"
+
+      inside.destroy
+      outside.destroy
     end
   end
 

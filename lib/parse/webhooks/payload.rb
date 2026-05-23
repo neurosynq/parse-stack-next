@@ -78,19 +78,52 @@ module Parse
         hash = Hash[hash.map { |k, v| [k.to_s.underscore.to_sym, v] }]
         @raw = hash
         @master = hash[:master]
-        @user = Parse::User.new hash[:user] if hash[:user].present?
+        # Strip protected mass-assignment keys (sessionToken, _rperm, _wperm,
+        # _hashed_password, authData, roles, etc.) BEFORE constructing the
+        # user object. Without this, an attacker reaching the webhook
+        # endpoint with a valid key (or with the optional unauthenticated
+        # mode enabled) can forge any of these fields on +payload.user+
+        # via the +objectId+-present hydration branch that bypasses the
+        # +Parse::Object#apply_attributes!+ protected-key filter.
+        if hash[:user].present?
+          @user = Parse::User.new(self.class.scrub_protected_keys(hash[:user]))
+        end
         @installation_id = hash[:installation_id]
         @params = hash[:params]
         @params = @params.with_indifferent_access if @params.is_a?(Hash)
         @function_name = hash[:function_name]
-        @object = hash[:object]
+        @object = self.class.scrub_protected_keys(hash[:object])
         @trigger_name = hash[:trigger_name]
-        @original = hash[:original]
-        @update = hash[:update] || {} #it comes as an update hash
+        @original = self.class.scrub_protected_keys(hash[:original])
+        @update = self.class.scrub_protected_keys(hash[:update]) || {}
         # Added for beforeFind and afterFind triggers
         @query = hash[:query]
         @objects = hash[:objects] || []
         @log = hash[:log]
+      end
+
+      # @!visibility private
+      # Routing metadata that must be preserved on payload hashes even
+      # though the general mass-assignment denylist forbids it. Stripping
+      # +className+ here breaks +parse_class+/+parse_object+ resolution and
+      # silently disables +payload_class_mismatch?+. The denylist still
+      # protects +Parse::Object#apply_attributes!+ at hydration time.
+      PAYLOAD_PRESERVED_KEYS = %w[className __type].freeze
+
+      # @!visibility private
+      # Returns a copy of +obj+ with the +PROTECTED_MASS_ASSIGNMENT_KEYS+
+      # removed, except for routing metadata in +PAYLOAD_PRESERVED_KEYS+.
+      # Operates on string and symbol keys (Parse Server uses camelCase
+      # strings on the wire; downstream code may have already symbolized).
+      # Pass-through for non-Hash input.
+      def self.scrub_protected_keys(obj)
+        return obj unless obj.is_a?(Hash)
+        denied = Parse::Properties::PROTECTED_MASS_ASSIGNMENT_KEYS
+        obj.reject do |k, _|
+          name = k.to_s
+          next false if PAYLOAD_PRESERVED_KEYS.include?(name)
+          denied.include?(name) || denied.include?(name.underscore)
+        end
       end
 
       # @return [ATTRIBUTES]
@@ -187,7 +220,10 @@ module Parse
       # @return [Parse::Object] a Parse::Object from the original object
       def original_parse_object
         return nil unless @original.is_a?(Hash)
-        Parse::Object.build(@original)
+        # Always pass the trigger's expected class explicitly so the
+        # className inside the payload cannot redirect this hydration to a
+        # different class.
+        Parse::Object.build(@original, parse_class)
       end
 
       # This method returns a Parse::Object by combining the original object, if was provided,
@@ -198,7 +234,40 @@ module Parse
       # @return [Parse::Object] a dirty tracked Parse::Object subclass instance
       def parse_object(pristine = false)
         return nil unless object?
-        return Parse::Object.build(@object) if pristine
+        return Parse::Object.build(@object, parse_class) if pristine
+        # Memoize so pre-block guard application and the user webhook handler
+        # observe the same instance. Otherwise field_guards applied on the
+        # framework's pre-built object would be invisible to the block's
+        # later parse_object call (which would construct a fresh dirty-tracked
+        # object from @object/@original).
+        return @parse_object if defined?(@parse_object) && !@parse_object.nil?
+        @parse_object = build_parse_object
+      end
+
+      # @!visibility private
+      # Returns +true+ when +@object+/+@original+ contain a className that
+      # disagrees with the trigger's expected class. Used to skip building
+      # a typed object when the payload was clearly forged or routed
+      # incorrectly.
+      def payload_class_mismatch?
+        expected = parse_class
+        return false if expected.nil?
+        [@object, @original, @update].any? do |h|
+          h.is_a?(Hash) && h["className"] && h["className"] != expected
+        end
+      end
+
+      # Force a fresh build, discarding any memoized parse_object. Used by the
+      # webhook framework after mutating @object / @update so a subsequent
+      # parse_object call picks up the modified payload state.
+      # @!visibility private
+      def reset_parse_object_cache!
+        @parse_object = nil
+      end
+
+      private
+
+      def build_parse_object
         # if its a before trigger, then we build the original object and apply the updates
         # in order to create a Parse::Object that has the dirty tracking information
         # if no original is nil, then it means this is a brand new object, so we create
@@ -206,7 +275,7 @@ module Parse
         if before_trigger?
           # if original is present, then this is a modified object
           if @original.present? && @original.is_a?(Hash)
-            o = Parse::Object.build @original
+            o = Parse::Object.build @original, parse_class
             o.apply_attributes! @object, dirty_track: true
 
             if o.is_a?(Parse::User) && @update.present? && @update["authData"].present?
@@ -226,8 +295,10 @@ module Parse
             end # if klass.present?
           end # if we have original
         end # if before_trigger?
-        Parse::Object.build(@object)
+        Parse::Object.build(@object, parse_class)
       end
+
+      public
 
       # This method will intentionally raise a {Parse::Webhooks::ResponseError} with
       # a specific message. When used inside of a registered cloud code webhook

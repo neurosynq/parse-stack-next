@@ -147,14 +147,16 @@ class PipelineValidatorTest < Minitest::Test
   # ============================================================
 
   def test_rejects_deeply_nested_pipeline
-    # Build a deeply nested structure
+    # Build a structure deeper than MAX_DEPTH (now 20 to accommodate real
+    # $facet+$lookup+$let chains). The DoS guardrail must still fire well
+    # before pathological depths.
     deep_value = { "value" => 1 }
-    15.times { deep_value = { "nested" => deep_value } }
+    (Parse::PipelineSecurity::MAX_DEPTH + 5).times { deep_value = { "nested" => deep_value } }
 
     error = assert_raises(Parse::Agent::PipelineValidator::PipelineSecurityError) do
       Parse::Agent::PipelineValidator.validate!([{ "$match" => deep_value }])
     end
-    assert_match(/depth/, error.message.downcase)
+    assert_match(/depth|nesting/, error.message.downcase)
   end
 
   # ============================================================
@@ -468,5 +470,70 @@ class AgentRateLimitingTest < Minitest::Test
     stats = agent.rate_limiter.stats
     assert_equal 60, stats[:limit]
     assert_equal 60, stats[:window]
+  end
+end
+
+# ============================================================
+# Wire-message sanitization for catch-all StandardError
+#
+# Regression coverage for the Scenario 4 finding from the v4.1.0 SRE drill:
+# Parse::Agent#execute's generic rescue must NOT echo the raised exception's
+# message into the response, because that message can carry infrastructure
+# topology (Redis hostnames, file paths, connection strings) into MCP
+# clients via tools/call content echo. Class+message belong in operator logs
+# only — the wire gets a generic indicator.
+# ============================================================
+
+class AgentInternalErrorSanitizationTest < Minitest::Test
+  def setup
+    unless Parse::Client.client?
+      Parse.setup(
+        server_url: "http://localhost:1337/parse",
+        application_id: "test-app-id",
+        api_key: "test-api-key",
+      )
+    end
+    @agent = Parse::Agent.new
+  end
+
+  def test_catch_all_rescue_does_not_leak_exception_message_into_response
+    # Force a tool dispatch path to raise a StandardError whose message
+    # would be PII / topology if echoed.
+    sentinel = "redis://internal-host.example.com:6379/3 connection refused"
+    klass = Class.new(StandardError)
+    Object.const_set(:AgentSanitizationLeakySentinel, klass) unless Object.const_defined?(:AgentSanitizationLeakySentinel)
+
+    Parse::Agent::Tools.stub(:invoke, ->(_agent, *_a, **_kw) { raise AgentSanitizationLeakySentinel, sentinel }) do
+      # Swallow the warn lines so test output stays clean — the warn IS the
+      # legitimate operator-side leak path we want to keep.
+      original_stderr = $stderr
+      $stderr = StringIO.new
+      begin
+        result = @agent.execute(:get_all_schemas)
+      ensure
+        operator_log = $stderr.string
+        $stderr = original_stderr
+      end
+
+      refute result[:success], "tool dispatch must fail when handler raises"
+      assert_equal :internal_error, result[:error_code]
+      refute_includes result[:error].to_s, sentinel,
+                      "wire response must not contain the raw exception message"
+      refute_includes result[:error].to_s, "redis://",
+                      "wire response must not contain backend connection strings"
+      refute_includes result[:error].to_s, "internal-host.example.com",
+                      "wire response must not contain internal hostnames"
+      assert_includes result[:error].to_s, "internal error",
+                      "wire response should give the LLM a generic indicator"
+      assert_includes result[:error].to_s, "get_all_schemas",
+                      "wire response should still name the tool that failed"
+
+      # Operator-side warn IS expected to include the full class+message so
+      # support engineers can diagnose. This is the documented split.
+      assert_includes operator_log, sentinel,
+                      "operator log SHOULD retain the full exception message"
+      assert_includes operator_log, "AgentSanitizationLeakySentinel",
+                      "operator log SHOULD retain the exception class name"
+    end
   end
 end

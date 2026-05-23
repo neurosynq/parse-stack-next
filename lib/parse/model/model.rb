@@ -71,12 +71,18 @@ module Parse
     CLASS_AUDIENCE = "_Audience"
     # The collection for Push Status in Parse. Used by Parse::PushStatus.
     CLASS_PUSH_STATUS = "_PushStatus"
+    # The collection for background job status in Parse. Used by Parse::JobStatus.
+    CLASS_JOB_STATUS = "_JobStatus"
+    # The collection for scheduled background jobs in Parse. Used by Parse::JobSchedule.
+    CLASS_JOB_SCHEDULE = "_JobSchedule"
     # The internal schema collection in Parse. Managed by Parse Server.
     CLASS_SCHEMA = "_SCHEMA"
     # The type label for hashes containing file data. Used by Parse::File.
     TYPE_FILE = "File"
     # The type label for hashes containing geopoints. Used by Parse::GeoPoint.
     TYPE_GEOPOINT = "GeoPoint"
+    # The type label for hashes containing polygons. Used by Parse::Polygon.
+    TYPE_POLYGON = "Polygon"
     # The type label for hashes containing a Parse object. Used by Parse::Object and subclasses.
     TYPE_OBJECT = "Object"
     # The type label for hashes containing a Parse date object. Used by Parse::Date.
@@ -152,6 +158,7 @@ module Parse
     def self.find_class(str)
       return Parse::File if str == TYPE_FILE
       return Parse::GeoPoint if str == TYPE_GEOPOINT
+      return Parse::Polygon if str == TYPE_POLYGON
       return Parse::Date if str == TYPE_DATE
       return Parse::Bytes if str == TYPE_BYTES
       # return Parse::User if str == "User"
@@ -160,8 +167,25 @@ module Parse
       str = str.to_s
       # Basically go through all Parse::Object subclasses and see who is has a parse_class
       # set to this string. We will cache the results for future use.
+      #
+      # Anonymous descendants (`Class.new(Parse::Object)` without an
+      # assigned constant) have `model_name.name == nil`, and the default
+      # `parse_class` implementation calls `model_name.name` and raises
+      # `ActiveModel::Name: Class name cannot be blank`. An unrescued
+      # raise here poisons every subsequent `find_class` call (cf.
+      # canonical-filter lookups, hidden-class registry, ACLScope role
+      # expansion). Some tests, however, override `parse_class` on an
+      # anonymous subclass to return a literal String — those are still
+      # legitimate findables. Rescue per-descendant so the iteration
+      # continues past the unnamed-and-default-parse_class case while
+      # still considering anonymous-but-overridden ones.
       @@model_cache[str] ||= Parse::Object.descendants.find do |f|
-        f.parse_class == str || f.parse_class == "_#{str}"
+        begin
+          cls = f.parse_class
+        rescue StandardError
+          next false
+        end
+        cls == str || cls == "_#{str}"
       end
     end
   end

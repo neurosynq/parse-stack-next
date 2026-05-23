@@ -6,6 +6,10 @@ require "active_support/inflector"
 require "active_support/core_ext/object"
 require "active_support/core_ext/string"
 require "active_support/core_ext"
+require "ipaddr"
+require "resolv"
+require "uri"
+require_relative "../model/file"
 
 module Parse
   # Interface to the CloudCode webhooks API.
@@ -14,6 +18,51 @@ module Parse
     module Registration
       # The set of allowed trigger types.
       ALLOWED_HOOKS = Parse::API::Hooks::TRIGGER_NAMES + [:function]
+
+      # @!visibility private
+      # Validates that a webhook endpoint URL is safe to register with
+      # Parse Server. Rejects non-http(s) schemes, embedded userinfo, and
+      # hostnames that resolve to loopback, link-local, RFC1918, CGNAT,
+      # multicast, or cloud-metadata addresses (covered by
+      # +Parse::File::BLOCKED_CIDRS+). Without these checks an attacker who
+      # can reach +register_webhook!+ could redirect Parse Server's trigger
+      # POSTs to an internal host (e.g. the cloud metadata service) and
+      # exfiltrate request bodies. Returns the input URL unchanged on
+      # success.
+      # @raise [ArgumentError] on any disallowed input.
+      def assert_webhook_url_safe!(url)
+        raise ArgumentError, "Webhook URL is required" if url.nil? || url.to_s.empty?
+        uri = begin
+          URI.parse(url.to_s)
+        rescue URI::InvalidURIError => e
+          raise ArgumentError, "Invalid webhook URL: #{e.message}"
+        end
+        unless %w[http https].include?(uri.scheme)
+          raise ArgumentError, "Webhook URL must be http(s) (got #{uri.scheme.inspect})"
+        end
+        host = uri.host
+        if host.nil? || host.empty?
+          raise ArgumentError, "Webhook URL missing host"
+        end
+        if uri.userinfo
+          raise ArgumentError, "Webhook URL must not include userinfo credentials"
+        end
+        if Parse::Webhooks.allow_private_webhook_urls
+          return url
+        end
+        addrs = Parse::File.resolve_addresses(host)
+        if addrs.empty?
+          raise ArgumentError, "Webhook URL host #{host} could not be resolved"
+        end
+        addrs.each do |ip|
+          if Parse::File::BLOCKED_CIDRS.any? { |cidr| cidr.include?(ip) }
+            raise ArgumentError,
+                  "Refusing to register webhook with private/internal " \
+                  "address #{ip} for host #{host}"
+          end
+        end
+        url
+      end
 
       # removes all registered webhook functions with Parse Server.
       def remove_all_functions!
@@ -41,6 +90,7 @@ module Parse
         unless endpoint.present? && (endpoint.starts_with?("http://") || endpoint.starts_with?("https://"))
           raise ArgumentError, "The HOOKS_URL must be http/s: '#{endpoint}''"
         end
+        assert_webhook_url_safe!(endpoint)
         endpoint += "/" unless endpoint.ends_with?("/")
         functionsMap = {}
         client.functions.results.each do |f|
@@ -67,6 +117,7 @@ module Parse
         unless endpoint.present? && (endpoint.starts_with?("http://") || endpoint.starts_with?("https://"))
           raise ArgumentError, "The HOOKS_URL must be http/s: '#{endpoint}''"
         end
+        assert_webhook_url_safe!(endpoint)
         endpoint += "/" unless endpoint.ends_with?("/")
         all_triggers = Parse::API::Hooks::TRIGGER_NAMES_LOCAL
 
@@ -110,6 +161,7 @@ module Parse
       def register_webhook!(trigger, name, url)
         trigger = trigger.to_s.camelize(:lower).to_sym
         raise ArgumentError, "Invalid hook trigger #{trigger}" unless ALLOWED_HOOKS.include?(trigger)
+        assert_webhook_url_safe!(url)
         if trigger == :function
           response = client.fetch_function(name)
           # if it is either an error (which has no results) or there is a result but

@@ -330,7 +330,12 @@ class AgentFeaturesTest < Minitest::Test
     assert_equal :readonly, agent.permissions
   end
 
-  def test_import_conversation_restores_permissions_when_requested
+  def test_import_conversation_ignores_restore_permissions_kwarg
+    # restore_permissions: was deprecated and made a no-op as a security
+    # hardening — permissions cannot be elevated from an imported
+    # transcript. The instance-level permissions set at constructor time
+    # are authoritative. The kwarg is still accepted (with a deprecation
+    # warning) for back-compat with callers that pass it.
     agent = Parse::Agent.new(permissions: :readonly)
     state = JSON.generate({
       conversation_history: [],
@@ -338,9 +343,12 @@ class AgentFeaturesTest < Minitest::Test
       permissions: "admin",
     })
 
-    agent.import_conversation(state, restore_permissions: true)
+    _out, err = capture_io do
+      agent.import_conversation(state, restore_permissions: true)
+    end
 
-    assert_equal :admin, agent.permissions
+    assert_equal :readonly, agent.permissions
+    assert_match(/restore_permissions/, err, "deprecation warning emitted")
   end
 
   def test_import_conversation_returns_false_for_invalid_json

@@ -36,6 +36,20 @@ module Parse
   class BatchOperation
     include Enumerable
 
+    # Default number of threads used to dispatch batch segments concurrently.
+    # Raise via `Parse::BatchOperation.parallelism = N` (or pass `parallelism:`
+    # to `#submit`) for higher throughput on bulk writes; 2 is intentionally
+    # conservative to avoid overwhelming smaller Parse Server deployments.
+    DEFAULT_PARALLELISM = 2
+
+    class << self
+      attr_writer :parallelism
+
+      def parallelism
+        @parallelism || DEFAULT_PARALLELISM
+      end
+    end
+
     # @!attribute requests
     #  @return [Array] the set of requests in this batch.
 
@@ -130,16 +144,18 @@ module Parse
     # instance contains more than 50 requests. This method will slice up the array of
     # request and send them based on the `segment` amount until they have all been submitted.
     # @param segment [Integer] the number of requests to send in each batch. Default 50.
+    # @param parallelism [Integer] the number of segments dispatched in
+    #   parallel. Defaults to `Parse::BatchOperation.parallelism` (2).
     # @return [Array<Parse::Response>] the corresponding set of responses for
     #  each request in the batch.
-    def submit(segment = 50, &block)
+    def submit(segment = 50, parallelism: self.class.parallelism, &block)
       @responses = []
       @requests.uniq!(&:signature)
-      @responses = @requests.each_slice(segment).to_a.threaded_map(2) do |slice|
+      parallelism = 1 if parallelism.nil? || parallelism < 1
+      @responses = @requests.each_slice(segment).to_a.threaded_map(parallelism) do |slice|
         client.batch_request(BatchOperation.new(slice))
       end
       @responses.flatten!
-      #puts "Requests: #{@requests.count} == Response: #{@responses.count}"
       @requests.zip(@responses).each(&block) if block_given?
       @responses
     end

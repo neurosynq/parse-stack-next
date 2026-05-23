@@ -756,4 +756,47 @@ class CloudConfigTest < Minitest::Test
       end
     end
   end
+
+  def test_master_key_only_round_trip
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      with_timeout(15, "masterKeyOnly round-trip test") do
+        puts "\n=== Testing masterKeyOnly round-trip ==="
+
+        guarded_key = "mko_guarded_#{Time.now.to_i}"
+        public_key  = "mko_public_#{Time.now.to_i}"
+
+        # Set both keys, mark only the guarded one as master-key-only.
+        result = Parse.update_config(
+          { guarded_key => "secret", public_key => "ok" },
+          master_key_only: { guarded_key => true },
+        )
+        assert result, "update_config with master_key_only should succeed"
+
+        flags = Parse.config! && Parse.master_key_only
+        assert_equal true, flags[guarded_key], "guarded key should be master-key-only"
+        refute flags[public_key], "public key should not be master-key-only"
+
+        # set_config keyword form should mark a single key in one PUT.
+        single_key = "mko_single_#{Time.now.to_i}"
+        single_result = Parse.set_config(single_key, "v", master_key_only: true)
+        assert single_result, "set_config with master_key_only: true should succeed"
+
+        Parse.config!
+        assert_equal true, Parse.master_key_only[single_key], "single key should be master-key-only after set_config"
+
+        # Unset the flag and verify it round-trips. Parse Server rejects
+        # masterKeyOnly entries for params that don't exist on the server,
+        # so this only works because single_key was persisted above.
+        unset_result = Parse.update_config({}, master_key_only: { single_key => false })
+        assert unset_result, "unsetting masterKeyOnly should succeed"
+
+        Parse.config!
+        assert_equal false, Parse.master_key_only[single_key], "single key should no longer be master-key-only"
+
+        puts "✅ masterKeyOnly round-trip test passed"
+      end
+    end
+  end
 end

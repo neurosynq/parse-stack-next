@@ -11,7 +11,13 @@ class BenchmarkSong < Parse::Object
   property :genre, :string
   property :tags, :array
   property :release_date, :date
-  belongs_to :artist, as: :pointer, through: :BenchmarkArtist
+  # `as: :pointer` was the legacy shorthand for "untyped Parse::Pointer";
+  # it intentionally refuses to hydrate the target as BenchmarkArtist, so
+  # `song.artist.name` raises NoMethodError on the Pointer. Use
+  # `class_name:` to declare the typed target so includes hydrate the
+  # full BenchmarkArtist row. (`through:` is not a belongs_to keyword;
+  # it only applies to has_many.)
+  belongs_to :artist, class_name: "BenchmarkArtist"
 end
 
 class BenchmarkArtist < Parse::Object
@@ -21,7 +27,7 @@ class BenchmarkArtist < Parse::Object
 end
 
 # Latency benchmark tests comparing Parse Server vs MongoDB Direct queries
-class QueryLatencyBenchmarkTest < Minitest::Test
+class QueryLatencyBenchmarkIntegrationTest < Minitest::Test
   include ParseStackIntegrationTest
 
   def with_timeout(seconds = 120, &block)

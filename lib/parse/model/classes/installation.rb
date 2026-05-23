@@ -21,6 +21,7 @@ module Parse
   #     property :app_identifier
   #     property :app_name
   #     property :app_version
+  #     property :app_build_number
   #     property :badge, :integer
   #     property :channels, :array
   #     property :device_token
@@ -62,6 +63,11 @@ module Parse
     # The version string of the client application to which this installation belongs.
     # @return [String]
     property :app_version
+
+    # @!attribute app_build_number
+    # The build number of the client application to which this installation belongs.
+    # @return [String]
+    property :app_build_number
 
     # @!attribute badge
     # A number field representing the last known application badge for iOS installations.

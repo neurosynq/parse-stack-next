@@ -20,6 +20,36 @@ module Parse
   #   migration.apply!  # Apply changes to server
   #
   module Schema
+    # Opt-in default Class Level Permissions applied to NEWLY-CREATED
+    # classes during {Schema::Migration#apply!}. Only used when the
+    # model class does not declare its own CLPs via
+    # `set_class_level_permissions`. Existing server classes are NEVER
+    # rewritten by this setting — the migrator only emits
+    # `classLevelPermissions` on the initial `create_schema` call.
+    #
+    # Default is `nil` (no CLPs sent — Parse Server's wide-open default
+    # applies). Setting this to a restrictive Hash (e.g. require master
+    # key, or require an authenticated user) gives integrators a single
+    # toggle to make new classes safe-by-default without touching every
+    # model.
+    #
+    # @example Lock new classes to authenticated reads + master-key writes
+    #   Parse::Schema.default_class_level_permissions = {
+    #     "find"     => { "requiresAuthentication" => true },
+    #     "get"      => { "requiresAuthentication" => true },
+    #     "count"    => { "requiresAuthentication" => true },
+    #     "create"   => {},
+    #     "update"   => {},
+    #     "delete"   => {},
+    #     "addField" => {},
+    #   }
+    #
+    # @return [Hash, nil]
+    @default_class_level_permissions = nil
+    class << self
+      attr_accessor :default_class_level_permissions
+    end
+
     # Parse field type mappings to Ruby types
     TYPE_MAP = {
       "String" => :string,
@@ -429,7 +459,30 @@ module Parse
           }
         end
 
-        { "className" => @model_class.parse_class, "fields" => fields }
+        schema = { "className" => @model_class.parse_class, "fields" => fields }
+        # Attach CLPs only for newly-created classes when the integrator
+        # has opted in via `Parse::Schema.default_class_level_permissions=`.
+        # Per-model CLPs declared via `set_class_level_permissions` win
+        # if present.
+        clps = model_class_level_permissions
+        schema["classLevelPermissions"] = clps if clps
+        schema
+      end
+
+      # Resolve CLPs for the model being migrated. Returns:
+      # - the model's explicitly-declared CLPs if it has any (looked up
+      #   via the conventional accessor names some Parse-Stack models
+      #   ship with), OR
+      # - {Parse::Schema.default_class_level_permissions} if set, OR
+      # - +nil+ to leave `classLevelPermissions` off the schema body so
+      #   Parse Server uses its built-in defaults.
+      def model_class_level_permissions
+        %i[class_level_permissions classLevelPermissions clp].each do |reader|
+          next unless @model_class.respond_to?(reader)
+          val = @model_class.public_send(reader)
+          return val if val.is_a?(Hash) && !val.empty?
+        end
+        Parse::Schema.default_class_level_permissions
       end
 
       def field_definition(type)

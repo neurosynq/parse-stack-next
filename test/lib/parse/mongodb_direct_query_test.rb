@@ -168,6 +168,40 @@ class MongoDBDirectQueryTest < Minitest::Test
     assert_equal "Song", results[0]["className"]
   end
 
+  def test_convert_aggregation_document_preserves_id_and_extra_fields
+    require "parse/mongodb"
+
+    # Simulates a $group row: _id is the group key (a pointer string), not a Parse objectId
+    row = { "_id" => "Team$abc123", "count" => 5, "total" => 250 }
+    result = Parse::MongoDB.convert_aggregation_document(row)
+
+    assert_equal "Team$abc123", result["_id"], "_id must be preserved verbatim (group key)"
+    assert_equal 5, result["count"]
+    assert_equal 250, result["total"]
+    refute result.key?("objectId"), "convert_aggregation_document must NOT introduce objectId"
+    refute result.key?("className"), "convert_aggregation_document must NOT introduce className"
+  end
+
+  def test_convert_aggregation_document_handles_nil_and_non_hash
+    require "parse/mongodb"
+
+    assert_nil Parse::MongoDB.convert_aggregation_document(nil)
+    assert_nil Parse::MongoDB.convert_aggregation_document("not a hash")
+    assert_equal({}, Parse::MongoDB.convert_aggregation_document({}))
+  end
+
+  def test_convert_aggregation_document_with_nil_id
+    require "parse/mongodb"
+
+    # $group with "_id" => nil produces a nil _id field on the row
+    row = { "_id" => nil, "total" => 100 }
+    result = Parse::MongoDB.convert_aggregation_document(row)
+
+    assert result.key?("_id"), "_id key must be preserved even when nil"
+    assert_nil result["_id"]
+    assert_equal 100, result["total"]
+  end
+
   # ==========================================================================
   # Query Direct Method Tests (without mongo gem)
   # ==========================================================================
@@ -285,6 +319,39 @@ class MongoDBDirectQueryTest < Minitest::Test
     query = Parse::Query.new("Song")
     result = query.send(:convert_field_for_direct_mongodb, "title")
     assert_equal "title", result
+  end
+
+  # Regression: any leading-underscore field — Parse Server internal,
+  # pointer-storage column, or SDK-built pipeline-temp alias —
+  # passes through verbatim. The previous closed-set whitelist only
+  # covered the named Parse internals plus `_p_*`, so SDK-built
+  # aliases like `_lookup_project_result` / `_lookup_project_id`
+  # (created by `extract_subquery_to_lookup_stages` when an `$inQuery`
+  # constraint compiles to a `$lookup`) fell through to `format_field`
+  # and were columnized to `lookupProjectResult` / `lookupProjectId`,
+  # silently dropping the constraint on the direct-MongoDB route.
+  def test_convert_field_underscore_prefixed_passes_through
+    require "parse/mongodb"
+    query = Parse::Query.new("Song")
+
+    # SDK-built pipeline-temp aliases (the reported regression):
+    assert_equal "_lookup_project_result",
+                 query.send(:convert_field_for_direct_mongodb, "_lookup_project_result")
+    assert_equal "_lookup_project_id",
+                 query.send(:convert_field_for_direct_mongodb, "_lookup_project_id")
+
+    # Parse-on-Mongo pointer storage column:
+    assert_equal "_p_artist",
+                 query.send(:convert_field_for_direct_mongodb, "_p_artist")
+
+    # Parse Server internal user columns — still passthrough under the
+    # broader rule, matching the previous whitelist behavior:
+    assert_equal "_hashed_password",
+                 query.send(:convert_field_for_direct_mongodb, "_hashed_password")
+    assert_equal "_session_token",
+                 query.send(:convert_field_for_direct_mongodb, "_session_token")
+    assert_equal "_acl",
+                 query.send(:convert_field_for_direct_mongodb, "_acl")
   end
 
   # ==========================================================================

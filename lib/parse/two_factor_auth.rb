@@ -83,6 +83,15 @@ module Parse
       end
     end
 
+    # Error raised when an operator is not authorized to perform a
+    # privileged MFA operation (e.g. master-key disable). See
+    # {Parse::MFA::UserExtension#disable_mfa_master_key!}.
+    class ForbiddenError < Parse::Error
+      def initialize(message = "Not authorized to perform this MFA operation")
+        super(message)
+      end
+    end
+
     # Default configuration
     DEFAULT_CONFIG = {
       issuer: "Parse App",

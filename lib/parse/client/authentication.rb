@@ -56,7 +56,19 @@ module Parse
         raise ArgumentError, "No Parse Application Id specified for authentication." unless @application_id.present?
         headers[APP_ID] = @application_id
         headers[API_KEY] = @api_key unless @api_key.blank?
-        unless @master_key.blank? || env[:request_headers][DISABLE_MASTER_KEY].present?
+
+        # Three sources can suppress the master key for this request:
+        #   1. The per-request `X-Disable-Parse-Master-Key` header (one-off
+        #      opt-out, kept for backwards compatibility).
+        #   2. Fiber-local state set by {Parse.without_master_key} (block-
+        #      scoped opt-out, also visible on Faraday retries because the
+        #      fiber persists across the retry loop — the header at (1)
+        #      gets stripped on first call and is gone by the retry).
+        #   3. A session-token-authenticated request (the existing check
+        #      below; session token wins over master key).
+        header_disable = env[:request_headers][DISABLE_MASTER_KEY].present?
+        fiber_disable  = Parse.master_key_disabled?
+        unless @master_key.blank? || header_disable || fiber_disable
           headers[MASTER_KEY] = @master_key
         end
 

@@ -27,8 +27,9 @@ class AgentTest < Minitest::Test
   def test_readonly_tools_available
     expected_tools = %i[
       get_all_schemas get_schema query_class count_objects
-      get_object get_sample_objects aggregate explain_query
-      call_method
+      get_object get_objects get_sample_objects aggregate explain_query
+      call_method export_data group_by group_by_date distinct list_tools
+      atlas_text_search atlas_autocomplete atlas_faceted_search
     ]
     assert_equal expected_tools.sort, @agent.allowed_tools.sort
   end

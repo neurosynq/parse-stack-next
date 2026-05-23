@@ -75,6 +75,17 @@ module Parse
       #   Prevents indefinite blocking when reading from socket
       attr_accessor :frame_read_timeout
 
+      # @return [Boolean] when false (default), refuse to derive a `ws://`
+      #   URL from an `http://` server URL on any non-loopback host. The
+      #   default `Parse::LiveQuery::Client#derive_websocket_url` path
+      #   silently picks `ws://` when the Parse server URL is `http://`,
+      #   carrying master keys and session tokens over a cleartext
+      #   socket. Set to `true` to explicitly opt into insecure
+      #   WebSocket transport (local development, container-internal
+      #   networks). Loopback hosts (`localhost`, `127.0.0.1`, `::1`)
+      #   are exempt and emit a warning instead.
+      attr_accessor :allow_insecure
+
       # @return [Symbol, nil] minimum TLS version :TLSv1, :TLSv1_1, :TLSv1_2, :TLSv1_3 (default: :TLSv1_2)
       #   Enforces minimum TLS version for WebSocket connections
       attr_accessor :ssl_min_version
@@ -145,6 +156,7 @@ module Parse
         @frame_read_timeout = 30       # 30 seconds
         @ssl_min_version = :TLSv1_2    # Enforce modern TLS by default
         @ssl_max_version = nil         # No maximum (use highest available)
+        @allow_insecure = false        # Refuse ws:// downgrade on non-loopback hosts
 
         # Logging
         @logging_enabled = false

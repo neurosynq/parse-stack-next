@@ -25,6 +25,8 @@ module Parse
             result[:type] = Parse::Model::TYPE_NUMBER
           when :geopoint, :geo_point
             result[:type] = Parse::Model::TYPE_GEOPOINT
+          when :polygon, :geo_polygon
+            result[:type] = Parse::Model::TYPE_POLYGON
           when :pointer
             result = { type: Parse::Model::TYPE_POINTER, targetClass: references[k] }
           when :acl
@@ -163,6 +165,12 @@ module Parse
 
             # Now apply the new CLP configuration
             current_schema[:classLevelPermissions] = class_permissions.as_json(include_defaults: true)
+          elsif include_clp && _default_class_level_permissions_for_upgrade
+            # Opt-in global default: applies only on the initial create path
+            # below (existing classes do NOT get rewritten here — we only
+            # reach this branch when current_schema[:fields] is non-empty,
+            # i.e. there are NEW columns to add; we still avoid mutating
+            # existing CLPs to prevent surprising lockouts).
           end
 
           return true if current_schema[:fields].empty? && !current_schema[:classLevelPermissions]
@@ -171,11 +179,23 @@ module Parse
 
         # Create new schema (class doesn't exist)
         initial_schema = schema
-        # Include CLPs in initial schema creation if configured
+        # Include CLPs in initial schema creation if configured. Order of
+        # precedence:
+        #   1. Per-model `class_permissions` (DSL)
+        #   2. Global `Parse::Schema.default_class_level_permissions` opt-in
+        #   3. None — Parse Server's wide-open defaults apply
         if include_clp && respond_to?(:class_permissions) && class_permissions.present?
           initial_schema[:classLevelPermissions] = class_permissions.as_json(include_defaults: true)
+        elsif include_clp && (default_clps = _default_class_level_permissions_for_upgrade)
+          initial_schema[:classLevelPermissions] = default_clps
         end
         client.create_schema parse_class, initial_schema
+      end
+
+      # @api private
+      def _default_class_level_permissions_for_upgrade
+        return nil unless defined?(Parse::Schema)
+        Parse::Schema.default_class_level_permissions
       end
     end
   end

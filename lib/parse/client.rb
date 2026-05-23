@@ -96,23 +96,34 @@ module Parse
   # @example
   #  # update a config with Parse
   #  Parse.set_config "myKey", "someValue"
+  #  # mark a single key as master-key-only
+  #  Parse.set_config "myKey", "someValue", master_key_only: true
   # @param field [String] the name configuration variable.
   # @param value [Object] the value configuration variable. Only Parse types are supported.
   # @param conn [Symbol] the name of the client connection to use.
+  # @param master_key_only [Boolean, nil] when not nil, sets the masterKeyOnly
+  #   flag for `field` to the given boolean value in the same request.
   # @return [Hash] the Parse config hash for the session.
-  def self.set_config(field, value, conn = :default)
-    Parse::Client.client(conn).update_config({ field => value })
+  def self.set_config(field, value, conn = :default, master_key_only: nil)
+    opts = master_key_only.nil? ? {} : { master_key_only: { field.to_s => !!master_key_only } }
+    Parse::Client.client(conn).update_config({ field => value }, **opts)
   end
 
   # Set a key value pairs in the Parse configuration for an application.
   # @example
   #   # batch update several
   #   Parse.update_config({fieldEnabled: true, searchMiles: 50})
+  #   # also mark some keys as master-key-only
+  #   Parse.update_config({fieldEnabled: true}, master_key_only: { fieldEnabled: true })
   # @param params [Hash] a set of key value pairs to set in the Parse configuration.
   # @param conn [Symbol] the name of the client connection to use.
+  # @param master_key_only [Hash{String=>Boolean}, nil] optional map of config
+  #   keys to boolean masterKeyOnly flags. Parse Server merges this with any
+  #   existing masterKeyOnly settings; unspecified keys keep their current flag.
   # @return [Hash] the Parse config hash for the session.
-  def self.update_config(params, conn = :default)
-    Parse::Client.client(conn).update_config(params)
+  def self.update_config(params, conn = :default, master_key_only: nil)
+    opts = master_key_only.nil? ? {} : { master_key_only: master_key_only }
+    Parse::Client.client(conn).update_config(params, **opts)
   end
 
   # Force fetch updated Parse configuration
@@ -120,6 +131,30 @@ module Parse
   # @return [Hash] the Parse configuration
   def self.config!(conn = :default)
     Parse::Client.client(conn).config!
+  end
+
+  # Return every config entry zipped with its masterKeyOnly trait.
+  # @example
+  #   Parse.config_entries
+  #   # => { "fieldA" => { value: "x", master_key_only: false } }
+  #   Parse.config_entries(master: true)
+  #   # => { "fieldA" => { value: "x", master_key_only: false },
+  #   #      "fieldB" => { value: 42,  master_key_only: true  } }
+  # @param conn [Symbol] the name of the client connection to use.
+  # @param master [Boolean] when true, include master-key-only entries.
+  # @return [Hash{String=>Hash}] map of config key to `{value:, master_key_only:}`.
+  def self.config_entries(conn = :default, master: false)
+    Parse::Client.client(conn).config_entries(master: master)
+  end
+
+  # Retrieve the masterKeyOnly flag map for the application configuration.
+  # @example
+  #   Parse.master_key_only["secretKey"] # => true
+  # @param conn [Symbol] the name of the client connection to use.
+  # @return [Hash{String=>Boolean}] map of config keys to masterKeyOnly flags,
+  #   or an empty hash if the server did not return one.
+  def self.master_key_only(conn = :default)
+    Parse::Client.client(conn).master_key_only
   end
 
   # Helper method to get the default Parse client.
@@ -171,6 +206,57 @@ module Parse
 
     # An error when a general response error occurs when communicating with Parse server.
     class ResponseError < Parse::Error; end
+
+    # An error when a Parse server response carries code 137 (DuplicateValue),
+    # typically raised when a unique field (or MongoDB unique index) rejects an
+    # insert. Carries the {Parse::Response} for inspection. The synchronize-create
+    # wrapper in {Parse::Core::Actions} rescues this internally and re-queries
+    # inside the held lock to return the winning object.
+    #
+    # **Message redaction.** Parse Server (and the underlying MongoDB driver)
+    # serialize the offending unique-key payload into the error string in two
+    # parallel forms: `keyValue: { "email": "user@example.com" }` AND
+    # `dup key: { : "user@example.com" }`. Echoing either into application
+    # logs exposes the colliding identifier (email, username, account number,
+    # external ID) to anyone with log access — turning a duplicate-write
+    # error into a unique-field enumeration oracle. The constructor strips
+    # both fragments before delegating to `super`. The raw response is
+    # preserved on `#response` for callers that legitimately need the
+    # unredacted detail (e.g. the synchronize-create wrapper).
+    class DuplicateValueError < ResponseError
+      CODE = 137
+      # Matches both MongoDB E11000 fragment forms: `keyValue: { ... }`
+      # and `dup key: { ... }`. The driver emits the offending unique-key
+      # value verbatim in each, so both must be stripped to close the leak.
+      KEY_VALUE_PATTERN = /(?:keyValue|dup\s*key)\s*:?\s*\{[^}]*\}/i.freeze
+      REDACTION = "[REDACTED]".freeze
+
+      attr_reader :response
+
+      def initialize(response = nil)
+        @response = response
+        raw = if response.is_a?(String)
+            response
+          elsif response.respond_to?(:error)
+            response.error
+          else
+            response.to_s
+          end
+        super(self.class.redact(raw))
+      end
+
+      # Strip `keyValue: { ... }` fragments from a message string so the
+      # offending unique-constraint value never leaks into log lines.
+      # Returns the original message verbatim when it contains no
+      # `keyValue:` token, so non-MongoDB-shaped errors are unaffected.
+      # @param msg [String, nil]
+      # @return [String, nil]
+      def self.redact(msg)
+        return msg if msg.nil?
+        s = msg.to_s
+        s.gsub(KEY_VALUE_PATTERN, REDACTION)
+      end
+    end
 
     # @!attribute cache
     #  The underlying cache store for caching API requests.
@@ -351,6 +437,7 @@ module Parse
       @master_key = opts[:master_key] || ENV["PARSE_SERVER_MASTER_KEY"] || ENV["PARSE_MASTER_KEY"]
 
       @require_https = opts.fetch(:require_https, ENV["PARSE_REQUIRE_HTTPS"] == "true")
+      @allow_faraday_proxy = opts.fetch(:allow_faraday_proxy, false)
 
       # Security check for HTTP usage (except localhost/127.0.0.1 for development)
       if @server_url&.start_with?("http://") && !@server_url.match?(%r{^http://(localhost|127\.0\.0\.1)(:|/)})
@@ -400,10 +487,26 @@ module Parse
         raise Parse::Error::ConnectionError, "Please call Parse.setup(server_url:, application_id:, api_key:) to setup a client"
       end
       @server_url += "/" unless @server_url.ends_with?("/")
+
+      # Resolve timeouts. Defaults guard the calling thread against an
+      # unresponsive Parse Server (slowloris, hung dyno) which would
+      # otherwise tie up Puma/Sidekiq workers indefinitely.
+      open_timeout = opts.fetch(:open_timeout, (ENV["PARSE_OPEN_TIMEOUT"] || 5).to_i)
+      read_timeout = opts.fetch(:timeout, (ENV["PARSE_TIMEOUT"] || 30).to_i)
+
       #Configure Faraday
       opts[:faraday] ||= {}
+      # Guard against silent TLS downgrade or attacker-controlled proxy via
+      # opts[:faraday]. The require_https check earlier only inspects the URL
+      # scheme; without this guard a caller passing
+      #   faraday: { ssl: { verify: false }, proxy: "http://attacker" }
+      # would neuter TLS verification on an HTTPS connection.
+      validate_faraday_opts!(opts[:faraday])
       opts[:faraday].merge!(:url => @server_url)
       @conn = Faraday.new(opts[:faraday]) do |conn|
+        # Apply timeouts before any user-supplied middleware sees a request.
+        conn.options.timeout = read_timeout if read_timeout > 0
+        conn.options.open_timeout = open_timeout if open_timeout > 0
         #conn.request :json
 
         # Configure logging if enabled
@@ -493,11 +596,59 @@ module Parse
           conn.adapter adapter
         end
       end
+      # Faraday's constructor may still synthesise a ProxyOptions from
+      # HTTPS_PROXY/HTTP_PROXY env vars regardless of the `proxy: nil`
+      # we pass in opts. Clear the proxy on the connection itself to be
+      # sure no env-derived MITM survives.
+      @conn.proxy = nil if !@allow_faraday_proxy && @conn.respond_to?(:proxy=)
       Parse::Client.clients[:default] ||= self
 
       # Configure LiveQuery if URL provided
       configure_live_query(opts)
     end
+
+    # Inspect `opts[:faraday]` for settings that would silently neuter
+    # transport security and reject them. Specifically:
+    #
+    # - `ssl: { verify: false }` on an HTTPS URL — would accept any cert
+    # - `proxy: "..."` — would route every request through an attacker-
+    #   controlled MITM unless explicitly allowlisted
+    #
+    # @api private
+    def validate_faraday_opts!(faraday_opts)
+      return unless faraday_opts.is_a?(Hash)
+
+      ssl = faraday_opts[:ssl] || faraday_opts["ssl"]
+      if ssl.is_a?(Hash)
+        verify = ssl.key?(:verify) ? ssl[:verify] : ssl["verify"]
+        if verify == false && @server_url.to_s.start_with?("https://")
+          raise ArgumentError,
+            "[Parse::Client] Refusing to disable TLS certificate verification " \
+            "(opts[:faraday][:ssl][:verify] = false) on an HTTPS server URL. " \
+            "Fix the server certificate or downgrade the URL to http:// " \
+            "(with require_https: false) for explicit local testing."
+        end
+      end
+
+      proxy = faraday_opts[:proxy] || faraday_opts["proxy"]
+      if proxy && !@allow_faraday_proxy
+        raise ArgumentError,
+          "[Parse::Client] Refusing opts[:faraday][:proxy] = #{proxy.inspect}. " \
+          "Routing requests through a proxy can be used to MITM credentials. " \
+          "Pass allow_faraday_proxy: true to explicitly opt in."
+      end
+
+      # Suppress Faraday's automatic discovery of HTTPS_PROXY / HTTP_PROXY
+      # / NO_PROXY environment variables when the explicit opt-in flag
+      # is not set. Without this, a `HTTPS_PROXY` env var leaks every
+      # Parse request (and master key) through a process-environment-
+      # controlled proxy — a vector that the explicit `proxy:` check
+      # above closes but env-discovery silently re-opens. Setting
+      # `proxy: nil` is the Faraday-documented way to disable
+      # env-proxy autodiscovery.
+      faraday_opts[:proxy] = nil unless @allow_faraday_proxy
+    end
+    private :validate_faraday_opts!
 
     # Configure LiveQuery with the given options
     # @param opts [Hash] configuration options

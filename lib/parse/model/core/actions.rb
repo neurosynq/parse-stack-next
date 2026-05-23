@@ -6,20 +6,11 @@ require "active_support"
 require "active_support/inflector"
 require "active_support/core_ext"
 require "time"
-require "parallel"
 require_relative "../../client/request"
 require_relative "fetching"
 
 module Parse
   class Query
-
-    # Supporting the `all` class method to be used in scope chaining with queries.
-    # @!visibility private
-    def all(expressions = { limit: :max }, &block)
-      conditions(expressions)
-      return results(&block) if block_given?
-      results
-    end
 
     # Supporting the `first_or_create` class method to be used in scope chaining with queries.
     # @!visibility private
@@ -106,6 +97,16 @@ module Parse
       # @!visibility private
       def self.included(base)
         base.extend(ClassMethods)
+        # Per-class override for the synchronize-create lock. `nil` means
+        # "inherit from `Parse.synchronize_create_default`". Set to true/false
+        # on a subclass to force-on or force-off for that class and its
+        # descendants. Use ActiveSupport::class_attribute so inheritance works
+        # naturally; mirrors `signup_on_save` (user.rb:178) and `field_guards`
+        # (field_guards.rb:55).
+        if base.respond_to?(:class_attribute)
+          base.class_attribute :synchronize_create_default, instance_writer: false
+          base.synchronize_create_default = nil
+        end
       end
 
       # Class methods applied to Parse::Object subclasses.
@@ -330,18 +331,86 @@ module Parse
         # Finds the first object matching the query conditions, or creates a new
         # *saved* object with the attributes. This method is similar to {first_or_create}
         # but will also {save!} the object if it was newly created.
+        #
+        # When `synchronize:` is enabled (per-call, per-class via
+        # `synchronize_create_default`, or globally via
+        # `Parse.synchronize_create_default`), the find→create→save sequence is
+        # serialized through {Parse::CreateLock} so concurrent callers
+        # with identical `query_attrs` cannot both create. The lock requires a
+        # Moneta cache store (Redis recommended); on a process-local store the
+        # lock degrades to a per-key Mutex. A MongoDB unique index on the
+        # constrained fields is the correctness floor — on Parse code 137
+        # (DuplicateValue) the wrapper re-queries inside the held lock and
+        # returns the winner.
+        #
         # @example
         #   obj = Parse::User.first_or_create!({ ..query conditions..})
         #   obj = Parse::User.first_or_create!({ ..query conditions..}, {.. resource_attrs ..})
+        # @example Per-call lock opt-in
+        #   User.first_or_create!({ email: e }, { name: n }, synchronize: true)
+        # @example Per-call with tuning
+        #   User.first_or_create!({ email: e }, {}, synchronize: { ttl: 5, wait: 1.0 })
+        # @example Auth-context threading
+        #   User.first_or_create!({ email: e }, {}, session: current_user.session_token)
         # @param query_attrs [Hash] a set of query constraints that also are applied.
         # @param resource_attrs [Hash] a set of attribute values to be applied if an object was not found.
+        # @param synchronize [Boolean, Hash, nil] override the synchronize-create lock. `nil` (default) defers
+        #   to the per-class `synchronize_create_default` or the module-level `Parse.synchronize_create_default`.
+        #   `true` enables with defaults; `false` opts out; a Hash enables with custom options merged over
+        #   `Parse.synchronize_create_options`.
+        # @param session [String, Parse::User, nil] session token (or object answering :session_token) threaded
+        #   through both the query and the save so the entire find→create flow runs under one auth identity.
+        # @param master_key [Boolean, nil] when explicitly `false`, disables master key for both halves.
         # @return [Parse::Object] a Parse::Object, whether found by the query or newly created.
         # @raise {Parse::RecordNotSaved} if the save fails
+        # @raise {Parse::CreateLockTimeoutError} when synchronized and the wait budget is exceeded
+        # @raise {Parse::CreateLockInvalidKey} when query_attrs cannot be canonicalized for a stable lock key
         # @see #first_or_create
-        def first_or_create!(query_attrs = {}, resource_attrs = {})
-          obj = first_or_create(query_attrs, resource_attrs)
-          obj.save! if obj.new?
-          obj
+        def first_or_create!(query_attrs = {}, resource_attrs = {}, synchronize: nil, session: nil, master_key: nil)
+          query_attrs = query_attrs.symbolize_keys
+          resource_attrs = resource_attrs.symbolize_keys
+
+          enabled, sync_opts = _resolve_synchronize_flag(synchronize)
+          return _first_or_create_unsynchronized!(query_attrs, resource_attrs, session: session, master_key: master_key) unless enabled
+
+          _assert_synchronize_class_allowed!
+          options = _merged_synchronize_options(sync_opts)
+          session_token = _extract_session_token(session)
+
+          # Split query_attrs into the constraint subset (what
+          # determines lock identity) and the query-shape options
+          # (`:cache`, `:limit`, `:order`, ACL helpers, …) that
+          # `Parse::Query#conditions` absorbs as query parameters.
+          # Without this, a caller passing the documented `cache:
+          # 30.seconds` escape hatch alongside their constraints
+          # tripped `Parse::CreateLock.canonicalize_value` on the
+          # `ActiveSupport::Duration` — see 4.4.2 changelog. The
+          # original `query_attrs` is still forwarded to
+          # `_scoped_first` below; `conditions()` extracts the option
+          # keys on the find side, so the cache TTL still applies.
+          lock_attrs = query_attrs.reject { |k, _| Parse::Query.option_key?(k) }
+          _assert_lock_attrs_have_constraints!(query_attrs, lock_attrs)
+
+          Parse::CreateLock.synchronize(
+            parse_class: parse_class,
+            query_attrs: lock_attrs,
+            options: options,
+            session_token: session_token,
+            master_key: master_key,
+          ) do
+            obj = _scoped_first(query_attrs, session: session, master_key: master_key)
+            next obj if obj
+
+            obj = self.new query_attrs.merge(resource_attrs)
+            begin
+              session ? obj.save!(session: session) : obj.save!
+              obj
+            rescue Parse::RecordNotSaved => e
+              winner = _recover_from_duplicate_value(e, query_attrs, session: session, master_key: master_key)
+              raise unless winner
+              winner
+            end
+          end
         end
 
         # Creates a new object with the given attributes and saves it.
@@ -359,36 +428,225 @@ module Parse
 
         # Finds the first object matching the query conditions and updates it with the attributes,
         # or creates a new *saved* object with the attributes. Saves new objects or existing objects with changes.
+        # See {#first_or_create!} for the synchronize-create lock semantics — they apply identically here.
         # @example
         #   Parse::User.create_or_update!({ ..query conditions..}, {.. resource_attrs ..})
         # @param query_attrs [Hash] a set of query constraints that also are applied.
         # @param resource_attrs [Hash] a set of attribute values to be applied to found objects or used for creation.
+        # @param synchronize (see #first_or_create!)
+        # @param session (see #first_or_create!)
+        # @param master_key (see #first_or_create!)
         # @return [Parse::Object] a Parse::Object, whether found by the query or newly created.
         # @raise {Parse::RecordNotSaved} if the save fails
-        def create_or_update!(query_attrs = {}, resource_attrs = {})
+        def create_or_update!(query_attrs = {}, resource_attrs = {}, synchronize: nil, session: nil, master_key: nil)
           query_attrs = query_attrs.symbolize_keys
           resource_attrs = resource_attrs.symbolize_keys
-          obj = query(query_attrs).first
 
-          if obj.blank?
-            # Object not found, create new one with query_attrs + resource_attrs
-            merged_attrs = query_attrs.merge(resource_attrs)
-            obj = self.new merged_attrs
-            obj.save!
-          else
-            # Object exists, apply resource_attrs and save if changes detected
-            unless resource_attrs.empty?
-              # Check if any attributes would actually change before applying
+          enabled, sync_opts = _resolve_synchronize_flag(synchronize)
+          return _create_or_update_unsynchronized!(query_attrs, resource_attrs, session: session, master_key: master_key) unless enabled
+
+          _assert_synchronize_class_allowed!
+          options = _merged_synchronize_options(sync_opts)
+          session_token = _extract_session_token(session)
+
+          # See #first_or_create! for the partition rationale — strip
+          # Parse::Query option keys before lock canonicalization.
+          lock_attrs = query_attrs.reject { |k, _| Parse::Query.option_key?(k) }
+          _assert_lock_attrs_have_constraints!(query_attrs, lock_attrs)
+
+          Parse::CreateLock.synchronize(
+            parse_class: parse_class,
+            query_attrs: lock_attrs,
+            options: options,
+            session_token: session_token,
+            master_key: master_key,
+          ) do
+            obj = _scoped_first(query_attrs, session: session, master_key: master_key)
+
+            if obj.nil?
+              obj = self.new query_attrs.merge(resource_attrs)
+              begin
+                session ? obj.save!(session: session) : obj.save!
+              rescue Parse::RecordNotSaved => e
+                winner = _recover_from_duplicate_value(e, query_attrs, session: session, master_key: master_key)
+                raise unless winner
+                obj = winner
+              end
+            end
+
+            if !obj.new? && !resource_attrs.empty?
               has_changes = resource_attrs.any? do |key, value|
                 obj.respond_to?(key) && obj.send(key) != value
               end
               if has_changes
                 obj.apply_attributes!(resource_attrs, dirty_track: true)
-                obj.save!
+                session ? obj.save!(session: session) : obj.save!
               end
             end
-          end
 
+            obj
+          end
+        end
+
+        # @!visibility private
+        # Resolves the per-call synchronize kwarg against per-class and module
+        # defaults. Returns [enabled?, options_hash].
+        #
+        # Precedence (most specific wins):
+        #   per-call true/false  →  per-class default  →  Parse.synchronize_create_default
+        # A Hash kwarg implies `true` with custom options. `nil` defers up the chain.
+        def _resolve_synchronize_flag(synchronize)
+          case synchronize
+          when true
+            [true, {}]
+          when false
+            [false, {}]
+          when Hash
+            [true, synchronize]
+          when nil
+            cls_default = respond_to?(:synchronize_create_default) ? synchronize_create_default : nil
+            case cls_default
+            when true
+              [true, {}]
+            when false
+              [false, {}]
+            when Hash
+              [true, cls_default]
+            else
+              [Parse.synchronize_create_default ? true : false, {}]
+            end
+          else
+            raise ArgumentError, "synchronize: must be true, false, nil, or an options Hash (got #{synchronize.class})"
+          end
+        end
+
+        # @!visibility private
+        def _merged_synchronize_options(per_call)
+          base = Parse.synchronize_create_options || {}
+          base.merge(per_call || {})
+        end
+
+        # @!visibility private
+        # Enforce {Parse.synchronize_classes} allowlist. Inheritance is
+        # **transitive** for Class entries (`self <= entry`): allowlisting
+        # `User` automatically allowlists every subclass of `User`. To gate
+        # per-class without inheritance, pass entries as Strings — they
+        # match only `self.name` / `parse_class` literally. See the
+        # `Parse.synchronize_classes` docstring in lib/parse/stack.rb.
+        def _assert_synchronize_class_allowed!
+          allowlist = Parse.synchronize_classes
+          return if allowlist.nil? || allowlist.empty?
+          allowed = allowlist.any? do |entry|
+            (entry.is_a?(Class) && self <= entry) ||
+              entry.to_s == self.name ||
+              entry.to_s == parse_class
+          end
+          return if allowed
+          raise Parse::CreateLockUnavailableError,
+                "#{self} is not in Parse.synchronize_classes allowlist; either add it or pass synchronize: false"
+        end
+
+        # @!visibility private
+        # Confirm that after partitioning query_attrs into
+        # constraints + query-shape options, at least one constraint
+        # remained. If not, raise a specific error explaining the
+        # likely mistake before `Parse::CreateLock.synchronize` does
+        # — its generic "non-empty query_attrs" message would mislead
+        # the caller who can see a non-empty `query_attrs` argument
+        # right there in their code.
+        #
+        # Two distinguished cases:
+        # - `query_attrs` was empty to begin with → generic empty
+        #   error (the user really did pass nothing).
+        # - `query_attrs` was non-empty but every key was a query
+        #   option (`:cache`, `:limit`, …) → specific error naming the
+        #   partitioned-out keys so the user can fix their call.
+        def _assert_lock_attrs_have_constraints!(query_attrs, lock_attrs)
+          return unless lock_attrs.empty?
+          if query_attrs.empty?
+            raise Parse::CreateLockInvalidKey,
+                  "synchronize requires at least one constraint key in query_attrs (got an empty Hash)"
+          end
+          option_keys = query_attrs.keys.select { |k| Parse::Query.option_key?(k) }
+          raise Parse::CreateLockInvalidKey,
+                "synchronize requires at least one constraint key in query_attrs; " \
+                "every key passed (#{option_keys.inspect}) is a Parse::Query option " \
+                "(`:cache`, `:limit`, `:order`, ACL helpers, …) and is partitioned " \
+                "out of the lock identity. Add a constraint key (e.g. the unique " \
+                "field your callsite is finding-or-creating against), or pass " \
+                "`synchronize: false` if you don't need cross-process locking."
+        end
+
+        # @!visibility private
+        # Extract a session token string from either a String or an object
+        # answering :session_token (e.g. Parse::User, Parse::Session). Returns
+        # nil when session is nil so the canonical lock key picks the
+        # "default" auth-context marker.
+        def _extract_session_token(session)
+          return nil if session.nil?
+          return session if session.is_a?(String)
+          return session.session_token if session.respond_to?(:session_token)
+          raise ArgumentError, "session: must be a String token or an object responding to :session_token (got #{session.class})"
+        end
+
+        # @!visibility private
+        # Run `query(constraints).first` with explicit auth scoping so the
+        # synchronized find runs under the same identity as the subsequent
+        # save. When session/master_key are unset, falls through to the
+        # client default exactly as the legacy non-synchronized path.
+        def _scoped_first(query_attrs, session: nil, master_key: nil)
+          q = query(query_attrs)
+          if session
+            q.session_token = session.respond_to?(:session_token) ? session.session_token : session
+          end
+          q.use_master_key = master_key unless master_key.nil?
+          q.first
+        end
+
+        # @!visibility private
+        # When a save inside the lock fails with Parse code 137 (DuplicateValue),
+        # re-query inside the still-held lock and return the row that won the
+        # race. Returns nil when the error was something other than 137 or the
+        # winner cannot be located. The caller raises the original exception in
+        # the nil case.
+        def _recover_from_duplicate_value(error, query_attrs, session: nil, master_key: nil)
+          obj = error.respond_to?(:object) ? error.object : nil
+          return nil unless obj
+          res = obj.instance_variable_get(:@_last_response)
+          return nil unless res && res.respond_to?(:code) && res.code == Parse::Client::DuplicateValueError::CODE
+          _scoped_first(query_attrs, session: session, master_key: master_key)
+        end
+
+        # @!visibility private
+        # The pre-synchronize behavior of `first_or_create!`, factored out so
+        # the synchronize wrapper can short-circuit when disabled. Preserves
+        # the legacy contract: query → build → save! if new.
+        def _first_or_create_unsynchronized!(query_attrs, resource_attrs, session: nil, master_key: nil)
+          obj = _scoped_first(query_attrs, session: session, master_key: master_key)
+          if obj.nil?
+            obj = self.new query_attrs.merge(resource_attrs)
+          end
+          if obj.new?
+            session ? obj.save!(session: session) : obj.save!
+          end
+          obj
+        end
+
+        # @!visibility private
+        def _create_or_update_unsynchronized!(query_attrs, resource_attrs, session: nil, master_key: nil)
+          obj = _scoped_first(query_attrs, session: session, master_key: master_key)
+          if obj.nil?
+            obj = self.new query_attrs.merge(resource_attrs)
+            session ? obj.save!(session: session) : obj.save!
+          elsif !resource_attrs.empty?
+            has_changes = resource_attrs.any? do |key, value|
+              obj.respond_to?(key) && obj.send(key) != value
+            end
+            if has_changes
+              obj.apply_attributes!(resource_attrs, dirty_track: true)
+              session ? obj.save!(session: session) : obj.save!
+            end
+          end
           obj
         end
 
@@ -678,6 +936,7 @@ module Parse
           end
         end
         response = client.update_object(parse_class, id, attribute_updates, session_token: _session_token)
+        @_last_response = response
         if response.success?
           result = response.result
           # Because beforeSave hooks can change the fields we are saving, any items that were
@@ -713,7 +972,17 @@ module Parse
       # @return [Boolean] true/false whether it was successful.
       def create
         run_callbacks :create do
-          res = client.create_object(parse_class, attribute_updates, session_token: _session_token)
+          body = attribute_updates
+          # Forward a client-assigned objectId when a `before_create` callback
+          # set it (e.g. `parse_reference precompute: true`). attribute_updates
+          # excludes BASE_KEYS, so @id must be merged explicitly. Parse Server
+          # accepts an objectId in the create POST body and rejects duplicates
+          # with a typed error rather than silently overwriting.
+          body[Parse::Model::OBJECT_ID] = @id if @id.present?
+          res = client.create_object(parse_class, body, session_token: _session_token)
+          # Retain the response so wrappers (e.g. synchronize_create) can
+          # inspect the Parse error code on failure (notably 137 DuplicateValue).
+          @_last_response = res
           unless res.error?
             result = res.result
             @id = result[Parse::Model::OBJECT_ID] || @id

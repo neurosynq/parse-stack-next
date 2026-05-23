@@ -13,11 +13,71 @@ require_relative "agent"
 require_relative "two_factor_auth"
 require_relative "two_factor_auth/user_extension"
 require_relative "schema"
+require_relative "schema/index_migrator"
+require_relative "schema/search_index_migrator"
+require_relative "lookup_rewriter"
 
 module Parse
   class Error < StandardError; end
 
   module Stack
+  end
+
+  # Fiber-local key consulted by the authentication middleware. A truthy
+  # entry suppresses the master-key header for the duration of the block
+  # set by {Parse.without_master_key}; a +:enabled+ entry forces the
+  # master-key header back on inside a nested {Parse.with_master_key}
+  # block.
+  MASTER_KEY_STATE_KEY = :__parse_master_key_state__
+
+  # Run +block+ with the master key suppressed for every Parse request
+  # originating in the current fiber. Equivalent to setting the
+  # +X-Disable-Parse-Master-Key+ header on each request, but block-scoped
+  # so callers can wrap a unit of work — e.g. running an action "as if
+  # the configured master key were not available" — without threading
+  # the header through every intermediate call.
+  #
+  # Survives Faraday retries (the per-request header would be stripped on
+  # the first attempt and gone by the retry; the fiber-local state lives
+  # for the lifetime of the block).
+  #
+  # @yield runs the block with master-key disabled
+  # @return [Object] the block's return value
+  # @example
+  #   Parse.without_master_key do
+  #     song = Song.find(id)         # session-token / API-key auth only
+  #     song.title = "Renamed"
+  #     song.save                    # subject to ACL/CLP
+  #   end
+  def self.without_master_key
+    previous = Fiber[MASTER_KEY_STATE_KEY]
+    Fiber[MASTER_KEY_STATE_KEY] = :disabled
+    yield
+  ensure
+    Fiber[MASTER_KEY_STATE_KEY] = previous
+  end
+
+  # Inverse of {.without_master_key}: forces the master key back on for
+  # the duration of the block, even if a containing {.without_master_key}
+  # had suppressed it. Useful for re-entering an admin-only operation
+  # inside a session-scoped block. If no master key is configured on the
+  # client, this is a no-op — the helper does not synthesise one.
+  #
+  # @yield runs the block with master-key enabled (if configured)
+  # @return [Object] the block's return value
+  def self.with_master_key
+    previous = Fiber[MASTER_KEY_STATE_KEY]
+    Fiber[MASTER_KEY_STATE_KEY] = :enabled
+    yield
+  ensure
+    Fiber[MASTER_KEY_STATE_KEY] = previous
+  end
+
+  # @return [Boolean] true if the current fiber is inside a
+  #   {.without_master_key} block. Consulted by the authentication
+  #   middleware in addition to the per-request disable header.
+  def self.master_key_disabled?
+    Fiber[MASTER_KEY_STATE_KEY] == :disabled
   end
 
   # Configuration for query validation warnings
@@ -126,14 +186,123 @@ module Parse
   #   }
   @mcp_remote_api = nil
 
+  # Auto-rewrite LLM-style `$lookup` stages in aggregation pipelines passed
+  # to `Parse::Query#aggregate` and `Parse::MongoDB.aggregate`. When true
+  # (the default), pipelines using pretty/logical field names (e.g.
+  # `localField: "author", foreignField: "_id"`) are translated to the
+  # Parse-on-Mongo column-name form (`_p_author`/`parseReference`) when
+  # the foreign class declares `parse_reference`. Pipelines already in
+  # `_p_*`/`parseReference` form pass through unchanged (idempotent), and
+  # when the foreign class lacks `parse_reference` the stage is left
+  # alone (no `$split` fallback in the auto path — it's an optimization,
+  # not a correction).
+  # @example Disable auto-rewrite
+  #   Parse.rewrite_lookups = false
+  @rewrite_lookups = true
+
+  # Configuration for strict property redefinition checks.
+  # When set to true (default), redeclaring a property with a different data type
+  # than the existing definition raises ArgumentError instead of warning and
+  # silently dropping the new declaration. Identical redeclarations (same data
+  # type and remote field name) are always silent. A type mismatch on a core
+  # Parse field (e.g. Installation#badge defined as :integer but redeclared as
+  # :string) is almost always a bug, so it is a hard failure by default. Set to
+  # false to fall back to the legacy warn-and-ignore behavior.
+  # @example Opt out of strict redefinition
+  #   Parse.strict_property_redefinition = false
+  @strict_property_redefinition = true
+
+  # Configuration for globally enabling the synchronize-create lock on
+  # `Parse::Object.first_or_create!` and `create_or_update!`. When true, every
+  # call to those methods acquires a Moneta-backed mutex (typically Redis) to
+  # prevent duplicate creation under concurrency. Per-call `synchronize: false`
+  # still opts out. See {Parse::CreateLock}.
+  # @example Enable globally
+  #   Parse.synchronize_create_default = true
+  # @example ENV fallback
+  #   PARSE_STACK_SYNCHRONIZE_CREATE=true
+  @synchronize_create_default = ENV["PARSE_STACK_SYNCHRONIZE_CREATE"] == "true"
+
+  # Configuration for raising on impossible pointer-shape constraints
+  # (e.g. bare objectId strings inside an `$in` array against a pointer
+  # column whose target class cannot be resolved). When true, the SDK
+  # raises {Parse::Query::PointerShapeError} instead of silently
+  # returning a value that won't match — preventing the silent-zero
+  # failure mode where the LLM/operator reads "0 results" as a real
+  # answer. When false (default), the SDK logs a one-shot warning via
+  # `Parse.logger` and leaves the value unchanged for backwards
+  # compatibility.
+  # @example Enable globally
+  #   Parse.strict_pointer_shapes = true
+  # @example ENV fallback (recommended for test/CI)
+  #   PARSE_STRICT_POINTER_SHAPES=true
+  @strict_pointer_shapes = ENV["PARSE_STRICT_POINTER_SHAPES"] == "true"
+
+  # Tuning bundle for the synchronize-create lock. Per-call kwargs override.
+  # Keys: :ttl (seconds, default 3, max 30), :wait (seconds, default 2.0,
+  # max 30), :on_degraded (:warn, :warn_throttled, :raise, :proceed).
+  # @example
+  #   Parse.synchronize_create_options = { ttl: 5, wait: 1.0, on_degraded: :warn_throttled }
+  @synchronize_create_options = {}
+
+  # HMAC secret for synchronize-create lock-key derivation. When set, lock
+  # keys are HMAC-SHA256 of the canonical payload (hides query_attrs content
+  # from Redis MONITOR / snapshot snoopers). When unset and the cache store
+  # is Redis-backed, a one-time warning is emitted and plain SHA256 is used
+  # so cross-process locking still works. When unset and the store is the
+  # in-memory adapter, an auto-derived per-process secret is used.
+  # @example
+  #   Parse.synchronize_create_secret = ENV["PARSE_STACK_LOCK_SECRET"]
+  @synchronize_create_secret = nil
+
+  # Optional dedicated Moneta store for the synchronize-create lock. When
+  # nil, falls back to {Parse.cache}.
+  # @example
+  #   Parse.synchronize_create_store = Moneta.new(:Redis, url: "redis://locks:6379/1")
+  @synchronize_create_store = nil
+
+  # Optional allowlist of {Parse::Object} subclasses that may use the
+  # synchronize-create lock. When set, calls from any other class raise
+  # {Parse::CreateLockUnavailableError}. When nil (default) with the global
+  # default enabled, a one-time +[Parse::Stack:SECURITY]+ warning is emitted
+  # noting the unbounded surface; the lock still applies to every class.
+  #
+  # **Inheritance behavior:** The allowlist check in
+  # {Parse::Core::Actions::ClassMethods#_assert_synchronize_class_allowed!}
+  # uses `self <= entry`, so any subclass of an allowlisted Class entry is
+  # itself allowlisted. Allowlisting `User` transitively allowlists every
+  # `class GuestUser < User` / `class AdminUser < User` etc. — declared now
+  # OR ever defined later in the process. If you need strict per-class
+  # gating, pass entries as String names (`"User"`) — those are matched
+  # against `self.name` / `parse_class` only, with no inheritance walk.
+  # @example Restrict to specific classes (subclasses inherit)
+  #   Parse.synchronize_classes = [User, Device, Subscription]
+  # @example Strict equality, no inheritance
+  #   Parse.synchronize_classes = ["User", "Device", "Subscription"]
+  @synchronize_classes = nil
+
   class << self
     attr_accessor :warn_on_query_issues, :autofetch_raise_on_missing_keys, :serialize_only_fetched_fields, :validate_query_keys,
-                  :live_query_enabled, :cache_write_on_fetch, :default_query_cache, :mcp_server_enabled, :mcp_server_port, :mcp_remote_api
+                  :live_query_enabled, :cache_write_on_fetch, :default_query_cache, :mcp_server_enabled, :mcp_server_port, :mcp_remote_api,
+                  :rewrite_lookups, :strict_property_redefinition,
+                  :synchronize_create_default, :synchronize_create_options, :synchronize_create_secret,
+                  :synchronize_create_store, :synchronize_classes,
+                  :strict_pointer_shapes
 
     # Check if LiveQuery feature is enabled
     # @return [Boolean]
     def live_query_enabled?
       @live_query_enabled == true
+    end
+
+    # Check if strict pointer-shape validation is enabled. When true,
+    # impossible shapes (e.g. bare string `$in` element against a
+    # pointer column whose target class is unknown) raise
+    # {Parse::Query::PointerShapeError} instead of silently returning
+    # zero rows. See {Parse.strict_pointer_shapes=}.
+    # @return [Boolean]
+    def strict_pointer_shapes?
+      @strict_pointer_shapes == true
     end
 
     # Check if MCP server feature is enabled
@@ -166,14 +335,30 @@ module Parse
     end
   end
 
+  # Error raised when {Parse::CreateLock#synchronize} cannot acquire the
+  # mutex within the configured wait budget. Callers typically rescue and either
+  # retry or treat as a temporary unavailability.
+  class CreateLockTimeoutError < Parse::Error; end
+
+  # Error raised when query_attrs passed to a synchronized `first_or_create!`
+  # contain values that cannot be canonicalized into a stable lock key (Procs,
+  # Regexps, query operators, unsaved pointers, nested Hashes, oversized
+  # payloads).
+  class CreateLockInvalidKey < Parse::Error; end
+
+  # Error raised when a synchronized call is made but the lock store is
+  # unavailable (typically `on_degraded: :raise` was configured and the store
+  # is process-local).
+  class CreateLockUnavailableError < Parse::Error; end
+
   # Error raised when autofetch would be triggered but Parse.autofetch_raise_on_missing_keys is true.
   # This helps developers identify where they need to add additional keys to their queries.
   class AutofetchTriggeredError < StandardError
-    attr_reader :klass, :object_id, :field, :is_pointer
+    attr_reader :klass, :parse_object_id, :field, :is_pointer
 
     def initialize(klass, object_id, field, is_pointer:)
       @klass = klass
-      @object_id = object_id
+      @parse_object_id = object_id
       @field = field
       @is_pointer = is_pointer
 
@@ -254,6 +439,17 @@ end
 if ENV["PARSE_MCP_ENABLED"] == "true" && !Parse.instance_variable_get(:@mcp_server_enabled)
   warn "[Parse::Stack] PARSE_MCP_ENABLED is set in environment but Parse.mcp_server_enabled is false. " \
        "Call Parse.mcp_server_enabled = true to enable the MCP agent feature."
+end
+
+# Startup warning: synchronize-create global-default mode without a class
+# allowlist exposes the whole first_or_create!/create_or_update! surface to
+# attacker-controlled lock contention. Operators should either restrict via
+# Parse.synchronize_classes or audit each call site that takes untrusted input.
+if Parse.synchronize_create_default && Parse.synchronize_classes.nil?
+  warn "[Parse::Stack:SECURITY] Parse.synchronize_create_default is true with no Parse.synchronize_classes allowlist. " \
+       "Every first_or_create!/create_or_update! caller is now subject to Redis-backed lock contention; an attacker " \
+       "controlling query_attrs on a public path can hold lock keys × TTL. Set Parse.synchronize_classes = [User, …] " \
+       "to restrict the surface, or audit each call site."
 end
 
 require_relative "stack/railtie" if defined?(::Rails)

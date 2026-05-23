@@ -510,10 +510,16 @@ class ACLIntegrationTest < Minitest::Test
         # Don't set ACL explicitly - should use class defaults
         assert doc.save, "Should save document with default ACL"
 
-        # Document should have public access by default (Parse::Object default)
+        # Starting in v4.1 the gem-wide default ACL policy is
+        # :owner_else_private. This Document class declares no `acl_policy`
+        # and no `set_default_acl`, so saves with no resolvable owner fall
+        # back to master-key-only (an empty ACL hash). Classes that want
+        # public defaults should declare `acl_policy :public` or call
+        # `set_default_acl :public, read: true, write: true` explicitly.
         assert doc.acl.is_a?(Parse::ACL), "Should have ACL object"
         default_acl = doc.acl.as_json
-        assert default_acl.has_key?("*"), "Should have public access entry"
+        assert_equal({}, default_acl,
+                     "Document with no acl_policy and no resolvable owner should fall back to master-key-only under the v4.1 :owner_else_private default")
 
         # Test SecretFile class (should have restrictive defaults)
         secret = SecretFile.new({

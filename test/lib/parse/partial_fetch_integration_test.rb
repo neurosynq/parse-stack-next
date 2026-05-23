@@ -2062,7 +2062,7 @@ class PartialFetchIntegrationTest < Minitest::Test
 
           # Verify error details
           assert_equal PartialFetchPost, error.klass, "Error should have correct class"
-          assert_equal post_id, error.object_id, "Error should have correct object_id"
+          assert_equal post_id, error.parse_object_id, "Error should have correct object_id"
           assert_equal :content, error.field, "Error should have correct field"
           refute error.is_pointer, "Error should indicate this is not a pointer fetch"
 
@@ -2110,7 +2110,7 @@ class PartialFetchIntegrationTest < Minitest::Test
 
           # Verify error details
           assert_equal PartialFetchPost, error.klass, "Error should have correct class"
-          assert_equal post_id, error.object_id, "Error should have correct object_id"
+          assert_equal post_id, error.parse_object_id, "Error should have correct object_id"
           assert_equal :title, error.field, "Error should have correct field"
           assert error.is_pointer, "Error should indicate this is a pointer fetch"
 
@@ -2216,6 +2216,92 @@ class PartialFetchIntegrationTest < Minitest::Test
         refute fetched_post.partially_fetched?, "Should be fully fetched after autofetch"
 
         puts "Autofetch works normally when raise option is disabled"
+      end
+    end
+  end
+
+  # =========================================================================
+  # Regression test for the 4.0.0 merge_includes_into_keys! fix.
+  #
+  # Before the fix: Song.query(keys: [:title], include: [:author]).first would
+  # return a Post with `author` stripped from the response, because Parse
+  # Server applies `keys` before evaluating `include` — the pointer field
+  # never makes it into the projected document, so `include` has nothing to
+  # expand. Without an integration test against a real Parse Server, the
+  # unit test only confirms that the compiled REST query contains
+  # `keys=title,author` and `include=author`; it cannot confirm the server
+  # actually populates the pointer.
+  # =========================================================================
+
+  def test_keys_with_include_populates_pointer
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      with_timeout(15, "keys+include populates pointer test") do
+        puts "\n=== Testing keys: [...] + include: [...] populates pointer ==="
+
+        user = PartialFetchUser.new(
+          name: "Author One",
+          email: "author@example.com",
+          age: 42,
+        )
+        assert user.save, "User should save"
+
+        post = PartialFetchPost.new(
+          title: "Post With Author",
+          content: "Some body content",
+          category: "tech",
+          author: user,
+        )
+        assert post.save, "Post should save"
+
+        # The bug shape: caller wants only the post title back over the wire
+        # AND wants the author pointer expanded to a full object. Without the
+        # 4.0.0 fix, Parse Server returns the post without the author field.
+        fetched = PartialFetchPost.query
+                                  .keys(:title)
+                                  .includes(:author)
+                                  .first
+
+        assert_equal "Post With Author", fetched.title
+
+        # The critical assertion: the included pointer is actually populated
+        # with a real object, not nil and not just a pointer that needs
+        # autofetching. If merge_includes_into_keys! did not run, `author`
+        # would be nil here because Parse Server stripped it from the
+        # response before the include stage saw it.
+        refute_nil fetched.author, "author pointer must be populated when include: is used alongside keys:"
+        assert_equal "Author One", fetched.author.name, "included author should be expanded to full object with name field"
+
+        puts "keys: [:title] + include: [:author] correctly populates author pointer"
+      end
+    end
+  end
+
+  def test_keys_with_chained_include_populates_top_level_pointer
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      with_timeout(15, "keys + chained include test") do
+        puts "\n=== Testing keys: [...] + include: ['author.x'] populates top-level pointer ==="
+
+        user = PartialFetchUser.new(name: "Chained", email: "c@example.com", age: 33)
+        assert user.save
+
+        post = PartialFetchPost.new(title: "Chained Include Post", author: user)
+        assert post.save
+
+        # Chained include — top-level segment ("author") must end up in keys
+        # for Parse Server to keep the pointer in the projection.
+        fetched = PartialFetchPost.query
+                                  .keys(:title)
+                                  .includes("author.name")
+                                  .first
+
+        refute_nil fetched.author, "top-level author pointer must be retained when include uses dot notation"
+        assert_equal "Chained", fetched.author.name
+
+        puts "keys: [:title] + include: ['author.name'] correctly retains top-level author"
       end
     end
   end

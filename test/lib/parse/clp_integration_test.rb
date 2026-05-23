@@ -25,6 +25,7 @@ class CLPIntegrationTest < Minitest::Test
   # Model with protected fields hidden from public
   class ProtectedDocument < Parse::Object
     parse_class "ProtectedDocument"
+    acl_policy :public
 
     property :title, :string
     property :content, :string
@@ -36,6 +37,7 @@ class CLPIntegrationTest < Minitest::Test
   # Model with owner-based protected fields (userField pattern)
   class OwnedDocument < Parse::Object
     parse_class "OwnedDocument"
+    acl_policy :public
 
     property :title, :string
     property :private_notes, :string
@@ -45,6 +47,7 @@ class CLPIntegrationTest < Minitest::Test
   # Model with authenticated user pattern
   class AuthenticatedDocument < Parse::Object
     parse_class "AuthenticatedDocument"
+    acl_policy :public
 
     property :title, :string
     property :authenticated_only_field, :string
@@ -54,6 +57,7 @@ class CLPIntegrationTest < Minitest::Test
   # Model with multiple roles intersection
   class MultiRoleDocument < Parse::Object
     parse_class "MultiRoleDocument"
+    acl_policy :public
 
     property :title, :string
     property :field_a, :string
@@ -64,6 +68,7 @@ class CLPIntegrationTest < Minitest::Test
   # Model for testing set_default_clp
   class DefaultCLPTestDoc < Parse::Object
     parse_class "DefaultCLPTestDoc"
+    acl_policy :public
 
     property :title, :string
     property :secret_field, :string
@@ -72,6 +77,7 @@ class CLPIntegrationTest < Minitest::Test
   # Model for testing snake_case field conversion
   class SnakeCaseTestDoc < Parse::Object
     parse_class "SnakeCaseTestDoc"
+    acl_policy :public
 
     property :public_title, :string
     property :internal_notes, :string
@@ -82,6 +88,7 @@ class CLPIntegrationTest < Minitest::Test
   # Model for comprehensive CLP testing
   class CompleteCLPDoc < Parse::Object
     parse_class "CompleteCLPDoc"
+    acl_policy :public
 
     property :title, :string
     property :public_data, :string
@@ -93,6 +100,7 @@ class CLPIntegrationTest < Minitest::Test
   # Model for testing requiresAuthentication
   class RequiresAuthDoc < Parse::Object
     parse_class "RequiresAuthDoc"
+    acl_policy :public
 
     property :title, :string
     property :data, :string

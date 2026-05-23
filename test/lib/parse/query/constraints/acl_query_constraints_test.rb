@@ -311,20 +311,16 @@ class TestAclQueryConstraints < Minitest::Test
   # Test execute_aggregation_pipeline mongo_direct handling
   describe "execute_aggregation_pipeline mongo_direct" do
     it "respects explicit mongo_direct: true" do
-      skip "Requires Parse::MongoDB to be defined" unless defined?(Parse::MongoDB)
-
       query = Parse::Query.new("Song")
-      query.readable_by([], mongo_direct: true)
+      query.readable_by("user123", mongo_direct: true)
 
-      # Check that the aggregation will use mongo_direct
-      aggregation = query.send(:execute_aggregation_pipeline)
-      # The aggregation should have mongo_direct set
-      # (implementation detail - may need to check via different means)
+      # Verify the mongo_direct flag is stored on the query
+      assert_equal true, query.instance_variable_get(:@acl_query_mongo_direct)
     end
 
     it "respects explicit mongo_direct: false to disable auto-detection" do
       query = Parse::Query.new("Song")
-      query.readable_by([], mongo_direct: false)
+      query.readable_by("user123", mongo_direct: false)
 
       # Even though ACL queries normally auto-detect mongo_direct,
       # explicit false should disable it

@@ -497,22 +497,32 @@ module Parse
               val = []
             end
 
+            # Always trust the declared klassName — never the className the
+            # server (or attacker-controlled mass assignment) supplied.
+            # Prevents type-confusion attacks that would mark this relation
+            # proxy as a different parse_class than the model declared.
+            if val.is_a?(Hash) && val[Parse::Model::KEY_CLASS_NAME] &&
+               val[Parse::Model::KEY_CLASS_NAME] != klassName &&
+               %w[Relation].include?(val["__type"])
+              warn "[#{self.class}] has_many :#{key} expected className=#{klassName.inspect}, ignoring incoming className=#{val[Parse::Model::KEY_CLASS_NAME].inspect}"
+            end
             if val.is_a?(Hash) && val["__type"] == "Relation"
               relation_objects = val["objects"] || []
-              val = Parse::RelationCollectionProxy.new relation_objects, delegate: self, key: key, parse_class: (val[Parse::Model::KEY_CLASS_NAME] || klassName)
+              val = Parse::RelationCollectionProxy.new relation_objects, delegate: self, key: key, parse_class: klassName
             elsif val.is_a?(Hash) && val["__op"] == "AddRelation" && val["objects"].present?
-              _collection = proxyKlass.new [], delegate: self, key: key, parse_class: (val[Parse::Model::KEY_CLASS_NAME] || klassName)
+              _collection = proxyKlass.new [], delegate: self, key: key, parse_class: klassName
               _collection.loaded = true
-              _collection.add val["objects"].parse_objects
+              _collection.add val["objects"].parse_objects(klassName)
               val = _collection
             elsif val.is_a?(Hash) && val["__op"] == "RemoveRelation" && val["objects"].present?
-              _collection = proxyKlass.new [], delegate: self, key: key, parse_class: (val[Parse::Model::KEY_CLASS_NAME] || klassName)
+              _collection = proxyKlass.new [], delegate: self, key: key, parse_class: klassName
               _collection.loaded = true
-              _collection.remove val["objects"].parse_objects
+              _collection.remove val["objects"].parse_objects(klassName)
               val = _collection
             elsif val.is_a?(Array)
-              # Otherwise create a new collection based on what the user defined.
-              val = proxyKlass.new val.parse_objects, delegate: self, key: key, parse_class: klassName
+              # Otherwise create a new collection based on what the user
+              # defined; always coerce array elements to the declared class.
+              val = proxyKlass.new val.parse_objects(klassName), delegate: self, key: key, parse_class: klassName
             end
 
             # send dirty tracking if set

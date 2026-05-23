@@ -125,8 +125,14 @@ class ACLConstraintsUnitTest < Minitest::Test
     compiled = query.compile
     puts "✅ Chained constraints: #{compiled[:where]}"
 
-    # Should contain both regular constraints and ACL constraint
-    assert compiled[:where].include?("_rperm"), "Should include _rperm constraint"
+    # TRACK-QUERY-2: `_rperm` lives inside the aggregation pipeline,
+    # NOT the REST `where` payload. Pre-fix, the `__aggregation_pipeline`
+    # marker leaked into `compile[:where]` and `_rperm` appeared as a
+    # substring of the encoded JSON. Now `compile_where` strips internal
+    # markers, so the ACL constraint surfaces via `query.pipeline` only.
+    pipeline_json = query.pipeline.to_json
+    assert_includes pipeline_json, "_rperm",
+                    "ACL pipeline should still include _rperm (aggregation path)"
     assert compiled[:where].include?('"published":true'), "Should include regular constraints"
     assert compiled[:where].include?('"title":{"$in":["Post 1","Post 2"]}'), "Should include in constraint"
   end
@@ -574,8 +580,11 @@ class ACLConstraintsUnitTest < Minitest::Test
 
     compiled = query.compile
 
-    # Should have both ACL constraint and regular constraint
-    assert compiled[:where].include?("_rperm"), "Should include _rperm constraint"
+    # TRACK-QUERY-2: ACL constraint lives in the aggregation pipeline,
+    # not in `compile[:where]`. See test_constraint_chaining_with_acl.
+    pipeline_json = query.pipeline.to_json
+    assert_includes pipeline_json, "_rperm",
+                    "ACL pipeline should still include _rperm (aggregation path)"
     assert compiled[:where].include?('"title":"Test Post"'), "Should include title constraint"
     assert_equal 10, compiled[:limit], "Should have limit set"
 
@@ -619,7 +628,11 @@ class ACLConstraintsUnitTest < Minitest::Test
 
     compiled = query.compile
 
-    assert compiled[:where].include?("_rperm"), "Should include _rperm constraint"
+    # TRACK-QUERY-2: ACL constraint lives in the aggregation pipeline,
+    # not in `compile[:where]`. See test_constraint_chaining_with_acl.
+    pipeline_json = query.pipeline.to_json
+    assert_includes pipeline_json, "_rperm",
+                    "ACL pipeline should still include _rperm (aggregation path)"
     assert compiled[:where].include?('"published":true'), "Should include published constraint"
     assert_equal "-createdAt", compiled[:order], "Should have order set"
     assert_equal 10, compiled[:limit], "Should have limit set"

@@ -15,7 +15,7 @@ class ACLDebugTest < Minitest::Test
       puts "\n=== ACL Serialization and Storage Debug ==="
 
       # Find or create the TestRole
-      test_role = Parse::Role.first_or_create!(name: "TestRole")
+      test_role = Parse::Role.first_or_create!({ name: "TestRole" })
       puts "DEBUG: Using role: #{test_role.name} (#{test_role.id})"
 
       # Create a simple document with ACL
