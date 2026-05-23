@@ -861,6 +861,149 @@ class MCPDispatcherTest < Minitest::Test
     Parse::Agent::Tools.reset_registry!
   end
 
+  # Built-in tools (count_objects, get_object, get_objects, get_sample_objects,
+  # distinct, group_by, group_by_date, list_tools, get_all_schemas, get_schema,
+  # query_class) declare an `output_schema` in TOOL_DEFINITIONS so the
+  # dispatcher mirrors their result data into `structuredContent` per
+  # MCP 2025-06-18. Tools.output_schema_for falls through to TOOL_DEFINITIONS
+  # when the registered-overlay misses.
+  def test_builtin_tools_declare_output_schemas
+    %i[count_objects get_object get_objects get_sample_objects
+       distinct group_by group_by_date list_tools
+       get_all_schemas get_schema query_class].each do |tool|
+      schema = Parse::Agent::Tools.output_schema_for(tool)
+      refute_nil schema,
+                 "built-in tool #{tool} should carry an outputSchema for MCP structuredContent"
+      assert_equal "object", schema[:type] || schema["type"],
+                   "built-in tool #{tool} outputSchema must be a JSON object schema"
+    end
+  end
+
+  def test_builtin_count_objects_emits_structuredContent
+    body = {
+      "jsonrpc" => "2.0", "id" => 100, "method" => "tools/call",
+      "params"  => { "name" => "count_objects", "arguments" => { "class_name" => "Song" } },
+    }
+    result = D.call(body: body, agent: @agent)
+
+    content_result = result[:body]["result"]
+    refute content_result["isError"], "expected non-error tools/call result"
+    refute_nil content_result["structuredContent"],
+               "count_objects must mirror its result Hash as structuredContent"
+    structured = content_result["structuredContent"]
+    assert_equal 42, structured[:count] || structured["count"]
+  end
+
+  def test_builtin_get_all_schemas_emits_structuredContent
+    body = {
+      "jsonrpc" => "2.0", "id" => 110, "method" => "tools/call",
+      "params"  => { "name" => "get_all_schemas", "arguments" => {} },
+    }
+    result = D.call(body: body, agent: @agent)
+
+    content_result = result[:body]["result"]
+    refute content_result["isError"], "expected non-error tools/call result"
+    structured = content_result["structuredContent"]
+    refute_nil structured,
+               "get_all_schemas must mirror its result Hash as structuredContent"
+    classes = structured[:classes] || structured["classes"]
+    refute_nil classes, "get_all_schemas structuredContent must carry the class catalog"
+  end
+
+  def test_builtin_get_schema_emits_structuredContent
+    body = {
+      "jsonrpc" => "2.0", "id" => 111, "method" => "tools/call",
+      "params"  => { "name" => "get_schema", "arguments" => { "class_name" => "Song" } },
+    }
+    result = D.call(body: body, agent: @agent)
+
+    content_result = result[:body]["result"]
+    refute content_result["isError"], "expected non-error tools/call result"
+    structured = content_result["structuredContent"]
+    refute_nil structured,
+               "get_schema must mirror its result Hash as structuredContent"
+    assert_equal "Song", structured[:className] || structured["className"]
+  end
+
+  # query_class declares a permissive-superset outputSchema covering both
+  # the JSON row envelope (results, pagination, ...) and the text envelope
+  # (format, headers, output, row_count) so clients disambiguate via the
+  # presence of `format`. Exercise both shapes through the dispatcher to
+  # prove structuredContent flows transparently in both cases.
+  def test_builtin_query_class_emits_structuredContent_json_envelope
+    body = {
+      "jsonrpc" => "2.0", "id" => 112, "method" => "tools/call",
+      "params"  => {
+        "name"      => "query_class",
+        "arguments" => { "class_name" => "Song" },
+      },
+    }
+    result = D.call(body: body, agent: @agent)
+
+    content_result = result[:body]["result"]
+    refute content_result["isError"], "expected non-error tools/call result"
+    structured = content_result["structuredContent"]
+    refute_nil structured,
+               "query_class (json envelope) must mirror its result Hash as structuredContent"
+    results = structured[:results] || structured["results"]
+    refute_nil results, "json-envelope structuredContent must carry :results"
+    assert_equal "abc123", results.first["objectId"] || results.first[:objectId]
+  end
+
+  def test_builtin_query_class_emits_structuredContent_text_envelope
+    text_agent = Class.new(StubAgent) do
+      def execute(tool_name, **kwargs)
+        return super unless tool_name == :query_class
+        { success: true, data: {
+          class_name: kwargs[:class_name],
+          format:     "csv",
+          headers:    %w[objectId title],
+          row_count:  1,
+          output:     "objectId,title\nabc123,Hello\n",
+        } }
+      end
+    end.new
+
+    body = {
+      "jsonrpc" => "2.0", "id" => 113, "method" => "tools/call",
+      "params"  => {
+        "name"      => "query_class",
+        "arguments" => { "class_name" => "Song", "format" => "csv" },
+      },
+    }
+    result = D.call(body: body, agent: text_agent)
+
+    content_result = result[:body]["result"]
+    refute content_result["isError"], "expected non-error tools/call result"
+    structured = content_result["structuredContent"]
+    refute_nil structured,
+               "query_class (text envelope) must mirror its result Hash as structuredContent"
+    assert_equal "csv", structured[:format] || structured["format"]
+    refute_nil structured[:output] || structured["output"],
+               "text-envelope structuredContent must carry :output"
+  end
+
+  def test_builtin_tools_list_advertises_outputSchema
+    real_defs_agent = Class.new(StubAgent) do
+      def tool_definitions(format: :mcp, category: nil)
+        Parse::Agent::Tools.definitions(
+          %i[count_objects get_object get_sample_objects distinct],
+          format: format, category: category,
+        )
+      end
+    end.new
+
+    body = { "jsonrpc" => "2.0", "id" => 101, "method" => "tools/list", "params" => {} }
+    result = D.call(body: body, agent: real_defs_agent)
+
+    tools = result[:body]["result"]["tools"]
+    assert_equal 4, tools.size
+    tools.each do |t|
+      assert t.key?(:outputSchema),
+             "built-in tool #{t[:name]} must surface outputSchema on tools/list"
+    end
+  end
+
   def test_notifications_cancelled_returns_no_response_body
     body = {
       "jsonrpc" => "2.0",

@@ -47,9 +47,9 @@ class MetadataAuditTest < Minitest::Test
   class MAWithCanonicalFilter < Parse::Object
     parse_class "MAWithCanonicalFilter"
     agent_description "Soft-delete class with canonical filter"
-    agent_canonical_filter "isRemoved" => { "$ne" => true }
+    agent_canonical_filter "archived" => { "$ne" => true }
 
-    property :isRemoved, :boolean
+    property :archived, :boolean
   end
 
   class MAHiddenFromAudit < Parse::Object
@@ -174,7 +174,7 @@ class MetadataAuditTest < Minitest::Test
 
   def test_audit_surfaces_declared_canonical_filters
     data = Parse::Agent.audit_metadata
-    assert_equal({ "isRemoved" => { "$ne" => true } },
+    assert_equal({ "archived" => { "$ne" => true } },
                  data[:canonical_filter_summary]["MAWithCanonicalFilter"])
     refute data[:canonical_filter_summary].key?("MACovered"),
            "classes without canonical filters should not appear"

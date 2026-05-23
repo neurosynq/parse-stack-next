@@ -9,7 +9,7 @@ module Parse
   # special methods to the Symbol class. The developer can then pass one
   # or an array of fields (as symbols) and call the particular ordering
   # polarity (ex. _:name.asc_ would create a Parse::Order where we want
-  # things to be sortd by the name field in ascending order)
+  # things to be sorted by the name field in ascending order)
   # For more information about the query design pattern from DataMapper
   # that inspired this, see http://datamapper.org/docs/find.html'
   # @example

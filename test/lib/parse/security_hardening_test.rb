@@ -290,6 +290,90 @@ class SecurityHardeningTest < Minitest::Test
     assert_equal "[FILTERED]", parsed["password"]
   end
 
+  # ─── Vector compaction in logged payloads ──────────────────────────────
+  # Embeddings inlined into log output are noisy (kilobytes per row) AND
+  # weakly sensitive (reversible-by-similarity against a public model).
+  # The structural pass collapses any numeric-only Array of length >= 32
+  # to a "<vector dims=N>" placeholder. Below threshold, untouched.
+
+  def test_redact_compacts_long_numeric_array_under_field_name
+    embedding = Array.new(1536) { |i| i.to_f / 1536.0 }
+    body = { "title" => "hello", "body_embedding" => embedding }.to_json
+    out = Parse::Middleware::BodyBuilder.redact(body)
+    parsed = JSON.parse(out)
+    assert_equal "hello", parsed["title"]
+    assert_equal "<vector dims=1536>", parsed["body_embedding"]
+    refute_includes out, embedding.first.to_s
+  end
+
+  def test_redact_compacts_query_vector_in_nested_aggregate_body
+    embedding = Array.new(768, 0.1)
+    body = {
+      "pipeline" => [
+        { "$vectorSearch" => { "queryVector" => embedding, "limit" => 10 } },
+      ],
+    }.to_json
+    out = Parse::Middleware::BodyBuilder.redact(body)
+    parsed = JSON.parse(out)
+    assert_equal "<vector dims=768>",
+                 parsed["pipeline"].first["$vectorSearch"]["queryVector"]
+    assert_equal 10, parsed["pipeline"].first["$vectorSearch"]["limit"]
+  end
+
+  def test_redact_does_not_touch_short_numeric_arrays
+    # Below threshold (32) — could be a coords list, score histogram,
+    # version triple, etc. Leave it alone.
+    body = { "coords" => [1.0, 2.0, 3.0], "scores" => Array.new(31, 0.5) }.to_json
+    out = Parse::Middleware::BodyBuilder.redact(body)
+    parsed = JSON.parse(out)
+    assert_equal [1.0, 2.0, 3.0], parsed["coords"]
+    assert_equal Array.new(31, 0.5), parsed["scores"]
+  end
+
+  def test_redact_does_not_touch_long_arrays_with_non_numeric_elements
+    # Long array but not vector-shaped — must remain untouched so we
+    # don't mangle tag lists or role pointer arrays.
+    tags = Array.new(64) { |i| "tag-#{i}" }
+    body = { "tags" => tags }.to_json
+    out = Parse::Middleware::BodyBuilder.redact(body)
+    parsed = JSON.parse(out)
+    assert_equal tags, parsed["tags"]
+  end
+
+  def test_redact_compacts_vector_nested_in_embedded_json_string
+    # Webhook/MCP payloads carry a JSON string under "body"; structural
+    # pass should recurse into the embedded JSON.
+    inner = { "embedding" => Array.new(384, 0.2) }.to_json
+    body = { "body" => inner }.to_json
+    out = Parse::Middleware::BodyBuilder.redact(body)
+    parsed = JSON.parse(out)
+    embedded = JSON.parse(parsed["body"])
+    assert_equal "<vector dims=384>", embedded["embedding"]
+  end
+
+  def test_redact_compacts_top_level_vector_array_value
+    # Some endpoints return a bare Array body. Walker must compact
+    # vector-shaped sub-arrays at any depth, including as Array
+    # elements (not just Hash values).
+    body = [{ "v" => Array.new(64, 0.5) }].to_json
+    out = Parse::Middleware::BodyBuilder.redact(body)
+    parsed = JSON.parse(out)
+    assert_equal "<vector dims=64>", parsed.first["v"]
+  end
+
+  def test_redact_compacts_batch_of_vectors_in_provider_response_shape
+    # Mirrors what a logged embedding-provider response body looks like:
+    # { "data" => [ { "embedding" => [...] }, ... ] }
+    body = {
+      "data" => Array.new(3) { |i| { "index" => i, "embedding" => Array.new(128, 0.3) } },
+    }.to_json
+    out = Parse::Middleware::BodyBuilder.redact(body)
+    parsed = JSON.parse(out)
+    parsed["data"].each do |row|
+      assert_equal "<vector dims=128>", row["embedding"]
+    end
+  end
+
   # ─── Additional coverage (mixed-track) ─────────────────────────────────
 
   # URL fetch additional probes

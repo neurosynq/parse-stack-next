@@ -4,6 +4,8 @@
 # Note: Do not require "../object" here - this file is loaded from object.rb
 # and adding that require would create a circular dependency.
 
+require "securerandom"
+
 module Parse
   class Error
     # 200	Error code indicating that the username is missing or empty.
@@ -245,6 +247,68 @@ module Parse
     # logged-in user can still see their own `email_verified` flag.
     guard :email_verified, :master_only
 
+    # @!visibility private
+    # Thread-local key used by {.with_authdata_trust} to mark the
+    # current hydration as a legitimate self-fetch (login/signup/MFA/
+    # `/users/me`). Outside that scope, {#apply_attributes!} strips
+    # +authData+ from incoming server JSON so a `_User` query/find that
+    # crosses ACL boundaries cannot leak another user's federated-identity
+    # tokens into the in-memory object.
+    AUTHDATA_TRUST_KEY = :__parse_stack_user_authdata_trusted
+
+    class << self
+      # @!visibility private
+      # Run +block+ in a scope where the next {Parse::User#apply_attributes!}
+      # call is permitted to hydrate +authData+ from the response. Used by
+      # +login+/+login!+/+session!+/+create+/+link_auth_data!+/MFA paths
+      # where the row being hydrated is provably the authenticating user.
+      def with_authdata_trust
+        prior = Thread.current[AUTHDATA_TRUST_KEY]
+        Thread.current[AUTHDATA_TRUST_KEY] = true
+        begin
+          yield
+        ensure
+          Thread.current[AUTHDATA_TRUST_KEY] = prior
+        end
+      end
+
+      # @!visibility private
+      # True iff the calling thread is currently inside a
+      # {.with_authdata_trust} scope.
+      def authdata_trusted?
+        Thread.current[AUTHDATA_TRUST_KEY] == true
+      end
+    end
+
+    # @!visibility private
+    # Defense-in-depth strip of +authData+ on the way into the in-memory
+    # User. Parse Server returns +authData+ on +GET /users/:id+ to any
+    # caller with ACL read on the row, and the default +_User+ ACL is
+    # permissive in many deployments — without this filter, fetching a
+    # different user (or iterating a +Parse::Query.new(User)+ result set)
+    # would expose their OAuth +access_token+ / +id_token+ to anyone who
+    # JSON-renders the result (Rails views, agent tool output, logging).
+    #
+    # The strip runs unconditionally unless the caller is inside a
+    # {.with_authdata_trust} scope, which is set by the self-fetch
+    # paths in this file (login/login!/session!/create/link_auth_data!/
+    # unlink_auth_data!) and by the MFA login extension. Trusted callers
+    # pass through to +super+ with the hash untouched. The PROTECTED
+    # mass-assignment filter that runs inside +super+ is unaffected.
+    def apply_attributes!(hash, dirty_track: false, filter_protected: nil, protected_set: nil)
+      if hash.is_a?(Hash) && !self.class.authdata_trusted?
+        if hash.key?(:authData) || hash.key?("authData") ||
+           hash.key?(:auth_data) || hash.key?("auth_data")
+          hash = hash.dup
+          hash.delete(:authData)
+          hash.delete("authData")
+          hash.delete(:auth_data)
+          hash.delete("auth_data")
+        end
+      end
+      super(hash, dirty_track: dirty_track, filter_protected: filter_protected, protected_set: protected_set)
+    end
+
     # @return [Boolean] true if this user is anonymous (i.e. created
     #   via the +authData.anonymous+ provider rather than via signup
     #   with a username/password or a real OAuth provider).
@@ -266,7 +330,7 @@ module Parse
     def link_auth_data!(service_name, **data)
       response = client.set_service_auth_data(id, service_name, data)
       raise Parse::Client::ResponseError, response if response.error?
-      apply_attributes!(response.result)
+      self.class.with_authdata_trust { apply_attributes!(response.result) }
     end
 
     # Removes third-party authentication data for this user
@@ -276,7 +340,99 @@ module Parse
     def unlink_auth_data!(service_name)
       response = client.set_service_auth_data(id, service_name, nil)
       raise Parse::Client::ResponseError, response if response.error?
-      apply_attributes!(response.result)
+      self.class.with_authdata_trust { apply_attributes!(response.result) }
+    end
+
+    # Upgrade an anonymous user (one created via the +authData.anonymous+
+    # provider) into a full username/password account. This is the
+    # SDK-side counterpart of the Parse JS SDK's
+    # +_linkWith('username', ...)+ flow — it sends a single
+    # +PUT /users/:id+ with the new credentials and an explicit
+    # +authData: { anonymous: nil }+ unlink in the same body, then
+    # narrowly applies the server's response to the in-memory user.
+    #
+    # The +authData.anonymous+ unlink is essential: leaving the anonymous
+    # provider attached after assigning a username would let anyone else
+    # who somehow learned the (random) anonymous id silently log in as
+    # the freshly-named account, a documented Parse foot-gun.
+    #
+    # @param username [String] the username to claim. Must be unique.
+    # @param password [String] the password to set on the account.
+    # @param email [String, nil] optional email address. Must be unique
+    #   if provided.
+    # @raise [Parse::Error::AuthenticationError] when this instance has
+    #   no attached +@session_token+, no objectId, or is not anonymous.
+    # @raise [Parse::Error::UsernameMissingError] when +username+ is blank.
+    # @raise [Parse::Error::PasswordMissingError] when +password+ is blank.
+    # @raise [Parse::Error::UsernameTakenError] when Parse Server reports
+    #   the username already exists.
+    # @raise [Parse::Error::EmailTakenError] when Parse Server reports
+    #   the email already exists.
+    # @raise [Parse::Error::InvalidEmailAddress] when Parse Server
+    #   reports the email is malformed.
+    # @raise [Parse::Client::ResponseError] for any other error response.
+    # @return [Boolean] true on success.
+    def upgrade_anonymous!(username:, password:, email: nil)
+      require_self_session!(:upgrade_anonymous!)
+      if @id.nil? || @id.to_s.empty?
+        raise Parse::Error::AuthenticationError,
+              "Parse::User#upgrade_anonymous! requires a saved user (no objectId)"
+      end
+      unless anonymous?
+        raise Parse::Error::AuthenticationError,
+              "Parse::User#upgrade_anonymous! is only valid for anonymous users " \
+              "(authData.anonymous is not present on this instance)"
+      end
+      if username.nil? || username.to_s.empty?
+        raise Parse::Error::UsernameMissingError, "upgrade_anonymous! requires a username."
+      end
+      if password.nil? || password.to_s.empty?
+        raise Parse::Error::PasswordMissingError, "upgrade_anonymous! requires a password."
+      end
+
+      body = {
+        username: username.to_s,
+        password: password.to_s,
+        # Explicitly unlink the anonymous provider in the same request
+        # that claims the new credentials — otherwise the account
+        # remains takeover-able via the anonymous id.
+        authData: { anonymous: nil },
+      }
+      body[:email] = email.to_s if email.is_a?(String) && !email.empty?
+
+      response = client.update_user(@id, body, session_token: @session_token)
+
+      if response.success?
+        result = response.result || {}
+        @updated_at = result["updatedAt"] || @updated_at
+        # Parse Server may rotate the session token on a credential
+        # change; apply it narrowly if present without going through the
+        # full property writer chain.
+        if result["sessionToken"].is_a?(String) && !result["sessionToken"].empty?
+          @session_token = result["sessionToken"]
+        end
+        @auth_data.delete("anonymous") if @auth_data.is_a?(Hash)
+        @username = username.to_s
+        @email = email.to_s if email.is_a?(String) && !email.empty?
+        @password = nil
+        changes_applied!
+        clear_partial_fetch_state!
+        return true
+      end
+
+      case response.code
+      when Parse::Response::ERROR_USERNAME_MISSING
+        raise Parse::Error::UsernameMissingError, response
+      when Parse::Response::ERROR_PASSWORD_MISSING
+        raise Parse::Error::PasswordMissingError, response
+      when Parse::Response::ERROR_USERNAME_TAKEN
+        raise Parse::Error::UsernameTakenError, response
+      when Parse::Response::ERROR_EMAIL_TAKEN
+        raise Parse::Error::EmailTakenError, response
+      when Parse::Response::ERROR_EMAIL_INVALID
+        raise Parse::Error::InvalidEmailAddress, response
+      end
+      raise Parse::Client::ResponseError, response
     end
 
     # @!visibility private
@@ -425,7 +581,7 @@ module Parse
         # telling us what the account currently looks like. (Compare
         # signup, where we narrow to an allow-list because a brand-new
         # account has no legitimate authData to report.)
-        apply_attributes! response.result
+        self.class.with_authdata_trust { apply_attributes! response.result }
         # Drop the plaintext password from memory now that the login
         # has succeeded. Direct ivar assignment so the dirty tracker
         # doesn't record this clear as a pending change.
@@ -545,10 +701,14 @@ module Parse
                                     body.delete("__parse_stack_trusted_authdata")) : false
       assert_create_body_safe!(body) unless trusted
       strip_server_controlled_keys!(body)
-      response = client.create_user(body, opts: opts)
+      response = client.create_user(body, **opts)
       if response.success?
         body.delete :password # clear password before merging
-        return Parse::User.build body.merge(response.result)
+        # Self-fetch trust: the response.result describes the user we
+        # just created, so any returned authData IS that user's own
+        # federated-identity payload — allow it through the hydration
+        # strip in {#apply_attributes!}.
+        return with_authdata_trust { Parse::User.build body.merge(response.result) }
       end
 
       case response.code
@@ -620,6 +780,23 @@ module Parse
       self.create(body)
     end
 
+    # Create and log in a new anonymous user via the
+    # +authData.anonymous+ provider. The returned user instance has a
+    # +session_token+ and an objectId, and {#anonymous?} returns true.
+    # Later, after the user has chosen a username and password, upgrade
+    # the account in-place with {#upgrade_anonymous!}.
+    #
+    # Parse Server requires the anonymous-provider payload to include a
+    # client-generated +id+; this helper produces one via
+    # +SecureRandom.uuid+ so callers don't have to hand-roll the
+    # +authData+ shape.
+    #
+    # @return [User] a freshly-created, logged-in anonymous user.
+    # @see #upgrade_anonymous!
+    def self.anonymous_signup
+      autologin_service(:anonymous, { id: SecureRandom.uuid })
+    end
+
     # This method will signup a new user using the parameters below. The required fields
     # to create a user in Parse is the _username_ and _password_ fields. The _email_ field is optional.
     # Both _username_ and _email_ (if provided), must be unique. At a minimum, it is recommended you perform
@@ -636,9 +813,38 @@ module Parse
     # @param username [String] the user's username
     # @param password [String] the user's password
     # @return [User] a logged in user for the provided username. Returns nil otherwise.
+    # @see .login!
     def self.login(username, password)
       response = client.login(username.to_s, password.to_s)
-      response.success? ? Parse::User.build(response.result) : nil
+      return nil unless response.success?
+      # Self-fetch trust: the login response IS the authenticating user;
+      # any returned authData belongs to them.
+      with_authdata_trust { Parse::User.build(response.result) }
+    end
+
+    # Login and return a Parse::User with this username/password combination,
+    # raising on failure instead of returning nil. Mirrors the
+    # `find_by_username!` / `find!` conventions: callers who treat an
+    # unsuccessful login as an exceptional condition shouldn't have to
+    # build their own `raise if .nil?` boilerplate around every call site.
+    #
+    # @param username [String] the user's username.
+    # @param password [String] the user's password.
+    # @return [User] the logged-in user.
+    # @raise [Parse::Error::AuthenticationError] when Parse Server rejects
+    #   the credentials, the request is rate-limited at the server, or the
+    #   response is otherwise unsuccessful.
+    # @see .login
+    def self.login!(username, password)
+      response = client.login(username.to_s, password.to_s)
+      if response.success?
+        # Self-fetch trust: see {.login}.
+        with_authdata_trust { Parse::User.build(response.result) }
+      else
+        raise Parse::Error::AuthenticationError,
+              "Parse::User.login! failed for #{username.inspect}: " \
+              "#{response.error || "HTTP #{response.http_status}"} (code=#{response.code.inspect})"
+      end
     end
 
     # Request a password reset for a registered email.
@@ -669,13 +875,50 @@ module Parse
 
     # Return a Parse::User for this active session token.
     # @raise [InvalidSessionTokenError] Invalid session token.
+    # @raise [ArgumentError] when `opts` smuggles a conflicting
+    #   `:session_token` key — the positional `token` argument is the
+    #   only source of truth; rejecting the kwarg prevents a silent
+    #   override that would authenticate as a different user.
     # @return [User] the user matching this active token
     # @see #session
     def self.session!(token, opts = {})
+      if opts.is_a?(Hash) && (opts.key?(:session_token) || opts.key?("session_token"))
+        raise ArgumentError,
+              "Parse::User.session! takes the session token as its positional " \
+              "argument; do not also pass it via opts[:session_token]"
+      end
       # support Parse::Session objects
       token = token.session_token if token.respond_to?(:session_token)
       response = client.current_user(token, **opts)
-      response.success? ? Parse::User.build(response.result) : nil
+      return nil unless response.success?
+      # Self-fetch trust: `/users/me` returns the row owned by the
+      # supplied session token, so authData here is that user's own.
+      with_authdata_trust { Parse::User.build(response.result) }
+    end
+
+    # Block-scoped sugar around {Parse.with_session}: runs the block
+    # with this user's `session_token` as the ambient session token for
+    # the current fiber. Every Parse call inside the block that doesn't
+    # explicitly pass `session_token:` or `use_master_key: true` will be
+    # sent as this user.
+    # @yield runs the block with the user's session in ambient scope.
+    # @return [Object] the block's return value.
+    # @raise [Parse::Error::AuthenticationError] when the user has no
+    #   session token attached.
+    # @example
+    #   user = Parse::User.login!("alice", "pw")
+    #   user.with_session do
+    #     Post.all                # scoped to alice
+    #     post.save               # scoped to alice
+    #   end
+    def with_session(&block)
+      raise ArgumentError, "Parse::User#with_session requires a block" unless block_given?
+      unless @session_token.is_a?(String) && !@session_token.empty?
+        raise Parse::Error::AuthenticationError,
+              "Parse::User#with_session requires an authenticated session — " \
+              "obtain the instance via login/signup or call `user.session_token = '...'` first"
+      end
+      Parse.with_session(@session_token, &block)
     end
 
     # If the current session token for this instance is nil, this method finds
@@ -697,8 +940,17 @@ module Parse
 
     # Logout from all sessions, effectively signing out on all devices.
     # Optionally keep the current session active.
+    #
+    # **Self-guard.** Requires the user instance to carry a session token —
+    # i.e. to have been obtained via login/signup or attached via
+    # {#session_token=}. Without this, `user.id = victim_id;
+    # user.logout_all!` could revoke another user's sessions if the
+    # deployment has loose `_Session` write CLP. The guard fails closed
+    # in the SDK so the deployment's CLP isn't the only line of defense.
+    #
     # @param keep_current [Boolean] if true, keeps the current session active (default: false)
     # @return [Integer] the number of sessions revoked
+    # @raise [Parse::Error::AuthenticationError] if the user has no session token
     # @example
     #   # Logout from all devices
     #   user.logout_all!
@@ -707,32 +959,63 @@ module Parse
     #   user.logout_all!(keep_current: true)
     def logout_all!(keep_current: false)
       return 0 unless id.present?
-      except_token = keep_current ? @session_token : nil
-      count = Parse::Session.revoke_all_for_user(self, except: except_token)
+      require_self_session!("logout_all!")
+      current_token = @session_token
+      # Self-scope the _Session query: in client mode the ambient client
+      # has no auth, so the query must carry this user's session token to
+      # be authorized against /classes/_Session. Master-key mode ignores
+      # the ambient since the master key still wins.
+      count = Parse.with_session(current_token) do
+        # Always revoke the OTHER sessions first under the live token —
+        # destroying the calling session mid-loop invalidates the token
+        # and the remaining deletes 401. Then, if not keeping current,
+        # close the calling session via the dedicated logout endpoint.
+        n = Parse::Session.revoke_all_for_user(self, except: current_token)
+        unless keep_current
+          begin
+            Parse.client.logout(current_token)
+            n += 1
+          rescue Parse::Error::InvalidSessionTokenError
+            # The calling session was already gone (server-side TTL or
+            # concurrent revoke). Idempotent: count what we destroyed.
+          end
+        end
+        n
+      end
       @session_token = nil unless keep_current
       @session = nil unless keep_current
       count
     end
 
     # Get the count of active (non-expired) sessions for this user.
+    # Requires an authenticated session (see {#logout_all!} for the rationale).
     # @return [Integer] the number of active sessions
+    # @raise [Parse::Error::AuthenticationError] if the user has no session token
     # @example
     #   count = user.active_session_count
     #   puts "User is logged in on #{count} devices"
     def active_session_count
       return 0 unless id.present?
-      Parse::Session.active_count_for_user(self)
+      require_self_session!("active_session_count")
+      Parse.with_session(@session_token) do
+        Parse::Session.active_count_for_user(self)
+      end
     end
 
     # Get all active sessions for this user.
+    # Requires an authenticated session (see {#logout_all!} for the rationale).
     # @return [Array<Parse::Session>] array of active session objects
+    # @raise [Parse::Error::AuthenticationError] if the user has no session token
     # @example
     #   user.sessions.each do |session|
     #     puts "Session created: #{session.created_at}"
     #   end
     def sessions
       return [] unless id.present?
-      Parse::Session.for_user(self).all
+      require_self_session!("sessions")
+      Parse.with_session(@session_token) do
+        Parse::Session.for_user(self).all
+      end
     end
 
     # Check if this user has multiple active sessions (logged in on multiple devices).
@@ -810,6 +1093,19 @@ module Parse
     end
 
     private
+
+    # Self-guard for session-scoped instance methods. Fails closed when
+    # the user instance carries no `@session_token`, preventing the
+    # `Parse::User.new.tap { |u| u.id = victim_id }` attack on any
+    # method that derives its authorization from the user's identity
+    # alone. See {#logout_all!} for the full rationale.
+    # @raise [Parse::Error::AuthenticationError] when no session token is attached.
+    def require_self_session!(method_name)
+      return if @session_token.is_a?(String) && !@session_token.empty?
+      raise Parse::Error::AuthenticationError,
+            "Parse::User##{method_name} requires an authenticated session — " \
+            "obtain the instance via login/signup or call `user.session_token = '...'` first"
+    end
 
     # Keys that {#signup_create} will accept from a `POST /parse/users`
     # response body and feed through {#set_attributes!}. `sessionToken`

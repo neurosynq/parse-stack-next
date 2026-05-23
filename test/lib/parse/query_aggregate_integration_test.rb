@@ -1830,7 +1830,7 @@ class QueryAggregateTest < Minitest::Test
         # Test 3: Test the exact failing pattern from user's example
         puts "\n--- Test 3: Test exact failing patterns ---"
 
-        # Pattern 1: Membership.where(role: x, active: true).group_by(:project).count
+        # Pattern 1: Subscription.where(role: x, active: true).group_by(:project).count
         # We'll simulate with Post.where(author: x, category: y).group_by(:author).count
         begin
           simulated_result = AggregateTestPost.where(author: user1, category: "tech").group_by(:author).count

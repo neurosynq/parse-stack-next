@@ -243,6 +243,18 @@ module Parse
       # @option options [Hash] :sort sort specification (default: by relevance score)
       # @option options [Boolean] :raw return raw MongoDB documents (default: false)
       # @option options [String] :class_name Parse class name for object conversion
+      # @option options [String] :session_token Parse session token used to scope
+      #   ACL/CLP enforcement to the owning user.
+      # @option options [Boolean] :master run with master-key semantics and bypass
+      #   ACL/CLP enforcement (default: false).
+      # @option options [Parse::User, Parse::Pointer] :acl_user act as the given
+      #   user pointer for ACL evaluation (no REST equivalent; mongo-direct only).
+      # @option options [String, Parse::Role] :acl_role act as the given role for
+      #   ACL evaluation (no REST equivalent; mongo-direct only).
+      # @option options [Symbol] :read_preference MongoDB read preference applied
+      #   to the underlying collection (e.g. +:secondary+).
+      # @option options [Integer] :max_time_ms maximum server-side execution time
+      #   in milliseconds for the aggregate command.
       #
       # @return [Parse::AtlasSearch::SearchResult] search result object
       #
@@ -393,6 +405,19 @@ module Parse
       # @option options [Integer] :limit max suggestions to return (default: 10)
       # @option options [Hash] :filter additional constraints
       # @option options [Boolean] :raw return raw documents (default: false)
+      # @option options [String] :class_name Parse class name for object conversion.
+      # @option options [String] :session_token Parse session token used to scope
+      #   ACL/CLP enforcement to the owning user.
+      # @option options [Boolean] :master run with master-key semantics and bypass
+      #   ACL/CLP enforcement (default: false).
+      # @option options [Parse::User, Parse::Pointer] :acl_user act as the given
+      #   user pointer for ACL evaluation (no REST equivalent; mongo-direct only).
+      # @option options [String, Parse::Role] :acl_role act as the given role for
+      #   ACL evaluation (no REST equivalent; mongo-direct only).
+      # @option options [Symbol] :read_preference MongoDB read preference applied
+      #   to the underlying collection (e.g. +:secondary+).
+      # @option options [Integer] :max_time_ms maximum server-side execution time
+      #   in milliseconds for the aggregate command.
       #
       # @return [Parse::AtlasSearch::AutocompleteResult] autocomplete result
       #
@@ -509,7 +534,14 @@ module Parse
       # @param collection_name [String] the Parse collection name
       # @param query [String, nil] the search query text (nil for match-all)
       # @param facets [Hash] facet definitions
-      # @param options [Hash] search options (same as #search)
+      # @param options [Hash] search options (same as {#search}; see that
+      #   method for the full list of accepted +@option+ entries including
+      #   +:index+, +:fields+, +:fuzzy+, +:limit+, +:filter+, +:read_preference+,
+      #   +:max_time_ms+, and the scoping kwargs +:master+, +:session_token+,
+      #   +:acl_user+, +:acl_role+). Note: scoped identity kwargs require
+      #   +master: true+ to be passed explicitly — $searchMeta bucket counts
+      #   cannot be filtered by ACL after the fact, so the method refuses
+      #   to silently downgrade.
       #
       # @return [Parse::AtlasSearch::FacetedResult] faceted result
       #
@@ -944,19 +976,15 @@ module Parse
           objects = parse_results.each_with_index.map do |doc, idx|
             obj = build_parse_object(doc, class_name)
             raw_doc = raw_results[idx]
-            # Attach search metadata from original raw document (scores are stripped during conversion)
+            # Attach search metadata from original raw document. `search_score`
+            # and `search_highlights` readers are defined once on Parse::Object
+            # (see lib/parse/model/object.rb) so we only set the ivars here —
+            # no per-row singleton method definition.
             if obj && raw_doc["_score"]
               obj.instance_variable_set(:@_search_score, raw_doc["_score"])
-              # Define accessor if not already defined
-              unless obj.respond_to?(:search_score)
-                obj.define_singleton_method(:search_score) { @_search_score }
-              end
             end
             if obj && raw_doc["_highlights"]
               obj.instance_variable_set(:@_search_highlights, raw_doc["_highlights"])
-              unless obj.respond_to?(:search_highlights)
-                obj.define_singleton_method(:search_highlights) { @_search_highlights }
-              end
             end
             obj
           end.compact

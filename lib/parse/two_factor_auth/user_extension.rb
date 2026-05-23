@@ -53,7 +53,9 @@ module Parse
           response = client.login_with_mfa(username, password, mfa_token)
           return nil unless response.success?
 
-          Parse::User.build(response.result)
+          # Self-fetch trust: an MFA login returns the authenticating
+          # user's own row, so authData here is legitimately theirs.
+          Parse::User.with_authdata_trust { Parse::User.build(response.result) }
         rescue Parse::Client::ResponseError => e
           if e.message.include?("Invalid MFA token") || e.message.include?("Missing additional authData")
             raise MFA::VerificationError, e.message
@@ -117,7 +119,8 @@ module Parse
       #
       # @param secret [String] Base32-encoded TOTP secret (generate with MFA.generate_secret)
       # @param token [String] Current TOTP code for verification (user enters from app)
-      # @return [String] Recovery codes (comma-separated) - SAVE THESE!
+      # @return [String, nil] Recovery codes (comma-separated) - SAVE THESE!
+      #   May be nil if the Parse Server response does not include them.
       # @raise [Parse::MFA::VerificationError] If token is invalid
       # @raise [Parse::MFA::AlreadyEnabledError] If MFA is already enabled
       # @raise [ArgumentError] If secret or token is blank

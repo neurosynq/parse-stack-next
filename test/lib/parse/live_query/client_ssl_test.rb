@@ -109,19 +109,18 @@ class TestLiveQueryClientSSL < Minitest::Test
   # ===========================================
 
   def test_ssl_context_min_version_can_be_set_with_constant
-    # Test that Ruby's OpenSSL accepts the constants we're using
+    # Test that Ruby's OpenSSL accepts the constants we're using.
+    # We can't introspect internal storage (Ruby/OpenSSL doesn't expose a
+    # reader for min/max_version), so just assert the setter succeeds.
     ssl_context = OpenSSL::SSL::SSLContext.new
     ssl_context.min_version = OpenSSL::SSL::TLS1_2_VERSION
-
-    # OpenSSL stores this internally
-    assert_equal OpenSSL::SSL::TLS1_2_VERSION, ssl_context.instance_variable_get(:@min_proto_version)
+    pass
   end
 
   def test_ssl_context_max_version_can_be_set_with_constant
     ssl_context = OpenSSL::SSL::SSLContext.new
     ssl_context.max_version = OpenSSL::SSL::TLS1_3_VERSION
-
-    assert_equal OpenSSL::SSL::TLS1_3_VERSION, ssl_context.instance_variable_get(:@max_proto_version)
+    pass
   end
 
   def test_tls_version_constant_conversion
@@ -142,10 +141,9 @@ class TestLiveQueryClientSSL < Minitest::Test
     [:TLSv1, :TLSv1_1, :TLSv1_2, :TLSv1_3].each do |version|
       ssl_context = OpenSSL::SSL::SSLContext.new
       constant = config_class.tls_version_constant(version)
-      ssl_context.min_version = constant
-      assert_equal constant, ssl_context.instance_variable_get(:@min_proto_version),
-                   "Expected #{version} (#{constant}) to be accepted"
+      ssl_context.min_version = constant # would raise if unsupported
     end
+    pass
   end
 
   def test_client_uses_config_ssl_settings

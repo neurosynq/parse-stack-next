@@ -57,11 +57,11 @@ class PointerCollectionProxyAsJsonIntegrationTest < Minitest::Test
 
         # Create capture with assets
         capture = PcpAsJsonCapture.new(
-          title: "Test Capture",
+          title: "Test Post",
           description: "A test capture with assets"
         )
         capture.assets.add(asset1, asset2)
-        assert capture.save, "Capture should save"
+        assert capture.save, "Post should save"
 
         # Fetch capture with assets included
         fetched = PcpAsJsonCapture.first(
@@ -111,11 +111,11 @@ class PointerCollectionProxyAsJsonIntegrationTest < Minitest::Test
 
         # Create capture with assets
         capture = PcpAsJsonCapture.new(
-          title: "Test Capture",
+          title: "Test Post",
           description: "A test capture with assets"
         )
         capture.assets.add(asset1, asset2)
-        assert capture.save, "Capture should save"
+        assert capture.save, "Post should save"
 
         # Fetch capture with assets included
         fetched = PcpAsJsonCapture.first(
@@ -165,11 +165,11 @@ class PointerCollectionProxyAsJsonIntegrationTest < Minitest::Test
 
         # Create capture with asset
         capture = PcpAsJsonCapture.new(
-          title: "Test Capture",
+          title: "Test Post",
           description: "A test capture with assets"
         )
         capture.assets.add(asset1)
-        assert capture.save, "Capture should save"
+        assert capture.save, "Post should save"
 
         # Fetch capture with specific keys for assets
         fetched = PcpAsJsonCapture.first(
@@ -224,11 +224,11 @@ class PointerCollectionProxyAsJsonIntegrationTest < Minitest::Test
 
         # Create capture with assets
         capture = PcpAsJsonCapture.new(
-          title: "Test Capture",
+          title: "Test Post",
           description: "A test capture with assets"
         )
         capture.assets.add(asset1, asset2)
-        assert capture.save, "Capture should save"
+        assert capture.save, "Post should save"
 
         # Fetch capture WITHOUT includes (assets will be pointers)
         fetched = PcpAsJsonCapture.first(:id.eq => capture.id)
@@ -286,11 +286,11 @@ class PointerCollectionProxyAsJsonIntegrationTest < Minitest::Test
 
         # Create capture with assets
         capture = PcpAsJsonCapture.new(
-          title: "Test Capture",
+          title: "Test Post",
           description: "A test capture with assets"
         )
         capture.assets.add(asset1, asset2)
-        assert capture.save, "Capture should save"
+        assert capture.save, "Post should save"
 
         # Simulate webhook pattern: fetch with includes, then serialize for response
         results = PcpAsJsonCapture.query(
@@ -308,7 +308,7 @@ class PointerCollectionProxyAsJsonIntegrationTest < Minitest::Test
         capture_json = response[0]
 
         # Check capture fields
-        assert_equal "Test Capture", capture_json["title"]
+        assert_equal "Test Post", capture_json["title"]
         assert_equal "A test capture with assets", capture_json["description"]
 
         # Check assets are full objects
@@ -336,10 +336,10 @@ class PointerCollectionProxyAsJsonIntegrationTest < Minitest::Test
 
         # Create capture without assets
         capture = PcpAsJsonCapture.new(
-          title: "Empty Capture",
+          title: "Empty Post",
           description: "No assets here"
         )
-        assert capture.save, "Capture should save"
+        assert capture.save, "Post should save"
 
         # Fetch capture
         fetched = PcpAsJsonCapture.first(:id.eq => capture.id)

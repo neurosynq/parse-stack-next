@@ -300,7 +300,7 @@ class UserSaveSignupIntegrationTest < Minitest::Test
         # Read the raw row back through the client (the Parse::User
         # subclass redispatches to plain Parse::User on build because
         # parse_class is shared, so query through the raw fetch path).
-        raw = Parse.client.fetch_object("_User", user.id, opts: { use_master_key: true })
+        raw = Parse.client.fetch_object("_User", user.id, use_master_key: true)
         assert raw.success?, "master-key fetch of new user must succeed"
         assert_equal expected_ref, raw.result["parseReference"],
                      "parseReference column must be persisted server-side"

@@ -31,9 +31,9 @@ class AgentSecurityHardeningTest < Minitest::Test
   class SHSong < Parse::Object
     parse_class "SHSong"
     property :title,     :string
-    property :isRemoved, :boolean
+    property :archived, :boolean
 
-    agent_canonical_filter "isRemoved" => { "$ne" => true }
+    agent_canonical_filter "archived" => { "$ne" => true }
   end
 
   class SHArtist < Parse::Object
@@ -51,7 +51,7 @@ class AgentSecurityHardeningTest < Minitest::Test
     parse_class "SHVisible"
     property :label, :string
     belongs_to :hidden_ref, as: :pointer, class_name: "SHHiddenClass"
-    agent_canonical_filter "isRemoved" => { "$ne" => true }
+    agent_canonical_filter "archived" => { "$ne" => true }
   end
 
   # ---- Setup / teardown ----------------------------------------------------
@@ -340,7 +340,7 @@ class AgentSecurityHardeningTest < Minitest::Test
   # H3 — group_by / group_by_date / distinct skip canonical filter
   # =========================================================================
 
-  # SHSong declares agent_canonical_filter "isRemoved" => { "$ne" => true }.
+  # SHSong declares agent_canonical_filter "archived" => { "$ne" => true }.
   # group_by / group_by_date / distinct must include this as a $match in the
   # pipeline submitted to aggregate_pipeline.
 
@@ -355,7 +355,7 @@ class AgentSecurityHardeningTest < Minitest::Test
     match_stages = pipeline.select { |s| s.is_a?(Hash) && s.keys.first.to_s == "$match" }
     canonical_present = match_stages.any? do |s|
       m = s["$match"]
-      m.is_a?(Hash) && m["isRemoved"] == { "$ne" => true }
+      m.is_a?(Hash) && m["archived"] == { "$ne" => true }
     end
     assert canonical_present,
            "group_by pipeline must contain a $match with canonical filter; got: #{pipeline.inspect}"
@@ -368,7 +368,7 @@ class AgentSecurityHardeningTest < Minitest::Test
     match_stages = pipeline.select { |s| s.is_a?(Hash) && s.keys.first.to_s == "$match" }
     canonical_present = match_stages.any? do |s|
       m = s["$match"]
-      m.is_a?(Hash) && m["isRemoved"] == { "$ne" => true }
+      m.is_a?(Hash) && m["archived"] == { "$ne" => true }
     end
     assert canonical_present,
            "group_by_date pipeline must contain canonical filter $match; got: #{pipeline.inspect}"
@@ -381,7 +381,7 @@ class AgentSecurityHardeningTest < Minitest::Test
     match_stages = pipeline.select { |s| s.is_a?(Hash) && s.keys.first.to_s == "$match" }
     canonical_present = match_stages.any? do |s|
       m = s["$match"]
-      m.is_a?(Hash) && m["isRemoved"] == { "$ne" => true }
+      m.is_a?(Hash) && m["archived"] == { "$ne" => true }
     end
     assert canonical_present,
            "distinct pipeline must contain canonical filter $match; got: #{pipeline.inspect}"
@@ -396,8 +396,8 @@ class AgentSecurityHardeningTest < Minitest::Test
     # The where: must encode the canonical filter
     assert query[:where], "explain_query must include a where: when canonical filter is declared"
     where = JSON.parse(query[:where])
-    assert where["isRemoved"] == { "$ne" => true } ||
-           (where["$and"] && where["$and"].any? { |c| c["isRemoved"] == { "$ne" => true } }),
+    assert where["archived"] == { "$ne" => true } ||
+           (where["$and"] && where["$and"].any? { |c| c["archived"] == { "$ne" => true } }),
            "explain_query where: must include canonical filter; got: #{where.inspect}"
   end
 
@@ -408,8 +408,8 @@ class AgentSecurityHardeningTest < Minitest::Test
     _, query = @find_calls.first
     assert query[:where], "export_data must include a where: when canonical filter is declared"
     where = JSON.parse(query[:where])
-    canonical = where["isRemoved"] == { "$ne" => true } ||
-                (where["$and"] && where["$and"].any? { |c| c["isRemoved"] == { "$ne" => true } })
+    canonical = where["archived"] == { "$ne" => true } ||
+                (where["$and"] && where["$and"].any? { |c| c["archived"] == { "$ne" => true } })
     assert canonical,
            "export_data (query path) must include canonical filter; got: #{where.inspect}"
   end
@@ -423,7 +423,7 @@ class AgentSecurityHardeningTest < Minitest::Test
     match_stages = pipeline.select { |s| s.is_a?(Hash) && s.keys.first.to_s == "$match" }
     canonical_present = match_stages.any? do |s|
       m = s["$match"]
-      m.is_a?(Hash) && m["isRemoved"] == { "$ne" => true }
+      m.is_a?(Hash) && m["archived"] == { "$ne" => true }
     end
     assert canonical_present,
            "export_data (pipeline path) must contain canonical filter $match; got: #{pipeline.inspect}"
@@ -436,8 +436,8 @@ class AgentSecurityHardeningTest < Minitest::Test
     _, query = @find_calls.first
     assert query[:where], "get_sample_objects must include a where: when canonical filter is declared"
     where = JSON.parse(query[:where])
-    canonical = where["isRemoved"] == { "$ne" => true } ||
-                (where["$and"] && where["$and"].any? { |c| c["isRemoved"] == { "$ne" => true } })
+    canonical = where["archived"] == { "$ne" => true } ||
+                (where["$and"] && where["$and"].any? { |c| c["archived"] == { "$ne" => true } })
     assert canonical,
            "get_sample_objects must include canonical filter in where:; got: #{where.inspect}"
   end
@@ -708,10 +708,10 @@ class AgentSecurityHardeningTest < Minitest::Test
     klass = nil
     refute_raises do
       klass = Class.new(Parse::Object) do
-        agent_canonical_filter "isRemoved" => { "$ne" => true }, "status" => "active"
+        agent_canonical_filter "archived" => { "$ne" => true }, "status" => "active"
       end
     end
-    assert_equal({ "isRemoved" => { "$ne" => true }, "status" => "active" },
+    assert_equal({ "archived" => { "$ne" => true }, "status" => "active" },
                  klass.agent_canonical_filter_for_apply)
   end
 

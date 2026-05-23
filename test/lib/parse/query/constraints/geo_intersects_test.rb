@@ -94,9 +94,11 @@ class TestGeoIntersectsGeometryQueryConstraint < Minitest::Test
   end
 
   def test_master_key_gate_falls_through_to_enabled_check
-    # Default use_master_key is true; the next gate is Parse::MongoDB.enabled?
+    # With use_master_key explicitly true, the master-key gate passes
+    # and the next gate (Parse::MongoDB.enabled?) fires.
     poly = Parse::Polygon.new([[0, 0], [0, 1], [1, 0]])
     q = User.query(:area.geo_intersects => poly)
+    q.use_master_key = true
     err = assert_raises(Parse::Query::MongoDirectRequired) { q.assert_mongo_direct_routable! }
     assert_match(/not enabled|configure/i, err.message)
   end

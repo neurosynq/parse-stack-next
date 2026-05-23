@@ -215,6 +215,21 @@ module Parse
         prepared_query.results
       end
 
+      # Convenience wrapper around {.all} that runs the query under a
+      # caller-supplied session token. Equivalent to passing
+      # `session_token:` in the constraints hash, surfaced as a named
+      # kwarg so client-mode callers don't have to remember the
+      # constraint-key form. Returns nil if `token` is blank.
+      # @param token [String, Parse::User, Parse::Session] session token,
+      #   user instance, or session instance.
+      # @param constraints (see .all)
+      # @return [Array<Parse::Object>]
+      def all_as(token, constraints = { limit: :max }, &block)
+        tok = token.respond_to?(:session_token) ? token.session_token : token
+        return nil if tok.nil? || tok.to_s.empty?
+        all(constraints.merge(session_token: tok), &block)
+      end
+
       # Returns the first item matching the constraint.
       # @overload first(count = 1)
       #  @param count [Interger] The number of items to return.
@@ -237,6 +252,23 @@ module Parse
         res = query(constraints).results
         return res.first if fetch_count == 1
         return res.first fetch_count
+      end
+
+      # Convenience wrapper around {.first} that runs the query under a
+      # caller-supplied session token.
+      # @param token [String, Parse::User, Parse::Session] session token,
+      #   user instance, or session instance.
+      # @param constraints (see .first)
+      # @return [Parse::Object, Array<Parse::Object>, nil]
+      def first_as(token, constraints = {})
+        tok = token.respond_to?(:session_token) ? token.session_token : token
+        return nil if tok.nil? || tok.to_s.empty?
+        if constraints.is_a?(Numeric)
+          # `first(2)` shape — surface kwarg via a synthetic constraints hash
+          first({ limit: constraints.to_i, session_token: tok })
+        else
+          first(constraints.merge(session_token: tok))
+        end
       end
 
       # Returns the most recently created object (ordered by created_at descending).
@@ -407,6 +439,13 @@ module Parse
       # @see Parse::LiveQuery::Subscription
       # @see Parse::Query#subscribe
       def subscribe(where: {}, fields: nil, session_token: nil, client: nil)
+        # Fall through to the ambient set by `Parse.with_session` / `Parse.login`
+        # so a caller wrapping a region with `with_session(user) { Klass.subscribe ... }`
+        # gets an ACL-aware subscription without re-threading the token.
+        if session_token.nil?
+          ambient = Parse.current_session_token
+          session_token = ambient if ambient.is_a?(String) && !ambient.empty?
+        end
         query(where).subscribe(fields: fields, session_token: session_token, client: client)
       end
 
@@ -430,7 +469,7 @@ module Parse
       #   - false - completely bypass cache (no read or write)
       # @return [Parse::Object] if only one id was provided as a parameter.
       # @return [Array<Parse::Object>] if more than one id was provided as a parameter.
-      def find(*parse_ids, type: :parallel, compact: true, cache: nil)
+      def find(*parse_ids, type: :parallel, compact: true, cache: nil, session_token: nil, use_master_key: nil)
         # flatten the list of Object ids.
         parse_ids.flatten!
         parse_ids.compact!
@@ -446,11 +485,28 @@ module Parse
 
         # Extract cache option for client requests
         client_opts = { cache: cache }
+        # Forward session-token / use_master_key when supplied so client-mode
+        # callers can scope a `.find` to a logged-in user without dropping
+        # down to the raw `client.fetch_object` form.
+        client_opts[:session_token]  = session_token  unless session_token.nil?
+        client_opts[:use_master_key] = use_master_key unless use_master_key.nil?
+        # The parallel path spawns worker threads via `Parallel.map`. Worker
+        # threads don't inherit fiber-local storage from the calling thread,
+        # so `Parse.current_session_token` resolved inside the worker would
+        # be nil even when the caller is inside a `Parse.with_session(...)`
+        # block. Snapshot the ambient here (in the calling thread) and pass
+        # it explicitly so each worker sends the right auth.
+        if !client_opts.key?(:session_token)
+          ambient = Parse.current_session_token
+          client_opts[:session_token] = ambient if ambient.is_a?(String) && !ambient.empty?
+        end
 
         if type == :batch
           # use a .in query with the given id as a list
           query = self.class.query(:id.in => parse_ids)
           query.cache = cache
+          query.session_token = session_token unless session_token.nil?
+          query.use_master_key = use_master_key unless use_master_key.nil?
           results = query.results
         else
           # use Parallel to make multiple threaded requests for finding these objects.

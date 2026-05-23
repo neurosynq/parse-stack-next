@@ -1,0 +1,190 @@
+# encoding: UTF-8
+# frozen_string_literal: true
+
+require "moneta"
+require_relative "pool"
+
+module Parse
+  module Cache
+    # Ergonomic Redis cache builder for Parse Stack. Composes a
+    # ConnectionPool of Moneta-Redis stores and carries an optional
+    # `namespace` that `Parse::Client` will pick up automatically — there
+    # is no need to also pass `cache_namespace:` to `Parse.setup` when
+    # using this wrapper.
+    #
+    # Usage:
+    #   Parse.setup(
+    #     cache: Parse::Cache::Redis.new(
+    #       url: "redis://localhost:6379/0",
+    #       namespace: "app_x",
+    #       pool_size: 10,
+    #     ),
+    #     expires: 60,
+    #     ...
+    #   )
+    #
+    # The instance is a Moneta-compatible store (it delegates the four
+    # methods the Faraday caching middleware uses — `[]`, `key?`,
+    # `delete`, `store` — to a pooled backend), so it can be passed
+    # directly to `Parse.setup(cache:)` / `Parse::Client.new(cache:)`.
+    class Redis
+      # @return [String, nil] cache key namespace prefix (or nil if not set).
+      attr_reader :namespace
+
+      # @return [Integer] pool size.
+      attr_reader :pool_size
+
+      # @return [String] Redis connection URL.
+      attr_reader :url
+
+      # @param url [String] Redis URL (e.g. `"redis://localhost:6379/0"`).
+      # @param namespace [String, nil] optional key prefix so multiple Parse
+      #   apps can share one Redis without colliding. When non-nil, the
+      #   namespace is automatically forwarded to the caching middleware
+      #   as `cache_namespace:`.
+      # @param pool_size [Integer] number of pooled Moneta-Redis stores.
+      #   Defaults to 5 (the Puma default thread count).
+      #
+      #   **Sizing math (per Faraday request):**
+      #   - cache hit: `key?` + `[]` = **2 checkouts**
+      #   - GET miss + successful store: `key?` + 3 variant deletes
+      #     (anonymous + master-key sibling + final key) + 1 `store` in
+      #     `on_complete` = **up to 5 checkouts**
+      #   - non-GET write (POST/PUT/DELETE): 3 variant deletes =
+      #     **3 checkouts**
+      #
+      #   The worst case (5) is on the write-through-after-miss path, not
+      #   the hit path. Rule of thumb: start at `pool_size = RAILS_MAX_THREADS`,
+      #   then bump it up if you observe `ConnectionPool::TimeoutError` in
+      #   `parse.cache.error` notifications (the middleware swallows that
+      #   error into a passthrough request rather than raising to the caller).
+      # @param pool_timeout [Numeric] seconds to wait for a backend
+      #   checkout before raising `ConnectionPool::TimeoutError`. Defaults
+      #   to 5s. The caching middleware catches that error and falls back
+      #   to a passthrough request rather than raising to the caller.
+      # @param moneta_options [Hash] extra options passed through to
+      #   `Moneta.new(:Redis, ...)` (e.g. `:db`, `:connect_timeout`).
+      #   `expires: true` is set automatically so per-key TTLs supplied
+      #   by the caching middleware (the `:expires` Faraday option) are
+      #   honored by Redis. Pass `expires: false` here to opt out — but
+      #   note that doing so causes cached responses to live forever,
+      #   which is rarely what you want for a session-token-scoped
+      #   response cache.
+      def initialize(url:, namespace: nil, pool_size: 5, pool_timeout: 5, **moneta_options)
+        @url = url
+        @namespace = normalize_namespace(namespace)
+        @pool_size = pool_size
+        @pool_timeout = pool_timeout
+        # Default expires: true so per-call `expires:` (the TTL the
+        # Faraday caching middleware passes on store) is honored. The
+        # Moneta-Redis adapter ignores per-call expires unless the
+        # store was constructed with this flag. Without it, cached
+        # session-scoped REST responses outlive their token's
+        # validity. Callers can still pass `expires: false` to opt out.
+        merged_options = { expires: true }.merge(moneta_options)
+        @moneta_options = merged_options
+        @closed = false
+        @pool = Pool.new(size: pool_size, timeout: pool_timeout) do
+          Moneta.new(:Redis, { url: url }.merge(merged_options))
+        end
+      end
+
+      def [](key)
+        @pool[key]
+      end
+
+      def key?(key)
+        @pool.key?(key)
+      end
+
+      def delete(key)
+        @pool.delete(key)
+      end
+
+      def store(key, value, options = {})
+        @pool.store(key, value, options)
+      end
+
+      # Clear cached entries belonging to this wrapper. Required for
+      # `Parse::Client#clear_cache!` compatibility.
+      #
+      # **Namespace-scoped when a namespace is set:** the wrapper walks
+      # `<namespace>:*` via Redis SCAN and DELs the matching keys,
+      # leaving other tenants on the same DB untouched. When no
+      # namespace is configured the wrapper falls back to `FLUSHDB` on
+      # the backing DB — same blast radius as previous versions, but
+      # only for unnamespaced deployments. To opt into the wide
+      # FLUSHDB explicitly (e.g. ops tooling), call {#flush_db!}.
+      def clear
+        if @namespace
+          delete_keys_matching!("#{@namespace}:*")
+        else
+          @pool.clear
+        end
+        self
+      end
+
+      # Issue `FLUSHDB` on the backing Redis DB, regardless of whether a
+      # namespace is configured. Evicts every key on the selected DB,
+      # including unrelated tenants — use only for ops tooling that
+      # owns the whole DB.
+      def flush_db!
+        @pool.clear
+        self
+      end
+
+      # Close all pooled connections. Safe to call multiple times.
+      def close
+        return if @closed
+        @closed = true
+        @pool.close
+      end
+
+      private
+
+      def delete_keys_matching!(pattern)
+        @pool.pool.with do |store|
+          redis = backend_client(store)
+          # SCAN-DEL loop. `count:` is a hint to the server; the actual
+          # batch size returned varies. Loop until the cursor wraps back
+          # to "0".
+          cursor = "0"
+          loop do
+            cursor, keys = redis.scan(cursor, match: pattern, count: 1000)
+            redis.del(*keys) unless keys.empty?
+            break if cursor == "0"
+          end
+        end
+      end
+
+      def backend_client(moneta_store)
+        # Walk down the Moneta proxy chain (Expires → Adapter → redis-rb)
+        # until we reach an object that quacks like the redis-rb client
+        # (i.e. responds to #scan). Moneta wraps the actual adapter when
+        # `expires: true` is passed, and the adapter then exposes the
+        # underlying redis-rb client via `#backend` (modern releases) or
+        # the `@backend` ivar (older releases).
+        node = moneta_store
+        12.times do
+          return node if node.respond_to?(:scan)
+          if node.respond_to?(:backend)
+            node = node.backend
+          elsif node.instance_variable_defined?(:@backend)
+            node = node.instance_variable_get(:@backend)
+          elsif node.instance_variable_defined?(:@adapter)
+            node = node.instance_variable_get(:@adapter)
+          else
+            break
+          end
+          break if node.nil?
+        end
+        node
+      end
+
+      def normalize_namespace(ns)
+        s = ns.to_s.chomp(":")
+        s.empty? ? nil : s
+      end
+    end
+  end
+end

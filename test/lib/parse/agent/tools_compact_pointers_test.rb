@@ -155,7 +155,7 @@ class ToolsCompactPointersTest < Minitest::Test
       { "_p_author" => "_User$bob222", "title" => "b" },
     ]
     agent = build_agent(rows)
-    result = T.aggregate(agent, class_name: "Capture",
+    result = T.aggregate(agent, class_name: "Post",
                                 pipeline: [{ "$match" => { "title" => { "$exists" => true } } }])
     assert_equal({ "author" => "_User" }, result[:pointer_classes])
     assert_equal "alice1", result[:results][0]["author"]
@@ -167,7 +167,7 @@ class ToolsCompactPointersTest < Minitest::Test
       { "_p_author" => "_User$alice1", "title" => "a" },
     ]
     agent = build_agent(rows)
-    result = T.aggregate(agent, class_name: "Capture",
+    result = T.aggregate(agent, class_name: "Post",
                                 pipeline: [{ "$match" => { "title" => { "$exists" => true } } }],
                                 compact_pointers: false)
     refute result.key?(:pointer_classes),
@@ -178,7 +178,7 @@ class ToolsCompactPointersTest < Minitest::Test
   def test_aggregate_omits_pointer_classes_when_no_columns_compress
     rows = [{ "title" => "a", "n" => 1 }]
     agent = build_agent(rows)
-    result = T.aggregate(agent, class_name: "Capture",
+    result = T.aggregate(agent, class_name: "Post",
                                 pipeline: [{ "$match" => { "title" => { "$exists" => true } } }])
     refute result.key?(:pointer_classes),
            "envelope must NOT carry pointer_classes when nothing was compressed"

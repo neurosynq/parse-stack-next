@@ -1,4 +1,4 @@
-# See: https://github.com/modernistik/parse-stack#cloud-code-webhooks
+# See: https://github.com/neurosynq/parse-stack-next#cloud-code-webhooks
 Parse::Webhooks.route(:function, :helloWorld) do
   #  use the Parse::Payload instance methods in this block
   name = params["name"].to_s #function params

@@ -33,6 +33,14 @@ module Parse
     ERROR_EMAIL_NOT_FOUND = 205
     # Code when the email is invalid
     ERROR_EMAIL_INVALID = 125
+    # Code returned for invalid or expired session tokens (Parse Server).
+    ERROR_INVALID_SESSION_TOKEN = 209
+    # Code returned for operations that are not permitted under the
+    # caller's ACL / CLP / authentication scope. Parse Server uses
+    # this code for both "you are not authenticated for this" and
+    # "you are authenticated, but not authorized" — see
+    # {#permission_denied?} for the SDK-friendly predicate.
+    ERROR_OPERATION_FORBIDDEN = 119
 
     # The field name for the error.
     ERROR = "error".freeze
@@ -169,6 +177,25 @@ module Parse
     # @see ERROR_OBJECT_NOT_FOUND
     def object_not_found?
       @code == ERROR_OBJECT_NOT_FOUND
+    end
+
+    # true if the response indicates the caller is not authorized to
+    # perform the requested operation. Parse Server signals authorization
+    # failure in two shapes that no-master-key clients commonly hit:
+    #
+    # - HTTP 403 with no body (sometimes 401) — recorded as
+    #   `http_status` only, with no error code in the JSON.
+    # - HTTP 400 + error code 119 (`OPERATION_FORBIDDEN`) — typical for
+    #   CLP and `protectedFields` denials.
+    # - HTTP 400 + error code 209 (`INVALID_SESSION_TOKEN`) — session
+    #   token missing, revoked, or expired.
+    #
+    # This predicate normalizes those into a single check so client code
+    # doesn't have to remember both the HTTP-status and code-only paths.
+    # @return [Boolean]
+    def permission_denied?
+      return true if @http_status == 401 || @http_status == 403
+      @code == ERROR_OPERATION_FORBIDDEN || @code == ERROR_INVALID_SESSION_TOKEN
     end
 
     # @return [Array] the result data from the response.

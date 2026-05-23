@@ -13,10 +13,10 @@ class IncludeProjectionIntegrationTest < Minitest::Test
     property :email, :string
     property :icon_image, :string   # stand-in for the big S3 presigned URL
     property :source_image, :string # ditto
-    property :internal_tag, :string
-    agent_fields :first_name, :last_name, :email, :icon_image, :source_image, :internal_tag
+    property :category, :string
+    agent_fields :first_name, :last_name, :email, :icon_image, :source_image, :category
     agent_large_fields :icon_image, :source_image
-    agent_join_fields :first_name, :last_name, :email, :internal_tag
+    agent_join_fields :first_name, :last_name, :email, :category
   end
 
   class ProjMembership < Parse::Object
@@ -30,7 +30,7 @@ class IncludeProjectionIntegrationTest < Minitest::Test
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
-      # Seed: one user with big string payloads + a Membership pointing at them.
+      # Seed: one user with big string payloads + a Subscription pointing at them.
       big = "X" * 1500  # stand-in for an ~600-char S3 URL
       user = ProjUser.create!(
         first_name:    "Ada",
@@ -38,7 +38,7 @@ class IncludeProjectionIntegrationTest < Minitest::Test
         email:         "ada@example.test",
         icon_image:    big,
         source_image:  big,
-        internal_tag:  "vip",
+        category:  "vip",
       )
       ProjMembership.create!(title: "Lead", active: true, user: user)
 
@@ -48,7 +48,7 @@ class IncludeProjectionIntegrationTest < Minitest::Test
       # .keys() which columnizes dotted paths and mangles them.
       raw_query = {
         where:   { active: true }.to_json,
-        keys:    "title,active,user,user.firstName,user.email,user.internalTag",
+        keys:    "title,active,user,user.firstName,user.email,user.category",
         include: "user",
         limit:   1,
       }
@@ -61,7 +61,7 @@ class IncludeProjectionIntegrationTest < Minitest::Test
       refute raw_user.key?("sourceImage")
       assert_equal "Ada", raw_user["firstName"]
       assert_equal "ada@example.test", raw_user["email"]
-      assert_equal "vip", raw_user["internalTag"]
+      assert_equal "vip", raw_user["category"]
 
       # Baseline (no projection) — confirms the user payload IS bloated
       # without the dotted-path projection.

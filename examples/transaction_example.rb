@@ -14,22 +14,22 @@ Parse.setup(
 )
 
 # Define example models
-class Team < Parse::Object
+class Workspace < Parse::Object
   property :name
   property :owner, :pointer, class_name: 'User'
   property :member_count, :integer, default: 0
 end
 
-class Membership < Parse::Object
+class Subscription < Parse::Object
   property :user, :pointer, class_name: 'User'
-  property :team, :pointer, class_name: 'Team'
+  property :workspace, :pointer, class_name: 'Workspace'
   property :access_level, :string
   property :grant, :string
 end
 
 class Project < Parse::Object
   property :name
-  property :team, :pointer, class_name: 'Team'
+  property :workspace, :pointer, class_name: 'Workspace'
   property :owner, :pointer, class_name: 'User'
 end
 
@@ -39,16 +39,16 @@ def transfer_project_ownership_basic(project, new_owner)
     # Get old owner
     old_owner = project.owner
     
-    # Find or create new owner membership
-    new_owner_membership = Membership.first(
+    # Find or create new owner subscription
+    new_owner_membership = Subscription.first(
       project: project,
       user: new_owner
     )
     
     if new_owner_membership.nil?
-      new_owner_membership = Membership.new(
+      new_owner_membership = Subscription.new(
         project: project,
-        team: project.team,
+        workspace: project.workspace,
         user: new_owner,
         grant: 'project',
         access_level: 'owner'
@@ -59,9 +59,9 @@ def transfer_project_ownership_basic(project, new_owner)
       batch.add(new_owner_membership)
     end
     
-    # Demote old owner if they have a membership
+    # Demote old owner if they have a subscription
     if old_owner.present?
-      old_owner_membership = Membership.first(
+      old_owner_membership = Subscription.first(
         project: project,
         user: old_owner
       )
@@ -89,13 +89,13 @@ def transfer_project_ownership_auto(project, new_owner)
     old_owner = project.owner
     objects_to_save = []
     
-    # Find or create new owner membership
-    new_owner_membership = Membership.first(
+    # Find or create new owner subscription
+    new_owner_membership = Subscription.first(
       project: project,
       user: new_owner
-    ) || Membership.new(
+    ) || Subscription.new(
       project: project,
-      team: project.team,
+      workspace: project.workspace,
       user: new_owner,
       grant: 'project'
     )
@@ -105,7 +105,7 @@ def transfer_project_ownership_auto(project, new_owner)
     
     # Demote old owner
     if old_owner.present?
-      old_owner_membership = Membership.first(
+      old_owner_membership = Subscription.first(
         project: project,
         user: old_owner
       )
@@ -132,33 +132,33 @@ rescue Parse::Error => e
 end
 
 # Example 3: Complex transaction with validation
-def complex_team_operation(team, new_members, new_owner)
+def complex_team_operation(workspace, new_members, new_owner)
   Parse::Object.transaction(retries: 3) do |batch|
     # Validate new owner is in new members list
     unless new_members.include?(new_owner)
       raise Parse::Error, "New owner must be in members list"
     end
     
-    # Update team
-    team.owner = new_owner
-    team.member_count = new_members.count
-    batch.add(team)
+    # Update workspace
+    workspace.owner = new_owner
+    workspace.member_count = new_members.count
+    batch.add(workspace)
     
-    # Create memberships for all new members
+    # Create subscriptions for all new members
     new_members.each do |member|
-      membership = Membership.new(
-        team: team,
+      subscription = Subscription.new(
+        workspace: workspace,
         user: member,
-        grant: 'team',
+        grant: 'workspace',
         access_level: member == new_owner ? 'owner' : 'member'
       )
-      batch.add(membership)
+      batch.add(subscription)
     end
     
-    # Create a project for the team
+    # Create a project for the workspace
     project = Project.new(
-      name: "#{team.name} Project",
-      team: team,
+      name: "#{workspace.name} Project",
+      workspace: workspace,
       owner: new_owner
     )
     batch.add(project)

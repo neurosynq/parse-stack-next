@@ -1,6 +1,6 @@
 
 class <%= class_name %> < Parse::Object
-  # See: https://github.com/modernistik/parse-stack#defining-properties
+  # See: https://github.com/neurosynq/parse-stack-next#defining-properties
 
   # You can change the inferred Parse table/collection name below
   # parse_class "<%= class_name.to_s.to_parse_class %>"
@@ -13,7 +13,7 @@ class <%= class_name %> < Parse::Object
   property :<%= attr.name %>, :<%= parse_type -%>
 <% end %>
 
-  # See: https://github.com/modernistik/parse-stack#cloud-code-webhooks
+  # See: https://github.com/neurosynq/parse-stack-next#cloud-code-webhooks
   # define a before save webhook for <%= class_name %>
   webhook :before_save do
     <%= class_name.to_s.underscore %> = parse_object

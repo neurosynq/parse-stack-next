@@ -64,7 +64,7 @@ class PointerFetchCacheIntegrationTest < Minitest::Test
       status: "active",
       notes: "Testing pointer fetch_cache!",
     )
-    assert capture.save, "Capture should save successfully"
+    assert capture.save, "Post should save successfully"
     capture_id = capture.id
     puts "Created capture with ID: #{capture_id}"
 
@@ -95,7 +95,7 @@ class PointerFetchCacheIntegrationTest < Minitest::Test
       status: "pending",
       notes: "These notes should not be fetched",
     )
-    assert capture.save, "Capture should save successfully"
+    assert capture.save, "Post should save successfully"
     capture_id = capture.id
     puts "Created capture with ID: #{capture_id}"
 
@@ -129,11 +129,11 @@ class PointerFetchCacheIntegrationTest < Minitest::Test
 
     # Create a capture linked to the project
     capture = PointerCacheTestCapture.new(
-      title: "Capture with Project",
+      title: "Post with Project",
       status: "active",
       project: project,
     )
-    assert capture.save, "Capture should save successfully"
+    assert capture.save, "Post should save successfully"
     capture_id = capture.id
     puts "Created capture with ID: #{capture_id}"
 
@@ -145,7 +145,7 @@ class PointerFetchCacheIntegrationTest < Minitest::Test
     fetched = pointer.fetch_cache!(includes: [:project])
 
     assert fetched, "fetch_cache! should return an object"
-    assert_equal "Capture with Project", fetched.title
+    assert_equal "Post with Project", fetched.title
 
     # The project should be included (not a pointer)
     fetched_project = fetched.project
@@ -164,7 +164,7 @@ class PointerFetchCacheIntegrationTest < Minitest::Test
       title: "Cache Option Test",
       status: "completed",
     )
-    assert capture.save, "Capture should save successfully"
+    assert capture.save, "Post should save successfully"
     capture_id = capture.id
     puts "Created capture with ID: #{capture_id}"
 
@@ -202,7 +202,7 @@ class PointerFetchCacheIntegrationTest < Minitest::Test
       title: "Caching Behavior Test",
       status: "active",
     )
-    assert capture.save, "Capture should save successfully"
+    assert capture.save, "Post should save successfully"
     capture_id = capture.id
     puts "Created capture with ID: #{capture_id}"
 

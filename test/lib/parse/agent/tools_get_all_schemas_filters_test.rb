@@ -35,9 +35,9 @@ class ToolsGetAllSchemasFiltersTest < Minitest::Test
       )
     end
     @catalog = [
-      { "className" => "Capture", "fields" => { "title" => { "type" => "String" } } },
+      { "className" => "Post", "fields" => { "title" => { "type" => "String" } } },
       { "className" => "Project", "fields" => { "name"  => { "type" => "String" } } },
-      { "className" => "CaptureRevision", "fields" => { "body" => { "type" => "String" } } },
+      { "className" => "PostRevision", "fields" => { "body" => { "type" => "String" } } },
       { "className" => "_User", "fields" => { "username" => { "type" => "String" } } },
     ]
     @agent = Parse::Agent.new
@@ -47,28 +47,28 @@ class ToolsGetAllSchemasFiltersTest < Minitest::Test
   def test_no_filter_returns_full_catalog
     result = Parse::Agent::Tools.get_all_schemas(@agent)
     names = (result[:custom] + result[:built_in]).map { |c| c[:name] }
-    assert_equal %w[Capture CaptureRevision Project _User].sort, names.sort
+    assert_equal %w[Post PostRevision Project _User].sort, names.sort
   end
 
   def test_names_filter_restricts_to_explicit_class_set
-    result = Parse::Agent::Tools.get_all_schemas(@agent, names: %w[Capture Project])
+    result = Parse::Agent::Tools.get_all_schemas(@agent, names: %w[Post Project])
     names = (result[:custom] + result[:built_in]).map { |c| c[:name] }
-    assert_equal %w[Capture Project].sort, names.sort
+    assert_equal %w[Post Project].sort, names.sort
   end
 
   def test_prefix_filter_restricts_to_matching_class_names
-    result = Parse::Agent::Tools.get_all_schemas(@agent, prefix: "Cap")
+    result = Parse::Agent::Tools.get_all_schemas(@agent, prefix: "Post")
     names = (result[:custom] + result[:built_in]).map { |c| c[:name] }
-    assert_equal %w[Capture CaptureRevision].sort, names.sort
+    assert_equal %w[Post PostRevision].sort, names.sort
   end
 
   def test_names_and_prefix_compose_as_intersection
     # Both filters applied: must be in the names set AND match the prefix.
     result = Parse::Agent::Tools.get_all_schemas(@agent,
-                                                names: %w[Capture CaptureRevision Project],
-                                                prefix: "Capture")
+                                                names: %w[Post PostRevision Project],
+                                                prefix: "Post")
     names = (result[:custom] + result[:built_in]).map { |c| c[:name] }
-    assert_equal %w[Capture CaptureRevision].sort, names.sort
+    assert_equal %w[Post PostRevision].sort, names.sort
   end
 
   def test_empty_names_array_is_a_noop
@@ -90,12 +90,12 @@ class ToolsGetAllSchemasFiltersTest < Minitest::Test
     # passing the name of a hidden class explicitly cannot probe for it.
     test = self
     hidden_method = Parse::Agent::MetadataRegistry.method(:hidden_class_names)
-    Parse::Agent::MetadataRegistry.define_singleton_method(:hidden_class_names) { ["Capture"] }
+    Parse::Agent::MetadataRegistry.define_singleton_method(:hidden_class_names) { ["Post"] }
     begin
       result = Parse::Agent::Tools.get_all_schemas(test.instance_variable_get(:@agent),
-                                                  names: %w[Capture Project])
+                                                  names: %w[Post Project])
       names = (result[:custom] + result[:built_in]).map { |c| c[:name] }
-      refute_includes names, "Capture",
+      refute_includes names, "Post",
                       "hidden class must not be returned even when named explicitly"
       assert_includes names, "Project"
     ensure

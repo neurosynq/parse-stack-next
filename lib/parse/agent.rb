@@ -455,6 +455,37 @@ module Parse
     WRITE_GATED_TOOLS  = %i[create_object update_object delete_object].freeze
     SCHEMA_GATED_TOOLS = %i[create_class delete_class].freeze
 
+    # Built-in tools that are safe to dispatch when the agent runs on a
+    # client (no master_key) with a session_token. Parse Server natively
+    # enforces ACL + CLP + protectedFields on these REST endpoints, so the
+    # SDK does not need to add an enforcement layer for them.
+    #
+    # The list is the MODE CEILING in client mode: an operator's `tools:`
+    # filter may narrow further, but cannot widen past this set. Anything
+    # not in CLIENT_SAFE_READ_TOOLS or CLIENT_SAFE_MUTATION_TOOLS is
+    # refused at dispatch when @client_mode is true, including custom
+    # registered tools (which must opt in explicitly via
+    # `Parse::Agent::Tools.register(client_safe: true, ...)`).
+    CLIENT_SAFE_READ_TOOLS = %i[
+      list_tools
+      get_object
+      get_objects
+      query_class
+      count_objects
+      get_sample_objects
+    ].freeze
+
+    # Built-in mutation tools that route through session-token REST and
+    # are therefore enforceable by Parse Server's native ACL/CLP. Gated
+    # additionally by the per-agent +allow_mutations:+ kwarg in client
+    # mode (default false) and by the existing process-level env vars
+    # (PARSE_AGENT_ALLOW_WRITE_TOOLS + PARSE_AGENT_ALLOW_RAW_CRUD).
+    CLIENT_SAFE_MUTATION_TOOLS = %i[
+      create_object
+      update_object
+      delete_object
+    ].freeze
+
     # Truthy ENV-var values. Anything else (including unset) means disabled.
     ENV_TRUTHY_RE = /\A(1|true|yes|on)\z/i.freeze
 
@@ -590,6 +621,24 @@ module Parse
     # @return [Parse::Client] the Parse client instance to use
     attr_reader :client
 
+    # @return [Boolean] whether the agent runs in client mode (its
+    #   Parse::Client has no master_key). In client mode the dispatchable
+    #   tool set is restricted to {CLIENT_SAFE_READ_TOOLS},
+    #   {CLIENT_SAFE_MUTATION_TOOLS} (gated on {#allow_mutations?}), and
+    #   any registered tool declared +client_safe: true+.
+    def client_mode?
+      @client_mode == true
+    end
+
+    # @return [Boolean] whether this agent may dispatch raw mutation
+    #   tools (create_object/update_object/delete_object). Layered with
+    #   the process-level PARSE_AGENT_ALLOW_WRITE_TOOLS +
+    #   PARSE_AGENT_ALLOW_RAW_CRUD env vars (all three must be true).
+    #   Default: +false+ in client mode, +true+ in master-key mode.
+    def allow_mutations?
+      @allow_mutations == true
+    end
+
     # @return [Array<Hash>] log of operations performed in this session
     attr_reader :operation_log
 
@@ -604,7 +653,7 @@ module Parse
 
     # @return [String, nil] caller-supplied identifier that ties multiple
     #   tool calls into a single logical conversation. Set by the transport
-    #   layer (MCPRackApp reads X-MCP-Session-Id) or directly by an
+    #   layer (MCPRackApp reads Mcp-Session-Id) or directly by an
     #   embedder. Included in every `parse.agent.tool_call` notification
     #   payload as `:correlation_id` when present. Sanitized to a max of
     #   128 characters from the set `[A-Za-z0-9._-]` to prevent log
@@ -1068,7 +1117,8 @@ module Parse
                    tools: nil, methods: nil, classes: nil, filters: nil,
                    parent: nil, recursion_depth: nil,
                    strict_tool_filter: nil, strict_class_filter: nil,
-                   master_atlas: nil)
+                   master_atlas: nil,
+                   allow_mutations: nil)
       # SECURITY: Mutually exclusive identity inputs. `acl_user:` and
       # `acl_role:` are unverified constructor assertions (the SDK does
       # not round-trip them to Parse Server for validation the way
@@ -1270,6 +1320,78 @@ module Parse
       @acl_role_scope  = acl_role
       @tenant_id       = tenant_id
       @master_atlas    = master_atlas == true
+
+      # Client-mode detection. An agent runs in CLIENT MODE when its
+      # underlying Parse::Client has no master_key AND it was constructed
+      # with a non-empty session_token. This is the explicit
+      # "session-token-on-a-public-client" posture: every tool call must
+      # route through a REST endpoint Parse Server natively authorizes
+      # (ACL + CLP + protectedFields) because the SDK has no master-key
+      # fallback to lean on.
+      #
+      # The "no master_key, no session_token" case is NOT treated as
+      # client mode — that's a misconfigured master-key-posture agent
+      # whose REST calls will fail with 401 at dispatch. The existing
+      # one-time master-key warning surfaces this; refusing here would
+      # break compatibility with test harnesses and bootstrap factories
+      # that construct agents before identity is threaded in.
+      #
+      # acl_user / acl_role on a no-master-key client are refused
+      # regardless of session_token presence: they are unverified
+      # constructor assertions with no REST equivalent — Parse Server's
+      # REST surface offers no "act as user-pointer" affordance, so the
+      # SDK cannot honor them without a master key.
+      no_master_key = @client.respond_to?(:master_key) && @client.master_key.nil?
+      session_token_present = !@session_token.nil? && !@session_token.to_s.empty?
+      @client_mode = no_master_key && session_token_present
+
+      if no_master_key && (@acl_user_scope || @acl_role_scope)
+        raise ArgumentError,
+              "Parse::Agent: acl_user: and acl_role: require a Parse::Client " \
+              "with a master_key (they are unverified constructor assertions " \
+              "the SDK can only honor via master-key REST). The supplied " \
+              "client has no master_key. Use session_token: instead, or " \
+              "switch to a master-key client."
+      end
+
+      # Per-agent mutation gate. Layered ON TOP of the process-level
+      # PARSE_AGENT_ALLOW_WRITE_TOOLS / PARSE_AGENT_ALLOW_RAW_CRUD env
+      # vars — BOTH must be true for raw create/update/delete to
+      # dispatch. Defaults:
+      #   * Client mode  → false (default-deny; opt in per agent)
+      #   * Master-key   → true  (back-compat; existing operators have
+      #                           only the env vars today, and adding a
+      #                           false default would silently disable
+      #                           writes for every existing master-key
+      #                           agent).
+      # When +parent:+ is supplied, the child cannot widen the parent's
+      # gate: if parent.allow_mutations? is false, child must also be
+      # false. Default-on-nil inherits the parent's value verbatim so
+      # the safe path (omit kwarg) is trivially correct.
+      if parent
+        parent_allows = parent.respond_to?(:allow_mutations?) ? parent.allow_mutations? : true
+        resolved_allow_mutations =
+          if allow_mutations.nil?
+            parent_allows
+          else
+            allow_mutations == true
+          end
+        if resolved_allow_mutations && !parent_allows
+          raise ArgumentError,
+                "sub-agent allow_mutations: true exceeds parent's " \
+                "allow_mutations: false. A sub-agent cannot widen the " \
+                "parent's mutation gate — drop the override (omit to inherit) " \
+                "or pass allow_mutations: false explicitly."
+        end
+        @allow_mutations = resolved_allow_mutations
+      else
+        @allow_mutations =
+          if allow_mutations.nil?
+            !@client_mode
+          else
+            allow_mutations == true
+          end
+      end
 
       # Resolve the ACL scope ONCE at construction into a frozen
       # Parse::ACLScope::Resolution. Three modes:
@@ -1561,12 +1683,24 @@ module Parse
     #
     # Resolution order is strict: builtin permission-tier tools are unioned
     # with registered tools whose declared permission is <= the agent's
-    # tier, then the per-instance filter narrows that set. The filter
-    # cannot elevate above the permission-tier output — `tools: { only:
+    # tier, then the per-instance filter narrows that set, then in client
+    # mode the client-safe ceiling narrows it further. None of these
+    # steps can elevate above its input — `tools: { only:
     # [:delete_object] }` on a `:readonly` agent still excludes
-    # `delete_object`. This invariant is the structural correctness of
-    # the layered design (env-gates ▷ permission tier ▷ per-instance
-    # filter) and must not be violated by future changes.
+    # `delete_object`, and `tools: { only: [:aggregate] }` on a
+    # client-mode agent still excludes `aggregate`. This invariant is
+    # the structural correctness of the layered design (mode ceiling ▷
+    # env-gates ▷ permission tier ▷ per-instance filter) and must not
+    # be violated by future changes.
+    #
+    # The client-mode intersection here is what makes the advertised
+    # catalog (MCP `tools/list`, OpenAI function definitions, the
+    # describe output) match the set the dispatch path will actually
+    # dispatch. Without it, an LLM would see a refused tool in its
+    # catalog, attempt it, and learn about the refusal only via an
+    # access-denied error — wasting turns on tools it never could have
+    # called. The dispatch-path gate in {#execute} remains as the
+    # belt-and-suspenders enforcement point.
     #
     # @return [Array<Symbol>] list of allowed tool names
     def allowed_tools
@@ -1575,6 +1709,14 @@ module Parse
 
       permitted = permitted & @tool_filter_only.to_a   if @tool_filter_only
       permitted = permitted - @tool_filter_except.to_a if @tool_filter_except
+
+      if @client_mode
+        permitted = permitted.select { |sym| Parse::Agent::Tools.client_safe?(sym) }
+        unless @allow_mutations
+          permitted -= Parse::Agent::CLIENT_SAFE_MUTATION_TOOLS
+        end
+      end
+
       permitted
     end
 
@@ -1692,10 +1834,64 @@ module Parse
       end
 
       unless tool_allowed?(tool_name)
-        # Distinguish "filter excluded it" (tier permits, instance filter
-        # narrowed it away) from "tier never allowed it" so consumers see
-        # the meaningful diagnostic. Same denial outcome either way — only
-        # the error_code + message differ.
+        # Distinguish refusal reasons so the LLM (and SOC tooling) see
+        # the meaningful diagnostic. Resolution order matters — the
+        # client-mode ceiling and the per-agent mutation gate emit
+        # specific :access_denied messages so an operator can tell
+        # which knob refused the call. The generic "filter excluded
+        # it" / "tier never allowed it" branches catch what's left.
+
+        # Operator-filter precedence: when the per-instance `tools:`
+        # filter is the binding gate, prefer the filter message even
+        # if the client-mode ceiling or mutation gate would also have
+        # refused. Otherwise an operator who set
+        # `tools: { except: [:create_object] }` AND `allow_mutations:
+        # false` is told "set allow_mutations: true", which won't
+        # actually help — the filter is the real blocker.
+        operator_filter_excludes =
+          (@tool_filter_except && @tool_filter_except.include?(tool_name)) ||
+          (@tool_filter_only && !@tool_filter_only.include?(tool_name))
+        if operator_filter_excludes && tier_permits_tool?(tool_name)
+          return error_response(
+                   "Tool '#{tool_name}' is not enabled for this agent instance " \
+                   "(excluded by the configured tools: filter).",
+                   error_code: :tool_filtered,
+                 )
+        end
+
+        if @client_mode &&
+           Parse::Agent::CLIENT_SAFE_MUTATION_TOOLS.include?(tool_name) &&
+           !@allow_mutations &&
+           Parse::Agent::Tools.client_safe?(tool_name)
+          # The tool is REST-safe (the mode ceiling would let it
+          # through) but the per-agent mutation gate is closed.
+          # Naming the gate specifically avoids sending operators to
+          # the env-var rabbit hole when the real fix is the
+          # constructor kwarg.
+          return error_response(
+                   "Raw mutation tool '#{tool_name}' is disabled for this " \
+                   "client-mode agent. Construct the agent with " \
+                   "allow_mutations: true to enable write/delete dispatch. " \
+                   "The process-level PARSE_AGENT_ALLOW_WRITE_TOOLS / " \
+                   "PARSE_AGENT_ALLOW_RAW_CRUD env vars must additionally " \
+                   "be set on the deployment.",
+                   error_code: :access_denied,
+                 )
+        end
+        if @client_mode && !Parse::Agent::Tools.client_safe?(tool_name)
+          # Mode ceiling. Tool requires either master-key REST or
+          # mongo-direct, neither of which a client-mode agent has.
+          # Refuse with a specific message so the LLM doesn't retry.
+          return error_response(
+                   "Tool '#{tool_name}' is not available to client-mode agents. " \
+                   "Client mode (no master_key on the underlying Parse::Client) " \
+                   "restricts dispatch to session-token-authorized REST tools: " \
+                   "#{(CLIENT_SAFE_READ_TOOLS + CLIENT_SAFE_MUTATION_TOOLS).sort.join(", ")}, " \
+                   "plus any custom tool registered with client_safe: true. " \
+                   "Refused at the mode ceiling.",
+                   error_code: :access_denied,
+                 )
+        end
         if tier_permits_tool?(tool_name)
           return error_response(
                    "Tool '#{tool_name}' is not enabled for this agent instance " \
@@ -1724,10 +1920,11 @@ module Parse
       # also re-opening the generic create_object/update_object surface
       # (which additionally requires RAW_CRUD=true).
       if WRITE_GATED_TOOLS.include?(tool_name) &&
-         !(Parse::Agent.write_tools_enabled? && Parse::Agent.raw_crud_enabled?)
+         !(Parse::Agent.write_tools_enabled? && Parse::Agent.raw_crud_enabled? && @allow_mutations)
         missing = []
         missing << "PARSE_AGENT_ALLOW_WRITE_TOOLS=true" unless Parse::Agent.write_tools_enabled?
         missing << "PARSE_AGENT_ALLOW_RAW_CRUD=true"    unless Parse::Agent.raw_crud_enabled?
+        missing << "allow_mutations: true (per-agent kwarg)" unless @allow_mutations
         return error_response(
                  "Raw CRUD tool '#{tool_name}' is disabled. Required: #{missing.join(' AND ')}. " \
                  "Prefer declaring an agent_method on the target class for an intent-based " \

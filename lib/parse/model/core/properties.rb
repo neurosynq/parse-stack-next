@@ -19,7 +19,7 @@ module Parse
   # supported in Parse and mapping them between their remote names with their local ruby named attributes.
   module Properties
     # These are the base types supported by Parse.
-    TYPES = [:string, :relation, :integer, :float, :boolean, :date, :array, :file, :geopoint, :polygon, :bytes, :object, :acl, :timezone, :phone, :email].freeze
+    TYPES = [:string, :relation, :integer, :float, :boolean, :date, :array, :file, :geopoint, :polygon, :bytes, :object, :acl, :timezone, :phone, :email, :vector].freeze
     # These are the base mappings of the remote field name types.
     BASE = { objectId: :string, createdAt: :date, updatedAt: :date, ACL: :acl }.freeze
     # The list of properties that are part of all objects
@@ -133,6 +133,18 @@ module Parse
       # `_enum:` on string-typed properties.
       def property_enum_descriptions
         @property_enum_descriptions ||= {}
+      end
+
+      # @return [Hash] per-property metadata for `:vector`-typed fields.
+      # Maps property names (symbols) to a frozen options hash:
+      # `{ dimensions: Integer, provider: Symbol, model: String, similarity: Symbol }`.
+      # `dimensions:` is required; the rest are optional and only carry
+      # meaning for the embedding provider plumbing layered above this
+      # type. Consumed by `Parse::Embeddings` and
+      # `Parse::AtlasSearch::IndexCatalog` to resolve which vector index
+      # to query for a given field.
+      def vector_properties
+        @vector_properties ||= {}
       end
 
       # Set the property fields for this class.
@@ -317,6 +329,44 @@ module Parse
             end
           end # validates_each
         end # data_type == :phone
+
+        # vector datatypes capture per-property embedding metadata
+        # (dimensions, provider, model, similarity) and validate that
+        # any assigned value matches the declared `dimensions:`.
+        # `dimensions:` is required at declaration time — the field
+        # cannot be safely indexed or compared against a query vector
+        # without it.
+        if data_type == :vector
+          dims = opts[:dimensions] || opts[:dims]
+          unless dims.is_a?(Integer) && dims > 0
+            raise ArgumentError,
+                  "Property #{self}##{key} :vector requires `dimensions:` as a positive Integer."
+          end
+          if dims > Parse::Vector::MAX_DIMENSIONS
+            raise ArgumentError,
+                  "Property #{self}##{key} :vector dimensions #{dims} exceeds max " \
+                  "#{Parse::Vector::MAX_DIMENSIONS}."
+          end
+          vector_properties[key] = {
+            dimensions: dims,
+            provider: opts[:provider],
+            model: opts[:model],
+            similarity: opts[:similarity],
+          }.freeze
+
+          validates_each key do |record, attribute, value|
+            next if value.nil?
+            unless value.is_a?(Parse::Vector)
+              record.errors.add(attribute, "field :#{attribute} must be a Parse::Vector.")
+            else
+              expected = record.class.vector_properties.dig(attribute, :dimensions)
+              if expected && value.dimensions != expected
+                record.errors.add(attribute,
+                  "field :#{attribute} expected #{expected} dimensions, got #{value.dimensions}.")
+              end
+            end
+          end # validates_each
+        end # data_type == :vector
 
         # email datatypes validate email format.
         if data_type == :email
@@ -794,6 +844,25 @@ module Parse
         val = Parse::Phone.new(val) if val.present?
       when :email
         val = Parse::Email.new(val) if val.present?
+      when :vector
+        # nil/blank → unset; coerce Arrays (and pass-through Parse::Vector)
+        # to a Parse::Vector, which validates that every element is a
+        # finite Numeric. Dimension mismatch is reported via
+        # validates_each so callers can rescue ActiveModel::ValidationError
+        # at save time rather than at every assignment; raising here
+        # would break partial hydration where the dimension class-level
+        # declaration may not yet be loaded.
+        if val.nil?
+          val = nil
+        elsif val.is_a?(Parse::Vector)
+          val = val
+        elsif val.is_a?(Array)
+          val = Parse::Vector.new(val)
+        else
+          raise ArgumentError,
+                "Property #{self.class}##{key} :vector requires an Array or Parse::Vector " \
+                "(got #{val.class})."
+        end
       else
         # You can provide a specific class instead of a symbol format
         if data_type.respond_to?(:typecast)

@@ -1,0 +1,9 @@
+{
+  "preset": "fast",
+  "provider": "openai-text-embedding-ada-002",
+  "dims": 1536,
+  "db": "vector_prototype",
+  "collection": "Movie",
+  "count": 1472,
+  "index_name": "Movie_embedding_openai_text_embedding_ada_002_1536_idx"
+}

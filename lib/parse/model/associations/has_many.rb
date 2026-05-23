@@ -323,10 +323,21 @@ module Parse
 
       # @!visibility private
       module ClassMethods
-        attr_writer :relations
+        attr_writer :relations, :has_many_associations
 
         def relations
           @relations ||= {}
+        end
+
+        # Static metadata for all `has_many` declarations on this class,
+        # covering all three storage modes (:query, :array, :relation).
+        # Populated at DSL time so codegen tools (e.g.
+        # Parse::GraphQL::TypeGenerator) can recover the target class and
+        # storage without parsing method closures. Keyed by the local
+        # accessor name.
+        # @return [Hash{Symbol => Hash}]
+        def has_many_associations
+          @has_many_associations ||= {}
         end
 
         # Examples:
@@ -355,6 +366,16 @@ module Parse
           opts[:scope_only] ||= false
           klassName = (opts[:as] || key).to_parse_class singularize: true
           foreign_field = (opts[:field] || parse_class.columnize).to_sym
+
+          self.has_many_associations[key.to_sym] = {
+            target_class: klassName,
+            storage: :query,
+            foreign_field: foreign_field,
+            field: nil,
+            required: false,
+            scope_only: opts[:scope_only] == true,
+            scoped: scope.is_a?(Proc),
+          }
 
           define_method(key) do |*args, &block|
             return [] if @id.nil?
@@ -450,6 +471,16 @@ module Parse
             # Add them to the list of fields in our class model
             self.fields.merge!(key => :array, parse_field => :array)
           end
+
+          self.has_many_associations[key.to_sym] = {
+            target_class: klassName,
+            storage: access_type, # :relation or :array
+            foreign_field: nil,
+            field: parse_field,
+            required: !!opts[:required],
+            scope_only: false,
+            scoped: false,
+          }
 
           self.field_map.merge!(key => parse_field)
           # dirty tracking

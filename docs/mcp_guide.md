@@ -285,7 +285,7 @@ Cooperative cancellation lets clients abort an in-flight long-running tool call.
 
 2. **SSE client disconnect.** When the underlying TCP connection closes (browser tab closed, network drop), Rack calls `SSEBody#close`, which trips the same cancellation token.
 
-**Identity binding (required for `notifications/cancelled`).** The cancelling request **must** carry the same `X-MCP-Session-Id` header as the original request. The header is sanitized into `agent.correlation_id` and used as half of the registry key (the JSON-RPC `requestId` is the other half). Cancellation without a matching `X-MCP-Session-Id` is a silent no-op — this prevents an attacker who guesses sequential JSON-RPC ids from cancelling other clients' in-flight requests. Failures (no session id, no matching entry, mismatched session id) all return `202` so the response shape is not a probe oracle.
+**Identity binding (required for `notifications/cancelled`).** The cancelling request **must** carry the same `Mcp-Session-Id` header as the original request. The header is sanitized into `agent.correlation_id` and used as half of the registry key (the JSON-RPC `requestId` is the other half). Cancellation without a matching `Mcp-Session-Id` is a silent no-op — this prevents an attacker who guesses sequential JSON-RPC ids from cancelling other clients' in-flight requests. Failures (no session id, no matching entry, mismatched session id) all return `202` so the response shape is not a probe oracle.
 
 **Cooperative checkpoints.** Cancellation is observed at safe points inside tool execution, not by forcibly killing the dispatcher thread. The two checkpoints built into `Parse::Agent#execute` are:
 
@@ -319,7 +319,7 @@ The stream still emits the `response` SSE event before closing so clients do not
 
 **Scope and limitations.**
 - The cancellation registry is per `MCPRackApp` instance. Cancellation does not span multiple mount points within a process, nor multiple processes in a clustered deployment.
-- Clients that do not set `X-MCP-Session-Id` lose cancellation but keep every other MCP feature.
+- Clients that do not set `Mcp-Session-Id` lose cancellation but keep every other MCP feature.
 - The standalone WEBrick-backed `MCPServer` does not support streaming and therefore does not support cancellation; calls return a single buffered response with no opportunity to interrupt.
 
 ---
@@ -544,14 +544,14 @@ Register before the `MCPRackApp` or `MCPServer` starts handling requests. Regist
 
 ```ruby
 Parse::Agent::Tools.register(
-  name:        :breakdown_captures,
-  description: "Count captures grouped by user/project/team/org with optional date window",
+  name:        :breakdown_posts,
+  description: "Count posts grouped by user/project/workspace/tenant with optional date window",
   parameters:  {
     type: "object",
     properties: {
       group_by: {
         type: "string",
-        enum: ["user", "project", "team", "org"],
+        enum: ["user", "project", "workspace", "tenant"],
         description: "Dimension to group by"
       },
       since: {
@@ -609,7 +609,7 @@ original_call = Parse::Agent::MCPDispatcher.method(:call)
 module CustomDispatch
   def self.call(body:, agent:, logger: nil)
     if body.dig("method") == "tools/call" &&
-       body.dig("params", "name") == "breakdown_captures"
+       body.dig("params", "name") == "breakdown_posts"
       # handle it here, return { status: 200, body: jsonrpc_result }
     else
       original_call.call(body: body, agent: agent, logger: logger)
@@ -961,9 +961,9 @@ support.describe_for("Ticket")
 #   class_name:              "Ticket",
 #   accessible:              :permitted,
 #   agent_fields:            [:subject, :status, :created_at, ...],
-#   agent_canonical_filter:  { "isDraft" => { "$ne" => true } },
+#   agent_canonical_filter:  { "draft" => { "$ne" => true } },
 #   per_agent_filter:        { archived: false },                 # composed: per-class AND :default
-#   tenant_scope:            { field: :org_id, value: "acme" },
+#   tenant_scope:            { field: :tenant_id, value: "acme" },
 #   large_fields:            [:body_html],
 #   agent_methods:           ["archive", "reopen"],               # tier-filtered to what this agent can call
 # }
@@ -1432,13 +1432,13 @@ Register before the `MCPRackApp` or `MCPServer` starts handling requests. Regist
 ```ruby
 Parse::Agent::Prompts.register(
   name:        "team_health",
-  description: "Summary of team activity in the last 30 days",
+  description: "Summary of workspace activity in the last 30 days",
   arguments: [
-    { "name" => "team_id", "description" => "Parse objectId of the team", "required" => true }
+    { "name" => "team_id", "description" => "Parse objectId of the workspace", "required" => true }
   ],
   renderer: ->(args) {
     since = (Time.now - 30 * 86400).utc.iso8601
-    "Show activity for team #{args["team_id"]} since #{since}. " \
+    "Show activity for workspace #{args["team_id"]} since #{since}. " \
     "Use count_objects and query_class to report events, members, and recent changes."
   }
 )
@@ -1453,8 +1453,8 @@ A renderer lambda may return either:
 # Hash form — overrides description per render
 renderer: ->(args) {
   {
-    description: "Team #{args["team_id"]} health report",
-    text:        "Analyze team #{args["team_id"]} activity since #{Time.now - 30 * 86400}."
+    description: "Workspace #{args["team_id"]} health report",
+    text:        "Analyze workspace #{args["team_id"]} activity since #{Time.now - 30 * 86400}."
   }
 }
 ```
@@ -1585,7 +1585,11 @@ The `tools/call` response for this tool ships with both forms:
 
 Per MCP 2025-06-18 expectations, clients should prefer `structuredContent` over parsing `content` text. The text content is unchanged from prior versions so legacy clients keep working unmodified.
 
-**Scope.** Only tools registered via `Tools.register(..., output_schema:)` opt into structured output. Built-in tools (`query_class`, `aggregate`, `get_object`, etc.) retain text-only output for now — opting them in is a follow-on item that would require declaring schemas for every existing tool. The `output_schema:` parameter is optional; tools registered without it produce the same wire shape they did in 4.1.
+**Built-in tool coverage (v5.0+).** Eleven built-in tools now declare `outputSchema` and emit `structuredContent` automatically: `count_objects`, `get_object`, `get_objects`, `get_sample_objects`, `distinct`, `group_by`, `group_by_date`, `list_tools`, `get_all_schemas`, `get_schema`, and `query_class`. The dispatcher mirrors each tool's result `data` Hash into `structuredContent` in addition to the existing text `content` array. `query_class` declares a permissive superset envelope (single `type: "object"` root, as MCP requires) that admits both the default JSON row shape (`{class_name, result_count, pagination, results, ...}`) and the `format: "csv" | "markdown" | "table"` text shape (`{class_name, format, headers, row_count, output}`) — clients disambiguate via the presence of `format`.
+
+**Remaining text-only built-ins.** `aggregate`, `export_data`, `atlas_text_search`, `atlas_autocomplete`, `atlas_faceted_search`, `explain_query`, and `call_method` continue to emit text-only output. `explain_query` mirrors MongoDB's version-dependent explain shape and `call_method` returns application-defined values, so both may stay text-only indefinitely; the Atlas + aggregate tools will opt in as their envelope shapes stabilize.
+
+**Custom tools.** The `output_schema:` parameter on `Tools.register` remains optional; tools registered without it produce the same text-only wire shape they did in 4.1.
 
 ### Batch pointer resolution: `get_objects`
 
@@ -1595,7 +1599,7 @@ When you need to dereference multiple pointers, use `get_objects(class_name:, id
 result = agent.execute(:get_objects,
   class_name: "User",
   ids:        ["abc123", "def456", "xyz789"],
-  include:    ["team"]      # optional pointer fields to resolve
+  include:    ["workspace"]      # optional pointer fields to resolve
 )
 # result[:data] =>
 # {
@@ -1632,7 +1636,7 @@ When a tool fails inside `Parse::Agent#execute`, the failure envelope returned t
 For `:access_denied` refusals, the envelope additionally carries a `details:` block populated from `Parse::Agent::AccessDenied#to_details`. It lets consumers branch on the specific refusal reason — and, when applicable, auto-rewrite the failing request — without parsing the prose `error:` message:
 
 ```ruby
-agent.execute(:aggregate, class_name: "Capture",
+agent.execute(:aggregate, class_name: "Post",
   pipeline: [{ "$group" => { "_id" => "$_p_author", "n" => { "$sum" => 1 } } }]
 )
 # => {
@@ -1834,7 +1838,11 @@ Every tool call dispatched through `Agent#execute` fires the `"parse.agent.tool_
 
 **Conversation correlation across multi-tool sessions.** Without correlation, individual tool-call events have no link between them — a Datadog dashboard sees "user X did query_class" and "user X did get_object" as independent points, with no way to know they belong to the same LLM turn. The dispatcher threads an optional correlation id through to every notification:
 
-- **Header path (recommended for hosted MCP):** the client sends `X-MCP-Session-Id: <opaque-id>` on every request in the conversation. `MCPRackApp` reads the header, sanitizes the value (charset `[A-Za-z0-9._-]`, max 128 chars — anything else is silently dropped to prevent log injection), and sets `agent.correlation_id` unless the factory has already supplied one. Notifications fired during that request carry the value as `payload[:correlation_id]`.
+- **Header path (recommended for hosted MCP):** the client sends `Mcp-Session-Id: <opaque-id>` on every request in the conversation (the MCP 2025-06-18 Streamable HTTP spec-canonical name). `MCPRackApp` reads the header, sanitizes the value (charset `[A-Za-z0-9._-]`, max 128 chars — anything else is silently dropped to prevent log injection), and sets `agent.correlation_id` unless the factory has already supplied one. Notifications fired during that request carry the value as `payload[:correlation_id]`.
+
+  **Server-assigned on `initialize`:** when the client omits the header on the `initialize` request, `MCPRackApp` generates a UUID, binds it to `agent.correlation_id`, and returns it in the `Mcp-Session-Id` response header. Clients echo that id on subsequent requests. A client-supplied `Mcp-Session-Id` on `initialize` is echoed back unchanged; a factory-bound `correlation_id` always wins over both. Only the `initialize` response carries the header — non-init responses don't, so the id is never leaked on every reply. The SDK does not maintain a server-side session store: the id is best-effort correlation only (audit threading + cancellation routing), and a subsequent request carrying an "unknown" id is NOT refused.
+
+  **Session termination via `DELETE /`:** a `DELETE` carrying `Mcp-Session-Id` cancels every in-flight request registered under that correlation id and returns `204 No Content`. The header value is sanitized with the same regex as the request setter; missing or invalid values return `400`. The DELETE handler runs before the agent factory, so teardown traffic cannot force per-request agent construction.
 
 - **Factory path (for application-bound sessions):** application code that already has an internal session identifier can override the client-supplied header by setting it inside the agent factory:
 
@@ -1853,7 +1861,7 @@ Every tool call dispatched through `Agent#execute` fires the `"parse.agent.tool_
 
 When unset (no header, no factory assignment), `payload[:correlation_id]` is omitted entirely — the key does not appear in the payload hash.
 
-The same `X-MCP-Session-Id` header is **required** for cooperative cancellation via `notifications/cancelled` — see the Cancellation section. Clients that thread the header through every request in a conversation get both correlated audit logs and cancellation; clients that don't lose both but keep every other MCP feature.
+The same `Mcp-Session-Id` header is **required** for cooperative cancellation via `notifications/cancelled` — see the Cancellation section. Clients that thread the header through every request in a conversation get both correlated audit logs and cancellation; clients that don't lose both but keep every other MCP feature.
 
 **Cancellation notification asymmetry.** A tool cancelled BEFORE it runs (via `agent.cancelled?` at the dispatcher's first checkpoint) does not fire `parse.agent.tool_call` — the tool never executed, so there is nothing to instrument. This matches how rate-limit and permission refusals are surfaced. A tool cancelled AFTER it returns (second checkpoint, "client cancelled while the tool's I/O was running") DOES fire the notification with `success: false, error_code: :cancelled`. Subscribers that count cancellations should expect the second shape; pre-run cancellations are visible to operators only via the wire response.
 
@@ -2030,18 +2038,18 @@ Two additive keyword arguments (v4.2.1) narrow the response without changing the
 
 ```ruby
 # Pull only a known subset (exact match)
-agent.execute(:get_all_schemas, names: %w[Capture Project Team])
-# => { custom: [{ name: "Capture", ... }, { name: "Project", ... }, { name: "Team", ... }], ... }
+agent.execute(:get_all_schemas, names: %w[Post Project Workspace])
+# => { custom: [{ name: "Post", ... }, { name: "Project", ... }, { name: "Workspace", ... }], ... }
 
 # Pull every class whose name starts with a prefix (case-sensitive)
-agent.execute(:get_all_schemas, prefix: "Capture")
-# => { custom: [{ name: "Capture", ... }, { name: "CaptureRevision", ... }], ... }
+agent.execute(:get_all_schemas, prefix: "Post")
+# => { custom: [{ name: "Post", ... }, { name: "PostRevision", ... }], ... }
 
 # Compose as intersection
 agent.execute(:get_all_schemas,
-  names:  %w[Capture CaptureRevision Project],
-  prefix: "Capture")
-# => only Capture + CaptureRevision (the names that ALSO match the prefix)
+  names:  %w[Post PostRevision Project],
+  prefix: "Post")
+# => only Post + PostRevision (the names that ALSO match the prefix)
 ```
 
 Both arguments default to nil (no filter, current behavior). An empty `names: []` array or empty `prefix: ""` string is also a no-op. Comparison is case-sensitive for exact match and prefix.
@@ -2091,11 +2099,11 @@ Aggregate results expose Parse pointer fields in their Parse-on-Mongo storage fo
 **Default-on compaction.** Every `aggregate` response is run through a compaction pass that rewrites `_p_<field>` keys to `<field>` and strips the `<ClassName>$` prefix from each value. The envelope picks up a top-level `pointer_classes:` map preserving the class information:
 
 ```ruby
-agent.execute(:aggregate, class_name: "Capture",
-  pipeline: [{ "$match" => { "isRemoved" => { "$ne" => true } } }, { "$project" => { "_p_author" => 1 } }]
+agent.execute(:aggregate, class_name: "Post",
+  pipeline: [{ "$match" => { "archived" => { "$ne" => true } } }, { "$project" => { "_p_author" => 1 } }]
 )
 # => {
-#   class_name:       "Capture",
+#   class_name:       "Post",
 #   result_count:     3,
 #   results: [
 #     { "objectId" => "row1", "author" => "alice1" },
@@ -2111,7 +2119,7 @@ agent.execute(:aggregate, class_name: "Capture",
 **Opting out.** Pass `compact_pointers: false` to receive raw Parse-on-Mongo shapes. Consumers that parse `<ClassName>$<objectId>` strings directly should either set the flag to `false` or migrate to consuming the bare objectId and the `pointer_classes` envelope map.
 
 ```ruby
-agent.execute(:aggregate, class_name: "Capture",
+agent.execute(:aggregate, class_name: "Post",
   pipeline: [...],
   compact_pointers: false)
 # Response keys back to raw _p_author: "_User$alice1" form; no pointer_classes
@@ -2124,10 +2132,10 @@ The pipeline access-policy walker that enforces a class's `agent_fields` allowli
 Schema-replacing stages (`$project`, `$group`, `$bucket`, `$bucketAuto`, `$replaceRoot`, `$replaceWith`, `$facet`, `$sortByCount`, `$count`) drop the source set; downstream stages can only reference the newly-introduced fields. This unblocks the canonical "group → filter → sort → limit" pattern that previously failed because synthetic accumulator outputs (`contributor_count`, `total_sum`) were checked against the source class's `agent_fields` allowlist and refused as `:field_denied`.
 
 ```ruby
-# Capture has agent_fields :only, [:objectId, :_p_author, :status]
+# Post has agent_fields :only, [:objectId, :_p_author, :status]
 # total_sum is NOT in agent_fields — but it's introduced by $group, so the
 # downstream $match/$sort can reference it without a denial.
-agent.execute(:aggregate, class_name: "Capture", pipeline: [
+agent.execute(:aggregate, class_name: "Post", pipeline: [
   { "$group" => { "_id" => "$status",
                   "total_sum" => { "$sum" => "$amount" } } },
   { "$match" => { "total_sum" => { "$gt" => 100 } } },
@@ -2151,10 +2159,10 @@ All three are `:readonly` and inherit the same access-control gates as `aggregat
 Group records by a field and apply an aggregation:
 
 ```ruby
-agent.execute(:group_by, class_name: "Capture", field: "lastAction",
+agent.execute(:group_by, class_name: "Post", field: "lastAction",
               operation: "count")
 # => { success: true, data: {
-#   class_name: "Capture", field: "lastAction", operation: "count",
+#   class_name: "Post", field: "lastAction", operation: "count",
 #   group_count: 4, limit: 200,
 #   groups: [
 #     { key: "submitted", value: 142 },
@@ -2170,7 +2178,7 @@ agent.execute(:group_by, class_name: "Capture", field: "lastAction",
 **Pointer auto-detection.** When the local Parse model declares the field as `:pointer`, the handler emits `$_p_<field>` in the pipeline and strips the `<ClassName>$` prefix from the response keys, surfacing the class once in `pointer_class:`:
 
 ```ruby
-agent.execute(:group_by, class_name: "Capture", field: "author")
+agent.execute(:group_by, class_name: "Post", field: "author")
 # => { ..., pointer_class: "_User",
 #     groups: [{ key: "abc123", value: 47 }, { key: "def456", value: 31 }, ...] }
 ```
@@ -2180,7 +2188,7 @@ Call `get_objects(class_name: "_User", ids: ["abc123", "def456"])` to resolve th
 **Array flattening.** Pass `flatten_arrays: true` to `$unwind` the field before grouping so individual array elements are counted:
 
 ```ruby
-agent.execute(:group_by, class_name: "Capture", field: "tags", flatten_arrays: true)
+agent.execute(:group_by, class_name: "Post", field: "tags", flatten_arrays: true)
 # Each tag is counted once per row containing it.
 ```
 
@@ -2200,11 +2208,11 @@ agent.execute(:group_by, class_name: "Order", field: "customerId",
 Bucket records by a date field at an interval and aggregate. Same operation set as `group_by`, plus `interval:` and `timezone:`:
 
 ```ruby
-agent.execute(:group_by_date, class_name: "Capture",
+agent.execute(:group_by_date, class_name: "Post",
               field: "createdAt", interval: "day",
               timezone: "America/New_York")
 # => { success: true, data: {
-#   class_name: "Capture", field: "createdAt", interval: "day",
+#   class_name: "Post", field: "createdAt", interval: "day",
 #   operation: "count", timezone: "America/New_York", sort: "key_asc",
 #   groups: [
 #     { key: "2024-11-24", value:  47 },
@@ -2227,10 +2235,10 @@ agent.execute(:group_by_date, class_name: "Capture",
 Return the distinct values of a field, optionally filtered:
 
 ```ruby
-agent.execute(:distinct, class_name: "Asset", field: "mediaFormat",
-              where: { "isRemoved" => { "$ne" => true } })
+agent.execute(:distinct, class_name: "Document", field: "mediaFormat",
+              where: { "archived" => { "$ne" => true } })
 # => { success: true, data: {
-#   class_name: "Asset", field: "mediaFormat",
+#   class_name: "Document", field: "mediaFormat",
 #   count: 3, values: ["video", "image", "audio"]
 # } }
 ```
@@ -2238,8 +2246,8 @@ agent.execute(:distinct, class_name: "Asset", field: "mediaFormat",
 **Pointer fields.** When the field is a pointer, the values come back stripped of the `<ClassName>$` prefix and `pointer_class:` carries the class:
 
 ```ruby
-agent.execute(:distinct, class_name: "Asset", field: "authorTeam")
-# => { ..., pointer_class: "Team",
+agent.execute(:distinct, class_name: "Document", field: "authorWorkspace")
+# => { ..., pointer_class: "Workspace",
 #     values: ["alphaTeam", "betaTeam", "gammaTeam"] }
 ```
 
@@ -2256,12 +2264,12 @@ All three tools accept `dry_run: true`, which returns the constructed MongoDB pi
 - Letting a power-user LLM mutate the pipeline (add a `$lookup`, change the `$sort`) before re-issuing through `aggregate`.
 
 ```ruby
-agent.execute(:group_by, class_name: "Capture", field: "author",
+agent.execute(:group_by, class_name: "Post", field: "author",
               operation: "sum", value_field: "elapsedMs",
               sort: "value_desc", limit: 10, dry_run: true)
 # => { success: true, data: {
 #   dry_run: true,
-#   class_name: "Capture",
+#   class_name: "Post",
 #   parameters: { field: "author", operation: "sum", value_field: "elapsedMs",
 #                 sort: "value_desc", limit: 10 },
 #   pipeline: [
@@ -2467,7 +2475,7 @@ Parse::Agent.rack_app(logger: Rails.logger) { |env| ... }
 
 **Sub-agent auth-scope inheritance and permissions clamp (v4.2).** When a tool handler constructs a sub-agent with `Parse::Agent.new(parent: agent, ...)`, the sub inherits `session_token` and `tenant_id` from the parent unless explicitly overridden. Without this inheritance, a session-token parent would silently produce a master-key sub-agent — the constructor default `session_token: nil` resolves to master-key mode — escalating privilege through the very kwarg meant to close sub-agent footguns. Explicit overrides still work (`Parse::Agent.new(parent: agent, session_token: nil)` produces a master-key sub if that is genuinely what the handler wants), but the default is fail-safe inheritance. `permissions:` is NOT inherited and defaults to `:readonly`, but the constructor enforces a clamp: an explicit `permissions:` override on a sub-agent is accepted only if `≤ parent.permissions`, otherwise `ArgumentError` is raised at construction. The clamp is the structural guarantee that a delegation chain cannot escape the parent's tier through sub-agent construction. See [Per-Agent Tool Filtering & Sub-Agent Delegation](#per-agent-tool-filtering--sub-agent-delegation-v42) for the full inheritance table.
 
-**Agent-level ACL scope: `session_token:` / `acl_user:` / `acl_role:` (v4.4.0).** `Parse::Agent.new` accepts three mutually-exclusive identity inputs. `session_token:` round-trips Parse Server's `/users/me` at construction (or defers to per-call REST if the server is unreachable). `acl_user:` takes a `Parse::User` or User-pointer and expands the user's role membership via `Parse::Role.all_for_user` — no token round-trip, the SDK enforces the resulting `_rperm` filter itself. `acl_role:` is service-account-style scoping — no user_id, just the role plus parent-role inheritance. Master-key posture (none of the three supplied) remains the default and still emits the one-time `[Parse::Agent:SECURITY]` banner at construction. Every built-in tool reads `agent.acl_scope_kwargs` (single point of truth) to forward identity into `Parse::MongoDB.aggregate`, `Parse::Query#results_direct`, and `Parse::AtlasSearch.{search,autocomplete}`. Developer-registered tool handlers and `agent_method` bodies can reach `agent.acl_scope`, `agent.acl_permission_strings`, `agent.acl_read_match_stage` (a `_rperm` `$match`), or `agent.acl_write_match_stage` (a `_wperm` `$match`) to apply the agent's identity to their own queries.
+**Agent-level ACL scope: `session_token:` / `acl_user:` / `acl_role:` (v4.4.0).** `Parse::Agent.new` accepts three mutually-exclusive identity inputs. `session_token:` round-trips Parse Server's `/users/me` at construction (or defers to per-call REST if the server is unreachable). `acl_user:` takes a `Parse::User` or User-pointer and expands the user's role subscription via `Parse::Role.all_for_user` — no token round-trip, the SDK enforces the resulting `_rperm` filter itself. `acl_role:` is service-account-style scoping — no user_id, just the role plus parent-role inheritance. Master-key posture (none of the three supplied) remains the default and still emits the one-time `[Parse::Agent:SECURITY]` banner at construction. Every built-in tool reads `agent.acl_scope_kwargs` (single point of truth) to forward identity into `Parse::MongoDB.aggregate`, `Parse::Query#results_direct`, and `Parse::AtlasSearch.{search,autocomplete}`. Developer-registered tool handlers and `agent_method` bodies can reach `agent.acl_scope`, `agent.acl_permission_strings`, `agent.acl_read_match_stage` (a `_rperm` `$match`), or `agent.acl_write_match_stage` (a `_wperm` `$match`) to apply the agent's identity to their own queries.
 
 **ACL composition on the mongo-direct aggregate path (v4.4.0).** When `aggregate` routes through `Parse::MongoDB.aggregate` (the default when `Parse::MongoDB.enabled?` is true), the agent layer derives the auth posture from the agent instance and forwards it to ACLScope — session-tokened / acl_user / acl_role agents get the same row-level `_rperm` `$match` injection regardless of identity mode; master-key agents pass `master: true` (the agent's class/field/tenant/canonical-filter gates are the security boundary for that posture). The posture is built in `Parse::Agent#acl_scope_kwargs`, not from tool-call JSON arguments; LLM-supplied `master:`, `session_token:`, `acl_user:`, or `acl_role:` kwargs are silently swallowed by the tool signature's `**_kwargs` catchall and never reach `Parse::MongoDB.aggregate`. An LLM cannot escalate from a scoped posture to master-key by injecting `master: true` into the tool arguments.
 
@@ -2480,6 +2488,119 @@ Parse::Agent.rack_app(logger: Rails.logger) { |env| ... }
 **Atlas Search per-tool refusal relaxed (v4.4.0).** `atlas_text_search` and `atlas_autocomplete` no longer require `session_token:` or `master_atlas: true` at the per-tool boundary. The SDK now enforces per-row ACL on these calls via `Parse::ACLScope`'s `_rperm` `$match` regardless of identity mode (session_token / acl_user / acl_role / master-key), so the operator's master-key construction is sufficient signal — the master-key banner at construction is the security-posture indicator. `atlas_faceted_search` retains its `master_atlas: true` requirement because `$searchMeta` bucket counts cannot be ACL-filtered at the `_rperm` level.
 
 The corollary: a session-tokened or `acl_user`-scoped agent calling `aggregate` will see only rows whose `_rperm` permits the requesting user (including roles inherited via `Parse::Role.all_for_user`); `acl_role` agents see rows readable by the role + its parent roles. `protectedFields` defined in the class's CLP are stripped from every returned row and every embedded `$lookup`-included sub-document. Pre-4.4.0, mongo-direct aggregate ran with admin Mongo credentials and no SDK-side enforcement — a real CLP/ACL gap that this release closes.
+
+---
+
+## Client Mode — Session-Token-Only Agents (v5.0)
+
+`Parse::Agent` automatically enters *client mode* when its underlying `Parse::Client` carries **no `master_key`** AND the constructor was given a **non-empty `session_token:`**. Client mode is a *posture*, not a separate class — the same `Parse::Agent` instance answers `agent.client_mode? => true` and applies a tighter dispatch ceiling to itself. The two complementary postures:
+
+| Posture       | `master_key` configured? | `session_token:` supplied? | Dispatch surface | ACL/CLP enforced by |
+|---------------|:------------------------:|:--------------------------:|------------------|---------------------|
+| **client mode** | no                     | yes (required)             | session-token REST allowlist | Parse Server (native) |
+| **master-key** | yes                     | optional (scopes if set)   | full tool catalog | SDK (`ACLScope` + `CLPScope` on mongo-direct) |
+
+A `Parse::Client` with no `master_key` AND no `session_token:` is **not** client mode — it is the legacy no-master construction that still emits the `[Parse::Agent:SECURITY]` banner. It's preserved for back-compat with test harnesses that drive the SDK without auth.
+
+### Detection and surface ceiling
+
+```ruby
+Parse.setup(server_url: "...", application_id: "...", api_key: "...")  # no master_key
+agent = Parse::Agent.new(session_token: user.session_token)
+
+agent.client_mode?      # => true
+agent.allow_mutations?  # => false (default in client mode)
+```
+
+The client-mode dispatch ceiling is a small allowlist; every other built-in tool is refused at the boundary:
+
+- **Read tools (always allowed):** `list_tools`, `get_object`, `get_objects`, `query_class`, `count_objects`, `get_sample_objects`
+- **Mutation tools (gated by `allow_mutations:`):** `create_object`, `update_object`, `delete_object`
+- **Refused at the ceiling:** `aggregate`, `atlas_text_search`, `atlas_autocomplete`, `atlas_faceted_search`, `find_similar`, `group_by`, `group_by_date`, `distinct`, `explain_query`, `export_data`, `get_all_schemas`, `get_schema`, `create_class`, `delete_class`, `call_method`, and every registered custom tool whose `register(...)` call did not pass `client_safe: true`.
+
+The refused tools all require either the application master key (REST `/aggregate`, `/schemas`) or a direct MongoDB connection (atlas-search, mongo-direct queries) — neither of which a client-mode agent has. Refusing at the dispatch ceiling rather than at first REST call gives the LLM an immediate `:access_denied` error envelope it can recover from, instead of a 403 from Parse Server somewhere downstream.
+
+### `allow_mutations:` — per-agent write gate
+
+```ruby
+# Default: client-mode agents are read-only
+reader = Parse::Agent.new(session_token: user.session_token)
+reader.execute(:create_object, class_name: "Post", fields: { title: "x" })
+# => { success: false, error_code: :access_denied,
+#      error: "Raw mutation tool 'create_object' is disabled. Pass allow_mutations: true to enable." }
+
+# Opt in per agent
+writer = Parse::Agent.new(session_token: user.session_token, allow_mutations: true)
+writer.execute(:create_object, class_name: "Post", fields: { title: "x" })  # → posts to /classes/Post with the session token
+```
+
+The gate AND-composes with the existing `PARSE_AGENT_ALLOW_WRITE_TOOLS` and `PARSE_AGENT_ALLOW_RAW_CRUD` env vars — both env vars and `allow_mutations: true` must agree before `create_object` / `update_object` / `delete_object` dispatch. In master-key mode `allow_mutations:` defaults to `true` so existing master-key agents continue to use the env vars alone (back-compat). Explicit `allow_mutations: false` on a master-key agent disables raw CRUD for that agent even when the env vars are set.
+
+### `acl_user:` / `acl_role:` are refused on no-master clients
+
+```ruby
+Parse::Agent.new(acl_user: some_user_pointer)
+# => ArgumentError: acl_user:/acl_role: require a Parse::Client with a master_key
+#    configured. The current client has no master_key. Use session_token: to bind
+#    a per-user identity instead, or configure a master-key client for scoped
+#    aggregations.
+```
+
+Both `acl_user:` and `acl_role:` are SDK-side constructor assertions — the SDK *asserts* "act as this user" or "act as this role" and then enforces the resulting `_rperm` filter itself, on a mongo-direct query path. Without a master key the SDK cannot reach that path, and Parse Server's REST surface has no "act as user-pointer" or "act as role" affordance, so honoring them would silently downgrade to anonymous. The constructor fails fast and points the caller at `session_token:` (the only verified identity model available to a no-master client).
+
+### `client_safe:` — eligibility flag for custom tools
+
+```ruby
+Parse::Agent::Tools.register(
+  name:        :my_read_helper,
+  description: "Compute something from session-scoped data",
+  parameters:  { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  permission:  :readonly,
+  client_safe: true,  # opt-in; default is false (master-key only)
+  handler:     ->(args, agent:) {
+    # IMPORTANT: thread agent.request_opts (NOT just session_token:) so the
+    # request also carries use_master_key: false. In a deployment where the
+    # process-default Parse::Client carries a master key, omitting
+    # use_master_key: false here would silently escalate to master-key
+    # posture and bypass Parse Server's session-token authorization.
+    agent.client.fetch_object("MyClass", args[:id], **agent.request_opts)
+  },
+)
+```
+
+Custom tools default to master-key-only — a registered tool is refused at the client-mode dispatch ceiling unless its author explicitly declared `client_safe: true`. The flag is an eligibility assertion from the tool author: *"this handler does not touch the master key, does not call mongo-direct aggregates, and is safe for a session-token-only agent."* The companion predicate `Parse::Agent::Tools.client_safe?(name)` reports the resolved eligibility of any built-in or registered tool.
+
+**Canonical handler pattern: `**agent.request_opts`.** Always splat `agent.request_opts` into the underlying `Parse::Client` call rather than threading `session_token: agent.session_token` alone. `request_opts` sets both `session_token:` and `use_master_key: false` (and raises `Parse::ACLScope::ACLRequired` for scoped postures that REST cannot honor). The `session_token:`-alone pattern works only when the process has no master key configured anywhere — the safer pattern works in every deployment.
+
+### Sub-agent inheritance
+
+```ruby
+parent = Parse::Agent.new(session_token: user.session_token, allow_mutations: true)
+child  = Parse::Agent.new(parent: parent)
+child.client_mode?       # => true  (inherits the parent's client + session_token)
+child.allow_mutations?   # => true  (inherits the parent's gate)
+
+narrower = Parse::Agent.new(parent: parent, allow_mutations: false)
+narrower.allow_mutations?  # => false (sub may narrow)
+
+Parse::Agent.new(parent: reader_without_mutations, allow_mutations: true)
+# => ArgumentError: sub-agent cannot widen parent's allow_mutations gate
+```
+
+The `allow_mutations:` gate composes with the existing sub-agent subset rules (`permissions:` clamp, `tools:` narrowing, `classes:` allowlist intersection) — a sub-agent may narrow but never widen, including the mutation gate.
+
+### Refusal message shape (operator-distinguishable)
+
+Four different refusal reasons each produce a distinct `:error_code` and message shape so SOC tooling can branch on them without parsing prose. Messages below are paraphrased for table width — the actual messages in `lib/parse/agent.rb` are longer; the column shows the opening clause and key tokens.
+
+| Refusal | Opening clause / key token | `:error_code` | Carries class name? |
+|---------|-----------------------------|---------------|----------------------|
+| Operator `tools:` filter | `"Tool 'X' is not enabled for this agent instance (excluded by the configured tools: filter)."` | `:tool_filtered` | No |
+| Mutation gate | `"Raw mutation tool 'create_object' is disabled for this client-mode agent. Construct the agent with allow_mutations: true …"` | `:access_denied` | No |
+| Mode ceiling | `"Tool 'aggregate' is not available to client-mode agents. …"` | `:access_denied` | No |
+| `agent_hidden` class | `"Class 'StudentSSN' is not accessible to this agent"` | `:access_denied` | Yes (the class name in the request) |
+
+**Resolution order at dispatch:** operator filter ▷ mutation gate ▷ mode ceiling ▷ in-tool class gate. Operator-filter precedence is deliberate — when a tool is excluded by both the operator's `tools: { except: [...] }` AND the mutation gate (or the mode ceiling), the operator-filter message wins so the operator looks at the right knob first. The mode-ceiling message names the tool, not the class — even when the request would have hit an `agent_hidden` class, the ceiling fires first for a refused tool, so the LLM does not learn anything about the class. For tools that pass the ceiling (e.g. `query_class`) the in-tool `assert_class_accessible!` runs next and the `agent_hidden` message echoes the class name supplied by the caller.
 
 ---
 
@@ -2679,18 +2800,18 @@ Two options on `property` carry per-field metadata to an LLM through `get_schema
 ### Declaration
 
 ```ruby
-class Membership < Parse::Object
-  parse_class "Membership"
+class Subscription < Parse::Object
+  parse_class "Subscription"
 
   property :title, :string,
-           _description: "Display title for this membership grant"
+           _description: "Display title for this subscription grant"
 
   property :grant, :string,
-           _description: "Scope of the membership grant",
+           _description: "Scope of the subscription grant",
            _enum: {
-             team:         "Member of a team within the org",
-             project:      "Member of a single project under a team",
-             organization: "Member of the org as a whole",
+             workspace:    "Member of a workspace within the tenant",
+             project:      "Member of a single project under a workspace",
+             tenant:       "Member of the tenant as a whole",
            }
 
   property :account_level, :string,
@@ -2702,27 +2823,27 @@ class Membership < Parse::Object
 end
 ```
 
-`_description:` takes a single string. `_enum:` takes a Hash mapping each allowed value (Symbol or String) to a per-value description. Value keys are stringified at declaration time to match the wire-format shape an LLM will see in query constraints (the schema always reports `value: "team"`, never `value: :team`).
+`_description:` takes a single string. `_enum:` takes a Hash mapping each allowed value (Symbol or String) to a per-value description. Value keys are stringified at declaration time to match the wire-format shape an LLM will see in query constraints (the schema always reports `value: "workspace"`, never `value: :workspace`).
 
 ### Surface in `get_schema`
 
 Both annotations show up per-field in the `fields[]` array:
 
 ```ruby
-agent.execute(:get_schema, class_name: "Membership")
+agent.execute(:get_schema, class_name: "Subscription")
 # => {
 #   success: true,
 #   data: {
-#     class_name: "Membership",
+#     class_name: "Subscription",
 #     fields: [
 #       { name: "title", type: "string", required: false,
-#         description: "Display title for this membership grant" },
+#         description: "Display title for this subscription grant" },
 #       { name: "grant", type: "string", required: false,
-#         description: "Scope of the membership grant",
+#         description: "Scope of the subscription grant",
 #         allowed_values: [
-#           { "value" => "team",         "description" => "Member of a team within the org" },
-#           { "value" => "project",      "description" => "Member of a single project under a team" },
-#           { "value" => "organization", "description" => "Member of the org as a whole" }
+#           { "value" => "workspace", "description" => "Member of a workspace within the tenant" },
+#           { "value" => "project",   "description" => "Member of a single project under a workspace" },
+#           { "value" => "tenant",    "description" => "Member of the tenant as a whole" }
 #         ] },
 #       { name: "accountLevel", type: "string", required: false,
 #         allowed_values: [...] },
@@ -2778,11 +2899,11 @@ The gem doesn't raise on the declaration — keeping `_enum:` on string-typed pr
 Pointer columns are stored on disk as `"ClassName$objectId"`. A `where:` constraint that passes a bare objectId without the surrounding Pointer shape matches nothing, and an LLM seeing `type: "Pointer"` alone has no signal about which value shapes are accepted. The schema formatter auto-emits a `query_hint:` on every Pointer field describing the SDK-accepted shapes inline, so the LLM doesn't have to query a sample row or guess.
 
 ```ruby
-agent.execute(:get_schema, class_name: "Capture")
+agent.execute(:get_schema, class_name: "Post")
 # => {
 #   success: true,
 #   data: {
-#     class_name: "Capture",
+#     class_name: "Post",
 #     fields: [
 #       { name: "author", type: "Pointer", required: true,
 #         target_class: "_User",
@@ -2800,7 +2921,7 @@ agent.execute(:get_schema, class_name: "Capture")
 **Hidden-target collapse.** When the target class is registered as `agent_hidden` (the LLM is not allowed to know it exists), `target_class:` is suppressed and `query_hint:` collapses the class name to a `<targetClass>` placeholder so the hint still describes the shape without leaking the target's identity:
 
 ```ruby
-# Membership.belongs_to :user, class_name: "_User"
+# Subscription.belongs_to :user, class_name: "_User"
 # and _User is agent_hidden in this agent's posture
 # => { name: "user", type: "Pointer",
 #      query_hint: 'Pointer to <targetClass>. Equality: { "user" => "<objectId>" } ' \
@@ -2819,7 +2940,7 @@ The hint mirrors the shapes the SDK actually normalizes through `convert_constra
 
 ### The bug it fixes
 
-The reported reproducer: a `query_class(class_name: "Membership", keys: ["user", "title", "active", "createdAt"], include: ["user"])` against a 6-row Membership query. The included `_User` records carried full S3 presigned image URLs (~600 chars each on two columns), a 17-entry `teams[]` pointer array, an `organizations[]` array, and 13 other fields per row. The user objects accounted for ~85% of the response payload, while the LLM only ever consumed `firstName`/`lastName`/`email`/`lastActiveAt`/`internalTag` — maybe 5% of the materialized user.
+The reported reproducer: a `query_class(class_name: "Subscription", keys: ["user", "title", "active", "createdAt"], include: ["user"])` against a 6-row Subscription query. The included `_User` records carried full S3 presigned image URLs (~600 chars each on two columns), a 17-entry `workspaces[]` pointer array, an `tenants[]` array, and 13 other fields per row. The user objects accounted for ~85% of the response payload, while the LLM only ever consumed `firstName`/`lastName`/`email`/`lastActiveAt`/`category` — maybe 5% of the materialized user.
 
 `keys:` on the parent class trimmed the parent rows correctly, but Parse Server returned the included user untouched because no dotted-path projection was specified for the join. `agent_join_fields` is the developer-friendly way to declare the projection once at the model layer instead of per-call.
 
@@ -2830,7 +2951,7 @@ class Parse::User
   # Direct-query allowlist — the upper bound on what an agent ever sees
   # from _User on a `query_class("_User", ...)` call.
   agent_fields :first_name, :last_name, :email, :icon_image, :source_image,
-               :teams, :organizations, :last_active_at, :internal_tag
+               :workspaces, :tenants, :last_active_at, :category
 
   # Heavy fields — stripped from any join even without an agent_join_fields
   # declaration (see "Resolution order" below).
@@ -2839,7 +2960,7 @@ class Parse::User
   # Narrower projection used when _User shows up as a join target. The agent
   # gets these fields automatically when another class's query includes :user
   # — no per-call dotted-path keys needed.
-  agent_join_fields :first_name, :last_name, :email, :last_active_at, :internal_tag
+  agent_join_fields :first_name, :last_name, :email, :last_active_at, :category
 end
 ```
 
@@ -2883,14 +3004,14 @@ Pass any `<pointer>.*` dotted path in `keys:` and auto-projection is suppressed 
 ```ruby
 # Auto-projection fires (bare pointer in keys + include)
 agent.execute(:query_class,
-  class_name: "Membership",
+  class_name: "Subscription",
   keys:    ["user", "title"],
   include: ["user"])
-# => wire keys: "user,title,user.firstName,user.lastName,user.email,user.internalTag,user.objectId,user.createdAt,user.updatedAt"
+# => wire keys: "user,title,user.firstName,user.lastName,user.email,user.category,user.objectId,user.createdAt,user.updatedAt"
 
 # Auto-projection SUPPRESSED (caller passed user.* dotted path)
 agent.execute(:query_class,
-  class_name: "Membership",
+  class_name: "Subscription",
   keys:    ["user.iconImage", "title"],
   include: ["user"])
 # => wire keys: "user.iconImage,title"  (no auto-expansion)
@@ -2900,7 +3021,7 @@ The auto-projection also doesn't fire when:
 
 - `keys:` is absent entirely (caller chose full-row mode).
 - The bare pointer name is NOT in `keys:` (caller didn't ask for the pointer at the parent level either — Parse Server wouldn't return it).
-- The include is multi-hop (`include: ["user.team"]`) — only one-hop targets get auto-projected; deeper hops materialize fully. Keeps the rewrite bounded and avoids walking the full RelationGraph at query time.
+- The include is multi-hop (`include: ["user.workspace"]`) — only one-hop targets get auto-projected; deeper hops materialize fully. Keeps the rewrite bounded and avoids walking the full RelationGraph at query time.
 
 ### Response envelope: `truncated_include_fields`
 
@@ -2908,16 +3029,16 @@ When auto-projection fires, `query_class`, `get_object`, and `get_objects` add a
 
 ```ruby
 agent.execute(:query_class,
-  class_name: "Membership",
+  class_name: "Subscription",
   keys:    ["user", "title", "active"],
   include: ["user"],
   limit:   10)
 # => {
-#   class_name: "Membership",
+#   class_name: "Subscription",
 #   result_count: 10,
 #   results: [...],
 #   truncated_include_fields: {
-#     "user" => ["iconImage", "sourceImage", "teams", "organizations"]
+#     "user" => ["iconImage", "sourceImage", "workspaces", "tenants"]
 #   }
 # }
 ```
@@ -2939,11 +3060,11 @@ If the join-relevant fields ARE the same as the direct-query fields (common for 
 Both `agent_fields` and `agent_join_fields` are echoed as top-level keys on the `get_schema` response when declared. The allowlist is already enforced by stripping non-allowed fields from the response, but enforcement-by-omission left consumers guessing what they could write in `keys:` — the explicit echo closes that gap:
 
 ```ruby
-agent.execute(:get_schema, class_name: "Membership")
+agent.execute(:get_schema, class_name: "Subscription")
 # => {
 #   success: true,
 #   data: {
-#     class_name:        "Membership",
+#     class_name:        "Subscription",
 #     type:              "custom",
 #     fields:            [...],                         # already trimmed to the allowlist
 #     agent_fields:      ["user", "title", "active", "grant", "accountLevel"],
@@ -3035,13 +3156,13 @@ class Order < Parse::Object
   property :total, :float
   property :status, :string
 
-  # Every read tool now filters by org_id = agent.tenant_id automatically.
-  agent_tenant_scope :org_id, from: ->(agent) { agent.tenant_id }
+  # Every read tool now filters by tenant_id = agent.tenant_id automatically.
+  agent_tenant_scope :tenant_id, from: ->(agent) { agent.tenant_id }
 end
 ```
 
 Two arguments:
-- `field` (Symbol or String) — the Parse field to scope on (e.g., `:org_id`, `:account_id`, `:tenant`).
+- `field` (Symbol or String) — the Parse field to scope on (e.g., `:tenant_id`, `:account_id`, `:workspace_id`).
 - `from:` (Proc / lambda) — a callable receiving the agent instance and returning the scope value to filter by. Return `nil` to signal "this agent has no tenant binding" — the call is then refused unless a bypass declaration covers the agent.
 
 ### Setting the agent's tenant binding
@@ -3110,22 +3231,22 @@ The proper fix (recursive scope injection into sub-pipelines) is tracked as a fo
 
 ## `agent_canonical_filter` — Per-Class "Valid State" Predicate
 
-Many Parse classes have a "live records" subset that every legitimate read should respect — soft-delete columns (`isRemoved`), publication flags (`onTimeline`), validity windows, tombstone markers, etc. Without a mechanism that codifies this subset, an LLM that drops to raw `aggregate` for a question `query_class` couldn't answer will silently include rows the application would have hidden, producing counts that disagree with the rest of the system.
+Many Parse classes have a "live records" subset that every legitimate read should respect — soft-delete columns (`archived`), publication flags (`published`), validity windows, tombstone markers, etc. Without a mechanism that codifies this subset, an LLM that drops to raw `aggregate` for a question `query_class` couldn't answer will silently include rows the application would have hidden, producing counts that disagree with the rest of the system.
 
 `agent_canonical_filter` declares the predicate ONCE on the model class. Every read tool the agent exposes applies it BY DEFAULT to every call, and `get_schema` surfaces it so callers that opt out can reproduce the predicate manually.
 
 ### Declaration
 
 ```ruby
-class Capture < Parse::Object
+class Post < Parse::Object
   property :title,      :string
-  property :isRemoved,  :boolean
-  property :onTimeline, :boolean
+  property :archived,  :boolean
+  property :published, :boolean
 
   # MongoDB-style match expression. Same shape that query_class's `where:`
   # accepts. Keys are stringified at declaration time.
-  agent_canonical_filter "isRemoved"  => { "$ne" => true },
-                         "onTimeline" => true
+  agent_canonical_filter "archived"  => { "$ne" => true },
+                         "published" => true
 end
 ```
 
@@ -3142,13 +3263,13 @@ The canonical filter is applied across every read surface the agent exposes:
 - **`get_sample_objects`** — included in the sample's effective `where:` so sample rows are drawn from the same subset as a normal query.
 - **`export_via_query`** and **`export_via_aggregate`** (the two backends behind `export_data`) — applied so an export is never a path to soft-deleted or otherwise excluded rows that the conversational tools hide.
 
-ID-based reads (`get_object`, `get_objects`) intentionally do NOT apply the canonical filter. The caller named a specific objectId and is asking for that exact row; redacting it because it failed a `isRemoved => { "$ne" => true }` predicate would surprise legitimate callers fetching a soft-deleted record by ID for audit or restoration. Hidden-class refusal still applies — `agent_hidden` is the access boundary; `agent_canonical_filter` is a default predicate.
+ID-based reads (`get_object`, `get_objects`) intentionally do NOT apply the canonical filter. The caller named a specific objectId and is asking for that exact row; redacting it because it failed a `archived => { "$ne" => true }` predicate would surprise legitimate callers fetching a soft-deleted record by ID for audit or restoration. Hidden-class refusal still applies — `agent_hidden` is the access boundary; `agent_canonical_filter` is a default predicate.
 
 ### Per-call opt-out
 
 ```ruby
-# Count all captures, including soft-deleted ones
-agent.execute(:count_objects, class_name: "Capture",
+# Count all posts, including soft-deleted ones
+agent.execute(:count_objects, class_name: "Post",
   apply_canonical_filter: false)
 ```
 
@@ -3159,14 +3280,14 @@ agent.execute(:count_objects, class_name: "Capture",
 When a class declares `agent_canonical_filter`, `get_schema(class_name)` surfaces it as `canonical_filter:` so a caller that opts out can reproduce the predicate in its own `where:`:
 
 ```ruby
-agent.execute(:get_schema, class_name: "Capture")
+agent.execute(:get_schema, class_name: "Post")
 # => {
 #   success: true,
 #   data: {
-#     class_name:       "Capture",
+#     class_name:       "Post",
 #     type:             "custom",
 #     fields:           [...],
-#     canonical_filter: { "isRemoved" => { "$ne" => true }, "onTimeline" => true },
+#     canonical_filter: { "archived" => { "$ne" => true }, "published" => true },
 #     ...
 #   }
 # }
@@ -3175,8 +3296,8 @@ agent.execute(:get_schema, class_name: "Capture")
 ### Programmatic lookup
 
 ```ruby
-Parse::Agent::MetadataRegistry.canonical_filter("Capture")
-# => { "isRemoved" => { "$ne" => true }, "onTimeline" => true }
+Parse::Agent::MetadataRegistry.canonical_filter("Post")
+# => { "archived" => { "$ne" => true }, "published" => true }
 Parse::Agent::MetadataRegistry.canonical_filter("ClassWithoutFilter")
 # => nil
 ```
@@ -3397,16 +3518,16 @@ audit = Parse::Agent.audit_metadata
 # => {
 #   classes_audited:                28,
 #   visible_classes_declared:       true,   # opt-in mode vs back-compat fallback
-#   missing_class_descriptions:     ["ProjectUsage", "CaptureSnapshot"],
+#   missing_class_descriptions:     ["PostMetric", "PostSnapshot"],
 #   missing_field_descriptions:     {
-#     "Capture"    => [:internal_tag, :base_status, ...],
-#     "Membership" => [:grant, :active]
+#     "Post"    => [:category, :status, ...],
+#     "Subscription" => [:grant, :active]
 #   },
 #   unresolvable_allowlist_entries: {
-#     "ProjectStage" => [:statys]              # likely typo of :status
+#     "PostStatus" => [:statys]              # likely typo of :status
 #   },
 #   canonical_filter_summary:       {
-#     "Capture" => { "isRemoved" => { "$ne" => true }, "onTimeline" => true }
+#     "Post" => { "archived" => { "$ne" => true }, "published" => true }
 #   }
 # }
 
@@ -3437,20 +3558,20 @@ Parse::Agent::MetadataAudit.print_summary
 # Classes audited: 28 (agent_visible mode)
 #
 # Missing class descriptions (2):
-#   - ProjectUsage
-#   - CaptureSnapshot
+#   - PostMetric
+#   - PostSnapshot
 #
 # Missing field descriptions (7 across 2 classes):
-#   Capture (5):
-#     internal_tag, base_status, is_removed, on_timeline, author
-#   Membership (2):
+#   Post (5):
+#     category, status, archived, published, author
+#   Subscription (2):
 #     grant, active
 #
 # Unresolvable allowlist entries:
-#   ProjectStage: statys
+#   PostStatus: statys
 #
 # Canonical filters declared (1):
-#   Capture: {"isRemoved" => {"$ne" => true}, "onTimeline" => true}
+#   Post: {"archived" => {"$ne" => true}, "published" => true}
 ```
 
 `print_summary` writes to `$stdout` by default; pass `io:` to redirect. Returns the same hash that `audit_metadata` returns, so a Rake task can both display and process the findings in one call.

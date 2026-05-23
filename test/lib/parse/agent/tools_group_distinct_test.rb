@@ -49,7 +49,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   # Parse stores relations in klass.relations, not klass.fields.
   class GroupRelationSong < Parse::Object
     parse_class "GroupRelationSong"
-    has_many :collaborators, through: :relation
+    has_many :coauthors, through: :relation
   end
 
   def setup
@@ -584,7 +584,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_group_by_date_rejects_relation_field
     stub_aggregate([])
     result = @agent.execute(:group_by_date, class_name: "GroupRelationSong",
-                            field: "collaborators", interval: "day")
+                            field: "coauthors", interval: "day")
     refute result[:success], "relation field must be rejected by group_by_date"
     assert_equal :invalid_argument, result[:error_code],
                  "expected invalid_argument error code for relation field"

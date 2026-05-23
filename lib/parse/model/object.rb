@@ -23,6 +23,7 @@ require_relative "date"
 require_relative "time_zone"
 require_relative "phone"
 require_relative "email"
+require_relative "vector"
 require_relative "acl"
 require_relative "clp"
 require_relative "push"
@@ -35,6 +36,8 @@ require_relative "core/describe"
 require_relative "core/indexing"
 require_relative "core/search_indexing"
 require_relative "core/properties"
+require_relative "core/vector_searchable"
+require_relative "core/embed_managed"
 require_relative "core/errors"
 require_relative "core/builder"
 require_relative "core/enhanced_change_tracking"
@@ -117,7 +120,7 @@ module Parse
   #
   # All columns in a Parse object are considered a type of property (ex. string, numbers, arrays, etc)
   # except in two cases - Pointers and Relations. For a detailed discussion of properties, see
-  # The {https://github.com/modernistik/parse-stack#defining-properties Defining Properties} section.
+  # The {https://github.com/neurosynq/parse-stack-next#defining-properties Defining Properties} section.
   #
   # Associations:
   #
@@ -151,10 +154,32 @@ module Parse
     extend Core::Describe
     extend Core::Indexing
     extend Core::SearchIndexing
+    extend Core::VectorSearchable
+    include Core::EmbedManaged
     include Core::Fetching
     include Core::Actions
     # @!visibility private
     BASE_OBJECT_CLASS = "Parse::Object".freeze
+
+    # Search/vector-search result accessors. Populated by
+    # `Parse::AtlasSearch.process_search_results` and
+    # `Parse::Core::VectorSearchable.build_vector_hits` via
+    # `instance_variable_set`. Defined here once instead of per-result
+    # via `define_singleton_method` so high-k result sets don't inflate
+    # a singleton class per row, and so a user-defined override on a
+    # subclass can't silently desync from the ivar.
+    #
+    # Each returns nil unless the object was returned from the
+    # corresponding search path.
+    #
+    # @return [Float, nil] vectorSearch relevance score.
+    def vector_score; @_vector_score; end
+
+    # @return [Float, nil] Atlas Search relevance score.
+    def search_score; @_search_score; end
+
+    # @return [Hash, nil] Atlas Search highlights blob.
+    def search_highlights; @_search_highlights; end
 
     # @return [Model::TYPE_OBJECT]
     def __type; Parse::Model::TYPE_OBJECT; end
@@ -365,6 +390,7 @@ module Parse
       def default_acls
         @default_acls ||= case acl_policy_setting
                           when :public, :owner_else_public then Parse::ACL.everyone
+                          when :public_read, :owner_but_public_read then Parse::ACL.everyone(true, false)
                           when :private, :owner_else_private then Parse::ACL.private
                           else Parse::ACL.everyone
                           end
@@ -431,7 +457,7 @@ module Parse
       end
 
       # Valid ACL policies that can be passed to {acl_policy}.
-      VALID_ACL_POLICIES = [:public, :private, :owner_else_public, :owner_else_private].freeze
+      VALID_ACL_POLICIES = [:public, :public_read, :private, :owner_else_public, :owner_else_private, :owner_but_public_read].freeze
 
       # Declarative ACL policy applied to newly-created instances of this class.
       # The policy is resolved at save time so that explicit ACL changes by the
@@ -443,9 +469,16 @@ module Parse
       # 2. Owner pointer resolved from the declared `owner:` field → owner R/W only
       # 3. The else-half of the policy: `:public` → public R/W, `:private` → master-key only
       #
-      # @param policy [Symbol] one of `:public`, `:private`, `:owner_else_public`, `:owner_else_private`.
+      # @param policy [Symbol] one of `:public`, `:public_read`, `:private`,
+      #   `:owner_else_public`, `:owner_else_private`, `:owner_but_public_read`.
+      #   `:public_read` stamps `{"*": {"read": true}}` — anyone can read, no
+      #   one can write through ACL (only the master key can mutate). Useful
+      #   for catalog/lookup tables. `:owner_but_public_read` stamps the
+      #   resolved owner with R/W AND grants public read in the same ACL —
+      #   useful for publicly-viewable content with a single authoring user;
+      #   falls back to `:public_read` semantics when no owner resolves.
       # @param owner [Symbol,nil] the name of the property/belongs_to whose pointer designates the owner user.
-      #   Only meaningful for `:owner_else_*` policies.
+      #   Only meaningful for `:owner_*` policies.
       # @example
       #   class Post < Parse::Object
       #     acl_policy :owner_else_private, owner: :author
@@ -488,10 +521,14 @@ module Parse
             "declare a belongs_to pointer to the owning user."
         end
         if owner && !policy.to_s.start_with?("owner_")
-          warn "[#{self}] `owner:` is ignored when acl_policy is #{policy.inspect}; only :owner_else_public and :owner_else_private use it."
+          warn "[#{self}] `owner:` is ignored when acl_policy is #{policy.inspect}; only :owner_else_public, :owner_else_private, and :owner_but_public_read use it."
         end
         if owner.nil? && policy.to_s.start_with?("owner_")
-          fallback = (policy == :owner_else_public) ? "public R/W" : "master-key-only"
+          fallback = case policy
+                     when :owner_else_public then "public R/W"
+                     when :owner_but_public_read then "public read only"
+                     else "master-key-only"
+                     end
           warn "[#{self}] acl_policy #{policy.inspect} declared without `owner:` field; ACL resolution will always use the fallback (#{fallback}). Pass `as:` at construction to override."
         end
         @acl_policy_setting = policy
@@ -1180,6 +1217,20 @@ module Parse
         end
       end
 
+      # `:vector` fields are excluded from serialization by default —
+      # embeddings are large (often 1024–4096 floats), they leak ML
+      # signal to clients, and they round-trip through the dedicated
+      # embed/find_similar pipelines rather than the standard REST
+      # save/find. Pass `include_vectors: true` to opt back in (e.g.,
+      # for tests or internal mongo-direct bulk writes).
+      unless opts[:include_vectors] == true
+        vector_fields = self.class.respond_to?(:fields) ? self.class.fields(:vector).keys.map(&:to_s) : []
+        if vector_fields.any?
+          except = Array(opts[:except]).map(&:to_s) | vector_fields
+          opts = opts.merge(except: except)
+        end
+      end
+
       # When :only is specified without :strict, automatically include identification fields
       # so the serialized object can be properly identified
       if opts[:only] && !opts[:strict]
@@ -1807,6 +1858,8 @@ module Parse
       target_acl = case policy
                    when :public
                      Parse::ACL.everyone(true, true)
+                   when :public_read
+                     Parse::ACL.everyone(true, false)
                    when :private
                      Parse::ACL.private
                    when :owner_else_public
@@ -1825,6 +1878,10 @@ module Parse
                      else
                        Parse::ACL.private
                      end
+                   when :owner_but_public_read
+                     acl = Parse::ACL.everyone(true, false)
+                     acl.apply(owner_id, true, true) if owner_id
+                     acl
                    end
 
       # Only re-stamp if the resolved ACL differs from the init-time stamp;

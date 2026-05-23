@@ -64,6 +64,12 @@ export PARSE_SERVER_ALLOW_CUSTOM_OBJECT_ID="${PARSE_SERVER_ALLOW_CUSTOM_OBJECT_I
 export PARSE_SERVER_LIVE_QUERY="${PARSE_SERVER_LIVE_QUERY:-{\"classNames\":[\"Song\",\"Album\",\"User\",\"_User\",\"TestLiveQuery\"]}}"
 export PARSE_SERVER_START_LIVE_QUERY_SERVER="${PARSE_SERVER_START_LIVE_QUERY_SERVER:-true}"
 
+# File upload — test-stack only. Authenticated session-token uploads are
+# permitted; public/anonymous uploads are NOT (mirrors a typical hardened
+# Parse Server config). The client_rest_files integration tests assert
+# both pathways: authed upload succeeds, anon upload is rejected.
+export PARSE_SERVER_FILE_UPLOAD="${PARSE_SERVER_FILE_UPLOAD:-{\"enableForPublic\":false,\"enableForAnonymousUser\":false,\"enableForAuthenticatedUser\":true}}"
+
 echo "Environment configured:"
 echo "  PARSE_SERVER_APPLICATION_ID: $PARSE_SERVER_APPLICATION_ID"
 echo "  PARSE_SERVER_LIVE_QUERY: $PARSE_SERVER_LIVE_QUERY"

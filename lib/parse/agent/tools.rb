@@ -20,8 +20,8 @@ module Parse
     # Third-party apps may register additional tools:
     #
     #   Parse::Agent::Tools.register(
-    #     name:        :breakdown_captures,
-    #     description: "Count captures grouped by user/...",
+    #     name:        :breakdown_posts,
+    #     description: "Count posts grouped by author/...",
     #     parameters:  { type: "object", properties: {...}, required: [...] },
     #     permission:  :readonly,
     #     timeout:     30,
@@ -104,6 +104,28 @@ module Parse
             },
             required: [],
           },
+          output_schema: {
+            type: "object",
+            properties: {
+              tools: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    name:        { type: "string" },
+                    category:    { type: "string" },
+                    description: { type: "string" },
+                  },
+                  required: %w[name category description],
+                },
+              },
+              categories: {
+                type: "object",
+                additionalProperties: { type: "string" },
+              },
+            },
+            required: %w[tools categories],
+          },
         },
 
         get_all_schemas: {
@@ -122,6 +144,42 @@ module Parse
                         description: "Optional. Restrict the output to class names that start with this prefix (case-sensitive)." },
             },
             required: [],
+          },
+          output_schema: {
+            type: "object",
+            properties: {
+              total:    { type: "integer", minimum: 0 },
+              note:     { type: "string" },
+              built_in: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    name:    { type: "string" },
+                    fields:  { type: "integer", minimum: 0 },
+                    desc:    { type: "string" },
+                    methods: { type: "integer", minimum: 0 },
+                  },
+                  required: %w[name fields],
+                  additionalProperties: true,
+                },
+              },
+              custom: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    name:    { type: "string" },
+                    fields:  { type: "integer", minimum: 0 },
+                    desc:    { type: "string" },
+                    methods: { type: "integer", minimum: 0 },
+                  },
+                  required: %w[name fields],
+                  additionalProperties: true,
+                },
+              },
+            },
+            required: %w[total built_in custom],
           },
         },
 
@@ -143,6 +201,24 @@ module Parse
               class_name: { type: "string" },
             },
             required: ["class_name"],
+          },
+          output_schema: {
+            type: "object",
+            properties: {
+              class_name:  { type: "string" },
+              type:        { type: "string" },
+              description: { type: "string" },
+              usage:       { type: "string" },
+              fields:      { type: "array", items: { type: "object", additionalProperties: true } },
+              indexes:     { type: "object", additionalProperties: true },
+              permissions: { type: "object", additionalProperties: true },
+              agent_methods:     { type: "array", items: { type: "object", additionalProperties: true } },
+              canonical_filter:  { type: "object", additionalProperties: true },
+              agent_fields:      { type: "array", items: { type: "string" } },
+              agent_join_fields: { type: "array", items: { type: "string" } },
+              relations:         { type: "object", additionalProperties: true },
+            },
+            required: %w[class_name type fields indexes permissions],
           },
         },
 
@@ -183,6 +259,50 @@ module Parse
             },
             required: ["class_name"],
           },
+          # Polymorphic envelope: the default `format: "json"` returns a row
+          # envelope (class_name, result_count, pagination, results, ...);
+          # `format: "csv"|"markdown"|"table"` returns a text envelope
+          # (class_name, format, headers, row_count, output). Declared here as
+          # a permissive superset (every key from either envelope is optional
+          # except class_name) because MCP 2025-06-18 expects type:object at
+          # the outputSchema root, which precludes a top-level oneOf. Clients
+          # that need to disambiguate inspect `format` (absent for the json
+          # envelope, present for text envelopes).
+          output_schema: {
+            type: "object",
+            properties: {
+              class_name:    { type: "string" },
+              # json envelope
+              result_count:  { type: "integer", minimum: 0 },
+              pagination: {
+                type: "object",
+                properties: {
+                  limit:    { type: "integer", minimum: 0 },
+                  skip:     { type: "integer", minimum: 0 },
+                  has_more: { type: "boolean" },
+                },
+                required: %w[limit skip has_more],
+              },
+              truncated:                { type: "boolean" },
+              truncated_note:           { type: "string" },
+              truncated_include_fields: { type: "object", additionalProperties: true },
+              next_call: {
+                type: "object",
+                properties: {
+                  tool:      { type: "string" },
+                  arguments: { type: "object", additionalProperties: true },
+                },
+                required: %w[tool arguments],
+              },
+              results: { type: "array", items: { type: "object", additionalProperties: true } },
+              # csv / markdown / table envelope
+              format:    { type: "string", enum: %w[csv markdown table] },
+              headers:   { type: "array", items: { type: "string" } },
+              row_count: { type: "integer", minimum: 0 },
+              output:    { type: "string" },
+            },
+            required: %w[class_name],
+          },
         },
 
         count_objects: {
@@ -203,6 +323,15 @@ module Parse
                                         description: "Default true. Set to false to count ignoring the class's canonical filter." },
             },
             required: ["class_name"],
+          },
+          output_schema: {
+            type: "object",
+            properties: {
+              class_name:  { type: "string" },
+              count:       { type: "integer", minimum: 0 },
+              constraints: { type: "object" },
+            },
+            required: %w[class_name count constraints],
           },
         },
 
@@ -227,6 +356,18 @@ module Parse
                                                      "to bypass the predicate and fetch the row directly." },
             },
             required: ["class_name", "object_id"],
+          },
+          output_schema: {
+            type: "object",
+            properties: {
+              class_name: { type: "string" },
+              object_id:  { type: "string" },
+              created_at: { type: %w[string null] },
+              updated_at: { type: %w[string null] },
+              object:     { type: "object" },
+              truncated_include_fields: { type: "object" },
+            },
+            required: %w[class_name object_id object],
           },
         },
 
@@ -253,6 +394,22 @@ module Parse
             },
             required: ["class_name", "ids"],
           },
+          output_schema: {
+            type: "object",
+            properties: {
+              class_name: { type: "string" },
+              objects: {
+                type: "object",
+                additionalProperties: { type: "object" },
+                description: "Map of objectId => fetched object. Empty when no ids resolved.",
+              },
+              missing:   { type: "array", items: { type: "string" } },
+              requested: { type: "integer", minimum: 0 },
+              found:     { type: "integer", minimum: 0 },
+              truncated_include_fields: { type: "object" },
+            },
+            required: %w[class_name objects missing requested found],
+          },
         },
 
         get_sample_objects: {
@@ -269,6 +426,16 @@ module Parse
               limit: { type: "integer" },
             },
             required: ["class_name"],
+          },
+          output_schema: {
+            type: "object",
+            properties: {
+              class_name:   { type: "string" },
+              sample_count: { type: "integer", minimum: 0 },
+              samples:      { type: "array", items: { type: "object" } },
+              note:         { type: "string" },
+            },
+            required: %w[class_name sample_count samples],
           },
         },
 
@@ -383,6 +550,33 @@ module Parse
             },
             required: ["class_name", "field"],
           },
+          output_schema: {
+            type: "object",
+            properties: {
+              class_name:     { type: "string" },
+              field:          { type: "string" },
+              operation:      { type: "string" },
+              group_count:    { type: "integer", minimum: 0 },
+              groups: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    key:   {},
+                    value: { type: %w[number null] },
+                  },
+                  required: %w[key value],
+                },
+              },
+              value_field:    { type: "string" },
+              pointer_class:  { type: "string" },
+              flatten_arrays: { type: "boolean" },
+              sort:           { type: "string" },
+              truncated:      { type: "boolean" },
+              limit:          { type: "integer" },
+            },
+            required: %w[class_name field operation group_count groups limit],
+          },
         },
 
         group_by_date: {
@@ -428,6 +622,33 @@ module Parse
             },
             required: ["class_name", "field", "interval"],
           },
+          output_schema: {
+            type: "object",
+            properties: {
+              class_name:   { type: "string" },
+              field:        { type: "string" },
+              interval:     { type: "string" },
+              operation:    { type: "string" },
+              group_count:  { type: "integer", minimum: 0 },
+              groups: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    key:   { type: %w[string null] },
+                    value: { type: %w[number null] },
+                  },
+                  required: %w[key value],
+                },
+              },
+              value_field:  { type: "string" },
+              timezone:     { type: "string" },
+              sort:         { type: "string" },
+              truncated:    { type: "boolean" },
+              limit:        { type: "integer" },
+            },
+            required: %w[class_name field interval operation group_count groups sort limit],
+          },
         },
 
         distinct: {
@@ -458,6 +679,21 @@ module Parse
                                                      "subset. Set to false to extract across the full collection." },
             },
             required: ["class_name", "field"],
+          },
+          output_schema: {
+            type: "object",
+            properties: {
+              class_name:    { type: "string" },
+              field:         { type: "string" },
+              count:         { type: "integer", minimum: 0 },
+              values:        { type: "array",
+                               items: { type: %w[string number boolean null] } },
+              pointer_class: { type: "string" },
+              sort:          { type: "string" },
+              truncated:     { type: "boolean" },
+              limit:         { type: "integer" },
+            },
+            required: %w[class_name field count values limit],
           },
         },
 
@@ -687,6 +923,13 @@ module Parse
         # @param permission [Symbol] :readonly, :write, or :admin (required)
         # @param timeout [Integer] seconds before ToolTimeoutError (default: 30)
         # @param handler [Proc] lambda(agent, **args) -> Hash (required)
+        # @param client_safe [Boolean] when +true+, the tool is dispatchable
+        #   from a client-mode agent (one whose client has no master_key).
+        #   Default +false+ — registered tools are master-key-only unless
+        #   the author explicitly declares them safe for session-token
+        #   contexts. The handler is responsible for routing through
+        #   +agent.client+ with +agent.session_token+ rather than touching
+        #   the master key directly.
         # @raise [ArgumentError] when required kwargs are missing or permission is invalid
         #
         # @note SECURITY: Registered tool handlers run as trusted code inside the
@@ -709,7 +952,8 @@ module Parse
         #   register at boot from code you control; never accept registrations
         #   from configuration files at runtime.
         def register(name:, description:, parameters:, permission:, handler:,
-                     timeout: DEFAULT_TIMEOUT, output_schema: nil, category: "custom")
+                     timeout: DEFAULT_TIMEOUT, output_schema: nil, category: "custom",
+                     client_safe: false)
           unless %i[readonly write admin].include?(permission)
             raise ArgumentError, "permission must be :readonly, :write, or :admin (got #{permission.inspect})"
           end
@@ -761,6 +1005,7 @@ module Parse
               timeout:       timeout.to_i,
               handler:       handler,
               output_schema: output_schema,
+              client_safe:   client_safe == true,
             }
           end
           notify_subscribers
@@ -848,18 +1093,19 @@ module Parse
           TOOL_TIMEOUTS[sym] || DEFAULT_TIMEOUT
         end
 
-        # Resolve the MCP outputSchema for a tool, if any. Only
-        # registered tools may declare an output_schema in v4.2;
-        # built-in tools return nil. The dispatcher uses this to decide
-        # whether to mirror the result data as `structuredContent` in
-        # the `tools/call` response envelope.
+        # Resolve the MCP outputSchema for a tool, if any. Checks
+        # registered tools first (override path), then falls through to
+        # the built-in TOOL_DEFINITIONS table. The dispatcher uses this
+        # to decide whether to mirror the result data as
+        # `structuredContent` in the `tools/call` response envelope.
         #
         # @param name [Symbol, String] tool name
         # @return [Hash, nil] JSON Schema Hash, or nil if not declared.
         def output_schema_for(name)
           sym = name.to_sym
           entry = REGISTRY_MUTEX.synchronize { @registry[sym] }
-          entry && entry[:output_schema]
+          return entry[:output_schema] if entry && entry[:output_schema]
+          TOOL_DEFINITIONS.dig(sym, :output_schema)
         end
 
         # Resolve the category for a tool. Registered tools always carry
@@ -874,6 +1120,33 @@ module Parse
           entry = REGISTRY_MUTEX.synchronize { @registry[sym] }
           return entry[:definition][:category] if entry
           TOOL_DEFINITIONS.dig(sym, :category)
+        end
+
+        # Whether a tool is safe to dispatch from a client-mode agent
+        # (one whose client has no master_key). Returns true for:
+        #
+        #   * Built-in read tools listed in CLIENT_SAFE_READ_TOOLS — these
+        #     route through session-token REST endpoints that Parse Server
+        #     natively authorizes (ACL + CLP + protectedFields).
+        #   * Built-in mutation tools listed in CLIENT_SAFE_MUTATION_TOOLS —
+        #     same REST-native authorization. The caller is responsible for
+        #     additionally checking the per-agent +allow_mutations+ gate;
+        #     this predicate reports REST-safety only.
+        #   * Custom tools registered with +client_safe: true+ — the
+        #     registering author has declared the handler safe for
+        #     client-mode dispatch.
+        #
+        # Anything else (call_method, aggregate, atlas_*, schema tools,
+        # custom tools registered without the flag) returns false.
+        #
+        # @param name [Symbol, String] tool name
+        # @return [Boolean]
+        def client_safe?(name)
+          sym = name.to_sym
+          return true if Parse::Agent::CLIENT_SAFE_READ_TOOLS.include?(sym)
+          return true if Parse::Agent::CLIENT_SAFE_MUTATION_TOOLS.include?(sym)
+          entry = REGISTRY_MUTEX.synchronize { @registry[sym] }
+          entry ? entry[:client_safe] == true : false
         end
 
         # Returns all tool names: builtins + registered.
@@ -2048,7 +2321,7 @@ module Parse
       # dotted path of their own — that's the explicit "I named exactly
       # what I want" signal. It's also suppressed when no `keys:` was
       # passed at all (caller chose full-row mode) and when the include is
-      # multi-hop (`user.team`); auto-projection is one-hop only.
+      # multi-hop (`author.workspace`); auto-projection is one-hop only.
       #
       # Pointer-to-joined-class resolution uses the parent class's
       # `references` reflection (same source `walk_pointer_path!` uses),
@@ -2087,8 +2360,8 @@ module Parse
           h[root] << k
         end
 
-        # Only consider one-hop includes; multi-hop (`user.team`) leaves
-        # the user projection alone and lets the deeper hop materialize
+        # Only consider one-hop includes; multi-hop (`author.workspace`) leaves
+        # the author projection alone and lets the deeper hop materialize
         # fully — keeps the auto-expansion bounded and avoids walking the
         # full relation graph at query time.
         single_hop_includes = include_arr.map(&:to_s).reject { |p| p.include?(".") }
@@ -4313,7 +4586,7 @@ module Parse
         lines = []
         lines << "| #{headers.join(" | ")} |"
         lines << "| #{headers.map { "---" }.join(" | ")} |"
-        rows.each { |r| lines << "| #{r.map { |c| c.to_s.gsub("|", "\\|") }.join(" | ")} |" }
+        rows.each { |r| lines << "| #{r.map { |c| c.to_s.gsub(/\r?\n/, " ").gsub(/([\\|])/, '\\\\\1') }.join(" | ")} |" }
         lines.join("\n")
       end
       module_function :format_export_markdown
@@ -4840,7 +5113,7 @@ module Parse
       #   2. Must be an Array.
       #   3. Length must not exceed {MAX_INCLUDE_FIELDS}.
       #   4. Each entry must match /\A[A-Za-z][A-Za-z0-9_.]{0,127}\z/
-      #      (allows dotted pointer paths like "author.team"; rejects any entry
+      #      (allows dotted pointer paths like "author.workspace"; rejects any entry
       #      beginning with an underscore such as "_session_token").
       #
       # @param include [Array<String>, nil] the include parameter to validate.

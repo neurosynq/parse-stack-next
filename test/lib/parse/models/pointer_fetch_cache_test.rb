@@ -7,14 +7,14 @@ require_relative "../../../test_helper"
 class PointerFetchCacheTest < Minitest::Test
   # Test model for pointer fetch tests
   class TestCapture < Parse::Object
-    parse_class "Capture"
+    parse_class "Post"
     property :title, :string
     property :status, :string
     property :notes, :string
   end
 
   def setup
-    @pointer = Parse::Pointer.new("Capture", "testObjectId123")
+    @pointer = Parse::Pointer.new("Post", "testObjectId123")
   end
 
   # ============================================================

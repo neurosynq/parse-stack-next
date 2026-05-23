@@ -211,7 +211,7 @@ convert into the Parse JSON shape, then `Song.new(doc)` or
 Authorization kwargs (v4.4.0) — pass at most ONE:
 
 - `session_token: <bearer>` — round-trips Parse Server's `/users/me`
-  to resolve the user and expand role membership.
+  to resolve the user and expand role subscription.
 - `acl_user: <Parse::User or Pointer>` — pre-resolved identity, skips
   the token round-trip. Role expansion runs via `Parse::Role.all_for_user`.
 - `acl_role: <Parse::Role or name>` — service-account scope; no user_id,
@@ -352,7 +352,7 @@ pipeline = [
   { "$project" => { "contributor_count" => { "$size" => "$contributor_set" } } },
 ]
 
-Parse::MongoDB.aggregate("Capture", pipeline)
+Parse::MongoDB.aggregate("Post", pipeline)
 # => [{ "contributor_count" => 27 }]
 #    row keyed by the literal alias, no read-side translation needed
 ```
@@ -740,6 +740,23 @@ authorization model for scoped callers and is the SAFER aggregation
 path for any user-context workload — REST aggregate has no ACL/CLP
 enforcement at all, while mongo-direct with a scope gets all of it.
 
+### Vector search inherits the 5-layer enforcement
+
+`Klass.find_similar(vector:, k:)` (and the `text:` variant that
+auto-embeds) is built on top of `Parse::MongoDB.aggregate` — the
+$vectorSearch stage is prepended, then the same Layer 1-5 chain runs
+against the result rows. Vector search inherits the pipeline-security
+denylist, `_rperm` ACL match, CLP read enforcement, `protectedFields`
+stripping, and master-key escape hatch automatically. There is no
+REST-aggregate path for vector search: scoped callers MUST use the
+mongo-direct path because Parse Server's REST `/aggregate` endpoint is
+master-key-only and would bypass every per-row ACL and CLP check.
+Built-in vector tools auto-promote `mongo_direct: false` to `true` for
+any agent that carries a `session_token`, `acl_user`, `acl_role`, or
+non-master scope so this enforcement always runs. See the
+[Atlas Vector Search Guide](./atlas_vector_search_guide.md) for the
+full API surface.
+
 ### Timeouts
 
 ```ruby
@@ -884,7 +901,7 @@ the blast radius; the URI controls routing.
 
 If you must hard-guarantee that direct queries cannot touch primary or
 electable secondaries — for example, because you want to give the
-endpoint to an external team or an autonomous agent — the connection
+endpoint to an external workspace or an autonomous agent — the connection
 string alone is insufficient. The options:
 
 - **Atlas SQL / BI Connector.** Issue the user a JDBC/SQL endpoint that
@@ -973,7 +990,7 @@ Validation rules enforced at declaration time:
   single-field declarations per MongoDB's rules.
 - `unique:` on `mongo_relation_index` → `ArgumentError`. A
   single-direction unique on a `has_many :through: :relation` would
-  contradict `has_many` semantics. For no-duplicate-pair membership,
+  contradict `has_many` semantics. For no-duplicate-pair subscription,
   declare a compound unique index directly via `Parse::MongoDB.create_index`.
 
 `parse_reference` auto-registers a unique-sparse index declaration on

@@ -104,7 +104,7 @@ module Parse
     # @param fields [Array<String, Symbol>] pointer field names
     # @return [self]
     # @example
-    #   clp.set_read_user_fields(:owner, :collaborators)
+    #   clp.set_read_user_fields(:owner, :coauthors)
     def set_read_user_fields(*fields)
       @permissions[:readUserFields] = fields.flatten.map(&:to_s)
       self

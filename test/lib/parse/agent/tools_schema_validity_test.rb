@@ -56,6 +56,38 @@ class ToolsSchemaValidityTest < Minitest::Test
     end
   end
 
+  # ---- Output-schema invariants (MCP structuredContent) -------------------
+  # Built-in tools that opt into MCP structuredContent declare :output_schema
+  # at the TOOL_DEFINITIONS level. The same array-missing-items defect class
+  # that breaks input parameters also breaks any client that validates
+  # structuredContent against the advertised outputSchema (MCP 2025-06-18
+  # SHOULD validation). Walk every declared output_schema with the same rule.
+
+  def test_every_output_schema_array_property_has_items
+    offenders = []
+    TOOLS.each do |tool_name, defn|
+      schema = defn[:output_schema]
+      next if schema.nil?
+      walk_array_props(schema, []) do |path, node|
+        offenders << "#{tool_name}: output_schema.#{path.join('.')} -> #{node.inspect}" unless node.key?(:items)
+      end
+    end
+    assert_empty offenders,
+                 "These output_schema array properties lack an `items` schema:\n  " +
+                 offenders.join("\n  ")
+  end
+
+  def test_every_output_schema_is_an_object_schema_when_declared
+    TOOLS.each do |tool_name, defn|
+      schema = defn[:output_schema]
+      next if schema.nil?
+      assert_equal "object", schema[:type],
+                   "#{tool_name} :output_schema type must be 'object' (MCP requires an object envelope)"
+      assert_kind_of Hash, schema[:properties],
+                     "#{tool_name} :output_schema must declare :properties"
+    end
+  end
+
   def test_required_only_references_declared_properties
     offenders = []
     TOOLS.each do |tool_name, defn|

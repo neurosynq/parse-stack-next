@@ -101,6 +101,74 @@ module Parse
           indexes.find { |idx| idx["name"] == index_name }
         end
 
+        # List only `type: "search"` indexes (lexical / BM25). Filters the
+        # raw {.list_indexes} output. `$listSearchIndexes` returns both
+        # search and vectorSearch index types on the same collection;
+        # callers building lexical pipelines should consume this view.
+        # Indexes with an absent `type` field default to `"search"` for
+        # compatibility with older Atlas Search releases that pre-date the
+        # vector-search index type.
+        #
+        # @param collection_name [String] the Parse collection name
+        # @return [Array<Hash>] search indexes only
+        def list_search_indexes(collection_name)
+          list_indexes(collection_name).select do |idx|
+            type = (idx["type"] || idx[:type] || "search").to_s
+            type == "search"
+          end
+        end
+
+        # List only `type: "vectorSearch"` indexes. Filters the raw
+        # {.list_indexes} output. Vector-search indexes are the only ones
+        # eligible for the `$vectorSearch` aggregation stage; routing a
+        # lexical-index name into vector search (or vice versa) fails at
+        # the Atlas Search node with a non-obvious error, so the SDK
+        # filters at lookup time.
+        #
+        # @param collection_name [String] the Parse collection name
+        # @return [Array<Hash>] vector-search indexes only
+        def list_vector_indexes(collection_name)
+          list_indexes(collection_name).select do |idx|
+            (idx["type"] || idx[:type]).to_s == "vectorSearch"
+          end
+        end
+
+        # Find the vector-search index that covers a given field path on a
+        # collection. Walks `latestDefinition.fields[]` looking for an
+        # entry whose `type` is `"vector"` and whose `path` matches
+        # `field`. Returns the first matching index, or nil if none.
+        #
+        # The shape this matches is the documented Atlas vectorSearch
+        # index definition:
+        #
+        #   {
+        #     "name" => "Movie_embedding_..._idx",
+        #     "type" => "vectorSearch",
+        #     "latestDefinition" => {
+        #       "fields" => [
+        #         { "type" => "vector", "path" => "embedding",
+        #           "numDimensions" => 1536, "similarity" => "cosine" },
+        #         { "type" => "filter", "path" => "wiki_id" }
+        #       ]
+        #     }
+        #   }
+        #
+        # @param collection_name [String]
+        # @param field [String, Symbol] the vector field path
+        # @return [Hash, nil] the index definition or nil
+        def find_vector_index(collection_name, field:)
+          field_str = field.to_s
+          list_vector_indexes(collection_name).find do |idx|
+            defn = idx["latestDefinition"] || idx[:latestDefinition] || {}
+            fields = defn["fields"] || defn[:fields] || []
+            fields.any? do |f|
+              type = (f["type"] || f[:type]).to_s
+              path = (f["path"] || f[:path]).to_s
+              type == "vector" && path == field_str
+            end
+          end
+        end
+
         # Validate that an index exists and is ready
         # @param collection_name [String] the Parse collection name
         # @param index_name [String] the index name to validate
@@ -349,5 +417,21 @@ module Parse
         end
       end
     end
+
+    # Alias for {IndexManager} exposing the type-aware lookup surface
+    # ({IndexManager.list_search_indexes},
+    # {IndexManager.list_vector_indexes},
+    # {IndexManager.find_vector_index}). Backed by the same module, so
+    # the cache, mutex, and TTL are shared across both names — calling
+    # `IndexCatalog.clear_cache` and `IndexManager.clear_cache`
+    # invalidates the same store.
+    #
+    # @example Discover the vector index covering Movie.embedding
+    #   idx = Parse::AtlasSearch::IndexCatalog.find_vector_index(
+    #     "Movie", field: "embedding"
+    #   )
+    #   idx&.dig("name")
+    #   # => "Movie_embedding_openai_text_embedding_ada_002_1536_idx"
+    IndexCatalog = IndexManager
   end
 end

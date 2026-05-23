@@ -188,6 +188,21 @@ module Parse
       #   CSRF and force a CORS preflight on browser `fetch()`, so this
       #   gate closes the browser-driven attack surface entirely. Pair
       #   with `allowed_origins` for defense in depth.
+      # @param health_path [String, nil] when set (e.g. `"/health"`),
+      #   `GET` requests to that exact path return `200 {"status":"ok"}`
+      #   without invoking the agent_factory, without authentication,
+      #   without rate-limiting, and without applying the
+      #   `allowed_origins` / `require_custom_header` CSRF gates.
+      #   Intended as a liveness probe for load balancers and
+      #   orchestrators (Kubernetes, ECS, Consul) that cannot present a
+      #   matching `Origin` or custom header. Because the probe sits
+      #   ahead of the pre-auth rate limiter, operators should
+      #   front-edge rate-limit the path at the LB/Nginx layer if
+      #   public-facing. The response intentionally contains no
+      #   version, build, or counter information — fingerprint-minimal
+      #   by design. `nil` (default) disables the endpoint entirely;
+      #   empty-string values are coerced to `nil`. Any non-GET method
+      #   on the path falls through to the standard 405 handler.
       # @raise [ArgumentError] if both or neither of agent_factory/block are given.
       def initialize(agent_factory: nil, max_body_size: DEFAULT_MAX_BODY_SIZE,
                      logger: nil, streaming: false,
@@ -195,7 +210,8 @@ module Parse
                      max_concurrent_dispatchers: nil,
                      pre_auth_rate_limiter: nil,
                      allowed_origins: nil,
-                     require_custom_header: nil, &block)
+                     require_custom_header: nil,
+                     health_path: nil, &block)
         if agent_factory && block
           raise ArgumentError, "Provide agent_factory: OR a block, not both"
         end
@@ -215,6 +231,7 @@ module Parse
         @pre_auth_rate_limiter      = pre_auth_rate_limiter
         @allowed_origins            = normalize_allowed_origins(allowed_origins)
         @required_custom_header     = normalize_required_custom_header(require_custom_header)
+        @health_path                = health_path.is_a?(String) && !health_path.empty? ? health_path : nil
         # Per-app registry of in-flight cancellable requests. Keyed by
         # [correlation_id, request_id]. A `notifications/cancelled` POST
         # whose `params.requestId` matches an entry trips the registered
@@ -267,6 +284,15 @@ module Parse
         #    underscored form collapses-and-overwrites the trusted slot.
         self.class.strip_underscore_smuggled_headers!(env)
 
+        # 0a. Liveness probe. When `health_path:` is configured, a GET to
+        #     that exact path returns `{"status":"ok"}` without auth,
+        #     rate-limiting, or factory invocation. Intentionally
+        #     fingerprint-minimal: no version, no build, no counter —
+        #     a load balancer needs "is it up?", not "what is it?".
+        if @health_path && env["PATH_INFO"] == @health_path && env["REQUEST_METHOD"] == "GET"
+          return [200, json_headers, ['{"status":"ok"}']]
+        end
+
         # 0b. NEW-MCP-6: pre-auth rate limit. Runs BEFORE the agent_factory
         #     so a malformed body / missing key / empty `{}` cannot force
         #     the operator-supplied factory to round-trip to Parse Server
@@ -280,6 +306,38 @@ module Parse
             headers["Retry-After"] = retry_after.ceil.to_s if retry_after && retry_after > 0
             return [429, headers, [json_rpc_error(-32_000, "Too Many Requests")]]
           end
+        end
+
+        # 0c. DELETE /  — MCP 2025-06-18 Streamable HTTP session
+        #     termination. A client signals it is done with a session by
+        #     sending DELETE with the same `Mcp-Session-Id` header it
+        #     received from initialize. Per spec the server MAY support
+        #     this; if it doesn't, it MUST return 405. We support it.
+        #
+        #     Stateless-agent reality: the factory builds a fresh agent
+        #     per request, so there is no server-side session store to
+        #     evict. What DELETE meaningfully does is cancel any
+        #     in-flight requests still running under that correlation_id
+        #     so worker threads exit instead of completing wasted work.
+        #     The cancellation_registry returns 0 when nothing matches
+        #     (also the "unknown session" case) — we don't probe-leak by
+        #     differentiating known vs unknown ids in the response.
+        #
+        #     Sanitized through Parse::Agent#correlation_id= via a
+        #     throwaway agent so a malicious header value (CRLF, shell
+        #     metachars) is silently rejected rather than reaching the
+        #     registry as a key.
+        if env["REQUEST_METHOD"] == "DELETE"
+          sid = env["HTTP_MCP_SESSION_ID"].to_s
+          if sid.empty?
+            return [400, json_headers, [json_rpc_error(-32_600, "Missing Mcp-Session-Id")]]
+          end
+          clean_sid = sanitize_session_id(sid)
+          if clean_sid.nil?
+            return [400, json_headers, [json_rpc_error(-32_600, "Invalid Mcp-Session-Id")]]
+          end
+          @cancellation_registry.cancel_all_for(clean_sid, reason: :session_terminated)
+          return [204, json_headers, [""]]
         end
 
         # 1. Method check — only POST is accepted.
@@ -348,6 +406,32 @@ module Parse
           return [400, json_headers, [json_rpc_error(-32_600, "Invalid Request")]]
         end
 
+        # 4c. MCP-Protocol-Version header validation (MCP 2025-06-18
+        #     Streamable HTTP). The spec says:
+        #       - The client MUST send `MCP-Protocol-Version: <ver>`
+        #         on every request AFTER initialize.
+        #       - If absent on a non-initialize request, the server
+        #         SHOULD assume `2025-03-26` for backwards compatibility.
+        #       - If present but not a version the server supports,
+        #         the server MUST respond `400 Bad Request`.
+        #     Initialize requests are exempt — initialize IS the
+        #     negotiation, so the header is meaningless there.
+        #     Cancellation notifications are also exempt because they
+        #     may be sent by a client that has not (yet) completed
+        #     initialize against this transport instance (e.g. a
+        #     reconnecting client cancelling a pre-disconnect request).
+        unless body["method"] == "initialize" ||
+               body["method"] == "notifications/cancelled"
+          requested = env["HTTP_MCP_PROTOCOL_VERSION"]
+          if requested.is_a?(String) && !requested.empty? &&
+             !Parse::Agent::MCPDispatcher::SUPPORTED_PROTOCOL_VERSIONS.include?(requested)
+            return [400, json_headers,
+                    [json_rpc_error(-32_600,
+                                    "Unsupported MCP-Protocol-Version: #{requested}",
+                                    id: body["id"])]]
+          end
+        end
+
         # 5. Agent factory — auth gate. Rescue Unauthorized first, then catch-all
         #    for unexpected factory errors.
         begin
@@ -363,24 +447,42 @@ module Parse
           return [500, json_headers, [json_rpc_error(-32_603, "Internal error")]]
         end
 
-        # 5b. Thread the conversation correlation id through. Source:
-        #     X-MCP-Session-Id header. Only fills it when the factory
-        #     hasn't already assigned one — application code that needs to
-        #     override the client-supplied id (e.g., bind to an internal
-        #     session record) can do so in the factory and we don't
-        #     stomp on it. The Parse::Agent#correlation_id= setter
-        #     sanitizes the value; an invalid header is silently dropped.
+        # 5b. Thread the conversation correlation id through. Source
+        #     header: the MCP 2025-06-18 Streamable HTTP spec-canonical
+        #     `Mcp-Session-Id` (Rack env key `HTTP_MCP_SESSION_ID`).
+        #
+        #     Only fills it when the factory hasn't already assigned one
+        #     — application code that needs to override the
+        #     client-supplied id (e.g., bind to an internal session
+        #     record) can do so in the factory and we don't stomp on it.
+        #     The Parse::Agent#correlation_id= setter sanitizes the
+        #     value; an invalid header is silently dropped.
         if agent && agent.respond_to?(:correlation_id=) &&
            agent.correlation_id.nil? &&
-           (sid = env["HTTP_X_MCP_SESSION_ID"])
+           (sid = env["HTTP_MCP_SESSION_ID"])
           agent.correlation_id = sid
+        end
+
+        # 5b-i. Server-assigned Mcp-Session-Id on initialize. Per MCP
+        #     2025-06-18 Streamable HTTP, the server SHOULD assign a
+        #     fresh session id during initialize when the client did not
+        #     supply one, and return it on the response so the client
+        #     can echo it on subsequent requests. Stateless-agent
+        #     reality: the SDK does not maintain a server-side session
+        #     store — the id is best-effort correlation only (used for
+        #     audit-log threading and cancellation routing). We do not
+        #     refuse subsequent requests carrying an "unknown" id.
+        if body.is_a?(Hash) && body["method"] == "initialize" &&
+           agent && agent.respond_to?(:correlation_id=) &&
+           agent.correlation_id.nil?
+          agent.correlation_id = SecureRandom.uuid
         end
 
         # 5c. notifications/cancelled — special-cased BEFORE the dispatcher.
         #     A JSON-RPC notification has no `id`, expects no response
         #     body, and must trip the in-flight request whose
         #     `(correlation_id, request_id)` matches. We require the
-        #     cancelling request to carry the same X-MCP-Session-Id
+        #     cancelling request to carry the same Mcp-Session-Id
         #     (sanitized into agent.correlation_id above) as the original
         #     request — otherwise an attacker who guesses sequential
         #     JSON-RPC ids could cancel arbitrary in-flight requests.
@@ -422,14 +524,16 @@ module Parse
       # @return [Array] Rack triple with Array<String> body.
       def serve_json(body, agent)
         result = Parse::Agent::MCPDispatcher.call(body: body, agent: agent, logger: @logger)
+        headers = json_headers
+        merge_session_header!(headers, body, agent)
         # When the dispatcher returns body: nil (a JSON-RPC notification
         # like notifications/cancelled has no response), the Rack body
         # is an empty string — NOT the literal "null". The HTTP-level
         # success/empty-body shape is what the spec calls for and is
         # what every MCP client expects after sending a notification.
-        return [result[:status], json_headers, [""]] if result[:body].nil?
+        return [result[:status], headers, [""]] if result[:body].nil?
 
-        [result[:status], json_headers, [JSON.generate(result[:body])]]
+        [result[:status], headers, [JSON.generate(result[:body])]]
       end
 
       # Return a streaming Rack response that emits SSE progress events while
@@ -504,7 +608,9 @@ module Parse
           )
         end
 
-        [200, sse_headers, sse_body]
+        headers = sse_headers
+        merge_session_header!(headers, body, agent)
+        [200, headers, sse_body]
       end
 
       # ---------------------------------------------------------------------------
@@ -945,7 +1051,7 @@ module Parse
       # matching CancellationToken.
       #
       # Identity binding: cancellation requires the cancelling request's
-      # `X-MCP-Session-Id` (sanitized into `agent.correlation_id`) to
+      # `Mcp-Session-Id` (sanitized into `agent.correlation_id`) to
       # match the original request's. This prevents an attacker who
       # guesses sequential JSON-RPC request ids from cancelling other
       # clients' in-flight requests. A registration with a nil
@@ -1021,6 +1127,24 @@ module Parse
           true
         end
 
+        # Trip every token registered under the given correlation_id.
+        # Used by `DELETE /` session termination — when a client tears
+        # down its session, any in-flight requests still running under
+        # that correlation_id are cancelled so worker threads exit
+        # promptly instead of carrying a doomed result to completion.
+        #
+        # Silent no-op when no entries match (or correlation_id is
+        # blank). Returns the number of tokens tripped.
+        def cancel_all_for(correlation_id, reason: :session_terminated)
+          return 0 if correlation_id.nil? || correlation_id.to_s.empty?
+          tokens = @mutex.synchronize do
+            keys = @entries.keys.select { |(cid, _)| cid == correlation_id }
+            keys.map { |k| @entries.delete(k)[1] }
+          end
+          tokens.each { |t| t.cancel!(reason: reason) }
+          tokens.size
+        end
+
         # @return [Integer] number of currently-registered tokens. Used
         #   by tests and operator dashboards.
         def size
@@ -1044,6 +1168,39 @@ module Parse
       # Return a per-response copy of the SSE header hash. See {#json_headers}.
       def sse_headers
         SSE_HEADERS.dup
+      end
+
+      # Sanitize an `Mcp-Session-Id` header value with the same rules as
+      # {Parse::Agent#correlation_id=} (URL-safe ASCII, ≤128 chars).
+      # Returns the cleaned string, or nil if the input fails the regex.
+      # Used by the DELETE handler before passing the value to the
+      # cancellation registry; reproducing the regex here keeps the
+      # transport layer from instantiating a throwaway Parse::Agent just
+      # to borrow its setter.
+      # Same character set as {Parse::Agent::CORRELATION_ID_RE}, redeclared
+      # here so this file doesn't depend on agent.rb's load order.
+      SESSION_ID_RE = /\A[A-Za-z0-9._\-]+\z/.freeze
+
+      def sanitize_session_id(value)
+        return nil if value.nil?
+        s = value.to_s
+        return nil unless SESSION_ID_RE.match?(s)
+        s[0, 128]
+      end
+
+      # When the request being responded to is `initialize` and the agent
+      # carries a (server-assigned or factory-bound) correlation_id,
+      # advertise it as the spec-canonical `Mcp-Session-Id` response
+      # header so the client can echo it on subsequent requests. The
+      # header is emitted ONLY on the initialize response — non-init
+      # responses don't carry it, both to avoid leaking the id on every
+      # reply and because the client already knows it.
+      def merge_session_header!(headers, body, agent)
+        return unless body.is_a?(Hash) && body["method"] == "initialize"
+        return unless agent && agent.respond_to?(:correlation_id)
+        sid = agent.correlation_id
+        return if sid.nil? || sid.to_s.empty?
+        headers["Mcp-Session-Id"] = sid
       end
 
       # ---------------------------------------------------------------------------

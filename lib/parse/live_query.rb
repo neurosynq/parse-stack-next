@@ -6,9 +6,12 @@ require_relative "model/core/errors"
 module Parse
   # LiveQuery provides real-time data subscriptions for reactive applications.
   # It uses WebSockets to receive push notifications when data changes on the server.
+  # Stable since Parse Stack 3.0.0.
   #
-  # @note EXPERIMENTAL: This feature is not fully implemented. The WebSocket client
-  #   is incomplete. You must explicitly enable this feature before use:
+  # @note LiveQuery requires an explicit opt-in before any subscription will
+  #   open a network connection. This is a safety gate (operator must
+  #   consciously enable the WebSocket egress surface), not a stability
+  #   warning. Set the toggle once at boot:
   #
   #   Parse.live_query_enabled = true
   #
@@ -60,10 +63,12 @@ module Parse
     # Default LiveQuery events
     EVENTS = %i[create update delete enter leave].freeze
 
-    # Error raised when LiveQuery is used but not enabled
+    # Error raised when LiveQuery is used but the opt-in toggle has not
+    # been set. Opening a WebSocket is a network-egress action that the
+    # operator must consciously enable; we refuse to do it implicitly.
     class NotEnabledError < Error
       def initialize
-        super("LiveQuery is experimental and must be explicitly enabled. Set Parse.live_query_enabled = true")
+        super("LiveQuery must be explicitly enabled before opening a subscription. Set Parse.live_query_enabled = true")
       end
     end
   end

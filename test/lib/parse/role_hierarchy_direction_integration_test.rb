@@ -83,7 +83,7 @@ class RoleHierarchyDirectionIntegrationTest < Minitest::Test
       # session user effectively has the Admin role.
       response = Parse::User.client.fetch_object(
         HierTestDoc.parse_class, doc.id,
-        opts: { session_token: logged_in.session_token }
+        session_token: logged_in.session_token
       )
       assert response.success?,
              "Moderator-only user must be able to read an Admin-ACL doc " \

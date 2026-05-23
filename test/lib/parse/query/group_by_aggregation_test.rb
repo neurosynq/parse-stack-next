@@ -148,7 +148,7 @@ class TestGroupByAggregation < Minitest::Test
 
   # Test return_pointers option converts keys
   def test_group_by_with_return_pointers
-    group_by = Parse::GroupBy.new(@query, :author_team, return_pointers: true)
+    group_by = Parse::GroupBy.new(@query, :author_workspace, return_pointers: true)
 
     mock_response = Minitest::Mock.new
     mock_response.expect :success?, true

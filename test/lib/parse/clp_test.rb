@@ -696,8 +696,8 @@ class TestCLPPointerPermissions < Minitest::Test
   end
 
   def test_set_read_user_fields
-    @clp.set_read_user_fields(:owner, :collaborators)
-    assert_equal %w[owner collaborators], @clp.read_user_fields
+    @clp.set_read_user_fields(:owner, :coauthors)
+    assert_equal %w[owner coauthors], @clp.read_user_fields
   end
 
   def test_set_write_user_fields
@@ -718,13 +718,13 @@ class TestCLPPointerPermissions < Minitest::Test
   def test_parse_data_handles_pointer_permissions
     data = {
       "find" => { "*" => true },
-      "readUserFields" => ["owner", "collaborators"],
+      "readUserFields" => ["owner", "coauthors"],
       "writeUserFields" => ["owner"]
     }
 
     @clp.parse_data(data)
 
-    assert_equal %w[owner collaborators], @clp.read_user_fields
+    assert_equal %w[owner coauthors], @clp.read_user_fields
     assert_equal %w[owner], @clp.write_user_fields
   end
 

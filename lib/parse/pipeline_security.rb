@@ -179,14 +179,41 @@ module Parse
     # Top-level pipeline stages permitted by the strict validator. The
     # set covers Parse-Stack's own aggregation use, plus Atlas Search
     # entry points (`$search`, `$searchMeta`, `$listSearchIndexes`) so
-    # that `Parse::AtlasSearch` calls do not break.
+    # that `Parse::AtlasSearch` calls do not break. `$vectorSearch` is
+    # included for `Parse::VectorSearch` — like `$search`, it is a
+    # read-only Atlas index stage and must be the FIRST stage of the
+    # pipeline (Atlas refuses it otherwise).
     ALLOWED_STAGES = %w[
       $match $group $sort $project $limit $skip $unwind $lookup
       $count $addFields $set $unset $bucket $bucketAuto $facet
       $sample $sortByCount $replaceRoot $replaceWith $redact
       $graphLookup $unionWith
-      $search $searchMeta $listSearchIndexes
+      $search $searchMeta $listSearchIndexes $vectorSearch
     ].freeze
+
+    # Atlas operators that are valid only as the FIRST stage of a
+    # pipeline (Atlas refuses them anywhere else). They are present in
+    # {ALLOWED_STAGES} so the SDK's own modules — `Parse::AtlasSearch`
+    # and `Parse::VectorSearch` — can emit them; both of those modules
+    # bypass {validate_pipeline!} and build their pipelines internally.
+    # Caller-supplied pipelines (e.g. through `Parse::Agent::Tools.aggregate`)
+    # must NOT include these stages: the Agent's tenant-scope `$match`
+    # prepend would push them off stage 0, and the proper agent surface
+    # for full-text and vector search is the dedicated
+    # `atlas_search` / `semantic_search` tools, not raw aggregate.
+    STAGE0_ONLY_ATLAS_STAGES = %w[
+      $search $searchMeta $vectorSearch $listSearchIndexes
+    ].freeze
+
+    # Cap on the length of a caller-supplied `$regex` (or the `regex:`
+    # field inside `$regexMatch` / `$regexFind` / `$regexFindAll`)
+    # pattern string. ReDoS protection: doesn't catch every pathological
+    # pattern (small patterns like `(a+)+$` can still backtrack
+    # catastrophically), but caps the worst class of caller-shipped
+    # patterns and stops the "1MB regex" denial-of-service shape that an
+    # attacker could send through `vector_filter:` / `filter:` /
+    # `where:`. Legitimate Parse-Server queries are well under this.
+    MAX_REGEX_PATTERN_LENGTH = 512
 
     # Cap on number of top-level stages in a strict-validated pipeline.
     MAX_PIPELINE_STAGES = 20
@@ -496,6 +523,36 @@ module Parse
               operator: key_str,
               reason: :denied_internal_field,
             )
+          end
+          # Cap caller-supplied regex pattern length. Catches the two
+          # shapes Mongo accepts: the find-form `{ field: { $regex: "..." } }`
+          # (key == "$regex", value a String), and the aggregation-form
+          # `{ $regexMatch: { input: ..., regex: "..." } }` (key ==
+          # "$regexMatch"/"$regexFind"/"$regexFindAll", value a Hash with
+          # a "regex"/"pattern" String inside). Stops a multi-KB pattern
+          # from reaching MongoDB regardless of where in the pipeline it
+          # appears.
+          if key_str == "$regex" && value.is_a?(String) && value.bytesize > MAX_REGEX_PATTERN_LENGTH
+            raise Error.new(
+              "SECURITY: $regex pattern exceeds #{MAX_REGEX_PATTERN_LENGTH} bytes " \
+              "(got #{value.bytesize}). Long caller-supplied regex patterns are a " \
+              "ReDoS vector; refuse caller-supplied regexes longer than this cap.",
+              stage: stage_idx,
+              operator: "$regex",
+              reason: :regex_pattern_too_long,
+            )
+          end
+          if %w[$regexMatch $regexFind $regexFindAll].include?(key_str) && value.is_a?(Hash)
+            pat = value["regex"] || value[:regex] || value["pattern"] || value[:pattern]
+            if pat.is_a?(String) && pat.bytesize > MAX_REGEX_PATTERN_LENGTH
+              raise Error.new(
+                "SECURITY: #{key_str} regex pattern exceeds #{MAX_REGEX_PATTERN_LENGTH} bytes " \
+                "(got #{pat.bytesize}). Refuse caller-supplied regexes longer than this cap.",
+                stage: stage_idx,
+                operator: key_str,
+                reason: :regex_pattern_too_long,
+              )
+            end
           end
           child_inside_expr = inside_expr || key_str == "$expr"
           if child_inside_expr && FORENSIC_OPERATORS.include?(key_str)

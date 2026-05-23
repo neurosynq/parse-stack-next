@@ -112,6 +112,16 @@ module Parse
 
       # @!visibility private
       module ClassMethods
+        attr_writer :has_one_associations
+
+        # Static metadata for all `has_one` declarations on this class.
+        # Populated at DSL time so codegen tools (e.g. Parse::GraphQL::TypeGenerator)
+        # can recover the target class and foreign field without parsing method
+        # closures. Keyed by the local accessor name.
+        # @return [Hash{Symbol => Hash}]
+        def has_one_associations
+          @has_one_associations ||= {}
+        end
 
         # has one are not property but instance scope methods
         def has_one(key, scope = nil, **opts)
@@ -119,6 +129,13 @@ module Parse
           klassName = opts[:as].to_parse_class
           foreign_field = opts[:field].to_sym
           _ivar = :"@_has_one_#{key}" # reserved for future caching
+
+          self.has_one_associations[key.to_sym] = {
+            target_class: klassName,
+            foreign_field: foreign_field,
+            scope_only: opts[:scope_only] == true,
+            scoped: scope.is_a?(Proc),
+          }
 
           if self.method_defined?(key)
             warn "Creating has_one :#{key} association. Will overwrite existing method #{self}##{key}."

@@ -87,14 +87,29 @@ module Parse
       # @return [Integer] frame read timeout in seconds
       attr_reader :frame_read_timeout
 
+      # Sentinel used to distinguish "caller passed nothing" from
+      # "caller explicitly passed nil". The latter must NOT fall through
+      # to the LiveQuery configuration or the parent Parse client value
+      # — that fallthrough was a silent master-key-smuggling bug for
+      # client-mode (no-master) callers. Aliased to the top-level
+      # {Parse::NOT_PROVIDED} so any other SDK code that needs the same
+      # "omitted vs nil" distinction reuses one identity-comparable
+      # constant.
+      NOT_PROVIDED = Parse::NOT_PROVIDED
+      private_constant :NOT_PROVIDED
+
       # Create a new LiveQuery client
       # @param url [String] WebSocket URL (wss://...)
       # @param application_id [String] Parse application ID
       # @param client_key [String] Parse REST API key
-      # @param master_key [String, nil] Parse master key (optional)
+      # @param master_key [String, nil] Parse master key. Pass `nil`
+      #   explicitly to force client-mode (no master key on the
+      #   subscription handshake) even when the parent Parse client has
+      #   one. Omit the argument to fall back to the LiveQuery config
+      #   or the parent Parse client.
       # @param auto_connect [Boolean] connect immediately (default: true)
       # @param auto_reconnect [Boolean] automatically reconnect on disconnect (default: true)
-      def initialize(url: nil, application_id: nil, client_key: nil, master_key: nil,
+      def initialize(url: nil, application_id: nil, client_key: nil, master_key: NOT_PROVIDED,
                      auto_connect: nil, auto_reconnect: nil)
         cfg = config
 
@@ -104,8 +119,11 @@ module Parse
                           parse_client_value(:application_id)
         @client_key = client_key || cfg.client_key ||
                       parse_client_value(:api_key)
-        @master_key = master_key || cfg.master_key ||
-                      parse_client_value(:master_key)
+        @master_key = if master_key.equal?(NOT_PROVIDED)
+            cfg.master_key || parse_client_value(:master_key)
+          else
+            master_key
+          end
 
         @auto_connect = auto_connect.nil? ? cfg.auto_connect : auto_connect
         @auto_reconnect = auto_reconnect.nil? ? cfg.auto_reconnect : auto_reconnect

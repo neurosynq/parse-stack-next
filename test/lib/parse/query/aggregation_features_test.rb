@@ -196,7 +196,7 @@ class TestQueryAggregationFeatures < Minitest::Test
                     end
                   end
                 } do
-      results = @query.distinct_objects(:author_team, return_pointers: true)
+      results = @query.distinct_objects(:author_workspace, return_pointers: true)
 
       assert_equal 2, results.size
       assert_kind_of Parse::Pointer, results.first
@@ -363,7 +363,7 @@ class TestQueryAggregationFeatures < Minitest::Test
   # Test convert_constraints_for_aggregation function
   def test_convert_constraints_for_aggregation_with_pointer
     pointer_constraint = {
-      "_p_authorTeam" => {
+      "_p_authorWorkspace" => {
         "__type" => "Pointer",
         "className" => "Team",
         "objectId" => "abc123",
@@ -373,14 +373,14 @@ class TestQueryAggregationFeatures < Minitest::Test
     result = @query.send(:convert_constraints_for_aggregation, pointer_constraint)
 
     # The field name gets formatted to aggregation format
-    aggregation_field = @query.send(:format_aggregation_field, "_p_authorTeam")
+    aggregation_field = @query.send(:format_aggregation_field, "_p_authorWorkspace")
 
     assert_equal "Team$abc123", result[aggregation_field]
   end
 
   def test_convert_constraints_for_aggregation_with_nested_pointer
     nested_constraint = {
-      "_p_authorTeam" => {
+      "_p_authorWorkspace" => {
         "$eq" => {
           "__type" => "Pointer",
           "className" => "Team",
@@ -392,7 +392,7 @@ class TestQueryAggregationFeatures < Minitest::Test
     result = @query.send(:convert_constraints_for_aggregation, nested_constraint)
 
     # The field name gets formatted to aggregation format
-    aggregation_field = @query.send(:format_aggregation_field, "_p_authorTeam")
+    aggregation_field = @query.send(:format_aggregation_field, "_p_authorWorkspace")
 
     assert_equal "Team$abc123", result[aggregation_field]["$eq"]
   end
@@ -430,8 +430,8 @@ class TestQueryAggregationFeatures < Minitest::Test
 
     # Create query with array equality constraint (uses aggregation pipeline)
     # Note: Use :eq_array for explicit array equality; :eq is for simple scalar equality
-    query = Parse::Query.new("Capture")
-    query.where(:author_team.eq_array => team)
+    query = Parse::Query.new("Post")
+    query.where(:author_workspace.eq_array => team)
 
     # Get the pipeline and check the $match stage
     pipeline = query.group_by(:last_action).pipeline
@@ -459,7 +459,7 @@ class TestQueryAggregationFeatures < Minitest::Test
     assert map_expr.key?("$map"), "First $eq operand should be $map expression"
     # $map.input wraps the field reference in $ifNull => [] so a missing field
     # is coerced to an empty array (avoiding $map type errors on legacy docs).
-    assert_equal({ "$ifNull" => ["$authorTeam", []] }, map_expr["$map"]["input"])
+    assert_equal({ "$ifNull" => ["$authorWorkspace", []] }, map_expr["$map"]["input"])
 
     # Second element should be array containing the object ID
     id_array = eq_content[1]
@@ -507,7 +507,7 @@ class TestQueryAggregationFeatures < Minitest::Test
     start_time = Time.new(2025, 8, 15, 7, 0, 0, "+00:00")
     end_time = Time.new(2025, 8, 16, 6, 59, 59, "+00:00")
 
-    query = Parse::Query.new("Capture")
+    query = Parse::Query.new("Post")
     query.where(:created_at.gte => start_time, :created_at.lte => end_time)
 
     # Mock the count_distinct pipeline generation

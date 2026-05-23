@@ -115,36 +115,50 @@ module Parse
       # `Parse::Role.users`, the reverse direction is often the
       # heavier-used index.
       #
-      # Uniqueness is NOT supported on `mongo_relation_index` — a unique
-      # single-direction index on a `has_many :through => :relation`
-      # field is semantically broken (it would say each owner can hold
-      # at most one related, contradicting `has_many`). If you want to
-      # enforce no-duplicate-pair membership, declare a compound unique
-      # index directly via `Parse::MongoDB.create_index` or a later
-      # extension to this DSL.
+      # Uniqueness on a *single-direction* relation index is NOT
+      # supported — `unique: true` on just `owningId` (or just
+      # `relatedId`) would assert each owner can hold at most one
+      # related, contradicting `has_many`. That mistake is rejected at
+      # declaration time.
       #
-      # @example Canonical case — role membership
+      # `dedup: true` is semantically different and IS supported: it
+      # registers a compound `{owningId: 1, relatedId: 1}` unique index
+      # on the join collection. The compound key prevents duplicate
+      # `(owner, related)` pair rows from accumulating (a real failure
+      # mode under concurrent `.add` calls on a Parse Relation), without
+      # constraining how many distinct relateds an owner may hold or
+      # vice versa. Default off — the index buys correctness at the
+      # cost of a write-time uniqueness check on every relation insert,
+      # and existing collections with duplicate pairs will fail the
+      # migrator's apply step until reconciled.
+      #
+      # @example Canonical case — role membership with dedup
       #   class Parse::Role < Parse::Object
       #     has_many :users, through: :relation
-      #     mongo_relation_index :users, bidirectional: true
+      #     mongo_relation_index :users, bidirectional: true, dedup: true
       #     # creates: _Join:users:_Role { owningId: 1 }
       #     #         _Join:users:_Role { relatedId: 1 }
+      #     #         _Join:users:_Role { owningId: 1, relatedId: 1 } unique
       #   end
       #
       # @param field [Symbol] the relation field name (must be declared
       #   via `has_many :field, through: :relation`)
       # @param bidirectional [Boolean] when true, register two
       #   declarations — one each for owningId and relatedId
+      # @param dedup [Boolean] when true, also register a compound
+      #   `{owningId: 1, relatedId: 1}` unique index that prevents
+      #   duplicate-pair membership rows
+      # @param unique [Boolean] rejected — see above
       # @raise [ArgumentError] when `field` is not a declared relation
-      #   or `unique:` is passed (not supported on relation indexes)
+      #   or `unique:` is passed
       # @return [Array<Hash>] the registered declarations
-      def mongo_relation_index(field, bidirectional: false, unique: false)
+      def mongo_relation_index(field, bidirectional: false, dedup: false, unique: false)
         if unique
           raise ArgumentError,
                 "#{self}.mongo_relation_index does not support unique: — uniqueness on " \
-                "a single-direction relation column breaks has_many semantics. For no-" \
-                "duplicate-pair membership, declare a compound unique index directly " \
-                "via Parse::MongoDB.create_index."
+                "a single-direction relation column breaks has_many semantics. Use " \
+                "`dedup: true` for a compound `{owningId, relatedId}` unique index that " \
+                "prevents duplicate-pair membership without constraining cardinality."
         end
         field = field.to_sym
         unless respond_to?(:relations) && relations.key?(field)
@@ -155,6 +169,9 @@ module Parse
         join_collection = "_Join:#{field}:#{parse_class}"
         decls = [register_relation_index(join_collection, "owningId", source: field)]
         decls << register_relation_index(join_collection, "relatedId", source: field) if bidirectional
+        if dedup
+          decls << register_relation_dedup_index(join_collection, source: field)
+        end
         decls
       end
 
@@ -236,6 +253,28 @@ module Parse
           collection:   collection,
         }.freeze
         if mongo_index_declarations.any? { |d| d[:keys] == decl[:keys] && d[:collection] == collection }
+          return decl
+        end
+        mongo_index_declarations << decl
+        decl
+      end
+
+      # Register the compound `{owningId: 1, relatedId: 1}` unique index
+      # on a relation join collection — the dedup form of
+      # `mongo_relation_index`. Compound uniqueness on both columns
+      # together is the *correctness* form: it forbids duplicate
+      # `(owner, related)` pair rows from accumulating without
+      # constraining how many distinct relateds an owner may hold.
+      # That is semantically different from `unique:` on a single
+      # column (which `mongo_relation_index` continues to reject).
+      def register_relation_dedup_index(collection, source:)
+        decl = {
+          keys:         { "owningId" => 1, "relatedId" => 1 }.freeze,
+          options:      { unique: true }.freeze,
+          declared_for: [source].freeze,
+          collection:   collection,
+        }.freeze
+        if mongo_index_declarations.any? { |d| d[:keys] == decl[:keys] && d[:options] == decl[:options] && d[:collection] == collection }
           return decl
         end
         mongo_index_declarations << decl
