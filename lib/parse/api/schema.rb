@@ -9,10 +9,11 @@ module Parse
       SCHEMAS_PATH = "schemas"
 
       # Get all the schemas for the application.
+      # @param opts [Hash] additional options for the request.
       # @return [Parse::Response]
-      def schemas
-        opts = { cache: false }
-        request :get, SCHEMAS_PATH, opts: opts
+      def schemas(opts = {})
+        request_opts = { cache: false }.merge(opts)
+        request :get, SCHEMAS_PATH, opts: request_opts
       end
 
       # Get the schema for a collection.

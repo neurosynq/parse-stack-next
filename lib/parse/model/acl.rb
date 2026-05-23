@@ -423,6 +423,354 @@ module Parse
       end
     end
 
+    # Returns an array of all user IDs and role names that have read access to this object.
+    # @return [Array<String>] list of user IDs and role names (e.g., ["*", "user123", "role:Admin"])
+    def readable_by
+      permissions.select { |k, v| v.read }.keys
+    end
+
+    # Returns an array of all user IDs and role names that have write access to this object.
+    # @return [Array<String>] list of user IDs and role names (e.g., ["*", "user123", "role:Admin"])
+    def writeable_by
+      permissions.select { |k, v| v.write }.keys
+    end
+    alias_method :writable_by, :writeable_by
+
+    # Checks if a specific user or role (or any in an array) has read access to this object.
+    # When passed an array of strings, returns true if ANY of the users/roles have read access (OR logic).
+    # When passed a Parse::User object or pointer, automatically fetches and checks the user's roles as well.
+    # @param user_or_role [String, Parse::User, Parse::Pointer, Array<String>] the user ID, role name, user object, user pointer, or array of user IDs/role names
+    # @return [Boolean] true if the user/role (or any in the array) has read access
+    # @example
+    #   acl.readable_by?("user123")                    # Check single user ID
+    #   acl.readable_by?("Admin")                      # Check single role name
+    #   acl.readable_by?(user_object)                  # Check user + their roles
+    #   acl.readable_by?(user_pointer)                 # Check user pointer + their roles
+    #   acl.readable_by?(["user123", "Admin"])         # Check array (OR logic)
+    def readable_by?(user_or_role)
+      # Handle arrays - check if ANY item in the array has read access (OR logic)
+      if user_or_role.is_a?(Array)
+        # For arrays, just check each string value directly (no User object expansion)
+        return user_or_role.any? do |item|
+          key = normalize_permission_key(item)
+          key && permissions[key]&.read == true
+        end
+      end
+
+      # Handle Parse::Pointer to User - expand to include user ID and roles
+      if user_or_role.is_a?(Parse::Pointer) || (user_or_role.respond_to?(:parse_class) && user_or_role.respond_to?(:id))
+        # Check if it's a pointer to a User
+        if user_or_role.respond_to?(:parse_class) && (user_or_role.parse_class == "User" || user_or_role.parse_class == "_User")
+          permissions_to_check = []
+
+          # Add the user ID from the pointer
+          user_id = user_or_role.respond_to?(:id) ? user_or_role.id : nil
+          permissions_to_check << user_id if user_id.present?
+
+          # Query roles directly using the user pointer (no need to fetch the full user)
+          begin
+            if user_id.present? && defined?(Parse::Role)
+              user_roles = Parse::Role.all(users: user_or_role)
+              user_roles.each do |role|
+                permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
+              end
+            end
+          rescue => e
+            # If role fetching fails, continue with just the user ID
+          end
+
+          # Check if any of the user's permissions (user ID or roles) have read access
+          return readable_by?(permissions_to_check) if permissions_to_check.any?
+          return false
+        end
+      end
+
+      # If it's a User object, expand it to include the user ID and all their roles
+      if user_or_role.is_a?(Parse::User) || (user_or_role.respond_to?(:is_a?) && user_or_role.is_a?(Parse::User))
+        permissions_to_check = []
+
+        # Add the user ID
+        permissions_to_check << user_or_role.id if user_or_role.respond_to?(:id) && user_or_role.id.present?
+
+        # Fetch and add all the user's roles
+        begin
+          if user_or_role.respond_to?(:id) && user_or_role.id.present? && defined?(Parse::Role)
+            user_roles = Parse::Role.all(users: user_or_role)
+            user_roles.each do |role|
+              permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
+            end
+          end
+        rescue => e
+          # If role fetching fails, continue with just the user ID
+        end
+
+        # Check if any of the user's permissions (user ID or roles) have read access
+        # Use array checking logic (OR)
+        return readable_by?(permissions_to_check) if permissions_to_check.any?
+        return false
+      end
+
+      # Single string value - check directly
+      key = normalize_permission_key(user_or_role)
+      return false unless key
+      permissions[key]&.read == true
+    end
+
+    # Checks if a specific user or role (or any in an array) has write access to this object.
+    # When passed an array of strings, returns true if ANY of the users/roles have write access (OR logic).
+    # When passed a Parse::User object or pointer, automatically fetches and checks the user's roles as well.
+    # @param user_or_role [String, Parse::User, Parse::Pointer, Array<String>] the user ID, role name, user object, user pointer, or array of user IDs/role names
+    # @return [Boolean] true if the user/role (or any in the array) has write access
+    # @example
+    #   acl.writeable_by?("user123")                   # Check single user ID
+    #   acl.writeable_by?("Admin")                     # Check single role name
+    #   acl.writeable_by?(user_object)                 # Check user + their roles
+    #   acl.writeable_by?(user_pointer)                # Check user pointer + their roles
+    #   acl.writeable_by?(["user123", "Admin"])        # Check array (OR logic)
+    def writeable_by?(user_or_role)
+      # Handle arrays - check if ANY item in the array has write access (OR logic)
+      if user_or_role.is_a?(Array)
+        # For arrays, just check each string value directly (no User object expansion)
+        return user_or_role.any? do |item|
+          key = normalize_permission_key(item)
+          key && permissions[key]&.write == true
+        end
+      end
+
+      # Handle Parse::Pointer to User - expand to include user ID and roles
+      if user_or_role.is_a?(Parse::Pointer) || (user_or_role.respond_to?(:parse_class) && user_or_role.respond_to?(:id))
+        # Check if it's a pointer to a User
+        if user_or_role.respond_to?(:parse_class) && (user_or_role.parse_class == "User" || user_or_role.parse_class == "_User")
+          permissions_to_check = []
+
+          # Add the user ID from the pointer
+          user_id = user_or_role.respond_to?(:id) ? user_or_role.id : nil
+          permissions_to_check << user_id if user_id.present?
+
+          # Query roles directly using the user pointer (no need to fetch the full user)
+          begin
+            if user_id.present? && defined?(Parse::Role)
+              user_roles = Parse::Role.all(users: user_or_role)
+              user_roles.each do |role|
+                permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
+              end
+            end
+          rescue => e
+            # If role fetching fails, continue with just the user ID
+          end
+
+          # Check if any of the user's permissions (user ID or roles) have write access
+          return writeable_by?(permissions_to_check) if permissions_to_check.any?
+          return false
+        end
+      end
+
+      # If it's a User object, expand it to include the user ID and all their roles
+      if user_or_role.is_a?(Parse::User) || (user_or_role.respond_to?(:is_a?) && user_or_role.is_a?(Parse::User))
+        permissions_to_check = []
+
+        # Add the user ID
+        permissions_to_check << user_or_role.id if user_or_role.respond_to?(:id) && user_or_role.id.present?
+
+        # Fetch and add all the user's roles
+        begin
+          if user_or_role.respond_to?(:id) && user_or_role.id.present? && defined?(Parse::Role)
+            user_roles = Parse::Role.all(users: user_or_role)
+            user_roles.each do |role|
+              permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
+            end
+          end
+        rescue => e
+          # If role fetching fails, continue with just the user ID
+        end
+
+        # Check if any of the user's permissions (user ID or roles) have write access
+        # Use array checking logic (OR)
+        return writeable_by?(permissions_to_check) if permissions_to_check.any?
+        return false
+      end
+
+      # Single string value - check directly
+      key = normalize_permission_key(user_or_role)
+      return false unless key
+      permissions[key]&.write == true
+    end
+    alias_method :writable_by?, :writeable_by?
+    alias_method :can_read?, :readable_by?
+    alias_method :can_write?, :writeable_by?
+
+    # Checks if the object has public read access.
+    # @return [Boolean] true if public can read this object
+    def public_read?
+      permissions[PUBLIC]&.read == true
+    end
+
+    # Checks if the object has public write access.
+    # @return [Boolean] true if public can write to this object
+    def public_write?
+      permissions[PUBLIC]&.write == true
+    end
+
+    # Checks if the object has no read permissions for anyone (master key only).
+    # @return [Boolean] true if no one has read access
+    def no_read?
+      permissions.values.none? { |v| v.read }
+    end
+
+    # Checks if the object has no write permissions for anyone (master key only).
+    # @return [Boolean] true if no one has write access
+    def no_write?
+      permissions.values.none? { |v| v.write }
+    end
+
+    # Checks if the object is read-only (has read permissions but no write permissions).
+    # @return [Boolean] true if object has read access but no write access
+    def read_only?
+      permissions.values.any? { |v| v.read } && permissions.values.none? { |v| v.write }
+    end
+
+    # Checks if the object is write-only (has write permissions but no read permissions).
+    # @return [Boolean] true if object has write access but no read access
+    def write_only?
+      permissions.values.any? { |v| v.write } && permissions.values.none? { |v| v.read }
+    end
+
+    # Returns an array of all user IDs and role names that have both read and write access.
+    # @return [Array<String>] list of user IDs and role names with full access
+    def owners
+      permissions.select { |k, v| v.read && v.write }.keys
+    end
+
+    # Checks if a specific user or role (or any in an array) has both read and write access to this object.
+    # When passed an array of strings, returns true if ANY of the users/roles have both read and write access (OR logic).
+    # When passed a Parse::User object or pointer, automatically fetches and checks the user's roles as well.
+    # @param user_or_role [String, Parse::User, Parse::Pointer, Array<String>] the user ID, role name, user object, user pointer, or array of user IDs/role names
+    # @return [Boolean] true if the user/role (or any in the array) has both read and write access
+    # @example
+    #   acl.owner?("user123")                          # Check single user ID
+    #   acl.owner?("Admin")                            # Check single role name
+    #   acl.owner?(user_object)                        # Check user + their roles
+    #   acl.owner?(user_pointer)                       # Check user pointer + their roles
+    #   acl.owner?(["user123", "Admin"])               # Check array (OR logic)
+    def owner?(user_or_role)
+      # Handle arrays - check if ANY item in the array is an owner (OR logic)
+      if user_or_role.is_a?(Array)
+        # For arrays, just check each string value directly (no User object expansion)
+        return user_or_role.any? do |item|
+          key = normalize_permission_key(item)
+          next false unless key
+          perm = permissions[key]
+          perm&.read == true && perm&.write == true
+        end
+      end
+
+      # Handle Parse::Pointer to User - expand to include user ID and roles
+      if user_or_role.is_a?(Parse::Pointer) || (user_or_role.respond_to?(:parse_class) && user_or_role.respond_to?(:id))
+        # Check if it's a pointer to a User
+        if user_or_role.respond_to?(:parse_class) && (user_or_role.parse_class == "User" || user_or_role.parse_class == "_User")
+          permissions_to_check = []
+
+          # Add the user ID from the pointer
+          user_id = user_or_role.respond_to?(:id) ? user_or_role.id : nil
+          permissions_to_check << user_id if user_id.present?
+
+          # Query roles directly using the user pointer (no need to fetch the full user)
+          begin
+            if user_id.present? && defined?(Parse::Role)
+              user_roles = Parse::Role.all(users: user_or_role)
+              user_roles.each do |role|
+                permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
+              end
+            end
+          rescue => e
+            # If role fetching fails, continue with just the user ID
+          end
+
+          # Check if any of the user's permissions (user ID or roles) are owners
+          return owner?(permissions_to_check) if permissions_to_check.any?
+          return false
+        end
+      end
+
+      # If it's a User object, expand it to include the user ID and all their roles
+      if user_or_role.is_a?(Parse::User) || (user_or_role.respond_to?(:is_a?) && user_or_role.is_a?(Parse::User))
+        permissions_to_check = []
+
+        # Add the user ID
+        permissions_to_check << user_or_role.id if user_or_role.respond_to?(:id) && user_or_role.id.present?
+
+        # Fetch and add all the user's roles
+        begin
+          if user_or_role.respond_to?(:id) && user_or_role.id.present? && defined?(Parse::Role)
+            user_roles = Parse::Role.all(users: user_or_role)
+            user_roles.each do |role|
+              permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
+            end
+          end
+        rescue => e
+          # If role fetching fails, continue with just the user ID
+        end
+
+        # Check if any of the user's permissions (user ID or roles) are owners
+        # Use array checking logic (OR)
+        return owner?(permissions_to_check) if permissions_to_check.any?
+        return false
+      end
+
+      # Single string value - check directly
+      key = normalize_permission_key(user_or_role)
+      return false unless key
+      perm = permissions[key]
+      perm&.read == true && perm&.write == true
+    end
+
+    # Checks if the ACL has no permissions (master key only access).
+    # @return [Boolean] true if no permissions exist
+    def empty?
+      permissions.empty? || permissions.values.none? { |v| v.present? }
+    end
+    alias_method :master_key_only?, :empty?
+    alias_method :master_only?, :empty?
+
+    private
+
+    # Normalizes a user or role input to the appropriate permission key format.
+    # @param user_or_role [String, Parse::User, Parse::Role] the input to normalize
+    # @return [String, nil] the normalized key or nil if invalid
+    def normalize_permission_key(user_or_role)
+      case user_or_role
+      when String
+        # Handle role names, user IDs, or public
+        if user_or_role == "*" || user_or_role.to_sym == :public
+          PUBLIC
+        elsif user_or_role.start_with?("role:")
+          user_or_role
+        else
+          # Could be a role name without prefix or a user ID
+          # Check if it exists as-is first, then try as role
+          if permissions.key?(user_or_role)
+            user_or_role
+          elsif permissions.key?("role:#{user_or_role}")
+            "role:#{user_or_role}"
+          else
+            user_or_role # Return as-is, might be a user ID
+          end
+        end
+      when Parse::User
+        user_or_role.id if user_or_role.respond_to?(:id)
+      when Parse::Role
+        "role:#{user_or_role.name}" if user_or_role.respond_to?(:name)
+      when Parse::Pointer
+        user_or_role.id if user_or_role.respond_to?(:id)
+      when Symbol
+        user_or_role == :public ? PUBLIC : user_or_role.to_s
+      else
+        nil
+      end
+    end
+
+    public
+
     # The Permission class tracks the read and write permissions for a specific
     # ACL entry. The value of an Parse-ACL hash only contains two keys: "read" and "write".
     #

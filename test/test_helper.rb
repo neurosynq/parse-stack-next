@@ -32,7 +32,8 @@ module ConstraintTests
       assert_respond_to(:field, o)
       op = :field.send(o)
       assert_instance_of(Parse::Operation, op)
-      assert_instance_of(@klass, op.constraint)
+      # Use kind_of to allow subclasses (e.g., ArrayEqConstraint for :eq)
+      assert_kind_of(@klass, op.constraint)
       if @key.nil?
         assert_nil op.constraint.key
       else
@@ -53,15 +54,15 @@ module ConstraintTests
   end
 end
 
-module MiniTest
+module Minitest
   module Assertions
     def refute_raises(*exp)
       msg = "#{exp.pop}.\n" if String === exp.last
 
       begin
         yield
-      rescue MiniTest::Skip => e
-        return e if exp.include? MiniTest::Skip
+      rescue Minitest::Skip => e
+        return e if exp.include? Minitest::Skip
         raise e
       rescue Exception => e
         exp = exp.first if exp.size == 1

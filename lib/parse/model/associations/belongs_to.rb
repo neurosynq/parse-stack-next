@@ -11,7 +11,7 @@ module Parse
   module Associations
     # This association creates a one-to-one association with another Parse model.
     # BelongsTo relation is the simplies association in which the local
-    # Parse table constains a column that has a Parse::Pointer to a foreign table record.
+    # Parse table constrains a column that has a Parse::Pointer to a foreign table record.
     #
     # This association says that this class contains a foreign pointer column
     # which references a different class. Utilizing the `belongs_to` method in
@@ -152,22 +152,45 @@ module Parse
           validates_presence_of(key) if opts[:required]
 
           # We generate the getter method
+          # Store the key and class name for N+1 detection
+          association_key = key
+          owner_class_name = self.name
+
           define_method(key) do
             val = instance_variable_get ivar
             # We provide autofetch functionality. If the value is nil and the
-            # current Parse::Object is a pointer, then let's auto fetch it
-            if val.nil? && pointer?
-              autofetch!(key)
+            # current Parse::Object is a pointer, or if this is a selectively fetched
+            # object and this field wasn't included in the fetch, then auto fetch it.
+            should_autofetch = val.nil? && (pointer? || (has_selective_keys? && !field_was_fetched?(association_key)))
+            if should_autofetch
+              # If autofetch is disabled and we're accessing an unfetched field on a
+              # selectively fetched object, raise an error to make the issue explicit
+              if autofetch_disabled? && has_selective_keys? && !field_was_fetched?(association_key)
+                raise Parse::UnfetchedFieldAccessError.new(association_key, self.class.name)
+              end
+              autofetch!(association_key)
               val = instance_variable_get ivar
             end
 
             # if for some reason we retrieved either from store or fetching a
-            # hash, lets try to buid a Pointer of that type.
+            # hash, lets try to build a Pointer of that type.
 
             if val.is_a?(Hash) && (val["__type"] == "Pointer" || val["__type"] == "Object")
-              val = Parse::Object.build val, (val[Parse::Model::KEY_CLASS_NAME] || klassName)
+              # Get nested fetched keys for this field if available
+              nested_keys = nested_keys_for(association_key)
+              val = Parse::Object.build val, (val[Parse::Model::KEY_CLASS_NAME] || klassName), fetched_keys: nested_keys
               instance_variable_set ivar, val
             end
+
+            # Track association source for N+1 detection when returning an unfetched pointer
+            # Uses a registry instead of setting instance variables on the pointer object
+            if val.is_a?(Parse::Pointer) && val.pointer? && Parse.warn_on_n_plus_one
+              Parse::NPlusOneDetector.register_source(val,
+                source_class: owner_class_name,
+                association: association_key
+              )
+            end
+
             val
           end
 
@@ -189,11 +212,25 @@ module Parse
             if val == Parse::Properties::DELETE_OP
               val = nil
             elsif val.is_a?(Hash) && (val["__type"] == "Pointer" || val["__type"] == "Object")
-              val = Parse::Object.build val, (val[Parse::Model::KEY_CLASS_NAME] || klassName)
+              # Get nested fetched keys for this field if available
+              nested_keys = nested_keys_for(key)
+              val = Parse::Object.build val, (val[Parse::Model::KEY_CLASS_NAME] || klassName), fetched_keys: nested_keys
             end
 
             if track == true
+              prepare_for_dirty_tracking!(key)
               send will_change_method unless val == instance_variable_get(ivar)
+            else
+              # During fetch (track=false), preserve existing embedded objects if the server
+              # only returned a pointer. This prevents autofetch from wiping out nested
+              # fetched data (e.g., user.first_name) when fetching unfetched fields.
+              existing = instance_variable_get(ivar)
+              if existing.is_a?(Parse::Pointer) && val.is_a?(Parse::Pointer) &&
+                 existing.id == val.id && !existing.pointer? && val.pointer?
+                # Existing object has embedded data, new value is just a pointer with same ID
+                # Preserve the existing richer object
+                val = existing
+              end
             end
 
             # Never set an object that is not a Parse::Pointer

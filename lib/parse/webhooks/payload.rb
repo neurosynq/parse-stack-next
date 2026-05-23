@@ -7,7 +7,7 @@ require "active_support/inflector"
 require "active_support/core_ext/object"
 require "active_support/core_ext/string"
 require "active_support/core_ext"
-require "active_model_serializers"
+require "active_model/serializers/json"
 
 module Parse
   class Webhooks
@@ -112,6 +112,11 @@ module Parse
       # true if this is a webhook function request.
       def function?
         @function_name.present?
+      end
+
+      # true if the master key was used for this request.
+      def master?
+        @master.present?
       end
 
       # @return [String] the name of the Parse class for this request.
@@ -238,6 +243,45 @@ module Parse
       def parse_query
         return nil unless parse_class.present? && @query.is_a?(Hash)
         Parse::Query.new parse_class, @query
+      end
+
+      # Returns true if this webhook was triggered by a Ruby Parse Stack request.
+      # This is determined by checking for the '_RB_' prefix in the request ID header.
+      # This flag is useful for preventing callback loops and implementing intelligent
+      # callback handling based on the request origin.
+      # @return [Boolean] true if the request originated from Ruby Parse Stack
+      def ruby_initiated?
+        @ruby_initiated ||= begin
+          request_id = nil
+          
+          if @raw.respond_to?(:[])
+            # Check for headers at the top level first
+            request_id = @raw['x-parse-request-id'] || @raw['X-Parse-Request-Id'] ||
+                        @raw[:x_parse_request_id] || @raw[:'X-Parse-Request-Id']
+            
+            # If not found at top level, check nested headers
+            if request_id.nil?
+              headers_sym = @raw[:headers] if @raw[:headers].is_a?(Hash)
+              headers_str = @raw['headers'] if @raw['headers'].is_a?(Hash)
+              
+              if headers_sym
+                request_id = headers_sym['x-parse-request-id'] || headers_sym['X-Parse-Request-Id']
+              elsif headers_str
+                request_id = headers_str['x-parse-request-id'] || headers_str['X-Parse-Request-Id']
+              end
+            end
+          end
+          
+          request_id&.start_with?('_RB_') || false
+        end
+      end
+
+      # Returns true if this webhook was triggered by a client request (JavaScript, iOS, Android, etc.)
+      # This is the inverse of ruby_initiated? and is useful for callback logic that should
+      # only run for client-initiated operations.
+      # @return [Boolean] true if the request originated from a client (not Ruby)
+      def client_initiated?
+        !ruby_initiated?
       end
     end # Payload
   end

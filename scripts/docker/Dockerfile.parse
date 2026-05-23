@@ -1,0 +1,13 @@
+FROM parseplatform/parse-server:8.4.0
+
+# Switch to root to copy and set permissions
+USER root
+
+# Copy our custom startup script with execute permissions
+COPY --chmod=755 start-parse.sh /start-parse.sh
+
+# Switch back to node user (if needed)
+USER node
+
+# Set the entrypoint to our script
+ENTRYPOINT ["/bin/sh", "/start-parse.sh"]

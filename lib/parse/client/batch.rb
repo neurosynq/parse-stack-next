@@ -41,7 +41,10 @@ module Parse
 
     # @!attribute responses
     #  @return [Array] the set of responses from this batch.
-    attr_accessor :requests, :responses
+    
+    # @!attribute transaction
+    #  @return [Boolean] whether this batch should be executed as a transaction.
+    attr_accessor :requests, :responses, :transaction
 
     # @return [Parse::Client] the client to be used for the request.
     def client
@@ -49,9 +52,11 @@ module Parse
     end
 
     # @param reqs [Array<Parse::Request>] an array of requests.
-    def initialize(reqs = nil)
+    # @param transaction [Boolean] whether to execute as a transaction.
+    def initialize(reqs = nil, transaction: false)
       @requests = []
       @responses = []
+      @transaction = transaction
       reqs = [reqs] unless reqs.is_a?(Enumerable)
       reqs.each { |r| add(r) } if reqs.is_a?(Enumerable)
     end
@@ -92,7 +97,9 @@ module Parse
 
     # @return [Hash] a formatted payload for the batch request.
     def as_json(*args)
-      { requests: requests }.as_json
+      payload = { requests: requests }
+      payload[:transaction] = true if @transaction
+      payload.as_json
     end
 
     # @return [Integer] the number of requests in the batch.

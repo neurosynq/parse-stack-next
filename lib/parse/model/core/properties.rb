@@ -7,9 +7,9 @@ require "active_support/inflector"
 require "active_support/core_ext"
 require "active_support/core_ext/object"
 require "active_support/inflector"
-require "active_model_serializers"
+require "active_model/serializers/json"
 require "active_support/inflector"
-require "active_model_serializers"
+require "active_model/serializers/json"
 require "active_support/hash_with_indifferent_access"
 require "time"
 
@@ -273,8 +273,15 @@ module Parse
 
           # If the value is nil and this current Parse::Object instance is a pointer?
           # then someone is calling the getter for this, which means they probably want
-          # its value - so let's go turn this pointer into a full object record
-          if value.nil? && pointer?
+          # its value - so let's go turn this pointer into a full object record.
+          # Also autofetch if object was selectively fetched and this field wasn't included.
+          should_autofetch = value.nil? && (pointer? || (has_selective_keys? && !field_was_fetched?(key)))
+          if should_autofetch
+            # If autofetch is disabled and we're accessing an unfetched field on a
+            # selectively fetched object, raise an error to make the issue explicit
+            if autofetch_disabled? && has_selective_keys? && !field_was_fetched?(key)
+              raise Parse::UnfetchedFieldAccessError.new(key, self.class.name)
+            end
             # call autofetch to fetch the entire record
             # and then get the ivar again cause it might have been updated.
             autofetch!(key)
@@ -380,6 +387,7 @@ module Parse
           # this will grab the current value and keep a copy of it - but we only do this if
           # the new value being set is different from the current value stored.
           if track == true
+            prepare_for_dirty_tracking!(key)
             send will_change_method unless val == instance_variable_get(ivar)
           end
 
@@ -551,9 +559,17 @@ module Parse
       when :geopoint
         val = Parse::GeoPoint.new(val) unless val.blank?
       when :file
-        val = Parse::File.new(val) unless val.blank?
+        if val.is_a?(Hash) && val["__type"] == "File"
+          val = Parse::File.new(val)
+        elsif !val.blank?
+          val = Parse::File.new(val)
+        end
       when :bytes
-        val = Parse::Bytes.new(val) unless val.blank?
+        if val.is_a?(Hash) && val["__type"] == "Bytes"
+          val = Parse::Bytes.new(val["base64"] || val[:base64])
+        elsif !val.blank?
+          val = Parse::Bytes.new(val)
+        end
       when :integer
         if val.nil? || val.respond_to?(:to_i) == false
           val = nil

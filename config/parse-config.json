@@ -1,0 +1,11 @@
+{
+  "appId": "myAppId",
+  "masterKey": "myMasterKey",
+  "restAPIKey": "test-rest-key",
+  "databaseURI": "mongodb://admin:password@mongo:27017/parse?authSource=admin",
+  "serverURL": "http://localhost:1337/parse",
+  "mountPath": "/parse",
+  "cloud": "/parse-server/cloud/main.js",
+  "logLevel": "info",
+  "allowClientClassCreation": true
+}

@@ -54,6 +54,20 @@ module Parse
         response.parse_class = className if response.present?
         response
       end
+
+      # Execute a MongoDB-style aggregation pipeline on a Parse collection.
+      # @param className [String] the name of the Parse collection.
+      # @param pipeline [Array] the MongoDB aggregation pipeline stages.
+      # @param opts [Hash] additional options to pass to the {Parse::Client} request.
+      # @param headers [Hash] additional HTTP headers to send with the request.
+      # @return [Parse::Response]
+      # @see Parse::Query
+      def aggregate_pipeline(className, pipeline = [], headers: {}, **opts)
+        query = { pipeline: pipeline.to_json }
+        response = request :get, aggregate_uri_path(className), query: query, headers: headers, opts: opts
+        response.parse_class = className if response.present?
+        response
+      end
     end #Aggregate
   end #API
 end

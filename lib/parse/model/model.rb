@@ -5,7 +5,7 @@ require "active_model"
 require "active_support"
 require "active_support/inflector"
 require "active_support/core_ext/object"
-require "active_model_serializers"
+require "active_model/serializers/json"
 require_relative "../client"
 
 module Parse
@@ -28,6 +28,17 @@ module Parse
     include ::ActiveModel::Conversion
     extend ::ActiveModel::Callbacks # callback support on save, update, delete, etc.
     extend ::ActiveModel::Naming # provides the methods for getting class names from Model classes
+
+    # Add dirty? methods as aliases for changed? methods
+    # These provide compatibility with expected API
+    def dirty?(field = nil)
+      if field.nil?
+        changed?
+      else
+        field_changed = "#{field}_changed?"
+        respond_to?(field_changed) ? send(field_changed) : false
+      end
+    end
 
     # The name of the field in a hash that contains information about the type
     # of data the hash represents.

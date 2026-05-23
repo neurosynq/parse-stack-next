@@ -181,10 +181,11 @@ module Parse
     # @return [Array<Parse::Session>] A list of active Parse::Session objects.
     has_many :active_sessions, as: :session
 
-    before_save do
-      # You cannot specify user ACLs.
-      self.clear_attribute_change!([:acl])
-    end
+    # CHANGE -- ACLs can be managed
+    # before_save do
+    #   # You cannot specify user ACLs.
+    #   self.clear_attribute_change!([:acl])
+    # end
 
     # @return [Boolean] true if this user is anonymous.
     def anonymous?

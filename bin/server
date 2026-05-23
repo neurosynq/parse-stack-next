@@ -4,7 +4,14 @@ require "bundler/setup"
 require "parse/stack"
 
 require "rack"
-require "rack/server"
 require "puma"
-Rack::Handler::WEBrick = Rack::Handler.get(:puma)
-Rack::Server.start :app => Parse::Webhooks
+
+# For Rack v3 compatibility, Rack::Server has been moved to rackup gem
+# Using a simple Puma server directly instead
+puts "Starting Parse::Webhooks server on port 9292..."
+puts "Visit http://localhost:9292"
+
+app = Parse::Webhooks
+server = Puma::Server.new(app)
+server.add_tcp_listener "0.0.0.0", 9292
+server.run

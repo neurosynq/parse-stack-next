@@ -66,6 +66,24 @@ module Parse
     # Ask the delegate to return a query for this collection type
     def query(constraints = {})
       q = forward :"#{@key}_relation_query"
+      
+      # Apply constraints if provided (excluding limit which is handled differently)
+      query_constraints = constraints.except(:limit)
+      if query_constraints.present?
+        q = q.where(query_constraints)
+      end
+      
+      # Apply limit if specified
+      if constraints[:limit].present?
+        q = q.limit(constraints[:limit])
+      end
+      
+      q
+    end
+
+    # Return a query with limit applied - allows chaining like relation.limit(5).all
+    def limit(count)
+      query(limit: count)
     end
 
     # Add Parse::Objects to the relation.

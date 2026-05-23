@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  mongo:
+    image: mongo:5.0
+    container_name: parse-stack-test-mongo
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password
+    volumes:
+      - mongo-data:/data/db
+
+  parse:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.parse
+    container_name: parse-stack-test-server
+    ports:
+      - "2337:1337"
+    depends_on:
+      mongo:
+        condition: service_started
+    volumes:
+      - ../../test/cloud:/parse-server/cloud
+      - ../../config:/parse-server/config
+    # Remove health check for now since it's causing startup delays
+    # healthcheck:
+    #   test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:1337/parse/health"]
+    #   interval: 10s
+    #   timeout: 5s
+    #   retries: 5
+    #   start_period: 30s
+
+  parse-dashboard:
+    image: parseplatform/parse-dashboard:7.3.0-alpha.44
+    container_name: parse-stack-test-dashboard
+    ports:
+      - "4040:4040"
+    environment:
+      PARSE_DASHBOARD_ALLOW_INSECURE_HTTP: "1"
+      PARSE_SERVER_MASTER_KEY: myMasterKey
+      PARSE_SERVER_APPLICATION_ID: myAppId
+      PARSE_SERVER_URL: http://localhost:2337/parse
+      PARSE_DASHBOARD_CONFIG: |
+        {
+          "apps": [{
+            "serverURL": "http://localhost:2337/parse",
+            "appId": "myAppId",
+            "masterKey": "myMasterKey",
+            "appName": "ParseStackTest"
+          }],
+          "users": [{
+            "user": "admin",
+            "pass": "admin"
+          }],
+          "useEncryptedPasswords": false,
+          "allowInsecureHTTP": true
+        }
+    depends_on:
+      - parse
+
+volumes:
+  mongo-data:

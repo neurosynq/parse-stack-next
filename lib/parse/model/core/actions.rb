@@ -110,6 +110,165 @@ module Parse
 
       # Class methods applied to Parse::Object subclasses.
       module ClassMethods
+        
+        # Execute a set of operations as an atomic transaction.
+        # All operations will be executed in sequence, and if any fail,
+        # the entire transaction will be rolled back.
+        #
+        # @example Basic transaction
+        #   Parse::Object.transaction do |batch|
+        #     user = User.first
+        #     user.username = "new_username"
+        #     batch.add(user)
+        #     
+        #     post = Post.new(author: user, title: "New Post")
+        #     batch.add(post)
+        #   end
+        #
+        # @example Using the block return for automatic batching
+        #   results = Parse::Object.transaction do
+        #     user1 = User.first
+        #     user1.score = 100
+        #     
+        #     user2 = User.first(username: "player2")
+        #     user2.score = 200
+        #     
+        #     [user1, user2]  # Return array of objects to save
+        #   end
+        #
+        # @param retries [Integer] number of times to retry on transaction conflict (error 251)
+        # @yield [Parse::BatchOperation] the batch operation to add requests to
+        # @return [Array<Parse::Response>] the responses from the transaction
+        # @raise [Parse::Error] if the transaction fails
+        def transaction(retries: 5, &block)
+          raise ArgumentError, "Block required for transaction" unless block_given?
+          
+          batch = Parse::BatchOperation.new(nil, transaction: true)
+          
+          # Store original state of objects for rollback
+          original_states = {}
+          tracked_objects = []
+          
+          # Wrap the batch to capture objects being added
+          batch_wrapper = Object.new
+          batch_wrapper.define_singleton_method(:is_a?) do |klass|
+            klass == Parse::BatchOperation || super(klass)
+          end
+          batch_wrapper.define_singleton_method(:kind_of?) do |klass|
+            klass == Parse::BatchOperation || super(klass)
+          end
+          batch_wrapper.define_singleton_method(:instance_of?) do |klass|
+            klass == Parse::BatchOperation
+          end
+          batch_wrapper.define_singleton_method(:add) do |obj|
+            # Store original state when object is first added to transaction
+            if obj.respond_to?(:attributes) && obj.respond_to?(:id) && !original_states.key?(obj)
+              original_states[obj] = {
+                attributes: obj.attributes.dup,
+                changed_attributes: obj.instance_variable_get(:@changed_attributes)&.dup || {},
+                id: obj.id,
+                mutations_from_database: obj.instance_variable_get(:@mutations_from_database),
+                mutations_before_last_save: obj.instance_variable_get(:@mutations_before_last_save)
+              }
+              tracked_objects << obj
+            end
+            batch.add(obj)
+          end
+          
+          # Forward other methods to the real batch
+          batch_wrapper.define_singleton_method(:method_missing) do |method, *args, &block|
+            batch.send(method, *args, &block)
+          end
+          
+          result = yield(batch_wrapper)
+          
+          # If block returns objects, add them to batch
+          if result.respond_to?(:change_requests)
+            batch_wrapper.add(result)
+          elsif result.is_a?(Array)
+            result.each { |obj| batch_wrapper.add(obj) if obj.respond_to?(:change_requests) }
+          end
+          
+          # Submit with retry logic for transaction conflicts
+          attempts = 0
+          begin
+            attempts += 1
+            responses = batch.submit
+            
+            # Check for success
+            if responses.all?(&:success?)
+              # Update tracked objects with data from successful responses
+              # Match responses to objects using the request tag (Ruby object_id)
+              # Build hash lookup once for O(n) instead of O(n²) linear search
+              objects_by_id = tracked_objects.each_with_object({}) { |o, h| h[o.object_id] = o }
+              requests = batch.requests
+              requests.zip(responses).each do |request, response|
+                next unless request && response && response.success?
+                result = response.result
+                next unless result.is_a?(Hash)
+
+                # Find the object matching this request's tag
+                obj = objects_by_id[request.tag]
+                next unless obj
+
+                # Update object with response data (objectId, createdAt, updatedAt)
+                if result["objectId"]
+                  obj.instance_variable_set(:@id, result["objectId"])
+                end
+                if result["createdAt"]
+                  obj.instance_variable_set(:@created_at, Parse::Date.parse(result["createdAt"]))
+                end
+                if result["updatedAt"]
+                  obj.instance_variable_set(:@updated_at, Parse::Date.parse(result["updatedAt"]))
+                elsif result["createdAt"]
+                  obj.instance_variable_set(:@updated_at, Parse::Date.parse(result["createdAt"]))
+                end
+
+                # Apply any additional attributes returned by beforeSave hooks
+                obj.set_attributes!(result) if obj.respond_to?(:set_attributes!)
+
+                # Clear change tracking since save was successful
+                obj.send(:clear_changes!) if obj.respond_to?(:clear_changes!, true)
+              end
+
+              return responses
+            else
+              # Find first error
+              error_response = responses.find { |r| !r.success? }
+              
+              # Rollback local object states
+              original_states.each do |obj, state|
+                obj.instance_variable_set(:@attributes, state[:attributes])
+                obj.instance_variable_set(:@changed_attributes, state[:changed_attributes])
+                obj.instance_variable_set(:@id, state[:id])
+                # Restore change tracking state
+                obj.instance_variable_set(:@mutations_from_database, state[:mutations_from_database])
+                obj.instance_variable_set(:@mutations_before_last_save, state[:mutations_before_last_save])
+              end
+              
+              raise Parse::Error, "Transaction failed: #{error_response.error}"
+            end
+            
+          rescue Parse::Error => e
+            # Retry on transaction conflict (error code 251)
+            if e.message.include?("251") && attempts < retries
+              sleep(0.1 * attempts) # Exponential backoff
+              retry
+            end
+            
+            # Rollback local object states on final failure
+            original_states.each do |obj, state|
+              obj.instance_variable_set(:@attributes, state[:attributes])
+              obj.instance_variable_set(:@changed_attributes, state[:changed_attributes])
+              obj.instance_variable_set(:@id, state[:id])
+              # Restore change tracking state
+              obj.instance_variable_set(:@mutations_from_database, state[:mutations_from_database])
+              obj.instance_variable_set(:@mutations_before_last_save, state[:mutations_before_last_save])
+            end
+            
+            raise e
+          end
+        end
         # @!attribute raise_on_save_failure
         # By default, we return `true` or `false` for save and destroy operations.
         # If you prefer to have `Parse::Object` raise an exception instead, you
@@ -145,7 +304,7 @@ module Parse
         #   Parse::User.first_or_create({ ..query conditions..})
         #   Parse::User.first_or_create({ ..query conditions..}, {.. resource_attrs ..})
         # @param query_attrs [Hash] a set of query constraints that also are applied.
-        # @param resource_attrs [Hash] a set of attribute values to be applied if an object was not found.
+        # @param resource_attrs [Hash] a set of additional attribute values to be applied only if an object was not found.
         # @return [Parse::Object] a Parse::Object, whether found by the query or newly created.
         def first_or_create(query_attrs = {}, resource_attrs = {})
           query_attrs = query_attrs.symbolize_keys
@@ -153,9 +312,11 @@ module Parse
           obj = query(query_attrs).first
 
           if obj.blank?
-            obj = self.new query_attrs
+            # Object not found, create new one with query_attrs + resource_attrs
+            merged_attrs = query_attrs.merge(resource_attrs)
+            obj = self.new merged_attrs
           end
-          obj.apply_attributes!(resource_attrs, dirty_track: true)
+          # If object exists, return it as-is without any modifications
           
           obj
         end
@@ -178,16 +339,37 @@ module Parse
         end
 
         # Finds the first object matching the query conditions and updates it with the attributes, 
-        # or creates a new *saved* object with the attributes. 
+        # or creates a new *saved* object with the attributes. Saves new objects or existing objects with changes.
         # @example
         #   Parse::User.create_or_update!({ ..query conditions..}, {.. resource_attrs ..})
         # @param query_attrs [Hash] a set of query constraints that also are applied.
-        # @param resource_attrs [Hash] a set of attribute values to be applied if an object was not found.
+        # @param resource_attrs [Hash] a set of attribute values to be applied to found objects or used for creation.
         # @return [Parse::Object] a Parse::Object, whether found by the query or newly created.
         # @raise {Parse::RecordNotSaved} if the save fails
         def create_or_update!(query_attrs = {}, resource_attrs = {})
-          obj = first_or_create(query_attrs, resource_attrs)
-          obj.save!
+          query_attrs = query_attrs.symbolize_keys
+          resource_attrs = resource_attrs.symbolize_keys
+          obj = query(query_attrs).first
+
+          if obj.blank?
+            # Object not found, create new one with query_attrs + resource_attrs
+            merged_attrs = query_attrs.merge(resource_attrs)
+            obj = self.new merged_attrs
+            obj.save!
+          else
+            # Object exists, apply resource_attrs and save if changes detected
+            unless resource_attrs.empty?
+              # Check if any attributes would actually change before applying
+              has_changes = resource_attrs.any? do |key, value|
+                obj.respond_to?(key) && obj.send(key) != value
+              end
+              if has_changes
+                obj.apply_attributes!(resource_attrs, dirty_track: true)
+                obj.save!
+              end
+            end
+          end
+          
           obj
         end
 
@@ -299,6 +481,10 @@ module Parse
           op_hash = { field => op_hash }.as_json
         end
 
+        # If the object hasn't been saved yet (no id), we can't make field operations
+        # Return true to indicate the operation was "successful" locally
+        return true if id.nil?
+
         response = client.update_object(parse_class, id, op_hash, session_token: _session_token)
         if response.error?
           puts "[#{parse_class}:#{field} Operation] #{response.error}"
@@ -339,7 +525,21 @@ module Parse
       # @return [Boolean] whether it was successful
       # @see #operate_field!
       def op_destroy!(field)
-        operate_field! field, { __op: :Delete }.freeze
+        result = operate_field! field, { __op: :Delete }.freeze
+        if result
+          # Also update the local state to reflect the deletion
+          field_sym = field.to_sym
+          if self.class.fields[field_sym].present?
+            set_attribute_method = "#{field}_set_attribute!"
+            if respond_to?(set_attribute_method)
+              send(set_attribute_method, nil, true) # Set to nil with dirty tracking
+            else
+              instance_variable_set(:"@#{field}", nil)
+              send("#{field}_will_change!") if respond_to?("#{field}_will_change!")
+            end
+          end
+        end
+        result
       end
 
       # Perform an atomic add operation on this relational field.
@@ -374,7 +574,20 @@ module Parse
         unless amount.is_a?(Numeric)
           raise ArgumentError, "Amount should be numeric"
         end
-        operate_field! field, { __op: :Increment, amount: amount.to_i }.freeze
+        result = operate_field! field, { __op: :Increment, amount: amount.to_i }.freeze
+        if result
+          # Also update the local state to reflect the increment
+          field_sym = field.to_sym
+          current_value = self[field_sym] || 0
+          new_value = current_value + amount.to_i
+          set_attribute_method = "#{field}_set_attribute!"
+          if respond_to?(set_attribute_method)
+            send(set_attribute_method, new_value, true) # Set new value with dirty tracking
+          else
+            self[field_sym] = new_value
+          end
+        end
+        result
       end
 
       # @return [Parse::Request] a destroy_request for the current object.
@@ -430,10 +643,19 @@ module Parse
       # Save the object regardless of whether there are changes. This would call
       # any beforeSave and afterSave cloud code hooks you have registered for this class.
       # @return [Boolean] true/false whether it was successful.
-      def update!(raw: false)
+      def update!(raw: false, force: false)
         if valid? == false
           errors.full_messages.each do |msg|
             warn "[#{parse_class}] warning: #{msg}"
+          end
+        end
+        if force == true && attribute_changes?.blank? && !new?
+          # if we are forcing an update, but there are no attribute changes,
+          # we should still mark the updated_at field as changed so that
+          # the server updates it.
+          if self.class.fields[:updated_at].present?
+            self.updated_at = Time.now.utc
+            self.updated_at_will_change! if respond_to?(:updated_at_will_change!)
           end
         end
         response = client.update_object(parse_class, id, attribute_updates, session_token: _session_token)
@@ -449,10 +671,23 @@ module Parse
       end
 
       # Save all the changes related to this object.
+      # @param force [Boolean] whether to send the update even if there are no changes.
       # @return [Boolean] true/false whether it was successful.
-      def update
-        return true unless attribute_changes?
-        update!
+      def update(force: false)
+        return true unless attribute_changes? || force
+        update!(force: force)
+      end
+
+      # Internal method to perform update with :update callbacks.
+      # Called from save() for existing objects.
+      # @param force [Boolean] whether to send the update even if there are no changes.
+      # @return [Boolean] true/false whether it was successful.
+      # @!visibility private
+      def perform_update(force: false)
+        return true unless attribute_changes? || force
+        run_callbacks :update do
+          update!(force: force)
+        end
       end
 
       # Save the object as a new record, running all callbacks.
@@ -497,21 +732,54 @@ module Parse
       # You may pass a session token to the `session` argument to perform this actions
       # with the privileges of a certain user.
       #
+      # Callback order:
+      # 1. before_validation / around_validation / after_validation
+      # 2. before_save / around_save
+      # 3. before_create or before_update / around_create or around_update
+      # 4. [actual save operation]
+      # 5. after_create or after_update
+      # 6. after_save
+      #
       # You can define before and after :save callbacks
       # autoraise: set to true will automatically raise an exception if the save fails
       # @raise {Parse::RecordNotSaved} if the save fails
       # @raise ArgumentError if a non-nil value is passed to `session` that doesn't provide a session token string.
       # @param session [String] a session token in order to apply ACLs to this operation.
       # @param autoraise [Boolean] whether to raise an exception if the save fails.
+      # @param force [Boolean] whether to run callbacks and send request even if there are no changes.
+      # @param validate [Boolean] whether to run validations (default: true).
       # @return [Boolean] whether the save was successful.
-      def save(session: nil, autoraise: false)
+      def save(session: nil, autoraise: false, force: false, validate: true)
+        # Prevent saving objects that have been fetched and found to be deleted
+        if _deleted?
+          error_msg = "Cannot save deleted object. Object with id '#{@id}' no longer exists on the server."
+          raise Parse::Error::ProtocolError, error_msg
+        end
+
         @_session_token = _validate_session_token! session, :save
-        return true unless changed?
+        return true unless changed? || force
+
+        # Run validations (validation callbacks are now triggered by valid? method)
+        if validate
+          validation_passed = valid?
+
+          unless validation_passed
+            if self.class.raise_on_save_failure || autoraise.present?
+              raise Parse::RecordNotSaved.new(self), "Validation failed: #{errors.full_messages.join(', ')}"
+            end
+            return false
+          end
+        end
+
         success = false
+
+        # Track if callbacks are halted by a before_save hook returning false
+        callback_executed = false
         run_callbacks :save do
+          callback_executed = true
           #first process the create/update action if any
           #then perform any relation changes that need to be performed
-          success = new? ? create : update
+          success = new? ? create : perform_update(force: force)
 
           # if the save was successful and we have relational changes
           # let's update send those next.
@@ -523,16 +791,22 @@ module Parse
               success = update_relations
               if success
                 changes_applied!
+                clear_partial_fetch_state!
               elsif self.class.raise_on_save_failure || autoraise.present?
                 raise Parse::RecordNotSaved.new(self), "Failed updating relations. #{self.parse_class} partially saved."
               end
             else
               changes_applied!
+              clear_partial_fetch_state!
             end
           elsif self.class.raise_on_save_failure || autoraise.present?
             raise Parse::RecordNotSaved.new(self), "Failed to create or save attributes. #{self.parse_class} was not saved."
           end
         end #callbacks
+
+        # If callbacks were halted (before_save returned false), return false
+        return false unless callback_executed
+
         @_session_token = nil
         success
       end
@@ -541,9 +815,17 @@ module Parse
       # @raise {Parse::RecordNotSaved} if the save fails
       # @raise ArgumentError if a non-nil value is passed to `session` that doesn't provide a session token string.
       # @param session (see #save)
+      # @param force (see #save)
       # @return (see #save)
-      def save!(session: nil)
-        save(autoraise: true, session: session)
+      def save!(session: nil, force: false)
+        save(autoraise: true, session: session, force: force)
+      end
+
+      # Returns true if this object has been fetched and found to be deleted from the server.
+      # Deleted objects cannot be saved.
+      # @return [Boolean] true if the object is marked as deleted
+      def _deleted?
+        @_deleted == true
       end
 
       # Delete this record from the Parse collection. Only valid if this object has an `id`.
@@ -572,7 +854,14 @@ module Parse
 
       # Runs all the registered `before_save` related callbacks.
       def prepare_save!
-        run_callbacks(:save) { false }
+        # With terminator configured, run_callbacks will return false if any callback returns false
+        # We track if the block executes to know if callbacks were halted
+        callback_success = false
+        run_callbacks(:save) do
+          callback_success = true
+          true
+        end
+        callback_success
       end
 
       # @return [Hash] a hash of the list of changes made to this instance.

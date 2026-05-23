@@ -238,6 +238,54 @@ module Parse
         return res.first fetch_count
       end
 
+      # Returns the most recently created object (ordered by created_at descending).
+      # @overload latest(count = 1)
+      #  @param count [Integer] The number of items to return.
+      #  @example
+      #   Object.latest(3) # => an array of the 3 most recently created objects.
+      #  @return [Parse::Object] if count == 1
+      #  @return [Array<Parse::Object>] if count > 1
+      # @overload latest(constraints = {})
+      #  @param constraints [Hash] a set of {Parse::Query} constraints.
+      #  @example
+      #   Object.latest(category: "news") # => most recent object in news category
+      #  @return [Parse::Object] the most recently created object matching constraints.
+      def latest(constraints = {})
+        fetch_count = 1
+        if constraints.is_a?(Numeric)
+          fetch_count = constraints.to_i
+          constraints = {}
+        end
+        constraints.merge!({ limit: fetch_count, order: :created_at.desc })
+        res = query(constraints).results
+        return res.first if fetch_count == 1
+        return res.first fetch_count
+      end
+
+      # Returns the most recently updated object (ordered by updated_at descending).
+      # @overload last_updated(count = 1)
+      #  @param count [Integer] The number of items to return.
+      #  @example
+      #   Object.last_updated(5) # => an array of the 5 most recently updated objects.
+      #  @return [Parse::Object] if count == 1
+      #  @return [Array<Parse::Object>] if count > 1
+      # @overload last_updated(constraints = {})
+      #  @param constraints [Hash] a set of {Parse::Query} constraints.
+      #  @example
+      #   Object.last_updated(status: "active") # => most recently updated active object
+      #  @return [Parse::Object] the most recently updated object matching constraints.
+      def last_updated(constraints = {})
+        fetch_count = 1
+        if constraints.is_a?(Numeric)
+          fetch_count = constraints.to_i
+          constraints = {}
+        end
+        constraints.merge!({ limit: fetch_count, order: :updated_at.desc })
+        res = query(constraints).results
+        return res.first if fetch_count == 1
+        return res.first fetch_count
+      end
+
       # Creates a count request which is more performant when counting objects.
       # @example
       #  # number of songs with a like count greater than 20.
@@ -247,6 +295,21 @@ module Parse
       # @see Parse::Query#count
       def count(constraints = {})
         query(constraints).count
+      end
+
+      # Counts the number of distinct values for a specified field.
+      # Uses MongoDB aggregation pipeline to efficiently count unique values.
+      # @example
+      #  # get count of unique genres for songs with play_count > 100
+      #  distinct_genres_count = Song.count_distinct(:genre, :play_count.gt => 100)
+      #  # get total number of unique users
+      #  unique_users = User.count_distinct(:objectId)
+      # @param field [Symbol|String] The name of the field to count distinct values for.
+      # @param constraints (see #all)
+      # @return [Integer] the number of distinct values
+      # @see Parse::Query#count_distinct
+      def count_distinct(field, constraints = {})
+        query(constraints).count_distinct(field)
       end
 
       # Finds the distinct values for a specified field across a single
@@ -282,21 +345,45 @@ module Parse
         _q
       end
 
-      # Find objects for a given objectId in this collection.The result is a list
+      # Create a cursor-based paginator for efficiently traversing large datasets.
+      # This is more efficient than skip/offset pagination for large result sets.
+      #
+      # @example Basic usage
+      #   cursor = Song.cursor(limit: 100, order: :created_at.desc)
+      #   cursor.each_page do |page|
+      #     process(page)
+      #   end
+      #
+      # @example With constraints
+      #   cursor = Song.cursor(artist: "Artist Name", limit: 50)
+      #   cursor.each { |song| puts song.title }
+      #
+      # @param constraints [Hash] query constraints to apply
+      # @param limit [Integer] number of items per page (default: 100)
+      # @param order [Symbol, Parse::Order] the ordering for pagination
+      # @return [Parse::Cursor] a cursor for paginating results
+      # @see Parse::Cursor
+      def cursor(constraints = {}, limit: 100, order: nil)
+        query(constraints).cursor(limit: limit, order: order)
+      end
+
+      # Find objects for a given objectId in this collection. The result is a list
       # (or single item) of the objects that were successfully found.
       # @example
       #  Object.find "<objectId>"
       #  Object.find "<objectId>", "<objectId>"....
       #  Object.find ["<objectId>", "<objectId>"]
+      #  Object.find "<objectId>", cache: false  # bypass cache
       # @param parse_ids [String] the objectId to find.
       # @param type [Symbol] the fetching methodology to use if more than one id was passed.
       #  - *:parallel* : Utilizes parrallel HTTP requests to fetch all objects requested.
       #  - *:batch* : This uses a batch fetch request using a contained_in clause.
       # @param compact [Boolean] whether to remove nil items from the returned array for objects
       #  that were not found.
+      # @param cache [Boolean] whether to use cache. Set to false to bypass cache entirely.
       # @return [Parse::Object] if only one id was provided as a parameter.
       # @return [Array<Parse::Object>] if more than one id was provided as a parameter.
-      def find(*parse_ids, type: :parallel, compact: true)
+      def find(*parse_ids, type: :parallel, compact: true, cache: true)
         # flatten the list of Object ids.
         parse_ids.flatten!
         parse_ids.compact!
@@ -304,9 +391,14 @@ module Parse
         as_array = parse_ids.count > 1
         results = []
 
+        # Extract cache option for client requests
+        client_opts = cache == false ? { cache: false } : {}
+
         if type == :batch
           # use a .in query with the given id as a list
-          results = self.class.all(:id.in => parse_ids)
+          query = self.class.query(:id.in => parse_ids)
+          query.cache = cache if cache == false
+          results = query.results
         else
           # use Parallel to make multiple threaded requests for finding these objects.
           # The benefit of using this as default is that each request goes to a specific URL
@@ -314,7 +406,7 @@ module Parse
           # individual objects.
           results = parse_ids.threaded_map do |parse_id|
             next nil unless parse_id.present?
-            response = client.fetch_object(parse_class, parse_id)
+            response = client.fetch_object(parse_class, parse_id, **client_opts)
             next nil if response.error?
             Parse::Object.build response.result, parse_class
           end

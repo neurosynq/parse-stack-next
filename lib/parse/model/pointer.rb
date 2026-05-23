@@ -5,7 +5,7 @@ require "active_model"
 require "active_support"
 require "active_support/inflector"
 require "active_support/core_ext"
-require "active_model_serializers"
+require "active_model/serializers/json"
 require_relative "model"
 
 module Parse
@@ -140,12 +140,97 @@ module Parse
 
     # This method is a general implementation that gets overriden by Parse::Object subclass.
     # Given the class name and the id, we will go to Parse and fetch the actual record, returning the
-    # JSON object.
-    # @return [Parse::Object] the fetched Parse::Object, nil otherwise.
-    def fetch
-      response = client.fetch_object(parse_class, id)
+    # Parse::Object by default.
+    # @overload fetch
+    #   Full fetch - fetches all fields
+    #   @return [Parse::Object] the fetched Parse::Object, nil otherwise.
+    # @overload fetch(return_object)
+    #   Legacy signature for backward compatibility.
+    #   @param return_object [Boolean] if true returns object, if false returns JSON
+    #   @return [Parse::Object, Hash] the object or raw JSON data
+    # @overload fetch(keys:, includes:)
+    #   Partial fetch - fetches only specified fields
+    #   @param keys [Array<Symbol, String>, nil] optional list of fields to fetch (partial fetch).
+    #   @param includes [Array<String>, nil] optional list of pointer fields to expand.
+    #   @return [Parse::Object] a partially fetched Parse::Object, nil otherwise.
+    def fetch(return_object = nil, keys: nil, includes: nil)
+      # Handle legacy signature: fetch(false) returns JSON
+      if return_object == false
+        return fetch_json(keys: keys, includes: includes)
+      end
+
+      # Build query parameters for partial fetch
+      query = {}
+      if keys.present?
+        keys_array = Array(keys).map { |k| Parse::Query.format_field(k) }
+        query[:keys] = keys_array.join(",")
+      end
+      if includes.present?
+        includes_array = Array(includes).map(&:to_s)
+        query[:include] = includes_array.join(",")
+      end
+
+      response = client.fetch_object(parse_class, id, query: query.presence)
+      return nil if response.error?
+
+      # Check if the result is empty - this indicates object not found
+      result = response.result
+      if result.nil? || (result.is_a?(Array) && result.empty?)
+        return nil
+      end
+
+      # Convert the JSON result to a proper Parse::Object
+      return nil unless result.is_a?(Hash)
+
+      # Try to find the appropriate Parse class, fallback to Parse::Object
+      klass = Parse::Model.find_class(parse_class) || Parse::Object
+
+      # For partial fetch, build with fetched_keys tracking
+      if keys.present?
+        # Parse keys to get top-level field names and nested keys
+        top_level_keys = Array(keys).map { |k| Parse::Query.format_field(k).split('.').first.to_sym }
+        top_level_keys << :id unless top_level_keys.include?(:id)
+        top_level_keys << :objectId unless top_level_keys.include?(:objectId)
+        top_level_keys.uniq!
+
+        # Parse dot notation into nested fetched keys
+        nested_keys = Parse::Query.parse_keys_to_nested_keys(Array(keys))
+
+        obj = klass.build(result, parse_class, fetched_keys: top_level_keys, nested_fetched_keys: nested_keys.presence)
+      else
+        # Full fetch - create without partial fetch tracking
+        obj = klass.new(result)
+      end
+
+      obj.clear_changes! if obj.respond_to?(:clear_changes!)
+      obj
+    end
+
+    # Returns raw JSON data from the server without creating an object.
+    # @param keys [Array<Symbol, String>, nil] optional list of fields to fetch.
+    # @param includes [Array<String>, nil] optional list of pointer fields to expand.
+    # @return [Hash, nil] the raw JSON data or nil if error.
+    def fetch_json(keys: nil, includes: nil)
+      query = {}
+      if keys.present?
+        keys_array = Array(keys).map { |k| Parse::Query.format_field(k) }
+        query[:keys] = keys_array.join(",")
+      end
+      if includes.present?
+        includes_array = Array(includes).map(&:to_s)
+        query[:include] = includes_array.join(",")
+      end
+
+      response = client.fetch_object(parse_class, id, query: query.presence)
       return nil if response.error?
       response.result
+    end
+
+    # Fetches the Parse object from the data store and returns a Parse::Object instance.
+    # This is a convenience method that calls fetch.
+    # @return [Parse::Object] the fetched Parse::Object, nil otherwise.
+    def fetch_object
+      fetch
     end
 
     # Two Parse::Pointers (or Parse::Objects) are equal if both of them have
@@ -159,15 +244,18 @@ module Parse
 
     alias_method :eql?, :==
 
-    # Compute a hash-code for this object. It is calculated
-    # by combining the Parse class name, the {Parse::Object#id} field and
-    # any pending changes.
+    # Compute a hash-code for this object based on identity (class and id).
+    # This is consistent with the == method which compares by parse_class and id.
     #
-    # Two objects with the same content will have the same hash code
-    # (and will compare using eql?).
-    # @return [Fixnum]
+    # Two objects with the same class and id will have the same hash code
+    # regardless of their dirty state or other attributes. This is important for:
+    # - Array operations (uniq, &, |) to work correctly based on identity
+    # - Hash key lookups to find objects by identity
+    # - Set operations
+    #
+    # @return [Integer] hash code based on class name and object id
     def hash
-      "#{parse_class}#{id}#{changes.to_s}".hash
+      [parse_class, id].hash
     end
 
     # @return [Boolean] true if instance has a Parse class and an id.
@@ -183,6 +271,66 @@ module Parse
     def [](key)
       return nil unless [:id, :objectId, :className].include?(key.to_sym)
       send(key)
+    end
+
+    # Handles method calls for properties that exist on the target model class.
+    # When a property is accessed on a Pointer, this will auto-fetch the object
+    # and delegate the method call to the fetched object.
+    #
+    # If Parse.autofetch_raise_on_missing_keys is enabled, this will raise
+    # Parse::AutofetchTriggeredError instead of fetching.
+    #
+    # @example
+    #   pointer = Post.pointer("abc123")
+    #   pointer.title  # auto-fetches and returns title
+    #
+    # @param method_name [Symbol] the method being called
+    # @param args [Array] arguments to the method
+    # @param block [Proc] optional block
+    # @return [Object] the result of calling the method on the fetched object
+    # @raise [Parse::AutofetchTriggeredError] if autofetch_raise_on_missing_keys is enabled
+    def method_missing(method_name, *args, &block)
+      # Try to find the model class for this pointer
+      klass = Parse::Model.find_class(parse_class)
+
+      # If no class is registered or the class doesn't have this field, use default behavior
+      unless klass && klass.respond_to?(:fields) && klass.fields[method_name.to_s.chomp('=').to_sym]
+        return super
+      end
+
+      # We have a registered class with this field - handle autofetch
+      field_name = method_name.to_s.chomp('=').to_sym
+
+      # If autofetch_raise_on_missing_keys is enabled, raise an error
+      if Parse.autofetch_raise_on_missing_keys
+        raise Parse::AutofetchTriggeredError.new(klass, id, field_name, is_pointer: true)
+      end
+
+      # Log info about autofetch being triggered
+      if Parse.warn_on_query_issues
+        puts "[Parse::Autofetch] Fetching #{parse_class}##{id} - pointer accessed field :#{field_name} (silence with Parse.warn_on_query_issues = false)"
+      end
+
+      # Fetch the object and delegate the method call
+      @_fetched_object ||= fetch
+      return nil unless @_fetched_object
+
+      @_fetched_object.send(method_name, *args, &block)
+    end
+
+    # Indicates whether this object responds to methods that would trigger autofetch.
+    # Returns true for properties defined on the target model class.
+    #
+    # @param method_name [Symbol] the method name to check
+    # @param include_private [Boolean] whether to include private methods
+    # @return [Boolean] true if the method can be handled
+    def respond_to_missing?(method_name, include_private = false)
+      klass = Parse::Model.find_class(parse_class)
+      if klass && klass.respond_to?(:fields)
+        field_name = method_name.to_s.chomp('=').to_sym
+        return true if klass.fields[field_name]
+      end
+      super
     end
 
     # Set the pointer properties through hash accessor. This is done for

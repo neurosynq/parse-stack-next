@@ -7,7 +7,7 @@ require "active_support/inflector"
 require "active_support/core_ext"
 require "active_support/core_ext/object"
 require "active_support/core_ext/string"
-require "active_model_serializers"
+require "active_model/serializers/json"
 require "time"
 require "open-uri"
 
@@ -28,6 +28,8 @@ require_relative "core/schema"
 require_relative "core/properties"
 require_relative "core/errors"
 require_relative "core/builder"
+require_relative "core/enhanced_change_tracking"
+require_relative "validations"
 require_relative "associations/has_one"
 require_relative "associations/belongs_to"
 require_relative "associations/has_many"
@@ -127,6 +129,7 @@ module Parse
   # @see Associations::HasMany
   class Object < Pointer
     include Properties
+    include Core::EnhancedChangeTracking
     include Associations::HasOne
     include Associations::BelongsTo
     include Associations::HasMany
@@ -143,12 +146,40 @@ module Parse
     # Default ActiveModel::Callbacks
     # @!group Callbacks
     #
+    # @!method before_validation
+    #   A callback called before validations are run.
+    #   @yield A block to execute for the callback.
+    #   @see ActiveModel::Callbacks
+    # @!method after_validation
+    #   A callback called after validations are run.
+    #   @yield A block to execute for the callback.
+    #   @see ActiveModel::Callbacks
+    # @!method around_validation
+    #   A callback called around validations.
+    #   @yield A block to execute for the callback.
+    #   @see ActiveModel::Callbacks
     # @!method before_create
     #   A callback called before the object has been created.
     #   @yield A block to execute for the callback.
     #   @see ActiveModel::Callbacks
     # @!method after_create
     #   A callback called after the object has been created.
+    #   @yield A block to execute for the callback.
+    #   @see ActiveModel::Callbacks
+    # @!method around_create
+    #   A callback called around object creation.
+    #   @yield A block to execute for the callback.
+    #   @see ActiveModel::Callbacks
+    # @!method before_update
+    #   A callback called before the object is updated (not on create).
+    #   @yield A block to execute for the callback.
+    #   @see ActiveModel::Callbacks
+    # @!method after_update
+    #   A callback called after the object has been updated.
+    #   @yield A block to execute for the callback.
+    #   @see ActiveModel::Callbacks
+    # @!method around_update
+    #   A callback called around object update.
     #   @yield A block to execute for the callback.
     #   @see ActiveModel::Callbacks
     # @!method before_save
@@ -161,6 +192,10 @@ module Parse
     #   @note This is not related to a Parse afterSave webhook trigger.
     #   @yield A block to execute for the callback.
     #   @see ActiveModel::Callbacks
+    # @!method around_save
+    #   A callback called around object save.
+    #   @yield A block to execute for the callback.
+    #   @see ActiveModel::Callbacks
     # @!method before_destroy
     #   A callback called before the object is about to be deleted.
     #   @note This is not related to a Parse beforeDelete webhook trigger.
@@ -171,8 +206,19 @@ module Parse
     #   @note This is not related to a Parse afterDelete webhook trigger.
     #   @yield A block to execute for the callback.
     #   @see ActiveModel::Callbacks
+    # @!method around_destroy
+    #   A callback called around object destruction.
+    #   @yield A block to execute for the callback.
+    #   @see ActiveModel::Callbacks
     # @!endgroup
-    define_model_callbacks :create, :save, :destroy, only: [:after, :before]
+
+    # Define all model callbacks with :before, :after, and :around support
+    # :validation - runs before/after/around validations
+    # :create - runs before/after/around creating a new object
+    # :update - runs before/after/around updating an existing object
+    # :save - runs before/after/around both create and update
+    # :destroy - runs before/after/around deleting an object
+    define_model_callbacks :validation, :create, :update, :save, :destroy, terminator: ->(target, result_lambda) { result_lambda.call == false }
 
     attr_accessor :created_at, :updated_at, :acl
 
@@ -268,11 +314,58 @@ module Parse
     end
 
     # @return [Hash] a json-hash representing this object.
+    # @param opts [Hash] options for serialization
+    # @option opts [Boolean] :only_fetched when true (or when Parse.serialize_only_fetched_fields
+    #   is true and this option is not explicitly set to false), only serialize fields that
+    #   were fetched for partially fetched objects. This prevents autofetch during serialization.
+    # @option opts [Array<Symbol,String>] :only limit serialization to these fields
+    # @option opts [Array<Symbol,String>] :except exclude these fields from serialization
     def as_json(opts = nil)
-      return pointer if pointer?
+      opts ||= {}
+
+      # For selectively fetched objects (partial fetch), serialize only the fetched fields.
+      # This takes priority over pointer detection because a partial fetch has actual data
+      # even if it lacks timestamps (which would otherwise make it look like a pointer).
+      # This behavior is controlled by:
+      # 1. Per-call: opts[:only_fetched] (explicit true/false)
+      # 2. Global: Parse.serialize_only_fetched_fields (default true)
+      if has_selective_keys?
+        # Determine if we should serialize only fetched fields
+        only_fetched = opts.fetch(:only_fetched) { Parse.serialize_only_fetched_fields }
+
+        if only_fetched && !opts.key?(:only)
+          # Build the :only list from fetched keys
+          # Use the local field names which match the attribute methods
+          only_keys = fetched_keys.map(&:to_s)
+          # Always include Parse metadata fields for proper object identification
+          only_keys |= %w[id objectId __type className created_at updated_at]
+          opts = opts.merge(only: only_keys)
+        end
+
+        changed_fields = changed_attributes
+        return super(opts).delete_if { |k, v| v.nil? && !changed_fields.has_key?(k) }
+      end
+
+      # When in pointer state (no data fetched, just an objectId), return the serialized
+      # pointer hash (with __type, className, objectId) for proper JSON serialization
+      return pointer.as_json(opts) if pointer?
+
       changed_fields = changed_attributes
-      super(opts || {}).delete_if { |k, v| v.nil? && !changed_fields.has_key?(k) }
+      super(opts).delete_if { |k, v| v.nil? && !changed_fields.has_key?(k) }
     end
+
+    private
+
+    # Override to return string keys for compatibility with ActiveModel's serialization.
+    # ActiveModel::Serialization#serializable_hash uses string comparison for :only/:except
+    # options, but our attributes method returns symbol keys.
+    # @return [Array<String>] attribute names as strings
+    # @!visibility private
+    def attribute_names_for_serialization
+      attributes.keys.map(&:to_s)
+    end
+
+    public
 
     # The main constructor for subclasses. It can take different parameter types
     # including a String and a JSON hash. Assume a `Post` class that inherits
@@ -309,11 +402,16 @@ module Parse
       # ACL.typecast will auto convert of Parse::ACL
       self.acl = self.class.default_acls.as_json if self.acl.nil?
 
-      clear_changes! if @id.present? #then it was an import
-
       # do not apply defaults on a pointer because it will stop it from being
-      # a pointer and will cause its field to be autofetched (for sync)
-      apply_defaults! unless pointer?
+      # a pointer and will cause its field to be autofetched (for sync).
+      # Note: apply_defaults! already skips unfetched fields on selectively fetched objects.
+      if !pointer?
+        apply_defaults!
+      end
+
+      # clear changes AFTER applying defaults, so fields set by defaults
+      # are not marked dirty when fetching with specific keys
+      clear_changes! if @id.present? #then it was an import
       # do not call super since it is Pointer subclass
     end
 
@@ -321,6 +419,10 @@ module Parse
     # @return [Array] list of default fields
     def apply_defaults!
       self.class.defaults_list.each do |key|
+        # Skip applying defaults to unfetched fields on selectively fetched objects.
+        # This preserves the ability to autofetch when the field is accessed.
+        next if has_selective_keys? && !field_was_fetched?(key)
+
         send(key) # should call set default proc/values if nil
       end
     end
@@ -342,11 +444,11 @@ module Parse
 
     # force reload from the database and replace any local fields with data from
     # the persistent store
-    # @param opts [Hash] a set of options to send to fetch!
+    # @param opts [Hash] a set of options to send to fetch! (e.g., cache: false)
     # @see Fetching#fetch!
-    def reload!(opts = {})
+    def reload!(**opts)
       # get the values from the persistence layer
-      fetch!(opts)
+      fetch!(**opts)
       clear_changes!
     end
 
@@ -360,6 +462,18 @@ module Parse
     # @return [Boolean] true if the object has no id.
     def new?
       @id.blank?
+    end
+
+    # Override valid? to run validation callbacks.
+    # This wraps the standard ActiveModel validation with our custom :validation callbacks.
+    # @param context [Symbol, nil] validation context (same as ActiveModel)
+    # @return [Boolean] true if the object passes all validations
+    def valid?(context = nil)
+      result = true
+      run_callbacks :validation do
+        result = super(context)
+      end
+      result
     end
 
     # Existed returns true if the object had existed before *its last save
@@ -379,6 +493,157 @@ module Parse
       end
       created_at != updated_at
     end
+
+    # Returns whether this object was fetched with specific keys (selective fetch).
+    # When selectively fetched, accessing unfetched fields will trigger an autofetch.
+    # This is an internal method used for autofetch logic.
+    # @return [Boolean] true if the object was fetched with specific keys.
+    # @api private
+    def has_selective_keys?
+      @_fetched_keys&.any? || false
+    end
+
+    # Returns whether this object was fetched with specific keys (partial/selective fetch).
+    # When partially fetched, only the specified keys are available and accessing other
+    # fields will trigger an autofetch. Returns false for pointers and fully fetched objects.
+    # @return [Boolean] true if the object was fetched with specific keys.
+    def partially_fetched?
+      !pointer? && has_selective_keys?
+    end
+
+    # Returns whether this object is fully fetched with all fields available.
+    # Returns false if the object is a pointer or was fetched with specific keys.
+    # @return [Boolean] true if the object is fully fetched.
+    def fully_fetched?
+      !pointer? && !has_selective_keys?
+    end
+
+    # Returns whether this object has been fetched from the server (fully or partially).
+    # Overrides Pointer#fetched? to return true for any object with data.
+    # @return [Boolean] true if the object has data (not just a pointer).
+    def fetched?
+      !pointer?
+    end
+
+    # Returns the array of keys that were fetched for this object.
+    # Empty array means the object was fully fetched.
+    # Returns a frozen duplicate to prevent external mutation.
+    # @return [Array<Symbol>] the keys that were fetched.
+    def fetched_keys
+      (@_fetched_keys || []).dup.freeze
+    end
+
+    # Disables autofetch for this object instance.
+    # Useful for preventing automatic network requests.
+    # @return [void]
+    def disable_autofetch!
+      @_autofetch_disabled = true
+    end
+
+    # Enables autofetch for this object instance (default behavior).
+    # @return [void]
+    def enable_autofetch!
+      @_autofetch_disabled = false
+    end
+
+    # Returns whether autofetch is disabled for this instance.
+    # @return [Boolean] true if autofetch is disabled
+    def autofetch_disabled?
+      @_autofetch_disabled == true
+    end
+
+    # Sets the fetched keys for this object. Used internally when building
+    # objects from partial fetch queries.
+    # @param keys [Array] the keys that were fetched
+    # @return [Array] the stored keys
+    def fetched_keys=(keys)
+      if keys.nil? || keys.empty?
+        @_fetched_keys = nil
+      else
+        # Always include :id and convert to symbols
+        @_fetched_keys = keys.map { |k| Parse::Query.format_field(k).to_sym }
+        @_fetched_keys << :id unless @_fetched_keys.include?(:id)
+        @_fetched_keys << :objectId unless @_fetched_keys.include?(:objectId)
+        @_fetched_keys.uniq!
+      end
+      @_fetched_keys
+    end
+
+    # Returns whether a specific field was fetched for this object.
+    # Base keys (id, created_at, updated_at) are always considered fetched.
+    # @param key [Symbol, String] the field name to check
+    # @return [Boolean] true if the field was fetched or if object is fully fetched.
+    def field_was_fetched?(key)
+      # If not partially fetched (i.e., still a pointer), all fields are NOT fetched
+      return false if pointer?
+
+      # If no selective keys were specified, this is a fully fetched object
+      # All fields are considered fetched
+      return true unless has_selective_keys?
+
+      key = key.to_sym
+      # Base keys are always considered fetched
+      return true if Parse::Properties::BASE_KEYS.include?(key)
+      return true if key == :acl || key == :ACL
+
+      # Check both local key and remote field name
+      # Convert remote_key to symbol for consistent comparison
+      remote_key = self.field_map[key]&.to_sym
+      @_fetched_keys.include?(key) || (remote_key && @_fetched_keys.include?(remote_key))
+    end
+
+    # Returns the nested fetched keys map for building nested objects.
+    # @return [Hash] map of field names to their fetched keys
+    def nested_fetched_keys
+      @_nested_fetched_keys || {}
+    end
+
+    # Sets the nested fetched keys map for building nested objects.
+    # @param keys_map [Hash] map of field names to their fetched keys
+    # @return [Hash] the stored map
+    def nested_fetched_keys=(keys_map)
+      @_nested_fetched_keys = keys_map.is_a?(Hash) ? keys_map : nil
+    end
+
+    # Gets the fetched keys for a specific nested field.
+    # @param field_name [Symbol, String] the field name
+    # @return [Array, nil] the fetched keys for the nested object, or nil if not specified
+    def nested_keys_for(field_name)
+      return nil unless @_nested_fetched_keys.present?
+      field_name = field_name.to_sym
+      @_nested_fetched_keys[field_name]
+    end
+
+    # Clears all partial fetch tracking state.
+    # Called after successful save since server returns updated object.
+    # @return [void]
+    def clear_partial_fetch_state!
+      @_fetched_keys = nil
+      @_nested_fetched_keys = nil
+    end
+
+    # Run after_create callbacks for this object.
+    # This method is called by webhook handlers when an object is created.
+    # @return [Boolean] true if callbacks executed successfully
+    def run_after_create_callbacks
+      run_callbacks_from_list(self.class._create_callbacks, :after)
+    end
+
+    # Run after_save callbacks for this object.
+    # This method is called by webhook handlers when an object is saved.
+    # @return [Boolean] true if callbacks executed successfully
+    def run_after_save_callbacks
+      run_callbacks_from_list(self.class._save_callbacks, :after)
+    end
+
+    # Run after_destroy callbacks for this object.
+    # This method is called by webhook handlers when an object is deleted.
+    # @return [Boolean] true if callbacks executed successfully
+    def run_after_delete_callbacks
+      run_callbacks_from_list(self.class._destroy_callbacks, :after)
+    end
+
+   
 
     # Returns a hash of all the changes that have been made to the object. By default
     # changes to the Parse::Properties::BASE_KEYS are ignored unless you pass true as
@@ -460,8 +725,10 @@ module Parse
     #   post = Post.build({"title" => "My Title"})
     # @param json [Hash] a JSON hash that contains a Parse object.
     # @param table [String] the Parse class for this hash. If not passed it will be detected.
+    # @param fetched_keys [Array] optional array of keys that were fetched (for partial fetch tracking).
+    # @param nested_fetched_keys [Hash] optional map of field names to their fetched keys for nested objects.
     # @return [Parse::Object] an instance of the Parse subclass
-    def self.build(json, table = nil)
+    def self.build(json, table = nil, fetched_keys: nil, nested_fetched_keys: nil)
       className = table
       className ||= (json[Parse::Model::KEY_CLASS_NAME] || json[:className]) if json.is_a?(Hash)
       if json.is_a?(Hash) && json["error"].present? && json["code"].present?
@@ -476,7 +743,21 @@ module Parse
       if klass.present?
         # when creating objects from Parse JSON data, don't use dirty tracking since
         # we are considering these objects as "pristine"
-        o = klass.new(json)
+        o = klass.allocate
+
+        # Set BOTH nested_fetched_keys AND fetched_keys BEFORE initialize
+        # to ensure partially_fetched? returns correct value during attribute application
+        o.instance_variable_set(:@_nested_fetched_keys, nested_fetched_keys) if nested_fetched_keys.present?
+        if fetched_keys.present?
+          # Process fetched_keys like the setter does - convert to symbols and include :id
+          processed_keys = fetched_keys.map { |k| Parse::Query.format_field(k).to_sym }
+          processed_keys << :id unless processed_keys.include?(:id)
+          processed_keys << :objectId unless processed_keys.include?(:objectId)
+          processed_keys.uniq!
+          o.instance_variable_set(:@_fetched_keys, processed_keys)
+        end
+
+        o.send(:initialize, json)
       else
         o = Parse::Pointer.new className, (json[Parse::Model::OBJECT_ID] || json[:objectId])
       end
@@ -523,6 +804,41 @@ module Parse
       return unless self.class.fields[key.to_sym].present?
       send("#{key}=", value)
     end
+
+    # Returns an array of property names (keys) for this Parse::Object.
+    # Similar to Hash#keys, this method returns all the defined field names
+    # for this object's class.
+    # @return [Array<String>] an array of property names as strings.
+    def keys
+      self.class.fields.keys.map(&:to_s)
+    end
+
+    # Check if a field has a value (is present and not nil).
+    # @param key [String, Symbol] the name of the field to check.
+    # @return [Boolean] true if the field has a non-nil value, false otherwise.
+    def has?(key)
+      return false unless self.class.fields[key.to_sym].present?
+      value = send(key)
+      !value.nil?
+    end
+
+    private
+
+    # Helper to run a set of callbacks of a certain kind (e.g., :after)
+    def run_callbacks_from_list(callbacks, kind)
+      callbacks.select { |cb| cb.kind == kind }.each do |callback|
+        # 'filter' can be a Symbol (method name), String (code), or Proc.
+        case callback.filter
+        when Symbol
+          send(callback.filter)
+        when Proc
+          instance_exec(&callback.filter)
+        when String
+          instance_eval(callback.filter)
+        end
+      end
+      true
+    end
   end
 end
 
@@ -541,7 +857,7 @@ end
 class Array
   # This helper method selects or converts all objects in an array that are either inherit from
   # Parse::Pointer or are a JSON Parse hash. If it is a hash, a Pare::Object will be built from it
-  # if it constains the proper fields. Non-convertible objects will be removed.
+  # if it constrains the proper fields. Non-convertible objects will be removed.
   # If the className is not contained or known, you can pass a table name as an argument
   # @param className [String] the name of the Parse class if it could not be detected.
   # @return [Array<Parse::Object>] an array of Parse::Object subclasses.
