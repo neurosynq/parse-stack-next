@@ -89,11 +89,12 @@ module Parse
 
       if size > MAX_PAGE_SIZE
         raise ArgumentError, "Page size #{size} exceeds maximum allowed (#{MAX_PAGE_SIZE}). " \
-                            "Parse Server limits queries to #{MAX_PAGE_SIZE} results."
+              "Parse Server limits queries to #{MAX_PAGE_SIZE} results."
       end
 
       size
     end
+
     private :validate_page_size
 
     # Check if more pages are available.
@@ -192,7 +193,7 @@ module Parse
         exhausted: @exhausted,
         position: @position,
         order_field: @order_field,
-        order_direction: @order_direction
+        order_direction: @order_direction,
       }
     end
 
@@ -212,7 +213,7 @@ module Parse
     #
     # @return [String] JSON string containing cursor state
     def serialize
-      require 'json'
+      require "json"
       state = {
         class_name: @query.table,
         constraints: @query.constraints(true),
@@ -225,7 +226,7 @@ module Parse
         exhausted: @exhausted,
         order_field: @order_field,
         order_direction: @order_direction,
-        version: 1  # For future compatibility
+        version: 1,  # For future compatibility
       }
       JSON.generate(state)
     end
@@ -246,14 +247,14 @@ module Parse
     #   cursor = Parse::Cursor.deserialize(saved_state)
     #   cursor.each_page { |page| process(page) }
     def self.deserialize(json_string)
-      require 'json'
+      require "json"
       state = JSON.parse(json_string, symbolize_names: true)
 
       # Validate required fields
       required = [:class_name, :page_size, :order_field, :order_direction]
       missing = required.select { |f| state[f].nil? }
       unless missing.empty?
-        raise ArgumentError, "Invalid cursor state: missing #{missing.join(', ')}"
+        raise ArgumentError, "Invalid cursor state: missing #{missing.join(", ")}"
       end
 
       # Get the model class
@@ -296,9 +297,9 @@ module Parse
     def serialize_value(value)
       case value
       when DateTime, Time
-        { '__type' => 'Date', 'iso' => value.utc.iso8601(3) }
+        { "__type" => "Date", "iso" => value.utc.iso8601(3) }
       when Date
-        { '__type' => 'Date', 'iso' => value.to_datetime.utc.iso8601(3) }
+        { "__type" => "Date", "iso" => value.to_datetime.utc.iso8601(3) }
       else
         value
       end
@@ -306,8 +307,8 @@ module Parse
 
     # Deserialize a value from JSON storage
     def self.deserialize_value(value)
-      return value unless value.is_a?(Hash) && value['__type'] == 'Date'
-      DateTime.parse(value['iso'])
+      return value unless value.is_a?(Hash) && value["__type"] == "Date"
+      DateTime.parse(value["iso"])
     end
 
     # Set up the ordering for cursor pagination.
@@ -371,14 +372,14 @@ module Parse
         clause1 = { formatted_field => { "$lt" => format_cursor_value(@last_order_value) } }
         clause2 = {
           formatted_field => format_cursor_value(@last_order_value),
-          "objectId" => { "$lt" => @last_object_id }
+          "objectId" => { "$lt" => @last_object_id },
         }
       else
         # Ascending: (field > last_value) OR (field = last_value AND objectId > last_id)
         clause1 = { formatted_field => { "$gt" => format_cursor_value(@last_order_value) } }
         clause2 = {
           formatted_field => format_cursor_value(@last_order_value),
-          "objectId" => { "$gt" => @last_object_id }
+          "objectId" => { "$gt" => @last_object_id },
         }
       end
 

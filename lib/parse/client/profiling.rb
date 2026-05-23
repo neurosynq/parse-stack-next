@@ -81,7 +81,7 @@ module Parse
             min_ms: durations.min,
             max_ms: durations.max,
             by_method: profiles.group_by { |p| p[:method] }.transform_values(&:size),
-            by_status: profiles.group_by { |p| p[:status] }.transform_values(&:size)
+            by_status: profiles.group_by { |p| p[:status] }.transform_values(&:size),
           }
         end
       end
@@ -110,7 +110,7 @@ module Parse
             started_at: start_time.iso8601(3),
             completed_at: end_time.iso8601(3),
             request_size: env[:body].to_s.bytesize,
-            response_size: response_body_size(response_env)
+            response_size: response_body_size(response_env),
           }
 
           self.class.add_profile(profile)

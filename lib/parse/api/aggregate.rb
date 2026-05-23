@@ -28,7 +28,6 @@ module Parse
         # @return [String] the API uri path
         def aggregate_uri_path(className)
           if className.is_a?(Parse::Pointer)
-            id = className.id
             className = className.parse_class
           end
           "#{PATH_PREFIX}#{className}"

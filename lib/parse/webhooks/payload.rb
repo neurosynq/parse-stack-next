@@ -74,7 +74,7 @@ module Parse
       # provided to you when using Parse::Webhooks.
       # @see Parse::Webhooks
       def initialize(hash = {})
-        hash = JSON.parse(hash) if hash.is_a?(String)
+        hash = JSON.parse(hash, max_nesting: 20) if hash.is_a?(String)
         hash = Hash[hash.map { |k, v| [k.to_s.underscore.to_sym, v] }]
         @raw = hash
         @master = hash[:master]
@@ -130,7 +130,8 @@ module Parse
       def parse_id
         return nil unless @object.present?
         @object[Parse::Model::OBJECT_ID] || @object[:objectId]
-      end; 
+      end
+
       alias_method :objectId, :parse_id
 
       # true if this is a webhook trigger request.
@@ -252,28 +253,28 @@ module Parse
       # @return [Boolean] true if the request originated from Ruby Parse Stack
       def ruby_initiated?
         @ruby_initiated ||= begin
-          request_id = nil
-          
-          if @raw.respond_to?(:[])
-            # Check for headers at the top level first
-            request_id = @raw['x-parse-request-id'] || @raw['X-Parse-Request-Id'] ||
-                        @raw[:x_parse_request_id] || @raw[:'X-Parse-Request-Id']
-            
-            # If not found at top level, check nested headers
-            if request_id.nil?
-              headers_sym = @raw[:headers] if @raw[:headers].is_a?(Hash)
-              headers_str = @raw['headers'] if @raw['headers'].is_a?(Hash)
-              
-              if headers_sym
-                request_id = headers_sym['x-parse-request-id'] || headers_sym['X-Parse-Request-Id']
-              elsif headers_str
-                request_id = headers_str['x-parse-request-id'] || headers_str['X-Parse-Request-Id']
+            request_id = nil
+
+            if @raw.respond_to?(:[])
+              # Check for headers at the top level first
+              request_id = @raw["x-parse-request-id"] || @raw["X-Parse-Request-Id"] ||
+                           @raw[:x_parse_request_id] || @raw[:'X-Parse-Request-Id']
+
+              # If not found at top level, check nested headers
+              if request_id.nil?
+                headers_sym = @raw[:headers] if @raw[:headers].is_a?(Hash)
+                headers_str = @raw["headers"] if @raw["headers"].is_a?(Hash)
+
+                if headers_sym
+                  request_id = headers_sym["x-parse-request-id"] || headers_sym["X-Parse-Request-Id"]
+                elsif headers_str
+                  request_id = headers_str["x-parse-request-id"] || headers_str["X-Parse-Request-Id"]
+                end
               end
             end
+
+            request_id&.start_with?("_RB_") || false
           end
-          
-          request_id&.start_with?('_RB_') || false
-        end
       end
 
       # Returns true if this webhook was triggered by a client request (JavaScript, iOS, Android, etc.)

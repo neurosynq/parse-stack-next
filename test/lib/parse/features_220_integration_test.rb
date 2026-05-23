@@ -1,9 +1,9 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-require_relative '../../test_helper'
-require_relative '../../test_helper_integration'
-require 'minitest/autorun'
+require_relative "../../test_helper"
+require_relative "../../test_helper_integration"
+require "minitest/autorun"
 
 # Test model for validation callbacks
 class ValidationCallbackTestModel < Parse::Object
@@ -84,7 +84,7 @@ class UniquenessTestModel < Parse::Object
   property :email, :string
   property :username, :string
   property :code, :string
-  belongs_to :organization, class_name: 'TestOrganization'
+  belongs_to :organization, class_name: "TestOrganization"
 
   validates :email, uniqueness: true
   validates :username, uniqueness: { case_sensitive: false }
@@ -144,7 +144,7 @@ class Features220IntegrationTest < Minitest::Test
     UpdateCallbackTestModel,
     UniquenessTestModel,
     TestOrganization,
-    AroundCallbackTestModel
+    AroundCallbackTestModel,
   ].freeze
 
   def teardown
@@ -179,13 +179,13 @@ class Features220IntegrationTest < Minitest::Test
   # ============================================
 
   def test_validation_callbacks_are_called
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "validation callbacks test") do
         model = ValidationCallbackTestModel.new(
           name: "Test",
-          email: "test@example.com"
+          email: "test@example.com",
         )
 
         assert model.valid?, "Model should be valid"
@@ -200,13 +200,13 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_validation_callback_order
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "validation callback order test") do
         model = ValidationCallbackTestModel.new(
           name: "Test",
-          email: "test@example.com"
+          email: "test@example.com",
         )
 
         # Validation callbacks are triggered during save, not just valid?
@@ -218,25 +218,25 @@ class Features220IntegrationTest < Minitest::Test
           :before_validation,
           :around_validation_before,
           :around_validation_after,
-          :after_validation
+          :after_validation,
         ]
 
         assert_equal expected_order, model.validation_order,
           "Validation callbacks should run in correct order during save"
 
-        puts "Validation callback order: #{model.validation_order.join(' -> ')}"
+        puts "Validation callback order: #{model.validation_order.join(" -> ")}"
       end
     end
   end
 
   def test_validation_callbacks_run_before_save
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "validation callbacks run before save test") do
         model = ValidationCallbackTestModel.new(
           name: "Test",
-          email: "test@example.com"
+          email: "test@example.com",
         )
 
         # Reset tracking
@@ -253,13 +253,13 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_save_fails_when_validation_fails
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "save fails on validation failure test") do
         model = ValidationCallbackTestModel.new(
           name: nil,  # Missing required field
-          email: "test@example.com"
+          email: "test@example.com",
         )
 
         refute model.save, "Model should not save with invalid data"
@@ -275,7 +275,7 @@ class Features220IntegrationTest < Minitest::Test
   # ============================================
 
   def test_update_callbacks_on_existing_record
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "update callbacks test") do
@@ -303,20 +303,20 @@ class Features220IntegrationTest < Minitest::Test
           :before_update,
           :around_update_before,
           :around_update_after,
-          :after_update
+          :after_update,
         ]
 
         assert_equal expected_order, model.update_order,
           "Update callbacks should run in correct order"
 
         puts "Update callbacks work correctly on existing records"
-        puts "  Update order: #{model.update_order.join(' -> ')}"
+        puts "  Update order: #{model.update_order.join(" -> ")}"
       end
     end
   end
 
   def test_update_callbacks_not_called_on_create
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "update callbacks not called on create test") do
@@ -337,7 +337,7 @@ class Features220IntegrationTest < Minitest::Test
   # ============================================
 
   def test_around_save_callback
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "around_save callback test") do
@@ -349,13 +349,13 @@ class Features220IntegrationTest < Minitest::Test
         assert model.callback_order.include?(:around_save_after), "Should have around_save_after"
 
         puts "around_save callback works correctly"
-        puts "  Callback order: #{model.callback_order.join(' -> ')}"
+        puts "  Callback order: #{model.callback_order.join(" -> ")}"
       end
     end
   end
 
   def test_around_create_callback
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "around_create callback test") do
@@ -372,7 +372,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_around_destroy_callback
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "around_destroy callback test") do
@@ -397,7 +397,7 @@ class Features220IntegrationTest < Minitest::Test
   # ============================================
 
   def test_uniqueness_validation_basic
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "basic uniqueness validation test") do
@@ -417,7 +417,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_uniqueness_validation_case_insensitive
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "case-insensitive uniqueness validation test") do
@@ -445,7 +445,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_uniqueness_validation_scoped
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "scoped uniqueness validation test") do
@@ -476,7 +476,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_uniqueness_validation_excludes_self_on_update
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "uniqueness excludes self test") do
@@ -499,7 +499,7 @@ class Features220IntegrationTest < Minitest::Test
   # ============================================
 
   def test_profiling_can_be_enabled
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "profiling enable test") do
@@ -520,7 +520,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_profiling_captures_requests
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "profiling captures requests test") do
@@ -556,7 +556,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_profiling_statistics
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "profiling statistics test") do
@@ -594,7 +594,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_profiling_callbacks
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "profiling callbacks test") do
@@ -626,7 +626,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_profiling_url_sanitization
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "profiling URL sanitization test") do
@@ -657,7 +657,7 @@ class Features220IntegrationTest < Minitest::Test
   # ============================================
 
   def test_query_explain
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "query explain test") do
@@ -676,13 +676,13 @@ class Features220IntegrationTest < Minitest::Test
         # The exact structure depends on MongoDB version, but it should have content
         # Parse Server returns the raw MongoDB explain output
         puts "Query explain works correctly"
-        puts "  Explain result keys: #{explain.keys.join(', ')}" if explain.keys.any?
+        puts "  Explain result keys: #{explain.keys.join(", ")}" if explain.keys.any?
       end
     end
   end
 
   def test_query_explain_with_complex_query
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "complex query explain test") do
@@ -691,7 +691,7 @@ class Features220IntegrationTest < Minitest::Test
           model = ValidationCallbackTestModel.new(
             name: "Complex Test #{i}",
             email: "complex#{i}@example.com",
-            status: i.even? ? "active" : "inactive"
+            status: i.even? ? "active" : "inactive",
           )
           model.save
         end
@@ -699,7 +699,7 @@ class Features220IntegrationTest < Minitest::Test
         # Complex query with multiple conditions
         explain = ValidationCallbackTestModel.query(
           :name.starts_with => "Complex",
-          :status => "active"
+          :status => "active",
         ).order(:createdAt.desc).explain
 
         assert explain.is_a?(Hash), "Complex query explain should return a Hash"
@@ -714,7 +714,7 @@ class Features220IntegrationTest < Minitest::Test
   # ============================================
 
   def test_cursor_basic_pagination
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(30, "cursor basic pagination test") do
@@ -722,7 +722,7 @@ class Features220IntegrationTest < Minitest::Test
         10.times do |i|
           model = ValidationCallbackTestModel.new(
             name: "Cursor Test #{i}",
-            email: "cursor#{i}@example.com"
+            email: "cursor#{i}@example.com",
           )
           model.save
         end
@@ -750,7 +750,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_cursor_with_ordering
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "cursor with ordering test") do
@@ -758,7 +758,7 @@ class Features220IntegrationTest < Minitest::Test
         5.times do |i|
           model = ValidationCallbackTestModel.new(
             name: "Order Test #{i}",
-            email: "order#{i}@example.com"
+            email: "order#{i}@example.com",
           )
           model.save
           sleep 0.1 # Small delay to ensure different created_at
@@ -784,7 +784,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_cursor_stats
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "cursor stats test") do
@@ -792,7 +792,7 @@ class Features220IntegrationTest < Minitest::Test
         6.times do |i|
           model = ValidationCallbackTestModel.new(
             name: "Stats Test #{i}",
-            email: "stats_cursor#{i}@example.com"
+            email: "stats_cursor#{i}@example.com",
           )
           model.save
         end
@@ -816,7 +816,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_cursor_reset
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "cursor reset test") do
@@ -824,7 +824,7 @@ class Features220IntegrationTest < Minitest::Test
         3.times do |i|
           model = ValidationCallbackTestModel.new(
             name: "Reset Test #{i}",
-            email: "reset#{i}@example.com"
+            email: "reset#{i}@example.com",
           )
           model.save
         end
@@ -848,7 +848,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_cursor_class_method
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "cursor class method test") do
@@ -856,7 +856,7 @@ class Features220IntegrationTest < Minitest::Test
         3.times do |i|
           model = ValidationCallbackTestModel.new(
             name: "ClassMethod Test #{i}",
-            email: "classmethod#{i}@example.com"
+            email: "classmethod#{i}@example.com",
           )
           model.save
         end
@@ -873,7 +873,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_cursor_with_tied_values
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(30, "cursor with tied values test") do
@@ -887,7 +887,7 @@ class Features220IntegrationTest < Minitest::Test
         6.times do |i|
           model = ValidationCallbackTestModel.new(
             name: test_name,  # Same name for all - creates tied values
-            email: "tied_value_#{i}_#{SecureRandom.hex(4)}@example.com"
+            email: "tied_value_#{i}_#{SecureRandom.hex(4)}@example.com",
           )
           model.save
           created_ids << model.id
@@ -925,7 +925,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_cursor_with_tied_created_at
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(30, "cursor with tied created_at test") do
@@ -939,7 +939,7 @@ class Features220IntegrationTest < Minitest::Test
         8.times do |i|
           model = ValidationCallbackTestModel.new(
             name: "#{test_prefix}_#{i}",
-            email: "tied_time_#{i}_#{SecureRandom.hex(4)}@example.com"
+            email: "tied_time_#{i}_#{SecureRandom.hex(4)}@example.com",
           )
           model.save
           created_ids << model.id
@@ -975,7 +975,7 @@ class Features220IntegrationTest < Minitest::Test
   # ============================================
 
   def test_n_plus_one_detection_enabled
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "N+1 detection enabled test") do
@@ -997,7 +997,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_n_plus_one_callback_registration
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "N+1 callback registration test") do
@@ -1022,7 +1022,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_n_plus_one_reset_tracking
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "N+1 reset tracking test") do
@@ -1043,7 +1043,7 @@ class Features220IntegrationTest < Minitest::Test
   end
 
   def test_n_plus_one_detector_tracking
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "N+1 detector tracking test") do
@@ -1056,7 +1056,7 @@ class Features220IntegrationTest < Minitest::Test
             source_class: "Song",
             association: :artist,
             target_class: "Artist",
-            object_id: "id_#{i}"
+            object_id: "id_#{i}",
           )
         end
 

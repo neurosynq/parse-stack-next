@@ -1,4 +1,4 @@
-require_relative '../../test_helper_integration'
+require_relative "../../test_helper_integration"
 
 # Test models for partial fetch testing
 class PartialFetchPost < Parse::Object
@@ -39,7 +39,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_tracks_fetched_keys
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "partial fetch tracking test") do
@@ -54,7 +54,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           is_published: true,
           is_featured: true,
           tags: ["ruby", "testing"],
-          meta_data: { featured: true }
+          meta_data: { featured: true },
         )
         assert post.save, "Post should save"
 
@@ -82,7 +82,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_no_dirty_tracking_for_defaults
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "partial fetch no dirty tracking test") do
@@ -95,7 +95,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           view_count: 50,
           is_published: true,
           is_featured: true,
-          tags: ["ruby"]
+          tags: ["ruby"],
         )
         assert post.save, "Post should save"
 
@@ -117,7 +117,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_autofetches_unfetched_fields
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "autofetch unfetched fields test") do
@@ -130,7 +130,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           content: original_content,
           category: "tech",
           view_count: 100,
-          is_published: true
+          is_published: true,
         )
         assert post.save, "Post should save"
 
@@ -160,7 +160,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_doesnt_autofetch_fetched_fields
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "no autofetch for fetched fields test") do
@@ -170,7 +170,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Post",
           content: "Content",
-          category: "tech"
+          category: "tech",
         )
         assert post.save, "Post should save"
 
@@ -194,7 +194,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_empty_keys_means_fully_fetched
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "empty keys fully fetched test") do
@@ -203,7 +203,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create post
         post = PartialFetchPost.new(
           title: "Test Post",
-          content: "Content"
+          content: "Content",
         )
         assert post.save, "Post should save"
 
@@ -224,7 +224,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_full_fetch_not_partially_fetched
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "full fetch not partially fetched test") do
@@ -233,7 +233,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create post
         post = PartialFetchPost.new(
           title: "Test Post",
-          content: "Content"
+          content: "Content",
         )
         assert post.save, "Post should save"
 
@@ -254,7 +254,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_fetch_clears_partial_fetch_state
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "fetch clears partial state test") do
@@ -263,7 +263,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create post
         post = PartialFetchPost.new(
           title: "Test Post",
-          content: "Content"
+          content: "Content",
         )
         assert post.save, "Post should save"
 
@@ -288,7 +288,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_save_only_changed_fields
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "partial fetch save only changed fields test") do
@@ -299,7 +299,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           title: "Original Title",
           content: "Original Content",
           view_count: 100,
-          is_published: true
+          is_published: true,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -327,7 +327,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_with_associations
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "partial fetch with associations test") do
@@ -337,7 +337,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         user = PartialFetchUser.new(
           name: "Test User",
           email: "test@example.com",
-          age: 30
+          age: 30,
         )
         assert user.save, "User should save"
 
@@ -345,7 +345,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Post",
           content: "Content",
-          author: user
+          author: user,
         )
         assert post.save, "Post should save"
 
@@ -367,7 +367,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_id_always_included
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "id always included test") do
@@ -396,7 +396,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_base_keys_always_fetched
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "base keys always fetched test") do
@@ -421,7 +421,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_with_query_methods
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "partial fetch with query methods test") do
@@ -455,7 +455,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_remote_field_name_support
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "remote field name support test") do
@@ -465,7 +465,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Post",
           view_count: 100,
-          is_published: true
+          is_published: true,
         )
         assert post.save, "Post should save"
 
@@ -483,7 +483,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_changes_not_include_unfetched_defaults
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "changes not include unfetched defaults test") do
@@ -495,7 +495,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           content: "Content",
           view_count: 50,
           is_published: true,
-          is_featured: true
+          is_featured: true,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -528,7 +528,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_multiple_partial_fetches_independent
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "multiple partial fetches independent test") do
@@ -538,7 +538,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Post",
           content: "Content",
-          category: "tech"
+          category: "tech",
         )
         assert post.save, "Post should save"
 
@@ -563,7 +563,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_nested_partial_fetch_with_keys
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "nested partial fetch with keys test") do
@@ -576,7 +576,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           age: 30,
           is_active: true,
           is_verified: true,
-          settings: { theme: "dark" }
+          settings: { theme: "dark" },
         )
         assert user.save, "User should save"
 
@@ -584,7 +584,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Post",
           content: "Content",
-          author: user
+          author: user,
         )
         assert post.save, "Post should save"
 
@@ -623,7 +623,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_nested_partial_fetch_autofetches_nested_fields
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "nested partial fetch autofetch test") do
@@ -634,14 +634,14 @@ class PartialFetchIntegrationTest < Minitest::Test
         user = PartialFetchUser.new(
           name: "Test User",
           email: "test@example.com",
-          age: original_age
+          age: original_age,
         )
         assert user.save, "User should save"
 
         # Create post with author
         post = PartialFetchPost.new(
           title: "Test Post",
-          author: user
+          author: user,
         )
         assert post.save, "Post should save"
 
@@ -678,7 +678,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_parse_keys_to_nested_keys
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "parse keys to nested keys test") do
@@ -708,7 +708,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_assignment_to_unfetched_field_does_not_trigger_autofetch
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "assignment no autofetch test") do
@@ -719,7 +719,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           title: "Test Post",
           content: "Original Content",
           category: "tech",
-          view_count: 100
+          view_count: 100,
         )
         assert post.save, "Post should save"
 
@@ -752,7 +752,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_assignment_to_unfetched_field_tracks_changes
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "assignment change tracking test") do
@@ -762,7 +762,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Post",
           content: "Original Content",
-          category: "tech"
+          category: "tech",
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -796,7 +796,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_multiple_assignments_to_unfetched_fields
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "multiple assignments test") do
@@ -807,7 +807,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           title: "Test Post",
           content: "Original Content",
           category: "original",
-          view_count: 50
+          view_count: 50,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -851,7 +851,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_assignment_with_same_value_does_not_mark_changed
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "same value assignment test") do
@@ -860,7 +860,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create post
         post = PartialFetchPost.new(
           title: "Test Post",
-          content: "Content"
+          content: "Content",
         )
         assert post.save, "Post should save"
 
@@ -880,7 +880,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_belongs_to_assignment_to_unfetched_field_tracks_changes
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "belongs_to assignment test") do
@@ -897,7 +897,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Post",
           content: "Content",
-          author: user1
+          author: user1,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -931,7 +931,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_belongs_to_unfetched_field_triggers_autofetch
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "belongs_to autofetch test") do
@@ -944,7 +944,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Post",
           content: "Content",
-          author: user
+          author: user,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -970,7 +970,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_belongs_to_unfetched_field_with_autofetch_disabled_raises_error
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "belongs_to error test") do
@@ -983,7 +983,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Post",
           content: "Content",
-          author: user
+          author: user,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1011,7 +1011,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_has_many_unfetched_field_triggers_autofetch
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "has_many autofetch test") do
@@ -1021,7 +1021,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Post",
           content: "Content",
-          tags: ["ruby", "testing", "parse"]
+          tags: ["ruby", "testing", "parse"],
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1046,7 +1046,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_fetch_preserves_local_changes
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "fetch preserves changes test") do
@@ -1057,7 +1057,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           title: "Original Title",
           content: "Original Content",
           category: "tech",
-          view_count: 100
+          view_count: 100,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1103,7 +1103,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_fetch_updates_unchanged_fields
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "fetch updates unchanged fields test") do
@@ -1112,7 +1112,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create a post
         post = PartialFetchPost.new(
           title: "Original Title",
-          content: "Original Content"
+          content: "Original Content",
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1149,7 +1149,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   # Tests for new fetch(keys:, includes:) functionality
 
   def test_fetch_with_keys_creates_partial_fetch
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "fetch with keys test") do
@@ -1160,7 +1160,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           title: "Test Title",
           content: "Test Content",
           category: "tech",
-          view_count: 100
+          view_count: 100,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1189,7 +1189,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_fetch_with_keys_merges_with_existing_partial_fetch
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "fetch with keys merging test") do
@@ -1200,7 +1200,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           title: "Test Title",
           content: "Test Content",
           category: "tech",
-          view_count: 100
+          view_count: 100,
         )
         assert post.save, "Post should save"
 
@@ -1231,7 +1231,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_fetch_with_keys_and_includes_expands_pointers
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "fetch with keys and includes test") do
@@ -1241,7 +1241,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         user = PartialFetchUser.new(
           name: "Test Author",
           email: "author@test.com",
-          age: 30
+          age: 30,
         )
         assert user.save, "User should save"
 
@@ -1249,7 +1249,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Title",
           content: "Test Content",
-          author: user
+          author: user,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1283,7 +1283,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_fetch_without_keys_clears_partial_fetch_state
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "full fetch clears partial fetch state test") do
@@ -1293,7 +1293,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Title",
           content: "Test Content",
-          category: "tech"
+          category: "tech",
         )
         assert post.save, "Post should save"
 
@@ -1317,7 +1317,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_fetch_json_returns_raw_data
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "fetch_json test") do
@@ -1326,7 +1326,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create test post
         post = PartialFetchPost.new(
           title: "Test Title",
-          content: "Test Content"
+          content: "Test Content",
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1350,7 +1350,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_legacy_fetch_signature_backward_compatibility
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "legacy fetch signature test") do
@@ -1359,7 +1359,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create test post
         post = PartialFetchPost.new(
           title: "Test Title",
-          content: "Test Content"
+          content: "Test Content",
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1391,7 +1391,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   # Tests for smart change reconciliation during partial fetch
 
   def test_partial_fetch_preserves_unfetched_field_values
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "partial fetch preserves unfetched fields test") do
@@ -1401,7 +1401,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Original Title",
           content: "Original Content",
-          category: "tech"
+          category: "tech",
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1424,7 +1424,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_preserves_dirty_state_for_unfetched_fields
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "partial fetch preserves dirty state test") do
@@ -1433,7 +1433,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create test post
         post = PartialFetchPost.new(
           title: "Original Title",
-          content: "Original Content"
+          content: "Original Content",
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1456,7 +1456,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_clears_dirty_when_server_matches_local
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "partial fetch clears dirty when values match test") do
@@ -1465,7 +1465,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create test post
         post = PartialFetchPost.new(
           title: "Original Title",
-          content: "Original Content"
+          content: "Original Content",
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1494,7 +1494,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_keeps_dirty_when_server_differs_from_local
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "partial fetch keeps dirty when values differ test") do
@@ -1503,7 +1503,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create test post
         post = PartialFetchPost.new(
           title: "Original Title",
-          content: "Original Content"
+          content: "Original Content",
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1526,7 +1526,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_updates_base_fields
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "partial fetch updates base fields test") do
@@ -1535,7 +1535,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create test post
         post = PartialFetchPost.new(
           title: "Original Title",
-          content: "Original Content"
+          content: "Original Content",
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1560,7 +1560,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_partial_fetch_with_nested_field_triggers_autofetch
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "partial fetch nested field autofetch test") do
@@ -1570,7 +1570,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         user = PartialFetchUser.new(
           name: "Test Author",
           email: "author@test.com",
-          age: 30
+          age: 30,
         )
         assert user.save, "User should save"
 
@@ -1578,7 +1578,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Title",
           content: "Test Content",
-          author: user
+          author: user,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1609,7 +1609,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_incremental_partial_fetch_merges_keys
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "incremental partial fetch test") do
@@ -1620,7 +1620,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           title: "Test Title",
           content: "Test Content",
           category: "tech",
-          view_count: 100
+          view_count: 100,
         )
         assert post.save, "Post should save"
 
@@ -1650,7 +1650,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_incremental_nested_keys_merging
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "incremental nested keys merging test") do
@@ -1660,7 +1660,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         user = PartialFetchUser.new(
           name: "Test Author",
           email: "author@test.com",
-          age: 30
+          age: 30,
         )
         assert user.save, "User should save"
 
@@ -1668,7 +1668,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Title",
           content: "Test Content",
-          author: user
+          author: user,
         )
         assert post.save, "Post should save"
 
@@ -1716,7 +1716,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_fetch_default_discards_local_changes
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "fetch default discards changes test") do
@@ -1725,7 +1725,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create test post
         post = PartialFetchPost.new(
           title: "Original Title",
-          content: "Original Content"
+          content: "Original Content",
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1748,7 +1748,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_fetch_preserve_changes_vs_default
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "fetch preserve_changes vs default test") do
@@ -1757,7 +1757,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create test post
         post = PartialFetchPost.new(
           title: "Original Title",
-          content: "Original Content"
+          content: "Original Content",
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1789,7 +1789,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_autofetch_raises_error_when_object_deleted
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "autofetch error on deleted object test") do
@@ -1800,7 +1800,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           title: "Test Post",
           content: "Test Content",
           category: "tech",
-          view_count: 100
+          view_count: 100,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1833,7 +1833,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_autofetch_error_leaves_object_in_consistent_state
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "autofetch error state consistency test") do
@@ -1843,7 +1843,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         post = PartialFetchPost.new(
           title: "Test Post",
           content: "Test Content",
-          category: "tech"
+          category: "tech",
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1878,7 +1878,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_autofetch_preserves_dirty_changes
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "autofetch preserves dirty changes test") do
@@ -1889,7 +1889,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           title: "Original Title",
           content: "Original Content",
           category: "tech",
-          view_count: 100
+          view_count: 100,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1928,7 +1928,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_autofetch_preserves_multiple_dirty_changes
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "autofetch preserves multiple dirty changes test") do
@@ -1940,7 +1940,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           content: "Original Content",
           category: "tech",
           view_count: 50,
-          is_published: false
+          is_published: false,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -1982,7 +1982,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_autofetch_preserves_dirty_unfetched_field_assignments
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "autofetch preserves unfetched field assignments test") do
@@ -1993,7 +1993,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           title: "Original Title",
           content: "Original Content",
           category: "tech",
-          view_count: 100
+          view_count: 100,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -2030,7 +2030,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_autofetch_raise_on_missing_keys_option
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "autofetch raise on missing keys test") do
@@ -2041,7 +2041,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           title: "Test Title",
           content: "Test Content",
           category: "tech",
-          view_count: 100
+          view_count: 100,
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -2080,7 +2080,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_autofetch_raise_on_missing_keys_for_pointer
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "autofetch raise on missing keys for pointer test") do
@@ -2089,7 +2089,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create test post
         post = PartialFetchPost.new(
           title: "Test Title",
-          content: "Test Content"
+          content: "Test Content",
         )
         assert post.save, "Post should save"
         post_id = post.id
@@ -2128,7 +2128,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_autofetch_preserves_nested_embedded_data
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "autofetch preserves nested embedded data test") do
@@ -2138,7 +2138,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         user = PartialFetchUser.new(
           name: "Test Author",
           email: "author@test.com",
-          age: 30
+          age: 30,
         )
         assert user.save, "User should save"
 
@@ -2147,7 +2147,7 @@ class PartialFetchIntegrationTest < Minitest::Test
           title: "Test Title",
           content: "Test Content",
           category: "tech",
-          author: user
+          author: user,
         )
         assert post.save, "Post should save"
 
@@ -2187,7 +2187,7 @@ class PartialFetchIntegrationTest < Minitest::Test
   end
 
   def test_autofetch_raise_disabled_by_default
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "autofetch raise disabled by default test") do
@@ -2199,7 +2199,7 @@ class PartialFetchIntegrationTest < Minitest::Test
         # Create test post
         post = PartialFetchPost.new(
           title: "Test Title",
-          content: "Test Content"
+          content: "Test Content",
         )
         assert post.save, "Post should save"
 

@@ -17,7 +17,9 @@ class TestSession < Minitest::Test
   def test_properties
     assert Parse::Session < Parse::Object
     assert_equal CORE_FIELDS, Parse::Session.fields
-    assert_equal({ user: Parse::Model::CLASS_USER }, Parse::Session.references)
+    # Note: :user reference uses "User" (Ruby class name) not "_User" (Parse internal name)
+    # This is because belongs_to :user infers the class name from :user symbol
+    assert_equal({ user: "User" }, Parse::Session.references)
     assert_empty Parse::Session.relations
     # check association methods
     assert Parse::Session.method_defined?(:user)

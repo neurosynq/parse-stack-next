@@ -33,7 +33,7 @@ module Parse
     # @return [String] the name of the file including extension (if any)
     attr_accessor :name
     # @return [String] the url resource of the file.
-    attr_accessor :url
+    attr_writer :url
 
     # @return [Object] the contents of the file.
     attr_accessor :contents
@@ -53,10 +53,10 @@ module Parse
     class << self
 
       # @return [String] the default mime-type
-      attr_accessor :default_mime_type
+      attr_writer :default_mime_type
 
       # @return [Boolean] whether to force all urls to be https.
-      attr_accessor :force_ssl
+      attr_writer :force_ssl
 
       # @return [String] The default mime type for created instances. Default: _'image/jpeg'_
       def default_mime_type

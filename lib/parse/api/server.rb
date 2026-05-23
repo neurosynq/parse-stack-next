@@ -8,7 +8,7 @@ module Parse
 
       # @!attribute server_info
       #  @return [Hash] the information about the server.
-      attr_accessor :server_info
+      attr_writer :server_info
 
       # @!visibility private
       SERVER_INFO_PATH = "serverInfo"

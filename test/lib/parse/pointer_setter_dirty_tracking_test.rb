@@ -1,4 +1,4 @@
-require_relative '../../test_helper'
+require_relative "../../test_helper"
 
 # Test model for pointer setter dirty tracking
 class PointerSetterTestModel < Parse::Object

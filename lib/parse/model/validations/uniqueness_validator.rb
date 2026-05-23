@@ -50,8 +50,8 @@ module Parse
         # Build the query to check for existing records
         klass = record.class
 
-        # Get the Parse field name for this attribute
-        parse_field = klass.field_map[attribute] || attribute.to_s.columnize
+        # Get the Parse field name for this attribute (available for debugging)
+        _parse_field = klass.field_map[attribute] || attribute.to_s.columnize
 
         # Build query conditions
         conditions = {}

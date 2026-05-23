@@ -1,7 +1,7 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-require 'set'
+require "set"
 
 module Parse
   # Exception raised when N+1 query is detected in strict mode
@@ -113,7 +113,7 @@ module Parse
         registry[pointer.object_id] = {
           source_class: source_class,
           association: association,
-          registered_at: Time.now.to_f
+          registered_at: Time.now.to_f,
         }
       end
 
@@ -144,7 +144,7 @@ module Parse
       def mode=(value)
         value = value.to_sym if value.respond_to?(:to_sym)
         unless VALID_MODES.include?(value)
-          raise ArgumentError, "Invalid N+1 mode: #{value.inspect}. Valid modes: #{VALID_MODES.join(', ')}"
+          raise ArgumentError, "Invalid N+1 mode: #{value.inspect}. Valid modes: #{VALID_MODES.join(", ")}"
         end
         Thread.current[MODE_KEY] = value
         reset! if value == :ignore
@@ -233,7 +233,7 @@ module Parse
           else
             warn(message)
           end
-        # :ignore mode does nothing (but callbacks still run)
+          # :ignore mode does nothing (but callbacks still run)
         end
       end
 
@@ -272,7 +272,7 @@ module Parse
         tracking = get_tracking
         {
           patterns_detected: tracking.count { |_, v| v[:warned] },
-          associations: tracking.map { |k, v| { pattern: k, fetches: v[:fetches].size, warned: v[:warned] } }
+          associations: tracking.map { |k, v| { pattern: k, fetches: v[:fetches].size, warned: v[:warned] } },
         }
       end
 
@@ -322,9 +322,9 @@ module Parse
         caller_locations.each do |loc|
           path = loc.path.to_s
           # Skip internal parse-stack code
-          next if path.include?('/lib/parse/')
-          next if path.include?('/gems/')
-          next if path.include?('ruby/') || path.include?('<internal')
+          next if path.include?("/lib/parse/")
+          next if path.include?("/gems/")
+          next if path.include?("ruby/") || path.include?("<internal")
 
           return "#{loc.path}:#{loc.lineno} in `#{loc.label}`"
         end

@@ -126,4 +126,67 @@ class TestClientAdapter < Minitest::Test
     assert_equal Faraday::Adapter::NetHttpPersistent, adapter_class,
       "connection_pooling: true should use Faraday::Adapter::NetHttpPersistent"
   end
+
+  # Tests for pool_size being passed as adapter argument (not in block)
+  # This was a bug fix: pool_size is a constructor param with no setter
+
+  def test_connection_pooling_with_pool_size_does_not_raise
+    # pool_size must be passed as adapter argument, not via setter
+    # Prior to the fix, this would raise: NoMethodError: undefined method `pool_size='
+    options = @base_options.merge(connection_pooling: { pool_size: 5 })
+
+    # Should not raise any errors
+    client = Parse::Client.new(options)
+    assert_instance_of Parse::Client, client
+  end
+
+  def test_connection_pooling_with_all_options_does_not_raise
+    # Test all connection_pooling options together
+    options = @base_options.merge(
+      connection_pooling: {
+        pool_size: 10,
+        idle_timeout: 60,
+        keep_alive: 30,
+      },
+    )
+
+    # Should not raise any errors
+    client = Parse::Client.new(options)
+    assert_instance_of Parse::Client, client
+    assert_equal Faraday::Adapter::NetHttpPersistent, get_adapter_class(client)
+  end
+
+  def test_connection_pooling_pool_size_passed_as_adapter_argument
+    # Verify pool_size is passed to the adapter correctly
+    options = @base_options.merge(connection_pooling: { pool_size: 7 })
+    client = Parse::Client.new(options)
+
+    conn = client.instance_variable_get(:@conn)
+    adapter_handler = conn.builder.adapter
+
+    # Faraday stores keyword arguments in @kwargs
+    adapter_kwargs = adapter_handler.instance_variable_get(:@kwargs) || {}
+
+    assert_equal 7, adapter_kwargs[:pool_size],
+      "pool_size should be passed as adapter keyword argument"
+  end
+
+  def test_connection_pooling_idle_timeout_configured
+    # idle_timeout has a setter, so it's configured in the block
+    # We verify the adapter is created without error
+    options = @base_options.merge(connection_pooling: { idle_timeout: 120 })
+
+    client = Parse::Client.new(options)
+    assert_instance_of Parse::Client, client
+    assert_equal Faraday::Adapter::NetHttpPersistent, get_adapter_class(client)
+  end
+
+  def test_connection_pooling_keep_alive_configured
+    # keep_alive has a setter, so it's configured in the block
+    options = @base_options.merge(connection_pooling: { keep_alive: 45 })
+
+    client = Parse::Client.new(options)
+    assert_instance_of Parse::Client, client
+    assert_equal Faraday::Adapter::NetHttpPersistent, get_adapter_class(client)
+  end
 end

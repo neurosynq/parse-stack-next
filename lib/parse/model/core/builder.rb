@@ -4,7 +4,8 @@
 require "active_support"
 require "active_support/inflector"
 require "active_support/core_ext"
-require_relative "../object"
+# Note: Do not require "../object" here - this file is loaded from object.rb
+# and adding that require would create a circular dependency.
 
 module Parse
   # Create all Parse::Object subclasses, including their properties and inferred
@@ -46,7 +47,7 @@ module Parse
         begin
           klass = Parse::Model.find_class className
           klass = ::Object.const_get(className.to_parse_class) if klass.nil?
-        rescue => e
+        rescue
           klass = ::Class.new(Parse::Object)
           ::Object.const_set(className, klass)
         end

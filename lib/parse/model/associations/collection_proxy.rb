@@ -43,7 +43,8 @@ module Parse
     #  the name of the property key to use when sending notifications for _will_change! and _fetch!
     #  @return [String]
 
-    attr_accessor :collection, :delegate, :loaded, :parse_class
+    attr_writer :collection
+    attr_accessor :loaded, :parse_class
     attr_reader :delegate, :key
 
     # This is to use dirty tracking within the proxy
@@ -108,7 +109,8 @@ module Parse
     # @return [Array]
     def to_a
       collection.to_a
-    end; 
+    end
+
     alias_method :to_ary, :to_a
 
     # Set the internal collection of items *without* dirty tracking or
@@ -146,7 +148,8 @@ module Parse
         collection.push item
       end
       @collection
-    end; 
+    end
+
     alias_method :push, :add
 
     # Add items to the collection if they don't already exist
@@ -157,7 +160,8 @@ module Parse
       notify_will_change!
       @collection = collection | items.flatten
       @collection
-    end; 
+    end
+
     alias_method :push_unique, :add_unique
 
     # Set Union - Returns a new array by joining two arrays, excluding
@@ -224,35 +228,39 @@ module Parse
         collection.delete item
       end
       @collection
-    end; 
+    end
+
     alias_method :delete, :remove
 
     # Atomically adds all items from the array.
     # This request is sent directly to the Parse backend.
     # @param items [Array] items to uniquely add
+    # @note Parse objects are automatically converted to pointer format
     # @see #add_unique!
     def add!(*items)
       return false unless @delegate.respond_to?(:op_add!)
-      @delegate.send :op_add!, @key, items.flatten
+      @delegate.send :op_add!, @key, items_to_pointers(items.flatten)
       reset!
     end
 
     # Atomically adds all items from the array that are not already part of the collection.
     # This request is sent directly to the Parse backend.
     # @param items [Array] items to uniquely add
+    # @note Parse objects are automatically converted to pointer format
     # @see #add!
     def add_unique!(*items)
       return false unless @delegate.respond_to?(:op_add_unique!)
-      @delegate.send :op_add_unique!, @key, items.flatten
+      @delegate.send :op_add_unique!, @key, items_to_pointers(items.flatten)
       reset!
     end
 
     # Atomically deletes all items from the array. This request is sent
     # directly to the Parse backend.
     # @param items [Array] items to remove
+    # @note Parse objects are automatically converted to pointer format
     def remove!(*items)
       return false unless @delegate.respond_to?(:op_remove!)
-      @delegate.send :op_remove!, @key, items.flatten
+      @delegate.send :op_remove!, @key, items_to_pointers(items.flatten)
       reset!
     end
 
@@ -303,9 +311,36 @@ module Parse
       collection.count
     end
 
-    # @return [Hash] a JSON representation
+    # @return [Array] a JSON representation
+    # @param opts [Hash] options for serialization
+    # @option opts [Boolean] :pointers_only (false) When true, converts all Parse objects
+    #   to pointer format. Use this when sending data to Parse Server (saves, webhooks).
+    #   When false (default), full objects are serialized for API responses.
+    # @example Default - full objects for API responses
+    #   team.members.as_json
+    #   # => [{"objectId"=>"abc", "name"=>"Alice", ...}, ...]
+    # @example Pointers only for storage
+    #   team.members.as_json(pointers_only: true)
+    #   # => [{"__type"=>"Pointer", "className"=>"Member", "objectId"=>"abc"}, ...]
     def as_json(opts = nil)
-      collection.as_json(opts)
+      opts ||= {}
+      pointers_only = opts.delete(:pointers_only) || opts.delete("pointers_only")
+
+      collection.map do |item|
+        if pointers_only && item.respond_to?(:pointer)
+          # Convert Parse objects/pointers to pointer format for storage
+          ptr = item.pointer
+          {
+            Parse::Model::TYPE_FIELD => Parse::Model::TYPE_POINTER,
+            Parse::Model::KEY_CLASS_NAME => ptr.parse_class,
+            Parse::Model::OBJECT_ID => ptr.id,
+          }
+        elsif item.respond_to?(:as_json)
+          item.as_json(opts)
+        else
+          item
+        end
+      end
     end
 
     # true if the collection is empty.
@@ -330,19 +365,19 @@ module Parse
     # Alias for Array#each
     def each(&block)
       return collection.enum_for(:each) unless block_given?
-      collection.each &block
+      collection.each(&block)
     end
 
     # Alias for Array#map
     def map(&block)
       return collection.enum_for(:map) unless block_given?
-      collection.map &block
+      collection.map(&block)
     end
 
     # Alias for Array#select
     def select(&block)
       return collection.enum_for(:select) unless block_given?
-      collection.select &block
+      collection.select(&block)
     end
 
     # Alias for Array#uniq
@@ -373,6 +408,27 @@ module Parse
     # @return [Array<Parse::Pointer>] an array of pointers representing this collection.
     def parse_pointers
       collection.to_a.parse_pointers
+    end
+
+    private
+
+    # Convert items to pointer format for atomic operations.
+    # Parse objects/pointers are converted to pointer hashes, other items pass through.
+    # @param items [Array] items to convert
+    # @return [Array] items with Parse objects converted to pointer format
+    def items_to_pointers(items)
+      items.map do |item|
+        if item.respond_to?(:pointer)
+          ptr = item.pointer
+          {
+            Parse::Model::TYPE_FIELD => Parse::Model::TYPE_POINTER,
+            Parse::Model::KEY_CLASS_NAME => ptr.parse_class,
+            Parse::Model::OBJECT_ID => ptr.id,
+          }
+        else
+          item
+        end
+      end
     end
   end
 end

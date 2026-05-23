@@ -32,11 +32,32 @@ module Parse
       HTTP_METHOD_OVERRIDE = "X-Http-Method-Override"
       # Maximum url length for most server requests before HTTP Method Override is used.
       MAX_URL_LENGTH = 2_000.freeze
+      # Fields that should be redacted from log output.
+      SENSITIVE_FIELDS = %w[password token sessionToken session_token access_token authData].freeze
+      SENSITIVE_PATTERN = /(#{SENSITIVE_FIELDS.join("|")})(["']?\s*[=:>]\s*["']?)([^"&\s,}\]]+)/i
+      # Request headers that must never be printed verbatim in debug logs.
+      # Matched case-insensitively against Faraday header keys.
+      REDACTED_HEADERS = [
+        Parse::Protocol::MASTER_KEY,
+        Parse::Protocol::API_KEY,
+        Parse::Protocol::SESSION_TOKEN,
+        "X-Parse-JavaScript-Key",
+        "Authorization",
+        "Cookie",
+      ].map(&:downcase).freeze
+
       class << self
         # Allows logging. Set to `true` to enable logging, `false` to disable.
         # You may specify `:debug` for additional verbosity.
         # @return [Boolean]
         attr_accessor :logging
+      end
+
+      # Redacts sensitive fields from a string for safe logging.
+      # @param str [String] the string to redact.
+      # @return [String] the redacted string.
+      def self.redact(str)
+        str.to_s.gsub(SENSITIVE_PATTERN) { "#{$1}#{$2}[FILTERED]" }
       end
 
       # Thread-safety
@@ -67,13 +88,16 @@ module Parse
         end
 
         if self.class.logging
-          puts "[Request #{env.method.upcase}] #{env[:url]}"
+          puts "[Request #{env.method.upcase}] #{self.class.redact(env[:url].to_s)}"
           env[:request_headers].each do |k, v|
-            next if k == Parse::Protocol::MASTER_KEY
-            puts "[Header] #{k} : #{v}"
+            if REDACTED_HEADERS.include?(k.to_s.downcase)
+              puts "[Header] #{k} : [FILTERED]"
+            else
+              puts "[Header] #{k} : #{v}"
+            end
           end
 
-          puts "[Request Body] #{env[:body]}"
+          puts "[Request Body] #{self.class.redact(env[:body].to_s)}"
         end
         @app.call(env).on_complete do |response_env|
           # on a response, create a new Parse::Response and replace the :body
@@ -81,7 +105,7 @@ module Parse
           # @todo CHECK FOR HTTP STATUS CODES
           if self.class.logging
             puts "[[Response #{response_env[:status]}]] ----------------------------------"
-            puts response_env.body
+            puts self.class.redact(response_env.body.to_s)
             puts "[[Response]] --------------------------------------\n"
           end
 
@@ -93,6 +117,7 @@ module Parse
             r.error = "Invalid response for #{env[:method]} #{env[:url]}: #{e}"
           end
           r.http_status = response_env[:status]
+          r.headers = response_env[:response_headers]
           r.code ||= response_env[:status] if r.error.present?
           response_env[:body] = r
         end

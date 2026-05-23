@@ -1,10 +1,9 @@
-require_relative '../../test_helper'
-require 'stringio'
-require 'logger'
+require_relative "../../test_helper"
+require "stringio"
+require "logger"
 
 # Unit tests for Parse Stack 2.1.10 logging middleware
 class LoggingMiddlewareTest < Minitest::Test
-
   def setup
     # Reset logging state before each test
     Parse::Middleware::Logging.enabled = nil

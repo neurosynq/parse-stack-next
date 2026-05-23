@@ -1,0 +1,47 @@
+{
+  "collectionName": "Song",
+  "database": "parse_atlas_test",
+  "name": "default",
+  "definition": {
+    "mappings": {
+      "dynamic": true,
+      "fields": {
+        "title": [
+          {
+            "type": "string",
+            "analyzer": "lucene.standard"
+          },
+          {
+            "type": "autocomplete",
+            "analyzer": "lucene.standard",
+            "tokenization": "edgeGram",
+            "minGrams": 2,
+            "maxGrams": 15,
+            "foldDiacritics": true
+          }
+        ],
+        "artist": {
+          "type": "string",
+          "analyzer": "lucene.standard"
+        },
+        "genre": [
+          {
+            "type": "string",
+            "analyzer": "lucene.standard"
+          },
+          {
+            "type": "stringFacet"
+          }
+        ],
+        "plays": [
+          {
+            "type": "number"
+          },
+          {
+            "type": "numberFacet"
+          }
+        ]
+      }
+    }
+  }
+}

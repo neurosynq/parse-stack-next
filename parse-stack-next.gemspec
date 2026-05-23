@@ -25,15 +25,30 @@ Gem::Specification.new do |spec|
   spec.bindir = "bin"
   spec.executables = ["parse-console"] #spec.files.grep(%r{^bin/pstack/}) { |f| File.basename(f) }
   spec.require_paths = ["lib"]
-  spec.required_ruby_version = ">= 3.0"
+  spec.required_ruby_version = ">= 3.1"
 
   spec.add_runtime_dependency "activemodel", [">= 5", "< 9"]
   spec.add_runtime_dependency "activesupport", [">= 5", "< 9"]
-  spec.add_runtime_dependency "parallel", [">= 1.6", "< 2"]
+  spec.add_runtime_dependency "parallel", [">= 1.6", "< 3"]
   spec.add_runtime_dependency "faraday", "~> 2.0"
   spec.add_runtime_dependency "faraday-net_http_persistent", "~> 2.0"
   spec.add_runtime_dependency "moneta", "< 2"
   spec.add_runtime_dependency "rack", ">= 2.0.6", "< 4"
+
+  # Optional dependencies for MFA (Multi-Factor Authentication) support
+  # Users must add these to their Gemfile to use MFA features:
+  #   gem 'rotp'    # For TOTP generation/verification
+  #   gem 'rqrcode' # For QR code generation
+
+  # Optional dependency for enhanced phone number validation
+  # Users can add this to their Gemfile for comprehensive phone validation:
+  #   gem 'phonelib' # For full ITU-T E.164 validation with libphonenumber data
+
+  # Optional dependency for direct MongoDB queries and Atlas Search
+  # Required for: Parse::MongoDB, Parse::AtlasSearch, mongo_direct query methods
+  # Users can add this to their Gemfile for direct MongoDB access:
+  #   gem 'mongo', '~> 2.18'
+  # Note: The gem is loaded at runtime only when MongoDB features are used
 
   #   spec.post_install_message = <<UPGRADE
   #

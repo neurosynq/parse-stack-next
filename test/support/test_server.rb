@@ -1,28 +1,28 @@
-require 'net/http'
-require 'json'
+require "net/http"
+require "json"
 
 module Parse
   module Test
     class ServerHelper
       DEFAULT_CONFIG = {
-        server_url: ENV['PARSE_TEST_SERVER_URL'] || 'http://localhost:2337/parse',
-        app_id: ENV['PARSE_TEST_APP_ID'] || 'myAppId',
-        api_key: ENV['PARSE_TEST_API_KEY'] || 'test-rest-key',
-        master_key: ENV['PARSE_TEST_MASTER_KEY'] || 'myMasterKey'
+        server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:2337/parse",
+        app_id: ENV["PARSE_TEST_APP_ID"] || "myAppId",
+        api_key: ENV["PARSE_TEST_API_KEY"] || "test-rest-key",
+        master_key: ENV["PARSE_TEST_MASTER_KEY"] || "myMasterKey",
       }.freeze
 
       class << self
         def setup(config = {})
           config = DEFAULT_CONFIG.merge(config)
-          
+
           Parse::Client.setup(
             server_url: config[:server_url],
             app_id: config[:app_id],
             api_key: config[:api_key],
             master_key: config[:master_key],
-            logging: ENV['PARSE_DEBUG'] ? :debug : false  # Disable Parse logging by default
+            logging: ENV["PARSE_DEBUG"] ? :debug : false, # Disable Parse logging by default
           )
-          
+
           if server_available?
             puts "✓ Connected to Parse Server at #{config[:server_url]}"
             true
@@ -34,16 +34,16 @@ module Parse
         end
 
         def server_available?
-          uri = URI(Parse::Client.client.server_url + '/health')
+          uri = URI(Parse::Client.client.server_url + "/health")
           response = Net::HTTP.get_response(uri)
-          response.code == '200'
+          response.code == "200"
         rescue StandardError => e
           # Fallback: Try to check if Parse is responding at all
           begin
             uri = URI(Parse::Client.client.server_url)
             response = Net::HTTP.get_response(uri)
             # Parse Server typically returns 404 or 401 for root path but it means server is up
-            ['200', '404', '401', '403'].include?(response.code)
+            ["200", "404", "401", "403"].include?(response.code)
           rescue StandardError => e2
             false
           end
@@ -51,32 +51,32 @@ module Parse
 
         def reset_database!
           return unless Parse::Client.client.master_key.present?
-          
+
           # Get all classes except system classes
           response = Parse::Client.client.schemas(use_master_key: true)
           schemas = response.results
-          
+
           user_classes = schemas.reject do |s|
-            s['className'].start_with?('_')
+            s["className"].start_with?("_")
           end
-          
+
           # Delete all objects from user classes
           user_classes.each do |schema|
-            class_name = schema['className']
+            class_name = schema["className"]
             begin
               total_deleted = 0
               attempts = 0
               max_attempts = 50  # Safety limit to prevent infinite loops
-              
+
               loop do
                 attempts += 1
                 break if attempts > max_attempts
-                
+
                 # Always fetch from skip=0 since we're deleting objects
                 fresh_query = Parse::Query.new(class_name).limit(100)
                 objects = fresh_query.results
                 break if objects.empty?
-                
+
                 # Delete objects
                 objects.each do |obj|
                   begin
@@ -87,16 +87,15 @@ module Parse
                   end
                 end
               end
-              
             rescue StandardError => e
-              # Silent failure - continue with other classes  
+              # Silent failure - continue with other classes
             end
           end
         end
 
         def seed_data(&block)
           return unless block_given?
-          
+
           puts "Seeding test data..."
           instance_eval(&block)
           puts "Seeding complete"
@@ -104,13 +103,13 @@ module Parse
 
         def create_test_user(username: nil, password: nil, email: nil)
           username ||= "test_#{SecureRandom.hex(4)}"
-          password ||= 'password123'
+          password ||= "password123"
           email ||= "#{username}@test.com"
-          
+
           user = Parse::User.new(
             username: username,
             password: password,
-            email: email
+            email: email,
           )
           user.save
           user
@@ -159,15 +158,15 @@ module Parse
           path: path,
           response: {
             status: status,
-            body: response_body
-          }
+            body: response_body,
+          },
         }
       end
 
       def self.stub_query(class_name, results = [])
         stub_request(:get, "/classes/#{class_name}", {
           results: results,
-          count: results.length
+          count: results.length,
         }.to_json)
       end
 
@@ -175,7 +174,7 @@ module Parse
         stub_request(:post, "/classes/#{class_name}", {
           objectId: SecureRandom.hex(10),
           createdAt: Time.now.iso8601,
-          **object_data
+          **object_data,
         }.to_json, 201)
       end
     end

@@ -26,7 +26,7 @@ module Parse
     class << self
       # @return [Hash] a hash containing all supported Parse operations mapped
       # to their {Parse::Constraint} subclass.
-      attr_accessor :operators
+      attr_writer :operators
 
       def operators
         @operators ||= {}
@@ -44,14 +44,35 @@ module Parse
       Operation.operators[@operator] unless @operator.nil?
     end
 
+    # MongoDB operators that are blocked in field names to prevent injection.
+    BLOCKED_FIELD_OPERATORS = %w[$where $function $accumulator $expr].freeze
+
     # Create a new operation.
     # @param field [Symbol] the name of the Parse field
     # @param op [Symbol] the operator name (ex. :eq, :lt)
+    # @raise [ArgumentError] if the field name contains a blocked MongoDB operator.
     def initialize(field, op)
       self.operand = field.to_sym
       self.operand = :objectId if operand == :id
+      validate_field_name!(operand)
       self.operator = op.to_sym
     end
+
+    private
+
+    # Validates that a field name does not contain MongoDB operators that could
+    # allow code execution or injection attacks.
+    def validate_field_name!(field)
+      field_str = field.to_s
+      if field_str.start_with?("$") || field_str.include?(".$")
+        blocked = BLOCKED_FIELD_OPERATORS.find { |op| field_str.include?(op) }
+        if blocked || field_str.start_with?("$")
+          raise ArgumentError, "Field name cannot contain MongoDB operators: #{field_str}"
+        end
+      end
+    end
+
+    public
 
     # @!visibility private
     def inspect

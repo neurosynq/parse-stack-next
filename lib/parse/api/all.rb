@@ -1,7 +1,8 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-require_relative "../client"
+# Note: Do not require "../client" here - this file is loaded from client.rb
+# and adding that require would create a circular dependency.
 require_relative "analytics"
 require_relative "aggregate"
 require_relative "batch"

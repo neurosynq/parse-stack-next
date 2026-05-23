@@ -1,4 +1,4 @@
-require_relative '../../test_helper'
+require_relative "../../test_helper"
 
 # Test model for fetch unit testing
 class FetchTestModel < Parse::Object
@@ -9,13 +9,12 @@ class FetchTestModel < Parse::Object
 end
 
 class FetchArrayHandlingTest < Minitest::Test
-
   def setup
     # Set up a minimal Parse client for testing
     Parse.setup(
       server_url: "http://localhost:1337/parse",
       application_id: "test_app_id",
-      api_key: "test_api_key"
+      api_key: "test_api_key",
     )
   end
 
@@ -31,7 +30,7 @@ class FetchArrayHandlingTest < Minitest::Test
     result = [
       { "objectId" => "xyz789", "name" => "Other Object", "value" => 100 },
       { "objectId" => "abc123", "name" => "Target Object", "value" => 42 },
-      { "objectId" => "def456", "name" => "Another Object", "value" => 200 }
+      { "objectId" => "def456", "name" => "Another Object", "value" => 200 },
     ]
 
     # Apply the array handling logic directly
@@ -53,7 +52,7 @@ class FetchArrayHandlingTest < Minitest::Test
     # Some APIs return 'id' instead of 'objectId'
     result = [
       { "id" => "xyz789", "name" => "Other Object" },
-      { "id" => "abc123", "name" => "Target Object" }
+      { "id" => "abc123", "name" => "Target Object" },
     ]
 
     found = result.find { |r| r.is_a?(Hash) && (r["objectId"] == obj.id || r["id"] == obj.id) }
@@ -72,7 +71,7 @@ class FetchArrayHandlingTest < Minitest::Test
 
     result = [
       { "objectId" => "xyz789", "name" => "Other Object" },
-      { "objectId" => "def456", "name" => "Another Object" }
+      { "objectId" => "def456", "name" => "Another Object" },
     ]
 
     found = result.find { |r| r.is_a?(Hash) && (r["objectId"] == obj.id || r["id"] == obj.id) }
@@ -109,7 +108,7 @@ class FetchArrayHandlingTest < Minitest::Test
       "string element",
       123,
       { "objectId" => "abc123", "name" => "Target Object" },
-      ["nested", "array"]
+      ["nested", "array"],
     ]
 
     found = result.find { |r| r.is_a?(Hash) && (r["objectId"] == obj.id || r["id"] == obj.id) }
@@ -133,7 +132,7 @@ class FetchArrayHandlingTest < Minitest::Test
       mock_class.new(1002),
       mock_class.new(1003),
       mock_class.new(1004),
-      mock_class.new(1005)
+      mock_class.new(1005),
     ]
 
     # Build hash lookup (the optimized approach)

@@ -1,8 +1,8 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-require_relative '../../test_helper'
-require 'minitest/autorun'
+require_relative "../../test_helper"
+require "minitest/autorun"
 
 class ProfilingMiddlewareTest < Minitest::Test
   def setup
@@ -63,7 +63,7 @@ class ProfilingMiddlewareTest < Minitest::Test
       started_at: Time.now.iso8601(3),
       completed_at: Time.now.iso8601(3),
       request_size: 100,
-      response_size: 500
+      response_size: 500,
     }
 
     Parse::Middleware::Profiling.add_profile(profile)
@@ -80,7 +80,7 @@ class ProfilingMiddlewareTest < Minitest::Test
       Parse::Middleware::Profiling.add_profile({
         method: "GET",
         url: "/test/#{i}",
-        duration_ms: i
+        duration_ms: i,
       })
     end
 
@@ -110,8 +110,7 @@ class ProfilingMiddlewareTest < Minitest::Test
     assert_equal 200.0, stats[:avg_ms], "Average should be 200ms"
     assert_equal 100, stats[:min_ms], "Min should be 100ms"
     assert_equal 300, stats[:max_ms], "Max should be 300ms"
-    assert_equal({ "GET" => 2, "POST" => 1 }, stats[:by_method], "By method breakdown should match"
-)
+    assert_equal({ "GET" => 2, "POST" => 1 }, stats[:by_method], "By method breakdown should match")
     assert_equal({ 200 => 2, 201 => 1 }, stats[:by_status], "By status breakdown should match")
   end
 

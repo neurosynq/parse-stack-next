@@ -531,7 +531,7 @@ class TestACL < Minitest::Test
     user = OpenStruct.new(id: "user888", parse_class: "_User")
 
     # Simulate role fetch failure
-    Parse::Role.stub :all, -> (_) { raise StandardError, "Network error" } do
+    Parse::Role.stub :all, ->(_) { raise StandardError, "Network error" } do
       # Setup ACL - user has direct read access
       acl = Parse::ACL.new
       acl.apply("user888", read: true, write: false)

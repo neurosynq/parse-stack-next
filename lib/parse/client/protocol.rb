@@ -5,7 +5,9 @@ module Parse
   # Set of Parse protocol constants.
   module Protocol
     # The default server url, based on the hosted Parse platform.
-    SERVER_URL = "http://localhost:1337/parse".freeze
+    # Uses HTTPS by default for security. Override with ENV["PARSE_SERVER_URL"]
+    # or pass server_url: to Parse.setup for custom configurations.
+    SERVER_URL = "https://localhost:1337/parse".freeze
     # The request header field to send the application Id.
     APP_ID = "X-Parse-Application-Id"
     # The request header field to send the REST API key.
@@ -26,6 +28,12 @@ module Parse
     CONTENT_TYPE = "Content-Type"
     # The default content type format for sending API requests.
     CONTENT_TYPE_FORMAT = "application/json; charset=utf-8"
+    # The request header field for MongoDB read preference.
+    # Supported values: PRIMARY, PRIMARY_PREFERRED, SECONDARY, SECONDARY_PREFERRED, NEAREST
+    READ_PREFERENCE = "X-Parse-Read-Preference"
+
+    # Valid read preference values for MongoDB
+    READ_PREFERENCES = %w[PRIMARY PRIMARY_PREFERRED SECONDARY SECONDARY_PREFERRED NEAREST].freeze
   end
 
   # All Parse error codes.

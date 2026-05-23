@@ -111,7 +111,7 @@ module Parse
 
       # @!visibility private
       module ClassMethods
-        attr_accessor :references
+        attr_writer :references
         # We can keep references to all "belong_to" properties
         def references
           @references ||= {}
@@ -186,9 +186,8 @@ module Parse
             # Uses a registry instead of setting instance variables on the pointer object
             if val.is_a?(Parse::Pointer) && val.pointer? && Parse.warn_on_n_plus_one
               Parse::NPlusOneDetector.register_source(val,
-                source_class: owner_class_name,
-                association: association_key
-              )
+                                                      source_class: owner_class_name,
+                                                      association: association_key)
             end
 
             val

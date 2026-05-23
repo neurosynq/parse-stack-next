@@ -96,9 +96,39 @@ module Parse
       collection.fetch_objects
     end
 
-    # Encode the collection as a JSON object of Parse::Pointers.
+    # Encode the collection as JSON.
+    # By default, returns Parse::Pointers for backward compatibility when saving.
+    # Set `pointers_only: false` to get full hydrated objects for API responses.
+    # @param opts [Hash] options for serialization
+    # @option opts [Boolean] :pointers_only (true) When true (default), converts all
+    #   Parse objects to pointer format. Set to false to serialize full objects.
+    # @option opts [Boolean] :only_fetched (true) When true (default when pointers_only
+    #   is false), only serialize fields that were actually fetched. This prevents
+    #   autofetch from being triggered during serialization of partially hydrated objects.
+    # @example Default - pointers for storage
+    #   capture.assets.as_json
+    #   # => [{"__type"=>"Pointer", "className"=>"Asset", "objectId"=>"abc"}, ...]
+    # @example Full objects for API responses (only fetched fields, no autofetch)
+    #   capture.assets.as_json(pointers_only: false)
+    #   # => [{"objectId"=>"abc", "file"=>{...}, "caption"=>"...", ...}, ...]
     def as_json(opts = nil)
-      parse_pointers.as_json(opts)
+      opts ||= {}
+
+      # Normalize string keys to symbols to avoid conflicts with defaults
+      opts = opts.transform_keys { |k| k.is_a?(String) ? k.to_sym : k }
+
+      # Check if pointers_only was explicitly set, otherwise default to true
+      pointers_only = opts.fetch(:pointers_only, true)
+
+      # Default to pointers_only: true for backward compatibility
+      # When pointers_only is false, default only_fetched to true to prevent
+      # autofetch during serialization of partially hydrated objects
+      defaults = { pointers_only: true }
+      unless pointers_only
+        defaults[:only_fetched] = true unless opts.key?(:only_fetched)
+      end
+      opts = defaults.merge(opts)
+      super(opts)
     end
   end
 end

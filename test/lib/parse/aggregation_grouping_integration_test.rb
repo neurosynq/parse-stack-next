@@ -1,9 +1,9 @@
-require_relative '../../test_helper_integration'
+require_relative "../../test_helper_integration"
 
 # Test models for aggregation grouping testing
 class AggregationProduct < Parse::Object
   parse_class "AggregationProduct"
-  
+
   property :name, :string
   property :category, :string
   property :price, :float
@@ -15,7 +15,7 @@ end
 
 class AggregationSale < Parse::Object
   parse_class "AggregationSale"
-  
+
   property :product_name, :string
   property :quantity, :integer
   property :revenue, :float
@@ -36,7 +36,7 @@ class AggregationGroupingIntegrationTest < Minitest::Test
   end
 
   def test_sortable_grouping_functionality
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "sortable grouping test") do
@@ -50,7 +50,7 @@ class AggregationGroupingIntegrationTest < Minitest::Test
           { name: "Desk Chair", category: "furniture", price: 249.99, tags: ["office", "comfort"], launch_date: Date.new(2023, 5, 5) },
           { name: "Gaming Mouse", category: "electronics", price: 79.99, tags: ["gaming", "computer"], launch_date: Date.new(2023, 7, 12) },
           { name: "Table Lamp", category: "furniture", price: 89.99, tags: ["lighting", "home"], launch_date: Date.new(2023, 4, 18) },
-          { name: "Headphones", category: "electronics", price: 199.99, tags: ["audio", "wireless"], launch_date: Date.new(2023, 9, 3) }
+          { name: "Headphones", category: "electronics", price: 199.99, tags: ["audio", "wireless"], launch_date: Date.new(2023, 9, 3) },
         ]
 
         products.each do |product_data|
@@ -65,7 +65,7 @@ class AggregationGroupingIntegrationTest < Minitest::Test
 
         assert results.is_a?(Hash), "Results should be a hash"
         assert results.keys.length >= 3, "Should have at least 3 categories"
-        
+
         # Verify structure of sortable grouping results
         assert results.key?("electronics"), "Should have electronics group"
         assert results["electronics"] >= 4, "Electronics should have at least 4 products"
@@ -78,12 +78,12 @@ class AggregationGroupingIntegrationTest < Minitest::Test
         puts "Testing sortable grouping with sorting capabilities..."
         sortable_query = AggregationProduct.query.group_by(:category, sortable: true)
         sortable_results = sortable_query.count
-        
+
         # Test sorting capabilities of GroupedResult
         sorted_by_key = sortable_results.sort_by_key_asc
         assert sorted_by_key.is_a?(Array), "Sorted results should be an array of [key, value] pairs"
         assert sorted_by_key.length >= 3, "Should have sorted category pairs"
-        
+
         # Test hash conversion
         hash_results = sortable_results.to_h
         assert hash_results.is_a?(Hash), "Should convert to hash"
@@ -94,8 +94,8 @@ class AggregationGroupingIntegrationTest < Minitest::Test
         # Test sortable grouping with additional aggregation stages
         puts "Testing sortable grouping with aggregation pipeline..."
         expensive_products = AggregationProduct.query
-                                              .where(:price.gt => 100)
-                                              .group_by(:category, sortable: true)
+          .where(:price.gt => 100)
+          .group_by(:category, sortable: true)
         expensive_results = expensive_products.count.to_h
 
         assert expensive_results.is_a?(Hash), "Expensive results should be a hash"
@@ -109,7 +109,7 @@ class AggregationGroupingIntegrationTest < Minitest::Test
   end
 
   def test_flatten_arrays_functionality
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "flatten arrays test") do
@@ -117,30 +117,30 @@ class AggregationGroupingIntegrationTest < Minitest::Test
 
         # Create test sales with array fields
         sales = [
-          { 
-            product_name: "Laptop Pro", 
-            quantity: 2, 
+          {
+            product_name: "Laptop Pro",
+            quantity: 2,
             revenue: 2599.98,
             sale_date: Date.new(2023, 9, 15),
             customer_regions: ["north", "west"],
-            payment_methods: ["credit", "paypal"]
+            payment_methods: ["credit", "paypal"],
           },
-          { 
-            product_name: "Smartphone X", 
-            quantity: 1, 
+          {
+            product_name: "Smartphone X",
+            quantity: 1,
             revenue: 899.99,
             sale_date: Date.new(2023, 9, 16),
             customer_regions: ["south", "east", "central"],
-            payment_methods: ["credit"]
+            payment_methods: ["credit"],
           },
-          { 
-            product_name: "Coffee Mug", 
-            quantity: 5, 
+          {
+            product_name: "Coffee Mug",
+            quantity: 5,
             revenue: 79.95,
             sale_date: Date.new(2023, 9, 17),
             customer_regions: ["north"],
-            payment_methods: ["cash", "debit", "credit"]
-          }
+            payment_methods: ["cash", "debit", "credit"],
+          },
         ]
 
         sales.each do |sale_data|
@@ -154,7 +154,7 @@ class AggregationGroupingIntegrationTest < Minitest::Test
         region_results = flattened_regions.count
 
         assert region_results.is_a?(Hash), "Results should be a hash"
-        
+
         # Should have individual regions as separate groups
         expected_regions = ["north", "west", "south", "east", "central"]
         expected_regions.each do |region|
@@ -188,8 +188,8 @@ class AggregationGroupingIntegrationTest < Minitest::Test
         # Test flatten_arrays with additional constraints
         puts "Testing flatten_arrays with query constraints..."
         high_value_regions = AggregationSale.query
-                                          .where(:revenue.gt => 500)
-                                          .group_by(:customer_regions, flatten_arrays: true)
+          .where(:revenue.gt => 500)
+          .group_by(:customer_regions, flatten_arrays: true)
         high_value_results = high_value_regions.count
 
         # Should only include regions from high-value sales (Laptop Pro and Smartphone X)
@@ -203,7 +203,7 @@ class AggregationGroupingIntegrationTest < Minitest::Test
   end
 
   def test_group_by_date_functionality
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(25, "group by date test") do
@@ -217,7 +217,7 @@ class AggregationGroupingIntegrationTest < Minitest::Test
           { product_name: "Next Day Sale 1", quantity: 3, revenue: 300.0, sale_date: DateTime.new(2023, 9, 16, 11, 15) },
           { product_name: "Next Day Sale 2", quantity: 1, revenue: 75.0, sale_date: DateTime.new(2023, 9, 16, 16, 45) },
           { product_name: "Weekend Sale", quantity: 2, revenue: 250.0, sale_date: DateTime.new(2023, 9, 17, 12, 0) },
-          { product_name: "Next Week Sale", quantity: 1, revenue: 120.0, sale_date: DateTime.new(2023, 9, 22, 10, 30) }
+          { product_name: "Next Week Sale", quantity: 1, revenue: 120.0, sale_date: DateTime.new(2023, 9, 22, 10, 30) },
         ]
 
         sales_data.each do |sale_data|
@@ -246,7 +246,7 @@ class AggregationGroupingIntegrationTest < Minitest::Test
 
         # All sales are in September 2023, so should have 1 group
         assert monthly_results.keys.length >= 1, "Should have at least 1 month group"
-        
+
         # Verify total count
         total_monthly_sales = monthly_results.values.sum
         assert_equal 7, total_monthly_sales, "September 2023 should have all 7 sales"
@@ -259,7 +259,7 @@ class AggregationGroupingIntegrationTest < Minitest::Test
         hourly_results = hourly_sales.count
 
         assert hourly_results.keys.length >= 6, "Should have multiple hour groups"
-        
+
         # Verify total count
         total_hourly_sales = hourly_results.values.sum
         assert_equal 7, total_hourly_sales, "Should have all 7 sales distributed across hours"
@@ -281,8 +281,8 @@ class AggregationGroupingIntegrationTest < Minitest::Test
         # Test group_by_date with constraints
         puts "Testing group_by_date with query constraints..."
         high_revenue_daily = AggregationSale.query
-                                          .where(:revenue.gt => 150)
-                                          .group_by_date(:sale_date, :day)
+          .where(:revenue.gt => 150)
+          .group_by_date(:sale_date, :day)
         constrained_results = high_revenue_daily.count
 
         # Should only include sales with revenue > 150
@@ -296,7 +296,7 @@ class AggregationGroupingIntegrationTest < Minitest::Test
   end
 
   def test_combined_grouping_features
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(25, "combined grouping features test") do
@@ -306,7 +306,7 @@ class AggregationGroupingIntegrationTest < Minitest::Test
         products = [
           { name: "Product A", category: "tech", price: 299.99, tags: ["gadget", "popular"], launch_date: Date.new(2023, 6, 15) },
           { name: "Product B", category: "tech", price: 199.99, tags: ["gadget", "budget"], launch_date: Date.new(2023, 7, 10) },
-          { name: "Product C", category: "home", price: 89.99, tags: ["furniture", "popular"], launch_date: Date.new(2023, 8, 5) }
+          { name: "Product C", category: "home", price: 89.99, tags: ["furniture", "popular"], launch_date: Date.new(2023, 8, 5) },
         ]
 
         products.each do |product_data|
@@ -316,13 +316,13 @@ class AggregationGroupingIntegrationTest < Minitest::Test
 
         # Test sortable grouping with flatten_arrays
         puts "Testing sortable grouping with flatten_arrays..."
-        sortable_flattened = AggregationProduct.query.group_by(:tags, 
-                                                               flatten_arrays: true, 
+        sortable_flattened = AggregationProduct.query.group_by(:tags,
+                                                               flatten_arrays: true,
                                                                sortable: true)
         combined_results = sortable_flattened.count.to_h
 
         assert combined_results.is_a?(Hash), "Results should be a hash"
-        
+
         # Should have individual tags as groups
         expected_tags = ["gadget", "popular", "budget", "furniture"]
         expected_tags.each do |tag|
@@ -338,12 +338,12 @@ class AggregationGroupingIntegrationTest < Minitest::Test
         # Test group_by_date with additional pipeline stages
         puts "Testing group_by_date with complex aggregation..."
         complex_date_group = AggregationProduct.query
-                                             .where(:price.gt => 150)
-                                             .group_by_date(:launch_date, :month, return_pointers: false)
+          .where(:price.gt => 150)
+          .group_by_date(:launch_date, :month, return_pointers: false)
         complex_results = complex_date_group.count
 
         assert complex_results.is_a?(Hash), "Results should be a hash"
-        
+
         # Should have fewer products when filtered by price
         total_expensive_products = complex_results.values.sum
         assert total_expensive_products <= 3, "Should have fewer products when price filtered"

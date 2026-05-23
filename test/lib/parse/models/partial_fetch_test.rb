@@ -1,4 +1,4 @@
-require_relative '../../../test_helper'
+require_relative "../../../test_helper"
 
 # Test model for partial fetch unit testing
 class PartialFetchTestModel < Parse::Object
@@ -22,7 +22,6 @@ class PartialFetchTestUser < Parse::Object
 end
 
 class PartialFetchTest < Minitest::Test
-
   def test_partially_fetched_returns_false_when_no_keys_set
     obj = PartialFetchTestModel.new
     refute obj.partially_fetched?, "New object should not be partially fetched"
@@ -206,7 +205,7 @@ class PartialFetchTest < Minitest::Test
     result = Parse::Query.parse_keys_to_nested_keys([
       :"team.manager.name",
       :"team.manager.email",
-      :"team.address"
+      :"team.address",
     ])
 
     assert result[:team].include?(:manager), "team should include manager"
@@ -238,8 +237,8 @@ class PartialFetchTest < Minitest::Test
     nested = { author: [:name, :email] }
 
     obj = PartialFetchTestModel.build(json, "PartialFetchTestModel",
-                                       fetched_keys: [:title],
-                                       nested_fetched_keys: nested)
+                                      fetched_keys: [:title],
+                                      nested_fetched_keys: nested)
 
     assert_equal [:name, :email], obj.nested_keys_for(:author)
   end
@@ -363,7 +362,7 @@ class PartialFetchTest < Minitest::Test
     # Use build to simulate actual partial fetch behavior
     json = { "objectId" => "abc123", "title" => "Test" }
     obj = PartialFetchTestModel.build(json, "PartialFetchTestModel",
-                                       fetched_keys: [:title])
+                                      fetched_keys: [:title])
     obj.disable_autofetch!
 
     # is_published has default: false, but since it wasn't fetched, it should raise
@@ -378,7 +377,7 @@ class PartialFetchTest < Minitest::Test
     # Use build to simulate actual partial fetch behavior
     json = { "objectId" => "abc123", "title" => "Test" }
     obj = PartialFetchTestModel.build(json, "PartialFetchTestModel",
-                                       fetched_keys: [:title])
+                                      fetched_keys: [:title])
     obj.disable_autofetch!
 
     # view_count has default: 0, but since it wasn't fetched, it should raise
@@ -393,7 +392,7 @@ class PartialFetchTest < Minitest::Test
     # Use build to simulate actual partial fetch behavior
     json = { "objectId" => "abc123", "title" => "Test" }
     obj = PartialFetchTestModel.build(json, "PartialFetchTestModel",
-                                       fetched_keys: [:title])
+                                      fetched_keys: [:title])
     obj.disable_autofetch!
 
     # tags has default: [], but since it wasn't fetched, it should raise
@@ -409,11 +408,11 @@ class PartialFetchTest < Minitest::Test
       "objectId" => "abc123",
       "title" => "Test",
       "viewCount" => 42,
-      "isPublished" => true
+      "isPublished" => true,
     }
 
     obj = PartialFetchTestModel.build(json, "PartialFetchTestModel",
-                                       fetched_keys: [:title, :view_count, :is_published])
+                                      fetched_keys: [:title, :view_count, :is_published])
     obj.disable_autofetch!
 
     # Should return the server values, not the defaults
@@ -427,12 +426,12 @@ class PartialFetchTest < Minitest::Test
       "objectId" => "abc123",
       "title" => "Test",
       "createdAt" => now,
-      "updatedAt" => now
-      # viewCount and isPublished not included in JSON (nil from server)
+      "updatedAt" => now,
+    # viewCount and isPublished not included in JSON (nil from server)
     }
 
     obj = PartialFetchTestModel.build(json, "PartialFetchTestModel",
-                                       fetched_keys: [:title, :view_count, :is_published])
+                                      fetched_keys: [:title, :view_count, :is_published])
     obj.disable_autofetch!
 
     # Should return defaults since the field was fetched but nil from server
@@ -453,7 +452,7 @@ class PartialFetchTest < Minitest::Test
     # Create a partially fetched object via build
     json = { "objectId" => "abc123", "title" => "Test" }
     obj = PartialFetchTestModel.build(json, "PartialFetchTestModel",
-                                       fetched_keys: [:title])
+                                      fetched_keys: [:title])
 
     # The instance variables for unfetched fields with defaults should not be set
     refute obj.instance_variable_defined?(:@view_count) && !obj.instance_variable_get(:@view_count).nil?,
@@ -466,11 +465,11 @@ class PartialFetchTest < Minitest::Test
     json = {
       "objectId" => "abc123",
       "title" => "Test",
-      "viewCount" => 100
+      "viewCount" => 100,
     }
 
     obj = PartialFetchTestModel.build(json, "PartialFetchTestModel",
-                                       fetched_keys: [:title, :view_count])
+                                      fetched_keys: [:title, :view_count])
 
     # The instance variable should be set for fetched fields
     assert_equal 100, obj.instance_variable_get(:@view_count)
@@ -486,7 +485,7 @@ class PartialFetchTest < Minitest::Test
 
     json = { "objectId" => "abc123", "title" => "Test Title" }
     obj = PartialFetchTestModel.build(json, "PartialFetchTestModel",
-                                       fetched_keys: [:title])
+                                      fetched_keys: [:title])
 
     result = obj.as_json
 
@@ -503,7 +502,7 @@ class PartialFetchTest < Minitest::Test
 
     json = { "objectId" => "abc123", "title" => "Test" }
     obj = PartialFetchTestModel.build(json, "PartialFetchTestModel",
-                                       fetched_keys: [:title])
+                                      fetched_keys: [:title])
 
     result = obj.as_json
 
@@ -521,7 +520,7 @@ class PartialFetchTest < Minitest::Test
 
     json = { "objectId" => "abc123", "title" => "Test" }
     obj = PartialFetchTestModel.build(json, "PartialFetchTestModel",
-                                       fetched_keys: [:title])
+                                      fetched_keys: [:title])
 
     # When the global setting is false, as_json will NOT filter by fetched keys
     # This means it will try to serialize ALL fields, triggering autofetch.
@@ -541,7 +540,7 @@ class PartialFetchTest < Minitest::Test
 
     json = { "objectId" => "abc123", "title" => "Test" }
     obj = PartialFetchTestModel.build(json, "PartialFetchTestModel",
-                                       fetched_keys: [:title])
+                                      fetched_keys: [:title])
 
     # With only_fetched: true (default when setting enabled), only fetched fields are serialized
     result = obj.as_json
@@ -560,7 +559,7 @@ class PartialFetchTest < Minitest::Test
 
     json = { "objectId" => "abc123", "title" => "Test", "content" => "Content" }
     obj = PartialFetchTestModel.build(json, "PartialFetchTestModel",
-                                       fetched_keys: [:title, :content])
+                                      fetched_keys: [:title, :content])
 
     # Explicit :only should take precedence over fetched_keys
     result = obj.as_json(only: ["content"])
@@ -616,7 +615,7 @@ class PartialFetchTest < Minitest::Test
 
     json = { "objectId" => "abc123", "title" => "Test" }
     obj = PartialFetchTestModel.build(json, "PartialFetchTestModel",
-                                       fetched_keys: [:title])
+                                      fetched_keys: [:title])
 
     result_json = obj.to_json
     result = JSON.parse(result_json)

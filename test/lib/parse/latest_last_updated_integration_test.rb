@@ -1,9 +1,9 @@
-require_relative '../../test_helper_integration'
+require_relative "../../test_helper_integration"
 
 # Test models for latest/last_updated method testing
 class TestBlogPost < Parse::Object
   parse_class "TestBlogPost"
-  
+
   property :title, :string
   property :content, :string
   property :category, :string
@@ -23,7 +23,7 @@ class LatestLastUpdatedTest < Minitest::Test
   end
 
   def test_latest_method_returns_most_recent_created_object
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "latest method test") do
@@ -32,14 +32,14 @@ class LatestLastUpdatedTest < Minitest::Test
         # Create test objects with small delays to ensure different created_at times
         post1 = TestBlogPost.new(title: "First Post", content: "Content 1", category: "tech")
         assert post1.save, "First post should save"
-        
+
         sleep(0.1) # Small delay
-        
+
         post2 = TestBlogPost.new(title: "Second Post", content: "Content 2", category: "news")
         assert post2.save, "Second post should save"
-        
+
         sleep(0.1) # Small delay
-        
+
         post3 = TestBlogPost.new(title: "Third Post", content: "Content 3", category: "tech")
         assert post3.save, "Third post should save"
 
@@ -67,7 +67,7 @@ class LatestLastUpdatedTest < Minitest::Test
   end
 
   def test_last_updated_method_returns_most_recent_updated_object
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "last_updated method test") do
@@ -76,10 +76,10 @@ class LatestLastUpdatedTest < Minitest::Test
         # Create test objects
         post1 = TestBlogPost.new(title: "Update Test 1", content: "Original content", view_count: 10)
         assert post1.save, "First post should save"
-        
+
         post2 = TestBlogPost.new(title: "Update Test 2", content: "Original content", view_count: 20)
         assert post2.save, "Second post should save"
-        
+
         post3 = TestBlogPost.new(title: "Update Test 3", content: "Original content", view_count: 30)
         assert post3.save, "Third post should save"
 
@@ -118,7 +118,7 @@ class LatestLastUpdatedTest < Minitest::Test
   end
 
   def test_latest_and_last_updated_with_empty_collection
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "empty collection test") do
@@ -141,7 +141,7 @@ class LatestLastUpdatedTest < Minitest::Test
   end
 
   def test_method_consistency_with_first_pattern
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(10, "method consistency test") do
@@ -149,25 +149,25 @@ class LatestLastUpdatedTest < Minitest::Test
 
         # Create test data
         3.times do |i|
-          post = TestBlogPost.new(title: "Consistency Test #{i+1}", category: "test")
-          assert post.save, "Test post #{i+1} should save"
+          post = TestBlogPost.new(title: "Consistency Test #{i + 1}", category: "test")
+          assert post.save, "Test post #{i + 1} should save"
           sleep(0.1) # Ensure different timestamps
         end
 
         # Test that methods follow same pattern as first()
-        
+
         # Single object return
         latest_single = TestBlogPost.latest
         assert latest_single.is_a?(TestBlogPost), "latest() should return single object"
-        
+
         last_updated_single = TestBlogPost.last_updated
         assert last_updated_single.is_a?(TestBlogPost), "last_updated() should return single object"
-        
+
         # Multiple objects return
         latest_multiple = TestBlogPost.latest(2)
         assert latest_multiple.is_a?(Array), "latest(n) should return array"
         assert_equal 2, latest_multiple.length, "latest(2) should return exactly 2 items"
-        
+
         last_updated_multiple = TestBlogPost.last_updated(2)
         assert last_updated_multiple.is_a?(Array), "last_updated(n) should return array"
         assert_equal 2, last_updated_multiple.length, "last_updated(2) should return exactly 2 items"

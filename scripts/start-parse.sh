@@ -4,17 +4,25 @@ set -e
 echo "=== Parse Server Startup Script ==="
 echo "Setting up environment..."
 
-# Write environment variables to a file for debugging
-echo "PARSE_SERVER_MASTER_KEY_IPS=0.0.0.0/0,::/0" >> /tmp/parse-env
-echo "Environment file contents:"
-cat /tmp/parse-env
-
-# Export the environment variable
+# Export environment variables for Parse Server
 export PARSE_SERVER_MASTER_KEY_IPS="0.0.0.0/0,::/0"
+export PARSE_SERVER_APPLICATION_ID="myAppId"
+export PARSE_SERVER_MASTER_KEY="myMasterKey"
+export PARSE_SERVER_REST_API_KEY="test-rest-key"
+export PARSE_SERVER_DATABASE_URI="mongodb://admin:password@mongo:27017/parse?authSource=admin"
+export PARSE_SERVER_MOUNT_PATH="/parse"
+export PARSE_SERVER_CLOUD="/parse-server/cloud/main.js"
+export PARSE_SERVER_LOG_LEVEL="info"
+export PARSE_SERVER_ALLOW_CLIENT_CLASS_CREATION="true"
 
-# Verify the variable is set
-echo "Environment variable check:"
-echo "PARSE_SERVER_MASTER_KEY_IPS: $PARSE_SERVER_MASTER_KEY_IPS"
+# LiveQuery configuration via environment variables
+export PARSE_SERVER_LIVE_QUERY='{"classNames":["Song","Album","User","_User","TestLiveQuery"]}'
+export PARSE_SERVER_START_LIVE_QUERY_SERVER="true"
+
+echo "Environment configured:"
+echo "  PARSE_SERVER_APPLICATION_ID: $PARSE_SERVER_APPLICATION_ID"
+echo "  PARSE_SERVER_LIVE_QUERY: $PARSE_SERVER_LIVE_QUERY"
+echo "  PARSE_SERVER_START_LIVE_QUERY_SERVER: $PARSE_SERVER_START_LIVE_QUERY_SERVER"
 
 # Start Parse Server
 echo "Starting Parse Server..."
@@ -26,36 +34,12 @@ ls -la /parse-server/
 # Try different ways to start parse-server
 if [ -f "/parse-server/bin/parse-server" ]; then
   echo "Using /parse-server/bin/parse-server"
-  exec /parse-server/bin/parse-server \
-    --appId myAppId \
-    --masterKey myMasterKey \
-    --restAPIKey test-rest-key \
-    --databaseURI mongodb://admin:password@mongo:27017/parse?authSource=admin \
-    --mountPath /parse \
-    --cloud /parse-server/cloud/main.js \
-    --logLevel info \
-    --allowClientClassCreation true
+  exec /parse-server/bin/parse-server
 elif [ -f "/usr/src/app/bin/parse-server" ]; then
   echo "Using /usr/src/app/bin/parse-server"
-  exec /usr/src/app/bin/parse-server \
-    --appId myAppId \
-    --masterKey myMasterKey \
-    --restAPIKey test-rest-key \
-    --databaseURI mongodb://admin:password@mongo:27017/parse?authSource=admin \
-    --mountPath /parse \
-    --cloud /parse-server/cloud/main.js \
-    --logLevel info \
-    --allowClientClassCreation true
+  exec /usr/src/app/bin/parse-server
 else
   echo "Trying with node and index.js"
   cd /parse-server
-  exec node ./bin/parse-server \
-    --appId myAppId \
-    --masterKey myMasterKey \
-    --restAPIKey test-rest-key \
-    --databaseURI mongodb://admin:password@mongo:27017/parse?authSource=admin \
-    --mountPath /parse \
-    --cloud /parse-server/cloud/main.js \
-    --logLevel info \
-    --allowClientClassCreation true
+  exec node ./bin/parse-server
 fi

@@ -148,12 +148,17 @@ module Parse
     #   Legacy signature for backward compatibility.
     #   @param return_object [Boolean] if true returns object, if false returns JSON
     #   @return [Parse::Object, Hash] the object or raw JSON data
-    # @overload fetch(keys:, includes:)
+    # @overload fetch(keys:, includes:, cache:)
     #   Partial fetch - fetches only specified fields
     #   @param keys [Array<Symbol, String>, nil] optional list of fields to fetch (partial fetch).
     #   @param includes [Array<String>, nil] optional list of pointer fields to expand.
+    #   @param cache [Boolean, Symbol, Integer] caching mode:
+    #     - true - read from and write to cache
+    #     - false - completely bypass cache
+    #     - :write_only - skip cache read, but update cache with fresh data
+    #     - Integer - cache for specific number of seconds
     #   @return [Parse::Object] a partially fetched Parse::Object, nil otherwise.
-    def fetch(return_object = nil, keys: nil, includes: nil)
+    def fetch(return_object = nil, keys: nil, includes: nil, cache: nil)
       # Handle legacy signature: fetch(false) returns JSON
       if return_object == false
         return fetch_json(keys: keys, includes: includes)
@@ -170,7 +175,11 @@ module Parse
         query[:include] = includes_array.join(",")
       end
 
-      response = client.fetch_object(parse_class, id, query: query.presence)
+      # Build opts for caching
+      opts = {}
+      opts[:cache] = cache unless cache.nil?
+
+      response = client.fetch_object(parse_class, id, query: query.presence, **opts)
       return nil if response.error?
 
       # Check if the result is empty - this indicates object not found
@@ -188,7 +197,7 @@ module Parse
       # For partial fetch, build with fetched_keys tracking
       if keys.present?
         # Parse keys to get top-level field names and nested keys
-        top_level_keys = Array(keys).map { |k| Parse::Query.format_field(k).split('.').first.to_sym }
+        top_level_keys = Array(keys).map { |k| Parse::Query.format_field(k).split(".").first.to_sym }
         top_level_keys << :id unless top_level_keys.include?(:id)
         top_level_keys << :objectId unless top_level_keys.include?(:objectId)
         top_level_keys.uniq!
@@ -231,6 +240,21 @@ module Parse
     # @return [Parse::Object] the fetched Parse::Object, nil otherwise.
     def fetch_object
       fetch
+    end
+
+    # Fetches the pointer with explicit caching enabled and returns a Parse::Object.
+    # This is a convenience method that calls fetch with cache: true.
+    # Use this when you want to leverage cached responses for better performance.
+    # @param keys [Array<Symbol, String>, nil] optional list of fields to fetch (partial fetch).
+    # @param includes [Array<String>, nil] optional list of pointer fields to expand.
+    # @return [Parse::Object] the fetched Parse::Object, nil otherwise.
+    # @example Fetch pointer with caching
+    #   capture = capture_pointer.fetch_cache!
+    # @example Partial fetch with caching
+    #   capture = capture_pointer.fetch_cache!(keys: [:title, :status])
+    # @see #fetch
+    def fetch_cache!(keys: nil, includes: nil)
+      fetch(keys: keys, includes: includes, cache: true)
     end
 
     # Two Parse::Pointers (or Parse::Objects) are equal if both of them have
@@ -294,12 +318,12 @@ module Parse
       klass = Parse::Model.find_class(parse_class)
 
       # If no class is registered or the class doesn't have this field, use default behavior
-      unless klass && klass.respond_to?(:fields) && klass.fields[method_name.to_s.chomp('=').to_sym]
+      unless klass && klass.respond_to?(:fields) && klass.fields[method_name.to_s.chomp("=").to_sym]
         return super
       end
 
       # We have a registered class with this field - handle autofetch
-      field_name = method_name.to_s.chomp('=').to_sym
+      field_name = method_name.to_s.chomp("=").to_sym
 
       # If autofetch_raise_on_missing_keys is enabled, raise an error
       if Parse.autofetch_raise_on_missing_keys
@@ -327,7 +351,7 @@ module Parse
     def respond_to_missing?(method_name, include_private = false)
       klass = Parse::Model.find_class(parse_class)
       if klass && klass.respond_to?(:fields)
-        field_name = method_name.to_s.chomp('=').to_sym
+        field_name = method_name.to_s.chomp("=").to_sym
         return true if klass.fields[field_name]
       end
       super

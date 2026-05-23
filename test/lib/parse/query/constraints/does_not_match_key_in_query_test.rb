@@ -29,10 +29,10 @@ class TestDoesNotMatchKeyInQueryConstraint < Minitest::Test
   def test_with_parse_query
     query = Parse::Query.new("Customer", active: true)
     constraint = @klass.new(:company, query)
-    
+
     expected_query = { where: { "active" => true }, className: "Customer" }
     expected = { company: { :$dontSelect => { key: :company, query: expected_query } } }
-    
+
     assert_equal expected, constraint.build
   end
 
@@ -40,17 +40,17 @@ class TestDoesNotMatchKeyInQueryConstraint < Minitest::Test
     query = Parse::Query.new("Customer", active: true)
     value = { key: "company_name", query: query }
     constraint = @klass.new(:company, value)
-    
+
     expected_query = { where: { "active" => true }, className: "Customer" }
     expected = { company: { :$dontSelect => { key: "company_name", query: expected_query } } }
-    
+
     assert_equal expected, constraint.build
   end
 
   def test_invalid_query_raises_error
     invalid_value = "not a query"
     constraint = @klass.new(:company, invalid_value)
-    
+
     assert_raises(ArgumentError) do
       constraint.build
     end
@@ -59,7 +59,7 @@ class TestDoesNotMatchKeyInQueryConstraint < Minitest::Test
   def test_invalid_hash_query_raises_error
     invalid_hash = { key: "company", query: "not a query" }
     constraint = @klass.new(:company, invalid_hash)
-    
+
     assert_raises(ArgumentError) do
       constraint.build
     end

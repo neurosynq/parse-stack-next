@@ -8,7 +8,7 @@ module Parse
 
       # @!attribute config
       #  @return [Hash] the cached config hash for the client.
-      attr_accessor :config
+      attr_writer :config
 
       # @!visibility private
       CONFIG_PATH = "config"

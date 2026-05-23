@@ -1,9 +1,9 @@
-require_relative '../../test_helper_integration'
+require_relative "../../test_helper_integration"
 
 # Test models for field selection testing
 class FieldSelectionPost < Parse::Object
   parse_class "FieldSelectionPost"
-  
+
   property :title, :string
   property :content, :string
   property :category, :string
@@ -16,7 +16,7 @@ end
 
 class FieldSelectionUser < Parse::Object
   parse_class "FieldSelectionUser"
-  
+
   property :name, :string
   property :email, :string
   property :age, :integer
@@ -36,7 +36,7 @@ class FieldSelectionIntegrationTest < Minitest::Test
   end
 
   def test_keys_method_limits_returned_fields
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "keys method field limitation test") do
@@ -51,19 +51,19 @@ class FieldSelectionIntegrationTest < Minitest::Test
           view_count: 100,
           published: true,
           tags: ["programming", "ruby"],
-          meta_data: { featured: true, priority: "high" }
+          meta_data: { featured: true, priority: "high" },
         )
         assert post1.save, "Post 1 should save"
 
         post2 = FieldSelectionPost.new(
-          title: "Test Post 2", 
+          title: "Test Post 2",
           content: "This is the content of post 2",
           category: "news",
           author_name: "Bob",
           view_count: 50,
           published: false,
           tags: ["updates", "company"],
-          meta_data: { featured: false, priority: "low" }
+          meta_data: { featured: false, priority: "low" },
         )
         assert post2.save, "Post 2 should save"
 
@@ -97,7 +97,7 @@ class FieldSelectionIntegrationTest < Minitest::Test
   end
 
   def test_select_fields_alias_functionality
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "select_fields alias test") do
@@ -109,7 +109,7 @@ class FieldSelectionIntegrationTest < Minitest::Test
           email: "test@example.com",
           age: 30,
           bio: "This is a bio",
-          preferences: { theme: "dark", notifications: true }
+          preferences: { theme: "dark", notifications: true },
         )
         assert user.save, "User should save"
 
@@ -144,7 +144,7 @@ class FieldSelectionIntegrationTest < Minitest::Test
   end
 
   def test_field_selection_with_array_and_object_fields
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "array and object field selection test") do
@@ -155,10 +155,10 @@ class FieldSelectionIntegrationTest < Minitest::Test
           title: "Complex Post",
           content: "Content with arrays and objects",
           tags: ["ruby", "parse", "testing"],
-          meta_data: { 
+          meta_data: {
             author: { name: "John", role: "admin" },
-            stats: { views: 1000, likes: 50 } 
-          }
+            stats: { views: 1000, likes: 50 },
+          },
         )
         assert post.save, "Complex post should save"
 
@@ -174,7 +174,7 @@ class FieldSelectionIntegrationTest < Minitest::Test
         # Test selecting object field
         posts_with_meta = FieldSelectionPost.query.keys(:title, :meta_data).results
         post_result = posts_with_meta.first
-        
+
         assert_equal "Complex Post", post_result.title, "Title should be present"
         assert post_result.meta_data.is_a?(Hash), "Meta data should be an object/hash"
         assert_equal "John", post_result.meta_data["author"]["name"], "Nested object data should be present"
@@ -186,7 +186,7 @@ class FieldSelectionIntegrationTest < Minitest::Test
   end
 
   def test_field_selection_with_constraints
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "field selection with constraints test") do
@@ -195,18 +195,18 @@ class FieldSelectionIntegrationTest < Minitest::Test
         # Create multiple posts
         post1 = FieldSelectionPost.new(title: "Tech Post", category: "tech", view_count: 100, published: true)
         assert post1.save, "Tech post should save"
-        
+
         post2 = FieldSelectionPost.new(title: "News Post", category: "news", view_count: 50, published: false)
         assert post2.save, "News post should save"
-        
+
         post3 = FieldSelectionPost.new(title: "Tech Post 2", category: "tech", view_count: 200, published: true)
         assert post3.save, "Tech post 2 should save"
 
         # Test field selection with where constraints
         tech_posts = FieldSelectionPost.query
-                                      .where(category: "tech")
-                                      .keys(:title, :view_count)
-                                      .results
+          .where(category: "tech")
+          .keys(:title, :view_count)
+          .results
 
         assert_equal 2, tech_posts.length, "Should return 2 tech posts"
         tech_posts.each do |post|
@@ -219,9 +219,9 @@ class FieldSelectionIntegrationTest < Minitest::Test
 
         # Test field selection with ordering
         ordered_posts = FieldSelectionPost.query
-                                         .keys(:title, :view_count)
-                                         .order(:view_count.desc)
-                                         .results
+          .keys(:title, :view_count)
+          .order(:view_count.desc)
+          .results
 
         assert_equal 3, ordered_posts.length, "Should return all posts ordered"
         assert ordered_posts.first.view_count >= ordered_posts.last.view_count, "Should be ordered by view count desc"
@@ -233,9 +233,9 @@ class FieldSelectionIntegrationTest < Minitest::Test
 
         # Test field selection with limit
         limited_posts = FieldSelectionPost.query
-                                         .keys(:title)
-                                         .limit(2)
-                                         .results
+          .keys(:title)
+          .limit(2)
+          .results
 
         assert_equal 2, limited_posts.length, "Should return limited number of posts"
         limited_posts.each do |post|
@@ -250,7 +250,7 @@ class FieldSelectionIntegrationTest < Minitest::Test
   end
 
   def test_field_selection_chaining_and_method_calls
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "field selection chaining test") do
@@ -259,7 +259,7 @@ class FieldSelectionIntegrationTest < Minitest::Test
         # Create test data
         user1 = FieldSelectionUser.new(name: "Alice", email: "alice@example.com", age: 25)
         assert user1.save, "User 1 should save"
-        
+
         user2 = FieldSelectionUser.new(name: "Bob", email: "bob@example.com", age: 30)
         assert user2.save, "User 2 should save"
 
@@ -287,7 +287,7 @@ class FieldSelectionIntegrationTest < Minitest::Test
         assert latest_user.name.present?, "Name should be present"
         refute latest_user.field_was_fetched?(:email), "Email should not be fetched"
 
-        # Test chaining with count() 
+        # Test chaining with count()
         count = FieldSelectionUser.query.keys(:name).count
         assert_equal 2, count, "Count should work with field selection"
 
@@ -297,7 +297,7 @@ class FieldSelectionIntegrationTest < Minitest::Test
   end
 
   def test_field_selection_performance_and_payload_size
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "field selection performance test") do
@@ -306,20 +306,20 @@ class FieldSelectionIntegrationTest < Minitest::Test
         # Create post with large content
         large_content = "Lorem ipsum " * 1000  # Large text content
         large_bio = "Biography " * 500
-        
+
         post = FieldSelectionPost.new(
           title: "Performance Test",
           content: large_content,
           author_name: "Performance Tester",
-          view_count: 1000
+          view_count: 1000,
         )
         assert post.save, "Performance test post should save"
-        
+
         user = FieldSelectionUser.new(
           name: "Performance User",
           email: "perf@example.com",
           bio: large_bio,
-          age: 25
+          age: 25,
         )
         assert user.save, "Performance test user should save"
 
@@ -327,18 +327,18 @@ class FieldSelectionIntegrationTest < Minitest::Test
         start_time = Time.now
         full_post = FieldSelectionPost.first
         full_load_time = Time.now - start_time
-        
+
         start_time = Time.now
         limited_post = FieldSelectionPost.query.keys(:title, :view_count).first
         limited_load_time = Time.now - start_time
-        
+
         # Verify data differences
         limited_post.disable_autofetch!  # Prevent autofetch when checking unfetched fields
         assert_equal full_post.title, limited_post.title, "Titles should match"
         assert_equal full_post.view_count, limited_post.view_count, "View counts should match"
         assert full_post.content.length > 1000, "Full post should have large content"
         refute limited_post.field_was_fetched?(:content), "Content should not be fetched"
-        
+
         # Performance should be better (though this can vary in test environment)
         puts "Full object load time: #{(full_load_time * 1000).round(2)}ms"
         puts "Limited fields load time: #{(limited_load_time * 1000).round(2)}ms"
@@ -348,23 +348,23 @@ class FieldSelectionIntegrationTest < Minitest::Test
         10.times do |i|
           FieldSelectionUser.new(
             name: "User #{i}",
-            email: "user#{i}@example.com", 
+            email: "user#{i}@example.com",
             bio: large_bio,
-            age: 20 + i
+            age: 20 + i,
           ).save
         end
 
         start_time = Time.now
         full_users = FieldSelectionUser.all
         full_batch_time = Time.now - start_time
-        
-        start_time = Time.now  
+
+        start_time = Time.now
         limited_users = FieldSelectionUser.query.keys(:name, :age).results
         limited_batch_time = Time.now - start_time
-        
+
         puts "Full batch (#{full_users.length} users): #{(full_batch_time * 1000).round(2)}ms"
         puts "Limited batch (#{limited_users.length} users): #{(limited_batch_time * 1000).round(2)}ms"
-        
+
         assert_equal full_users.length, limited_users.length, "Should return same number of users"
         limited_users.each do |user|
           user.disable_autofetch!  # Prevent autofetch when checking unfetched fields
@@ -379,7 +379,7 @@ class FieldSelectionIntegrationTest < Minitest::Test
   end
 
   def test_field_selection_edge_cases
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "field selection edge cases test") do
@@ -421,7 +421,7 @@ class FieldSelectionIntegrationTest < Minitest::Test
   end
 
   def test_select_constraint_functionality
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "select constraint test") do
@@ -430,46 +430,46 @@ class FieldSelectionIntegrationTest < Minitest::Test
         # Create authors with different fan counts
         author1 = FieldSelectionUser.new(name: "Popular Author", email: "popular@example.com", age: 30, bio: "Has many fans")
         assert author1.save, "Popular author should save"
-        
+
         author2 = FieldSelectionUser.new(name: "Niche Author", email: "niche@example.com", age: 25, bio: "Has few fans")
         assert author2.save, "Niche author should save"
-        
+
         author3 = FieldSelectionUser.new(name: "Famous Author", email: "famous@example.com", age: 40, bio: "Very popular")
         assert author3.save, "Famous author should save"
 
         # Create posts with different categories and author associations
         post1 = FieldSelectionPost.new(
-          title: "Tech Post by Popular Author", 
+          title: "Tech Post by Popular Author",
           content: "Great tech content",
           category: "tech",
-          author_name: author1.name
+          author_name: author1.name,
         )
         assert post1.save, "Post 1 should save"
-        
+
         post2 = FieldSelectionPost.new(
-          title: "News Post by Niche Author", 
+          title: "News Post by Niche Author",
           content: "Local news",
-          category: "news", 
-          author_name: author2.name
+          category: "news",
+          author_name: author2.name,
         )
         assert post2.save, "Post 2 should save"
-        
+
         post3 = FieldSelectionPost.new(
-          title: "Tech Post by Famous Author", 
+          title: "Tech Post by Famous Author",
           content: "Advanced tech topics",
           category: "tech",
-          author_name: author3.name
+          author_name: author3.name,
         )
         assert post3.save, "Post 3 should save"
 
         # Test select constraint: Find posts where author_name matches name of users older than 35
         older_authors_query = FieldSelectionUser.query.where(:age.gt => 35)
         posts_by_older_authors = FieldSelectionPost.query
-                                                  .where(:author_name.select => { 
-                                                    key: :name, 
-                                                    query: older_authors_query 
-                                                  })
-                                                  .results
+          .where(:author_name.select => {
+                   key: :name,
+                   query: older_authors_query,
+                 })
+          .results
 
         assert_equal 1, posts_by_older_authors.length, "Should find 1 post by author older than 35"
         post_result = posts_by_older_authors.first
@@ -480,15 +480,15 @@ class FieldSelectionIntegrationTest < Minitest::Test
         # Create a query that looks for users by author_name field (this won't work since users don't have author_name)
         # Instead, let's test with a working scenario where field names actually match
         posts_with_specific_names = FieldSelectionPost.query.where(:title.contains => "Famous")
-        
+
         # This simplified syntax would look for Users where 'title' field matches, but Users don't have title
         # So let's create a more appropriate test
         users_with_specific_names = FieldSelectionUser.query.where(:name.contains => "Famous")
         posts_by_specific_users = FieldSelectionPost.query
-                                                    .where(:author_name.select => { 
-                                                      key: :name, 
-                                                      query: users_with_specific_names 
-                                                    })
+                                                    .where(:author_name.select => {
+                                                             key: :name,
+                                                             query: users_with_specific_names,
+                                                           })
                                                     .results
 
         assert_equal 1, posts_by_specific_users.length, "Should find 1 post by user with 'Famous' in name"
@@ -496,10 +496,10 @@ class FieldSelectionIntegrationTest < Minitest::Test
         # Test select constraint with additional filters
         tech_posts_by_older_authors = FieldSelectionPost.query
                                                         .where(category: "tech")
-                                                        .where(:author_name.select => { 
-                                                          key: :name, 
-                                                          query: older_authors_query 
-                                                        })
+                                                        .where(:author_name.select => {
+                                                                 key: :name,
+                                                                 query: older_authors_query,
+                                                               })
                                                         .results
 
         assert_equal 1, tech_posts_by_older_authors.length, "Should find 1 tech post by older author"
@@ -511,7 +511,7 @@ class FieldSelectionIntegrationTest < Minitest::Test
   end
 
   def test_reject_constraint_functionality
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(20, "reject constraint test") do
@@ -520,48 +520,48 @@ class FieldSelectionIntegrationTest < Minitest::Test
         # Create users with different preferences
         user1 = FieldSelectionUser.new(name: "Active User", email: "active@example.com", age: 28, bio: "Very active")
         assert user1.save, "Active user should save"
-        
+
         user2 = FieldSelectionUser.new(name: "Inactive User", email: "inactive@example.com", age: 22, bio: "Not very active")
         assert user2.save, "Inactive user should save"
-        
+
         user3 = FieldSelectionUser.new(name: "Moderate User", email: "moderate@example.com", age: 35, bio: "Somewhat active")
         assert user3.save, "Moderate user should save"
 
         # Create posts with different engagement levels and author associations
         post1 = FieldSelectionPost.new(
-          title: "High Engagement Post", 
+          title: "High Engagement Post",
           content: "Very popular content",
           category: "tech",
           author_name: user1.name,
-          view_count: 1000
+          view_count: 1000,
         )
         assert post1.save, "High engagement post should save"
-        
+
         post2 = FieldSelectionPost.new(
-          title: "Low Engagement Post", 
+          title: "Low Engagement Post",
           content: "Not very popular",
-          category: "news", 
+          category: "news",
           author_name: user2.name,
-          view_count: 10
+          view_count: 10,
         )
         assert post2.save, "Low engagement post should save"
-        
+
         post3 = FieldSelectionPost.new(
-          title: "Medium Engagement Post", 
+          title: "Medium Engagement Post",
           content: "Moderately popular",
           category: "tech",
           author_name: user3.name,
-          view_count: 100
+          view_count: 100,
         )
         assert post3.save, "Medium engagement post should save"
 
         # Test reject constraint: Find posts where author_name does NOT match name of young users (age < 25)
         young_users_query = FieldSelectionUser.query.where(:age.lt => 25)
         posts_not_by_young_authors = FieldSelectionPost.query
-                                                       .where(:author_name.reject => { 
-                                                         key: :name, 
-                                                         query: young_users_query 
-                                                       })
+                                                       .where(:author_name.reject => {
+                                                                key: :name,
+                                                                query: young_users_query,
+                                                              })
                                                        .results
 
         assert_equal 2, posts_not_by_young_authors.length, "Should find 2 posts not by young authors"
@@ -572,10 +572,10 @@ class FieldSelectionIntegrationTest < Minitest::Test
 
         # Test reject constraint with another query approach
         posts_not_by_inactive_user = FieldSelectionPost.query
-                                                       .where(:author_name.reject => { 
-                                                         key: :name, 
-                                                         query: FieldSelectionUser.query.where(name: "Inactive User")
-                                                       })
+                                                       .where(:author_name.reject => {
+                                                                key: :name,
+                                                                query: FieldSelectionUser.query.where(name: "Inactive User"),
+                                                              })
                                                        .results
 
         assert_equal 2, posts_not_by_inactive_user.length, "Should find 2 posts not by Inactive User"
@@ -583,10 +583,10 @@ class FieldSelectionIntegrationTest < Minitest::Test
         # Test reject constraint combined with other filters
         tech_posts_not_by_young = FieldSelectionPost.query
                                                     .where(category: "tech")
-                                                    .where(:author_name.reject => { 
-                                                      key: :name, 
-                                                      query: young_users_query 
-                                                    })
+                                                    .where(:author_name.reject => {
+                                                             key: :name,
+                                                             query: young_users_query,
+                                                           })
                                                     .results
 
         assert_equal 2, tech_posts_not_by_young.length, "Should find 2 tech posts not by young authors"
@@ -601,7 +601,7 @@ class FieldSelectionIntegrationTest < Minitest::Test
   end
 
   def test_select_and_reject_constraints_with_complex_scenarios
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(25, "complex select/reject test") do
@@ -610,41 +610,41 @@ class FieldSelectionIntegrationTest < Minitest::Test
         # Create a more complex scenario with different user roles and post types
         admin_user = FieldSelectionUser.new(name: "Admin User", email: "admin@example.com", age: 30, bio: "Administrator")
         assert admin_user.save, "Admin user should save"
-        
+
         editor_user = FieldSelectionUser.new(name: "Editor User", email: "editor@example.com", age: 26, bio: "Content editor")
         assert editor_user.save, "Editor user should save"
-        
+
         author_user = FieldSelectionUser.new(name: "Author User", email: "author@example.com", age: 24, bio: "Content author")
         assert author_user.save, "Author user should save"
 
         # Create posts with different statuses and authors
         published_post1 = FieldSelectionPost.new(
-          title: "Published by Admin", 
+          title: "Published by Admin",
           content: "Important announcement",
           category: "news",
           author_name: admin_user.name,
           view_count: 500,
-          published: true
+          published: true,
         )
         assert published_post1.save, "Published post 1 should save"
-        
+
         draft_post1 = FieldSelectionPost.new(
-          title: "Draft by Editor", 
+          title: "Draft by Editor",
           content: "Work in progress",
           category: "tech",
           author_name: editor_user.name,
           view_count: 0,
-          published: false
+          published: false,
         )
         assert draft_post1.save, "Draft post 1 should save"
-        
+
         published_post2 = FieldSelectionPost.new(
-          title: "Published by Author", 
+          title: "Published by Author",
           content: "Tutorial content",
           category: "tech",
           author_name: author_user.name,
           view_count: 200,
-          published: true
+          published: true,
         )
         assert published_post2.save, "Published post 2 should save"
 
@@ -655,14 +655,14 @@ class FieldSelectionIntegrationTest < Minitest::Test
         # Find published posts by experienced users but not by novice users
         published_posts_by_experienced = FieldSelectionPost.query
                                                            .where(published: true)
-                                                           .where(:author_name.select => { 
-                                                             key: :name, 
-                                                             query: experienced_users_query 
-                                                           })
-                                                           .where(:author_name.reject => { 
-                                                             key: :name, 
-                                                             query: novice_users_query 
-                                                           })
+                                                           .where(:author_name.select => {
+                                                                    key: :name,
+                                                                    query: experienced_users_query,
+                                                                  })
+                                                           .where(:author_name.reject => {
+                                                                    key: :name,
+                                                                    query: novice_users_query,
+                                                                  })
                                                            .results
 
         assert_equal 1, published_posts_by_experienced.length, "Should find 1 published post by experienced user"
@@ -672,12 +672,12 @@ class FieldSelectionIntegrationTest < Minitest::Test
 
         # Test select constraint with field selection (keys)
         posts_by_experienced_limited_fields = FieldSelectionPost.query
-                                                               .where(:author_name.select => { 
-                                                                 key: :name, 
-                                                                 query: experienced_users_query 
-                                                               })
-                                                               .keys(:title, :author_name, :published)
-                                                               .results
+          .where(:author_name.select => {
+                   key: :name,
+                   query: experienced_users_query,
+                 })
+          .keys(:title, :author_name, :published)
+          .results
 
         assert_equal 2, posts_by_experienced_limited_fields.length, "Should find 2 posts by experienced users"
         posts_by_experienced_limited_fields.each do |post|

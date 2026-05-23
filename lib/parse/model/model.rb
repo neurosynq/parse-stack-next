@@ -67,6 +67,12 @@ module Parse
     CLASS_ROLE = "_Role"
     # The collection for to store Products (in-App purchases) in Parse. Used by Parse::Product.
     CLASS_PRODUCT = "_Product"
+    # The collection for Audiences in Parse. Used by Parse::Audience.
+    CLASS_AUDIENCE = "_Audience"
+    # The collection for Push Status in Parse. Used by Parse::PushStatus.
+    CLASS_PUSH_STATUS = "_PushStatus"
+    # The internal schema collection in Parse. Managed by Parse Server.
+    CLASS_SCHEMA = "_SCHEMA"
     # The type label for hashes containing file data. Used by Parse::File.
     TYPE_FILE = "File"
     # The type label for hashes containing geopoints. Used by Parse::GeoPoint.

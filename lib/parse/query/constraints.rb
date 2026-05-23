@@ -12,6 +12,57 @@ require_relative "constraint"
 # that inspired this, see http://datamapper.org/docs/find.html
 
 module Parse
+  # Security module for validating regex patterns to prevent ReDoS attacks.
+  # MongoDB uses PCRE which is susceptible to catastrophic backtracking.
+  module RegexSecurity
+    # Maximum allowed length for regex patterns
+    MAX_PATTERN_LENGTH = 500
+
+    # Patterns that can cause exponential backtracking in PCRE
+    DANGEROUS_PATTERNS = [
+      /\(\?\=|\(\?\!|\(\?\<[!=]/,                    # Lookahead/lookbehind assertions
+      /\{(\d{3,}|\d+,\d{3,})\}/,                     # Large repetition counts {1000} or {1,1000}
+      /(\.\*|\.\+)\s*(\.\*|\.\+)/,                   # Consecutive .* or .+ patterns
+      /\([^)]*(\+|\*)[^)]*\)\s*(\+|\*)/,             # Nested quantifiers like (a+)+
+      /\(\?[^)]*\([^)]*(\+|\*)[^)]*\)[^)]*(\+|\*)\)/, # More complex nested quantifiers
+    ].freeze
+
+    class << self
+      # Validates a regex pattern for potential ReDoS vulnerabilities.
+      # @param pattern [String, Regexp] the pattern to validate
+      # @param max_length [Integer] maximum allowed pattern length
+      # @raise [ArgumentError] if the pattern is potentially dangerous
+      # @return [String] the validated pattern string
+      def validate!(pattern, max_length: MAX_PATTERN_LENGTH)
+        pattern_str = pattern.is_a?(Regexp) ? pattern.source : pattern.to_s
+
+        if pattern_str.length > max_length
+          raise ArgumentError, "Regex pattern too long (#{pattern_str.length} chars, max #{max_length}). " \
+                               "Long patterns can cause performance issues."
+        end
+
+        DANGEROUS_PATTERNS.each do |dangerous|
+          if pattern_str.match?(dangerous)
+            raise ArgumentError, "Regex pattern contains potentially dangerous constructs that could cause " \
+                                 "ReDoS (Regular Expression Denial of Service). Pattern: #{pattern_str.inspect}"
+          end
+        end
+
+        pattern_str
+      end
+
+      # Checks if a pattern is safe without raising an exception.
+      # @param pattern [String, Regexp] the pattern to check
+      # @return [Boolean] true if safe, false if potentially dangerous
+      def safe?(pattern, max_length: MAX_PATTERN_LENGTH)
+        validate!(pattern, max_length: max_length)
+        true
+      rescue ArgumentError
+        false
+      end
+    end
+  end
+
   class Constraint
     # A constraint for matching by a specific objectId value.
     #
@@ -64,7 +115,7 @@ module Parse
 
         begin
           klass = className.constantize
-        rescue NameError => e
+        rescue NameError
           klass = Parse::Model.find_class className
         end
 
@@ -491,13 +542,13 @@ module Parse
         lt: "$lt",
         lte: "$lte",
         ne: "$ne",
-        eq: "$eq"
+        eq: "$eq",
       }.freeze
 
       # @return [Hash] the compiled constraint using aggregation pipeline.
       def build
         value = formatted_value
-        field_name = @operation.operand.to_s
+        field_name = Parse::Query.format_field(@operation.operand)
         size_expr = { "$size" => { "$ifNull" => ["$#{field_name}", []] } }
 
         if value.is_a?(Integer)
@@ -508,10 +559,10 @@ module Parse
             {
               "$match" => {
                 "$expr" => {
-                  "$eq" => [size_expr, value]
-                }
-              }
-            }
+                  "$eq" => [size_expr, value],
+                },
+              },
+            },
           ]
         elsif value.is_a?(Hash)
           # Hash with comparison operators
@@ -520,7 +571,7 @@ module Parse
           value.each do |op, val|
             op_sym = op.to_sym
             unless COMPARISON_OPERATORS.key?(op_sym)
-              raise ArgumentError, "#{self.class}: Unknown operator '#{op}'. Valid operators: #{COMPARISON_OPERATORS.keys.join(', ')}"
+              raise ArgumentError, "#{self.class}: Unknown operator '#{op}'. Valid operators: #{COMPARISON_OPERATORS.keys.join(", ")}"
             end
             unless val.is_a?(Integer) && val >= 0
               raise ArgumentError, "#{self.class}: Value for '#{op}' must be a non-negative integer"
@@ -536,9 +587,9 @@ module Parse
           pipeline = [
             {
               "$match" => {
-                "$expr" => expr
-              }
-            }
+                "$expr" => expr,
+              },
+            },
           ]
         else
           raise ArgumentError, "#{self.class}: Value must be an integer or hash with comparison operators (gt, gte, lt, lte, ne, eq)"
@@ -548,17 +599,20 @@ module Parse
       end
     end
 
-    # Array empty constraint - shorthand for size == 0.
-    # Matches arrays that have no elements.
+    # Array empty constraint - matches arrays with no elements.
+    # Uses direct equality for the true case (index-friendly) rather than $size.
     #
-    #  q.where :tags.arr_empty => true   # arrays with 0 elements
-    #  q.where :tags.arr_empty => false  # arrays with 1+ elements (same as nempty)
+    #  q.where :tags.arr_empty => true   # arrays with 0 elements (uses { field: [] })
+    #  q.where :tags.arr_empty => false  # arrays with 1+ elements (uses $size > 0)
     #
     # @note This uses the arr_empty name to avoid conflict with the existing empty constraint
     #   which checks if the first array element exists.
+    # @note The true case uses equality which can leverage MongoDB indexes.
+    #   The false case still requires $size which cannot use indexes.
     #
     # @see ArraySizeConstraint
     # @see ArrayNotEmptyConstraint
+    # @see ArrayEmptyOrNilConstraint
     class ArrayEmptyConstraint < Constraint
       # @!method arr_empty
       # A registered method on a symbol to create the constraint.
@@ -574,19 +628,17 @@ module Parse
           raise ArgumentError, "#{self.class}: Value must be true or false"
         end
 
-        field_name = @operation.operand.to_s
-        size_expr = { "$size" => { "$ifNull" => ["$#{field_name}", []] } }
+        field_name = Parse::Query.format_field(@operation.operand)
 
-        # If true, match size == 0; if false, match size > 0
-        comparison = value ? { "$eq" => [size_expr, 0] } : { "$gt" => [size_expr, 0] }
-
-        pipeline = [
-          {
-            "$match" => {
-              "$expr" => comparison
-            }
-          }
-        ]
+        if value
+          # Use direct equality for empty array (can use MongoDB index)
+          pipeline = [{ "$match" => { field_name => [] } }]
+        else
+          # For non-empty, use $ne [] which is index-friendly
+          # Note: This matches arrays with elements but also matches nil/missing
+          # Use not_empty constraint if you need to exclude nil/missing
+          pipeline = [{ "$match" => { field_name => { "$ne" => [] } } }]
+        end
 
         { "__aggregation_pipeline" => pipeline }
       end
@@ -615,7 +667,7 @@ module Parse
           raise ArgumentError, "#{self.class}: Value must be true or false"
         end
 
-        field_name = @operation.operand.to_s
+        field_name = Parse::Query.format_field(@operation.operand)
         size_expr = { "$size" => { "$ifNull" => ["$#{field_name}", []] } }
 
         # If true, match size > 0; if false, match size == 0
@@ -624,10 +676,135 @@ module Parse
         pipeline = [
           {
             "$match" => {
-              "$expr" => comparison
-            }
-          }
+              "$expr" => comparison,
+            },
+          },
         ]
+
+        { "__aggregation_pipeline" => pipeline }
+      end
+    end
+
+    # Array empty or nil constraint - matches arrays that are empty OR nil/missing.
+    # This is useful for finding records where an array field has no values,
+    # whether it's explicitly empty or was never set.
+    #
+    #  q.where :tags.empty_or_nil => true   # matches [] or nil/missing
+    #  q.where :tags.empty_or_nil => false  # matches non-empty arrays only
+    #
+    # @note Uses index-friendly operations where possible.
+    #
+    # @see ArrayEmptyConstraint
+    # @see ExistsConstraint
+    class ArrayEmptyOrNilConstraint < Constraint
+      # @!method empty_or_nil
+      # A registered method on a symbol to create the constraint.
+      # @example
+      #  q.where :field.empty_or_nil => true
+      # @return [ArrayEmptyOrNilConstraint]
+      register :empty_or_nil
+
+      # @return [Hash] the compiled constraint using aggregation pipeline.
+      def build
+        value = formatted_value
+        unless value == true || value == false
+          raise ArgumentError, "#{self.class}: Value must be true or false"
+        end
+
+        # Use formatted field name for proper Parse field mapping
+        field_name = Parse::Query.format_field(@operation.operand)
+
+        if value
+          # Match empty array OR nil/missing field
+          # Use explicit $eq for empty array check (more reliable through Parse Server)
+          pipeline = [
+            {
+              "$match" => {
+                "$or" => [
+                  { field_name => { "$exists" => true, "$eq" => [] } },
+                  { field_name => { "$exists" => false } },
+                  { field_name => { "$eq" => nil } },
+                ],
+              },
+            },
+          ]
+        else
+          # Match non-empty arrays (must exist, not nil, and not empty)
+          # Use $and to combine multiple conditions without duplicate keys
+          pipeline = [
+            {
+              "$match" => {
+                "$and" => [
+                  { field_name => { "$exists" => true } },
+                  { field_name => { "$ne" => nil } },
+                  { field_name => { "$ne" => [] } },
+                ],
+              },
+            },
+          ]
+        end
+
+        { "__aggregation_pipeline" => pipeline }
+      end
+    end
+
+    # Array not empty constraint - matches arrays that have at least one element.
+    # This is the opposite of empty_or_nil: it matches only non-empty arrays.
+    #
+    #  q.where :tags.not_empty => true   # matches non-empty arrays only
+    #  q.where :tags.not_empty => false  # matches [] or nil/missing
+    #
+    # @note Uses index-friendly operations where possible.
+    #
+    # @see ArrayEmptyOrNilConstraint
+    # @see ArrayEmptyConstraint
+    class ArrayNotEmptyOrNilConstraint < Constraint
+      # @!method not_empty
+      # A registered method on a symbol to create the constraint.
+      # @example
+      #  q.where :field.not_empty => true
+      # @return [ArrayNotEmptyOrNilConstraint]
+      register :not_empty
+
+      # @return [Hash] the compiled constraint using aggregation pipeline.
+      def build
+        value = formatted_value
+        unless value == true || value == false
+          raise ArgumentError, "#{self.class}: Value must be true or false"
+        end
+
+        # Use formatted field name for proper Parse field mapping
+        field_name = Parse::Query.format_field(@operation.operand)
+
+        if value
+          # Match non-empty arrays (must exist, not nil, and not empty)
+          # Use $and to combine multiple conditions without duplicate keys
+          pipeline = [
+            {
+              "$match" => {
+                "$and" => [
+                  { field_name => { "$exists" => true } },
+                  { field_name => { "$ne" => nil } },
+                  { field_name => { "$ne" => [] } },
+                ],
+              },
+            },
+          ]
+        else
+          # Match empty array OR nil/missing field
+          # Use explicit $eq for empty array check (more reliable through Parse Server)
+          pipeline = [
+            {
+              "$match" => {
+                "$or" => [
+                  { field_name => { "$exists" => true, "$eq" => [] } },
+                  { field_name => { "$exists" => false } },
+                  { field_name => { "$eq" => nil } },
+                ],
+              },
+            },
+          ]
+        end
 
         { "__aggregation_pipeline" => pipeline }
       end
@@ -661,7 +838,7 @@ module Parse
         val = formatted_value
         val = [val].compact unless val.is_a?(Array)
 
-        field_name = @operation.operand.to_s
+        field_name = Parse::Query.format_field(@operation.operand)
 
         # Check if values are pointers (Parse objects or pointer objects)
         is_pointer_array = val.any? do |item|
@@ -685,29 +862,40 @@ module Parse
             raise ArgumentError, "#{self.class.name}: Cannot use unsaved objects (missing ID) in array constraint"
           end
 
-          # For pointer arrays, we need to map the objectIds from the stored pointers
+          # For pointer arrays, we need to map the objectIds from the stored pointers.
+          # $ifNull coerces a missing/null field to [] so $map (and $setEquals) don't
+          # raise type errors on legacy documents that lack the field.
           pipeline = [
             {
               "$match" => {
                 "$expr" => {
                   "$setEquals" => [
-                    { "$map" => { "input" => "$#{field_name}", "as" => "p", "in" => "$$p.objectId" } },
-                    target_ids
-                  ]
-                }
-              }
-            }
+                    { "$map" => {
+                        "input" => { "$ifNull" => ["$#{field_name}", []] },
+                        "as" => "p",
+                        "in" => "$$p.objectId",
+                      } },
+                    target_ids,
+                  ],
+                },
+              },
+            },
           ]
         else
-          # For simple value arrays (strings, numbers, etc.)
+          # For simple value arrays (strings, numbers, etc.).
+          # $ifNull coerces a missing/null field to [] so $setEquals doesn't raise
+          # a type error on legacy documents that lack the field.
           pipeline = [
             {
               "$match" => {
                 "$expr" => {
-                  "$setEquals" => ["$#{field_name}", val]
-                }
-              }
-            }
+                  "$setEquals" => [
+                    { "$ifNull" => ["$#{field_name}", []] },
+                    val,
+                  ],
+                },
+              },
+            },
           ]
         end
 
@@ -746,7 +934,7 @@ module Parse
         val = formatted_value
         val = [val].compact unless val.is_a?(Array)
 
-        field_name = @operation.operand.to_s
+        field_name = Parse::Query.format_field(@operation.operand)
 
         # Check if values are pointers (Parse objects or pointer objects)
         is_pointer_array = val.any? do |item|
@@ -770,29 +958,40 @@ module Parse
             raise ArgumentError, "#{self.class.name}: Cannot use unsaved objects (missing ID) in array constraint"
           end
 
-          # For pointer arrays, compare mapped objectIds with exact equality (order matters)
+          # For pointer arrays, compare mapped objectIds with exact equality (order matters).
+          # $ifNull coerces a missing/null field to [] so $map doesn't raise a type
+          # error on legacy documents that lack the field.
           pipeline = [
             {
               "$match" => {
                 "$expr" => {
                   "$eq" => [
-                    { "$map" => { "input" => "$#{field_name}", "as" => "p", "in" => "$$p.objectId" } },
-                    target_ids
-                  ]
-                }
-              }
-            }
+                    { "$map" => {
+                        "input" => { "$ifNull" => ["$#{field_name}", []] },
+                        "as" => "p",
+                        "in" => "$$p.objectId",
+                      } },
+                    target_ids,
+                  ],
+                },
+              },
+            },
           ]
         else
-          # For simple value arrays, direct $eq comparison (order matters)
+          # For simple value arrays, direct $eq comparison (order matters).
+          # $ifNull coerces a missing/null field to [] so a doc lacking the field
+          # is treated the same as one with [], consistent with set_equals/arr_empty.
           pipeline = [
             {
               "$match" => {
                 "$expr" => {
-                  "$eq" => ["$#{field_name}", val]
-                }
-              }
-            }
+                  "$eq" => [
+                    { "$ifNull" => ["$#{field_name}", []] },
+                    val,
+                  ],
+                },
+              },
+            },
           ]
         end
 
@@ -825,7 +1024,7 @@ module Parse
         val = formatted_value
         val = [val].compact unless val.is_a?(Array)
 
-        field_name = @operation.operand.to_s
+        field_name = Parse::Query.format_field(@operation.operand)
 
         # Check if values are pointers (Parse objects or pointer objects)
         is_pointer_array = val.any? do |item|
@@ -849,29 +1048,40 @@ module Parse
             raise ArgumentError, "#{self.class.name}: Cannot use unsaved objects (missing ID) in array constraint"
           end
 
-          # For pointer arrays, compare mapped objectIds with $ne (order matters)
+          # For pointer arrays, compare mapped objectIds with $ne (order matters).
+          # $ifNull coerces a missing/null field to [] so $map doesn't raise a type
+          # error on legacy documents that lack the field.
           pipeline = [
             {
               "$match" => {
                 "$expr" => {
                   "$ne" => [
-                    { "$map" => { "input" => "$#{field_name}", "as" => "p", "in" => "$$p.objectId" } },
-                    target_ids
-                  ]
-                }
-              }
-            }
+                    { "$map" => {
+                        "input" => { "$ifNull" => ["$#{field_name}", []] },
+                        "as" => "p",
+                        "in" => "$$p.objectId",
+                      } },
+                    target_ids,
+                  ],
+                },
+              },
+            },
           ]
         else
-          # For simple value arrays, direct $ne comparison (order matters)
+          # For simple value arrays, direct $ne comparison (order matters).
+          # $ifNull coerces a missing/null field to [] so a doc lacking the field
+          # is treated the same as one with [], consistent with set_equals/arr_empty.
           pipeline = [
             {
               "$match" => {
                 "$expr" => {
-                  "$ne" => ["$#{field_name}", val]
-                }
-              }
-            }
+                  "$ne" => [
+                    { "$ifNull" => ["$#{field_name}", []] },
+                    val,
+                  ],
+                },
+              },
+            },
           ]
         end
 
@@ -883,9 +1093,8 @@ module Parse
     # Matches arrays that do NOT contain exactly the same elements (regardless of order).
     # This is order-independent: [A, B, C] does NOT match [A, B] but [C, B, A] DOES match.
     #
-    #  q.where :field.nlike => ["rock", "pop"]
     #  q.where :field.not_set_equals => ["rock", "pop"]
-    #  q.where :tags.nlike => [category1, category2]  # for pointers
+    #  q.where :tags.not_set_equals => [category1, category2]  # for pointers
     #
     # @note This constraint uses aggregation pipeline with MongoDB $not and $setEquals.
     #
@@ -905,7 +1114,7 @@ module Parse
         val = formatted_value
         val = [val].compact unless val.is_a?(Array)
 
-        field_name = @operation.operand.to_s
+        field_name = Parse::Query.format_field(@operation.operand)
 
         # Check if values are pointers (Parse objects or pointer objects)
         is_pointer_array = val.any? do |item|
@@ -929,33 +1138,45 @@ module Parse
             raise ArgumentError, "#{self.class.name}: Cannot use unsaved objects (missing ID) in array constraint"
           end
 
-          # For pointer arrays, use $not with $setEquals on mapped objectIds
+          # For pointer arrays, use $not with $setEquals on mapped objectIds.
+          # $ifNull coerces a missing/null field to [] so $map doesn't raise a type
+          # error on legacy documents that lack the field. A missing field is
+          # treated the same as [] for set-equality purposes.
           pipeline = [
             {
               "$match" => {
                 "$expr" => {
                   "$not" => {
                     "$setEquals" => [
-                      { "$map" => { "input" => "$#{field_name}", "as" => "p", "in" => "$$p.objectId" } },
-                      target_ids
-                    ]
-                  }
-                }
-              }
-            }
+                      { "$map" => {
+                          "input" => { "$ifNull" => ["$#{field_name}", []] },
+                          "as" => "p",
+                          "in" => "$$p.objectId",
+                        } },
+                      target_ids,
+                    ],
+                  },
+                },
+              },
+            },
           ]
         else
-          # For simple value arrays, use $not with $setEquals
+          # For simple value arrays, use $not with $setEquals.
+          # $ifNull coerces a missing/null field to [] so $setEquals doesn't raise
+          # a type error on legacy documents that lack the field.
           pipeline = [
             {
               "$match" => {
                 "$expr" => {
                   "$not" => {
-                    "$setEquals" => ["$#{field_name}", val]
-                  }
-                }
-              }
-            }
+                    "$setEquals" => [
+                      { "$ifNull" => ["$#{field_name}", []] },
+                      val,
+                    ],
+                  },
+                },
+              },
+            },
           ]
         end
 
@@ -995,7 +1216,7 @@ module Parse
           raise ArgumentError, "#{self.class}: Value must be a hash of criteria for element matching"
         end
 
-        field_name = @operation.operand.to_s
+        field_name = Parse::Query.format_field(@operation.operand)
 
         # Convert any Parse objects to pointers in the criteria
         converted_val = convert_criteria(val)
@@ -1007,10 +1228,10 @@ module Parse
           {
             "$match" => {
               field_name => {
-                "$elemMatch" => converted_val
-              }
-            }
-          }
+                "$elemMatch" => converted_val,
+              },
+            },
+          },
         ]
 
         { "__aggregation_pipeline" => pipeline }
@@ -1060,7 +1281,7 @@ module Parse
         val = formatted_value
         val = [val].compact unless val.is_a?(Array)
 
-        field_name = @operation.operand.to_s
+        field_name = Parse::Query.format_field(@operation.operand)
 
         # Check if values are pointers
         is_pointer_array = val.any? do |item|
@@ -1084,27 +1305,40 @@ module Parse
             raise ArgumentError, "#{self.class.name}: Cannot use unsaved objects (missing ID) in array constraint"
           end
 
+          # $ifNull coerces a missing/null field to [] so $map (and $setIsSubset)
+          # don't raise type errors on legacy documents that lack the field.
+          # The empty set is a subset of every set, so a missing field matches
+          # any subset_of target — consistent with treating missing as [].
           pipeline = [
             {
               "$match" => {
                 "$expr" => {
                   "$setIsSubset" => [
-                    { "$map" => { "input" => "$#{field_name}", "as" => "p", "in" => "$$p.objectId" } },
-                    target_ids
-                  ]
-                }
-              }
-            }
+                    { "$map" => {
+                        "input" => { "$ifNull" => ["$#{field_name}", []] },
+                        "as" => "p",
+                        "in" => "$$p.objectId",
+                      } },
+                    target_ids,
+                  ],
+                },
+              },
+            },
           ]
         else
+          # $ifNull coerces a missing/null field to [] so $setIsSubset doesn't
+          # raise a type error on legacy documents that lack the field.
           pipeline = [
             {
               "$match" => {
                 "$expr" => {
-                  "$setIsSubset" => ["$#{field_name}", val]
-                }
-              }
-            }
+                  "$setIsSubset" => [
+                    { "$ifNull" => ["$#{field_name}", []] },
+                    val,
+                  ],
+                },
+              },
+            },
           ]
         end
 
@@ -1133,9 +1367,11 @@ module Parse
       # @return [Hash] the compiled constraint using aggregation pipeline.
       def build
         val = formatted_value
-        field_name = @operation.operand.to_s
+        field_name = Parse::Query.format_field(@operation.operand)
 
-        # Handle pointer values
+        # Handle pointer values. Wrap field reference in $ifNull so a missing
+        # field is treated as [] (yielding null from $arrayElemAt) rather than
+        # propagating a Missing value through the pipeline.
         if val.respond_to?(:id)
           compare_val = val.id
           pipeline = [
@@ -1143,12 +1379,16 @@ module Parse
               "$match" => {
                 "$expr" => {
                   "$eq" => [
-                    { "$arrayElemAt" => [{ "$map" => { "input" => "$#{field_name}", "as" => "p", "in" => "$$p.objectId" } }, 0] },
-                    compare_val
-                  ]
-                }
-              }
-            }
+                    { "$arrayElemAt" => [{ "$map" => {
+                        "input" => { "$ifNull" => ["$#{field_name}", []] },
+                        "as" => "p",
+                        "in" => "$$p.objectId",
+                      } }, 0] },
+                    compare_val,
+                  ],
+                },
+              },
+            },
           ]
         elsif val.is_a?(Parse::Pointer)
           compare_val = val.id
@@ -1157,12 +1397,16 @@ module Parse
               "$match" => {
                 "$expr" => {
                   "$eq" => [
-                    { "$arrayElemAt" => [{ "$map" => { "input" => "$#{field_name}", "as" => "p", "in" => "$$p.objectId" } }, 0] },
-                    compare_val
-                  ]
-                }
-              }
-            }
+                    { "$arrayElemAt" => [{ "$map" => {
+                        "input" => { "$ifNull" => ["$#{field_name}", []] },
+                        "as" => "p",
+                        "in" => "$$p.objectId",
+                      } }, 0] },
+                    compare_val,
+                  ],
+                },
+              },
+            },
           ]
         else
           pipeline = [
@@ -1170,12 +1414,12 @@ module Parse
               "$match" => {
                 "$expr" => {
                   "$eq" => [
-                    { "$arrayElemAt" => ["$#{field_name}", 0] },
-                    val
-                  ]
-                }
-              }
-            }
+                    { "$arrayElemAt" => [{ "$ifNull" => ["$#{field_name}", []] }, 0] },
+                    val,
+                  ],
+                },
+              },
+            },
           ]
         end
 
@@ -1204,9 +1448,11 @@ module Parse
       # @return [Hash] the compiled constraint using aggregation pipeline.
       def build
         val = formatted_value
-        field_name = @operation.operand.to_s
+        field_name = Parse::Query.format_field(@operation.operand)
 
-        # Handle pointer values
+        # Handle pointer values. Wrap field reference in $ifNull so a missing
+        # field is treated as [] (yielding null from $arrayElemAt) rather than
+        # propagating a Missing value through the pipeline.
         if val.respond_to?(:id)
           compare_val = val.id
           pipeline = [
@@ -1214,12 +1460,16 @@ module Parse
               "$match" => {
                 "$expr" => {
                   "$eq" => [
-                    { "$arrayElemAt" => [{ "$map" => { "input" => "$#{field_name}", "as" => "p", "in" => "$$p.objectId" } }, -1] },
-                    compare_val
-                  ]
-                }
-              }
-            }
+                    { "$arrayElemAt" => [{ "$map" => {
+                        "input" => { "$ifNull" => ["$#{field_name}", []] },
+                        "as" => "p",
+                        "in" => "$$p.objectId",
+                      } }, -1] },
+                    compare_val,
+                  ],
+                },
+              },
+            },
           ]
         elsif val.is_a?(Parse::Pointer)
           compare_val = val.id
@@ -1228,12 +1478,16 @@ module Parse
               "$match" => {
                 "$expr" => {
                   "$eq" => [
-                    { "$arrayElemAt" => [{ "$map" => { "input" => "$#{field_name}", "as" => "p", "in" => "$$p.objectId" } }, -1] },
-                    compare_val
-                  ]
-                }
-              }
-            }
+                    { "$arrayElemAt" => [{ "$map" => {
+                        "input" => { "$ifNull" => ["$#{field_name}", []] },
+                        "as" => "p",
+                        "in" => "$$p.objectId",
+                      } }, -1] },
+                    compare_val,
+                  ],
+                },
+              },
+            },
           ]
         else
           pipeline = [
@@ -1241,12 +1495,12 @@ module Parse
               "$match" => {
                 "$expr" => {
                   "$eq" => [
-                    { "$arrayElemAt" => ["$#{field_name}", -1] },
-                    val
-                  ]
-                }
-              }
-            }
+                    { "$arrayElemAt" => [{ "$ifNull" => ["$#{field_name}", []] }, -1] },
+                    val,
+                  ],
+                },
+              },
+            },
           ]
         end
 
@@ -1356,7 +1610,8 @@ module Parse
     #  :name.like => /Bob/i
     #
     class RegularExpressionConstraint < Constraint
-      #Requires that a key's value match a regular expression
+      # Requires that a key's value match a regular expression.
+      # Includes security validation to prevent ReDoS attacks.
 
       # @!method like
       # A registered method on a symbol to create the constraint. Maps to Parse operator "$regex".
@@ -1370,6 +1625,24 @@ module Parse
       constraint_keyword :$regex
       register :like
       register :regex
+
+      # Builds the regex constraint with security validation.
+      # @raise [ArgumentError] if the pattern is potentially dangerous (ReDoS)
+      # @return [Hash] the compiled constraint
+      def build
+        value = formatted_value
+        pattern_str = value.is_a?(Regexp) ? value.source : value.to_s
+        options = value.is_a?(Regexp) && value.casefold? ? "i" : nil
+
+        # Validate the regex pattern for ReDoS vulnerabilities
+        Parse::RegexSecurity.validate!(pattern_str)
+
+        if options
+          { @operation.operand => { key => pattern_str, :$options => options } }
+        else
+          { @operation.operand => { key => pattern_str } }
+        end
+      end
     end
 
     # Equivalent to the `$relatedTo` Parse query operation. If you want to
@@ -1656,7 +1929,7 @@ module Parse
       def build
         remote_field_name = @operation.operand
         query = nil
-        
+
         if @value.is_a?(Hash)
           res = @value.symbolize_keys
           remote_field_name = res[:key] || remote_field_name
@@ -1671,7 +1944,7 @@ module Parse
         else
           raise ArgumentError, "Invalid `:matches_key_in_query` query constraint. It should follow the format: :field.matches_key_in_query => { key: 'key', query: '<Parse::Query>' }"
         end
-        
+
         { @operation.operand => { :$select => { key: remote_field_name, query: query } } }
       end
     end
@@ -1707,7 +1980,7 @@ module Parse
       def build
         remote_field_name = @operation.operand
         query = nil
-        
+
         if @value.is_a?(Hash)
           res = @value.symbolize_keys
           remote_field_name = res[:key] || remote_field_name
@@ -1722,7 +1995,7 @@ module Parse
         else
           raise ArgumentError, "Invalid `:does_not_match_key_in_query` query constraint. It should follow the format: :field.does_not_match_key_in_query => { key: 'key', query: '<Parse::Query>' }"
         end
-        
+
         { @operation.operand => { :$dontSelect => { key: remote_field_name, query: query } } }
       end
     end
@@ -1749,11 +2022,16 @@ module Parse
         unless value.is_a?(String)
           raise ArgumentError, "#{self.class}: Value must be a string for starts_with constraint"
         end
-        
+
+        # Validate length to prevent performance issues
+        if value.length > Parse::RegexSecurity::MAX_PATTERN_LENGTH
+          raise ArgumentError, "#{self.class}: Value too long (#{value.length} chars, max #{Parse::RegexSecurity::MAX_PATTERN_LENGTH})"
+        end
+
         # Escape special regex characters in the prefix
         escaped_value = Regexp.escape(value)
         regex_pattern = "^#{escaped_value}"
-        
+
         { @operation.operand => { :$regex => regex_pattern, :$options => "i" } }
       end
     end
@@ -1780,15 +2058,55 @@ module Parse
         unless value.is_a?(String)
           raise ArgumentError, "#{self.class}: Value must be a string for contains constraint"
         end
-        
+
+        # Validate length to prevent performance issues
+        if value.length > Parse::RegexSecurity::MAX_PATTERN_LENGTH
+          raise ArgumentError, "#{self.class}: Value too long (#{value.length} chars, max #{Parse::RegexSecurity::MAX_PATTERN_LENGTH})"
+        end
+
         # Escape special regex characters in the search text
         escaped_value = Regexp.escape(value)
         regex_pattern = ".*#{escaped_value}.*"
-        
+
         { @operation.operand => { :$regex => regex_pattern, :$options => "i" } }
       end
     end
 
+    # Equivalent to using the `$regex` Parse query operation with a suffix pattern.
+    # This is useful for matching fields that end with a specific string.
+    #
+    #  # Find files whose name ends with ".pdf"
+    #  File.where(:name.ends_with => ".pdf")
+    #  # Generates: "name": { "$regex": "\\.pdf$", "$options": "i" }
+    #
+    class EndsWithConstraint < Constraint
+      # @!method ends_with
+      # A registered method on a symbol to create the constraint. Maps to Parse operator "$regex".
+      # @example
+      #  q.where :field.ends_with => "suffix"
+      # @return [EndsWithConstraint]
+      constraint_keyword :$regex
+      register :ends_with
+
+      # @return [Hash] the compiled constraint.
+      def build
+        value = formatted_value
+        unless value.is_a?(String)
+          raise ArgumentError, "#{self.class}: Value must be a string for ends_with constraint"
+        end
+
+        # Validate length to prevent performance issues
+        if value.length > Parse::RegexSecurity::MAX_PATTERN_LENGTH
+          raise ArgumentError, "#{self.class}: Value too long (#{value.length} chars, max #{Parse::RegexSecurity::MAX_PATTERN_LENGTH})"
+        end
+
+        # Escape special regex characters in the suffix
+        escaped_value = Regexp.escape(value)
+        regex_pattern = "#{escaped_value}$"
+
+        { @operation.operand => { :$regex => regex_pattern, :$options => "i" } }
+      end
+    end
 
     # A convenience constraint that combines greater-than-or-equal and less-than-or-equal
     # constraints for date/time range queries. This is equivalent to using both $gte and $lte.
@@ -1811,16 +2129,16 @@ module Parse
         unless value.is_a?(Array) && value.length == 2
           raise ArgumentError, "#{self.class}: Value must be an array with exactly 2 elements [start_date, end_date]"
         end
-        
+
         start_date, end_date = value
-        
+
         # Format the dates using Parse's date formatting
         formatted_start = Parse::Constraint.formatted_value(start_date)
         formatted_end = Parse::Constraint.formatted_value(end_date)
-        
-        { @operation.operand => { 
+
+        { @operation.operand => {
           Parse::Constraint::GreaterThanOrEqualConstraint.key => formatted_start,
-          Parse::Constraint::LessThanOrEqualConstraint.key => formatted_end
+          Parse::Constraint::LessThanOrEqualConstraint.key => formatted_end,
         } }
       end
     end
@@ -1859,147 +2177,180 @@ module Parse
         unless value.is_a?(Array) && value.length == 2
           raise ArgumentError, "#{self.class}: Value must be an array with exactly 2 elements [min_value, max_value]"
         end
-        
+
         min_value, max_value = value
-        
+
         # Format the values using Parse's formatting (handles dates, numbers, etc.)
         formatted_min = Parse::Constraint.formatted_value(min_value)
         formatted_max = Parse::Constraint.formatted_value(max_value)
-        
-        { @operation.operand => { 
+
+        { @operation.operand => {
           Parse::Constraint::GreaterThanOrEqualConstraint.key => formatted_min,
-          Parse::Constraint::LessThanOrEqualConstraint.key => formatted_max
+          Parse::Constraint::LessThanOrEqualConstraint.key => formatted_max,
         } }
       end
     end
 
-    # A constraint for filtering objects based on ACL read permissions for specific users or roles.
-    # This constraint queries the MongoDB _rperm field directly, which contains an array of user IDs 
-    # and role names that have read access to the object.
+    # A constraint for filtering objects based on ACL read permissions.
+    # This constraint queries the MongoDB _rperm field directly.
+    # Strings are used as exact permission values (user IDs or "role:RoleName" format).
     #
-    #  # Find objects readable by a specific user (includes user ID + their roles)
+    # For role-based filtering with automatic "role:" prefix, use readable_by_role instead.
+    #
+    #  # Find objects readable by a specific user object (fetches user's roles automatically)
     #  Post.where(:ACL.readable_by => user)
-    #  
-    #  # Find objects readable by specific role names (strings are treated as role names)
-    #  Post.where(:ACL.readable_by => ["Admin", "Moderator"])
-    #  
-    #  # Find objects readable by a single role name
-    #  Post.where(:ACL.readable_by => "Admin")
-    #  
-    #  # Mix users and role names
-    #  Post.where(:ACL.readable_by => [user1, user2, "Admin", "Moderator"])
+    #
+    #  # Find objects readable by exact permission strings (no prefix added)
+    #  Post.where(:ACL.readable_by => "user123")           # User ID
+    #  Post.where(:ACL.readable_by => "role:Admin")        # Role with explicit prefix
+    #  Post.where(:ACL.readable_by => ["user123", "role:Admin"])
     #
     class ACLReadableByConstraint < Constraint
       # @!method readable_by
       # A registered method on a symbol to create the constraint.
       # @example
-      #  q.where :ACL.readable_by => user_or_roles
+      #  q.where :ACL.readable_by => user_or_permission_strings
       # @return [ACLReadableByConstraint]
       register :readable_by
 
       # @return [Hash] the compiled constraint using _rperm field.
       def build
-        value = formatted_value
+        # Use @value directly to preserve type information before formatted_value converts to pointers
+        value = @value
         permissions_to_check = []
-        
+
         # Handle different input types using duck typing
         if value.is_a?(Parse::User) || (value.respond_to?(:is_a?) && value.is_a?(Parse::User))
-          # For a user, include their ID and all their role names
+          # For a user, include their ID and all their role names (with hierarchy)
           permissions_to_check << value.id if value.respond_to?(:id) && value.id.present?
-          
-          # Automatically fetch user's roles from Parse
-          # Parse stores user roles as objects in _Role collection that have this user in their 'users' relation
+
+          # Automatically fetch user's roles from Parse and expand hierarchy
           begin
             if value.respond_to?(:id) && value.id.present? && defined?(Parse::Role)
-              # Query roles that contain this user
               user_roles = Parse::Role.all(users: value)
               user_roles.each do |role|
                 permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
+                # Expand role hierarchy - include child roles
+                if role.respond_to?(:all_child_roles)
+                  role.all_child_roles(max_depth: 5).each do |child_role|
+                    permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
+                  end
+                end
               end
             end
-          rescue => e
+          rescue
             # If role fetching fails, continue with just the user ID
-            # This allows the constraint to work even if role queries fail
           end
-          
         elsif value.is_a?(Parse::Role) || (value.respond_to?(:is_a?) && value.is_a?(Parse::Role))
-          # For a role, add the role name with "role:" prefix
+          # For a role object, add the role name with "role:" prefix
           permissions_to_check << "role:#{value.name}" if value.respond_to?(:name) && value.name.present?
-          
+
+          # Expand role hierarchy - include all child roles
+          begin
+            if value.respond_to?(:all_child_roles)
+              value.all_child_roles(max_depth: 5).each do |child_role|
+                permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
+              end
+            end
+          rescue
+            # If child role fetching fails, continue with just the direct role
+          end
         elsif value.is_a?(Parse::Pointer) || (value.respond_to?(:parse_class) && value.respond_to?(:id))
           # Handle pointer to User or Role
           if value.respond_to?(:parse_class) && (value.parse_class == "User" || value.parse_class == "_User")
             permissions_to_check << value.id if value.respond_to?(:id) && value.id.present?
 
-            # Query roles directly using the user pointer (no need to fetch the full user)
+            # Query roles directly using the user pointer and expand hierarchy
             begin
               if value.respond_to?(:id) && value.id.present? && defined?(Parse::Role)
                 user_roles = Parse::Role.all(users: value)
                 user_roles.each do |role|
                   permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
+                  # Expand role hierarchy - include child roles
+                  if role.respond_to?(:all_child_roles)
+                    role.all_child_roles(max_depth: 5).each do |child_role|
+                      permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
+                    end
+                  end
                 end
               end
-            rescue => e
+            rescue
               # If role fetching fails, continue with just the user ID
             end
-          elsif value.respond_to?(:parse_class) && (value.parse_class == "Role" || value.parse_class == "_Role")
-            # For role pointers, we need the role name, but we only have the ID
-            # We'd need to fetch the role to get its name, so for now skip this
-            # or require that role names be passed as strings
           end
-          
         elsif value.is_a?(Array)
-          # Handle array of role names, user IDs, or mixed
+          # Handle array of permission values
           value.each do |item|
             if item.is_a?(Parse::User) || (item.respond_to?(:is_a?) && item.is_a?(Parse::User))
               permissions_to_check << item.id if item.respond_to?(:id) && item.id.present?
+              # Fetch user's roles and expand hierarchy
+              begin
+                if item.respond_to?(:id) && item.id.present? && defined?(Parse::Role)
+                  user_roles = Parse::Role.all(users: item)
+                  user_roles.each do |role|
+                    permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
+                    if role.respond_to?(:all_child_roles)
+                      role.all_child_roles(max_depth: 5).each do |child_role|
+                        permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
+                      end
+                    end
+                  end
+                end
+              rescue
+                # Continue with just the user ID
+              end
             elsif item.is_a?(Parse::Role) || (item.respond_to?(:is_a?) && item.is_a?(Parse::Role))
               permissions_to_check << "role:#{item.name}" if item.respond_to?(:name) && item.name.present?
+              # Expand role hierarchy
+              begin
+                if item.respond_to?(:all_child_roles)
+                  item.all_child_roles(max_depth: 5).each do |child_role|
+                    permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
+                  end
+                end
+              rescue
+                # Continue with just the direct role
+              end
             elsif item.is_a?(Parse::Pointer) || (item.respond_to?(:parse_class) && item.respond_to?(:id))
-              # Handle pointer to User
               if item.respond_to?(:parse_class) && (item.parse_class == "User" || item.parse_class == "_User")
                 permissions_to_check << item.id if item.respond_to?(:id) && item.id.present?
               end
             elsif item.is_a?(String)
-              # Treat all strings as role names or public access
-              if item == "*"
-                # Special case for public access - don't add role: prefix
-                permissions_to_check << "*"
-              elsif item.start_with?("role:")
-                permissions_to_check << item
-              else
-                # Assume it's a role name, add role: prefix
-                permissions_to_check << "role:#{item}"
-              end
+              # Use string as-is (exact permission value)
+              # Also accept "public" as an alias for "*"
+              permissions_to_check << (item == "public" ? "*" : item)
             end
           end
-          
         elsif value.is_a?(String)
-          # Handle single string - only accept "*" for public access or "role:name" format
-          if value == "*"
-            # Special case for public access - don't add role: prefix
-            permissions_to_check << "*"
-          elsif value.start_with?("role:")
-            permissions_to_check << value
-          else
-            # For role names, add role: prefix
-            permissions_to_check << "role:#{value}"
+          if value == "none"
+            # "none" = objects with empty _rperm (master key only)
+            # Only check for empty array - if _rperm is missing/undefined, Parse treats it as public
+            # Parse Server saves empty _rperm as [] when no read permissions are set
+            pipeline = [
+              {
+                "$match" => {
+                  "_rperm" => { "$eq" => [] },
+                },
+              },
+            ]
+            return { "__aggregation_pipeline" => pipeline }
           end
-          
+
+          # Use string as-is (exact permission value: user ID, "role:Name", or "*")
+          # Also accept "public" as an alias for "*"
+          # Note: For role names without prefix, use readable_by_role or pass a Parse::Role object
+          permissions_to_check << (value == "public" ? "*" : value)
         else
           raise ArgumentError, "ACLReadableByConstraint: value must be a User, Role, String, or Array of these types"
         end
-        
+
         if permissions_to_check.empty?
           raise ArgumentError, "ACLReadableByConstraint: no valid permissions found in provided value"
         end
-        
-        # Query the _rperm field through aggregation pipeline since Parse Server
-        # doesn't expose _rperm/_wperm fields through regular REST API queries
-        # _rperm contains an array of user IDs and role names that have read access
-        # Also include public access "*" in the check
-        permissions_with_public = permissions_to_check + ["*"]
-        
+
+        # Also include public access "*" in the check (unless already included)
+        permissions_with_public = permissions_to_check.include?("*") ? permissions_to_check : permissions_to_check + ["*"]
+
         # Build the aggregation pipeline to match documents with _rperm field
         # Also match documents where _rperm doesn't exist (publicly accessible)
         pipeline = [
@@ -2007,144 +2358,258 @@ module Parse
             "$match" => {
               "$or" => [
                 { "_rperm" => { "$in" => permissions_with_public } },
-                { "_rperm" => { "$exists" => false } }
-              ]
-            }
-          }
+                { "_rperm" => { "$exists" => false } },
+              ],
+            },
+          },
         ]
-        
-        # Return a special marker that indicates this needs aggregation pipeline processing
+
         { "__aggregation_pipeline" => pipeline }
       end
     end
 
-    # A constraint for filtering objects based on ACL write permissions for specific users or roles.
-    # This constraint queries the MongoDB _wperm field directly, which contains an array of user IDs 
-    # and role names that have write access to the object.
+    # A constraint for filtering objects readable by specific role names.
+    # Automatically adds "role:" prefix to role names.
     #
-    #  # Find objects writable by a specific user (includes user ID + their roles)
+    #  # Find objects readable by Admin role (string - adds role: prefix)
+    #  Post.where(:ACL.readable_by_role => "Admin")
+    #
+    #  # Find objects readable by Role object
+    #  Post.where(:ACL.readable_by_role => admin_role)
+    #
+    #  # Find objects readable by multiple roles
+    #  Post.where(:ACL.readable_by_role => ["Admin", "Moderator"])
+    #
+    class ACLReadableByRoleConstraint < Constraint
+      # @!method readable_by_role
+      # @example
+      #  q.where :ACL.readable_by_role => "Admin"
+      # @return [ACLReadableByRoleConstraint]
+      register :readable_by_role
+
+      # @return [Hash] the compiled constraint using _rperm field.
+      def build
+        value = formatted_value
+        permissions_to_check = []
+
+        if value.is_a?(Parse::Role) || (value.respond_to?(:is_a?) && value.is_a?(Parse::Role))
+          permissions_to_check << "role:#{value.name}" if value.respond_to?(:name) && value.name.present?
+        elsif value.is_a?(Parse::Pointer) || (value.respond_to?(:parse_class) && value.respond_to?(:id))
+          # Handle pointer to Role - need to fetch it to get the name
+          if value.respond_to?(:parse_class) && (value.parse_class == "Role" || value.parse_class == "_Role")
+            begin
+              role = value.fetch if value.respond_to?(:fetch)
+              permissions_to_check << "role:#{role.name}" if role&.respond_to?(:name) && role.name.present?
+            rescue
+              # If fetching fails, skip this pointer
+            end
+          end
+        elsif value.is_a?(Array)
+          value.each do |item|
+            if item.is_a?(Parse::Role) || (item.respond_to?(:is_a?) && item.is_a?(Parse::Role))
+              permissions_to_check << "role:#{item.name}" if item.respond_to?(:name) && item.name.present?
+            elsif item.is_a?(Parse::Pointer) || (item.respond_to?(:parse_class) && item.respond_to?(:id))
+              if item.respond_to?(:parse_class) && (item.parse_class == "Role" || item.parse_class == "_Role")
+                begin
+                  role = item.fetch if item.respond_to?(:fetch)
+                  permissions_to_check << "role:#{role.name}" if role&.respond_to?(:name) && role.name.present?
+                rescue
+                  # If fetching fails, skip this pointer
+                end
+              end
+            elsif item.is_a?(String)
+              # Add role: prefix if not already present
+              permissions_to_check << (item.start_with?("role:") ? item : "role:#{item}")
+            end
+          end
+        elsif value.is_a?(String)
+          # Add role: prefix if not already present
+          permissions_to_check << (value.start_with?("role:") ? value : "role:#{value}")
+        else
+          raise ArgumentError, "ACLReadableByRoleConstraint: value must be a Role, Role Pointer, String, or Array of these types"
+        end
+
+        if permissions_to_check.empty?
+          raise ArgumentError, "ACLReadableByRoleConstraint: no valid role names found"
+        end
+
+        # Also include public access "*" in the check
+        permissions_with_public = permissions_to_check + ["*"]
+
+        pipeline = [
+          {
+            "$match" => {
+              "$or" => [
+                { "_rperm" => { "$in" => permissions_with_public } },
+                { "_rperm" => { "$exists" => false } },
+              ],
+            },
+          },
+        ]
+
+        { "__aggregation_pipeline" => pipeline }
+      end
+    end
+
+    # A constraint for filtering objects based on ACL write permissions.
+    # This constraint queries the MongoDB _wperm field directly.
+    # Strings are used as exact permission values (user IDs or "role:RoleName" format).
+    #
+    # For role-based filtering with automatic "role:" prefix, use writable_by_role instead.
+    #
+    #  # Find objects writable by a specific user object (fetches user's roles automatically)
     #  Post.where(:ACL.writable_by => user)
-    #  
-    #  # Find objects writable by specific role names (strings are treated as role names)
-    #  Post.where(:ACL.writable_by => ["Admin", "Moderator"])
-    #  
-    #  # Find objects writable by a single role name
-    #  Post.where(:ACL.writable_by => "Admin")
-    #  
-    #  # Mix users and role names
-    #  Post.where(:ACL.writable_by => [user1, user2, "Admin", "Moderator"])
+    #
+    #  # Find objects writable by exact permission strings (no prefix added)
+    #  Post.where(:ACL.writable_by => "user123")           # User ID
+    #  Post.where(:ACL.writable_by => "role:Admin")        # Role with explicit prefix
+    #  Post.where(:ACL.writable_by => ["user123", "role:Admin"])
     #
     class ACLWritableByConstraint < Constraint
       # @!method writable_by
       # A registered method on a symbol to create the constraint.
       # @example
-      #  q.where :ACL.writable_by => user_or_roles
+      #  q.where :ACL.writable_by => user_or_permission_strings
       # @return [ACLWritableByConstraint]
       register :writable_by
 
       # @return [Hash] the compiled constraint using _wperm field.
       def build
-        value = formatted_value
+        # Use @value directly to preserve type information before formatted_value converts to pointers
+        value = @value
         permissions_to_check = []
-        
+
         # Handle different input types using duck typing
         if value.is_a?(Parse::User) || (value.respond_to?(:is_a?) && value.is_a?(Parse::User))
-          # For a user, include their ID and all their role names
+          # For a user, include their ID and all their role names (with hierarchy)
           permissions_to_check << value.id if value.respond_to?(:id) && value.id.present?
-          
-          # Automatically fetch user's roles from Parse
-          # Parse stores user roles as objects in _Role collection that have this user in their 'users' relation
+
+          # Automatically fetch user's roles from Parse and expand hierarchy
           begin
             if value.respond_to?(:id) && value.id.present? && defined?(Parse::Role)
-              # Query roles that contain this user
               user_roles = Parse::Role.all(users: value)
               user_roles.each do |role|
                 permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
+                # Expand role hierarchy - include child roles
+                if role.respond_to?(:all_child_roles)
+                  role.all_child_roles(max_depth: 5).each do |child_role|
+                    permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
+                  end
+                end
               end
             end
-          rescue => e
+          rescue
             # If role fetching fails, continue with just the user ID
-            # This allows the constraint to work even if role queries fail
           end
-          
         elsif value.is_a?(Parse::Role) || (value.respond_to?(:is_a?) && value.is_a?(Parse::Role))
-          # For a role, add the role name with "role:" prefix
+          # For a role object, add the role name with "role:" prefix
           permissions_to_check << "role:#{value.name}" if value.respond_to?(:name) && value.name.present?
-          
+
+          # Expand role hierarchy - include all child roles
+          begin
+            if value.respond_to?(:all_child_roles)
+              value.all_child_roles(max_depth: 5).each do |child_role|
+                permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
+              end
+            end
+          rescue
+            # If child role fetching fails, continue with just the direct role
+          end
         elsif value.is_a?(Parse::Pointer) || (value.respond_to?(:parse_class) && value.respond_to?(:id))
           # Handle pointer to User or Role
           if value.respond_to?(:parse_class) && (value.parse_class == "User" || value.parse_class == "_User")
             permissions_to_check << value.id if value.respond_to?(:id) && value.id.present?
 
-            # Query roles directly using the user pointer (no need to fetch the full user)
+            # Query roles directly using the user pointer and expand hierarchy
             begin
               if value.respond_to?(:id) && value.id.present? && defined?(Parse::Role)
                 user_roles = Parse::Role.all(users: value)
                 user_roles.each do |role|
                   permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
+                  # Expand role hierarchy - include child roles
+                  if role.respond_to?(:all_child_roles)
+                    role.all_child_roles(max_depth: 5).each do |child_role|
+                      permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
+                    end
+                  end
                 end
               end
-            rescue => e
+            rescue
               # If role fetching fails, continue with just the user ID
             end
-          elsif value.respond_to?(:parse_class) && (value.parse_class == "Role" || value.parse_class == "_Role")
-            # For role pointers, we need the role name, but we only have the ID
-            # We'd need to fetch the role to get its name, so for now skip this
-            # or require that role names be passed as strings
           end
-          
         elsif value.is_a?(Array)
-          # Handle array of role names, user IDs, or mixed
+          # Handle array of permission values
           value.each do |item|
             if item.is_a?(Parse::User) || (item.respond_to?(:is_a?) && item.is_a?(Parse::User))
               permissions_to_check << item.id if item.respond_to?(:id) && item.id.present?
+              # Fetch user's roles and expand hierarchy
+              begin
+                if item.respond_to?(:id) && item.id.present? && defined?(Parse::Role)
+                  user_roles = Parse::Role.all(users: item)
+                  user_roles.each do |role|
+                    permissions_to_check << "role:#{role.name}" if role.respond_to?(:name) && role.name.present?
+                    if role.respond_to?(:all_child_roles)
+                      role.all_child_roles(max_depth: 5).each do |child_role|
+                        permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
+                      end
+                    end
+                  end
+                end
+              rescue
+                # Continue with just the user ID
+              end
             elsif item.is_a?(Parse::Role) || (item.respond_to?(:is_a?) && item.is_a?(Parse::Role))
               permissions_to_check << "role:#{item.name}" if item.respond_to?(:name) && item.name.present?
+              # Expand role hierarchy
+              begin
+                if item.respond_to?(:all_child_roles)
+                  item.all_child_roles(max_depth: 5).each do |child_role|
+                    permissions_to_check << "role:#{child_role.name}" if child_role.respond_to?(:name) && child_role.name.present?
+                  end
+                end
+              rescue
+                # Continue with just the direct role
+              end
             elsif item.is_a?(Parse::Pointer) || (item.respond_to?(:parse_class) && item.respond_to?(:id))
-              # Handle pointer to User
               if item.respond_to?(:parse_class) && (item.parse_class == "User" || item.parse_class == "_User")
                 permissions_to_check << item.id if item.respond_to?(:id) && item.id.present?
               end
             elsif item.is_a?(String)
-              # Treat all strings as role names or public access
-              if item == "*"
-                # Special case for public access - don't add role: prefix
-                permissions_to_check << "*"
-              elsif item.start_with?("role:")
-                permissions_to_check << item
-              else
-                # Assume it's a role name, add role: prefix
-                permissions_to_check << "role:#{item}"
-              end
+              # Use string as-is (exact permission value)
+              # Also accept "public" as an alias for "*"
+              permissions_to_check << (item == "public" ? "*" : item)
             end
           end
-          
         elsif value.is_a?(String)
-          # Handle single string - only accept "*" for public access or "role:name" format
-          if value == "*"
-            # Special case for public access - don't add role: prefix
-            permissions_to_check << "*"
-          elsif value.start_with?("role:")
-            permissions_to_check << value
-          else
-            # For role names, add role: prefix
-            permissions_to_check << "role:#{value}"
+          if value == "none"
+            # "none" = objects with empty _wperm (master key only)
+            # Only check for empty array - if _wperm is missing/undefined, Parse treats it as public
+            # Parse Server saves empty _wperm as [] when no write permissions are set
+            pipeline = [
+              {
+                "$match" => {
+                  "_wperm" => { "$eq" => [] },
+                },
+              },
+            ]
+            return { "__aggregation_pipeline" => pipeline }
           end
-          
+
+          # Use string as-is (exact permission value: user ID, "role:Name", or "*")
+          # Also accept "public" as an alias for "*"
+          permissions_to_check << (value == "public" ? "*" : value)
         else
           raise ArgumentError, "ACLWritableByConstraint: value must be a User, Role, String, or Array of these types"
         end
-        
+
         if permissions_to_check.empty?
           raise ArgumentError, "ACLWritableByConstraint: no valid permissions found in provided value"
         end
-        
-        # Query the _wperm field through aggregation pipeline since Parse Server
-        # doesn't expose _rperm/_wperm fields through regular REST API queries
-        # _wperm contains an array of user IDs and role names that have write access
-        # Also include public access "*" in the check
-        permissions_with_public = permissions_to_check + ["*"]
-        
+
+        # Also include public access "*" in the check (unless already included)
+        permissions_with_public = permissions_to_check.include?("*") ? permissions_to_check : permissions_to_check + ["*"]
+
         # Build the aggregation pipeline to match documents with _wperm field
         # Also match documents where _wperm doesn't exist (publicly writable)
         pipeline = [
@@ -2152,13 +2617,95 @@ module Parse
             "$match" => {
               "$or" => [
                 { "_wperm" => { "$in" => permissions_with_public } },
-                { "_wperm" => { "$exists" => false } }
-              ]
-            }
-          }
+                { "_wperm" => { "$exists" => false } },
+              ],
+            },
+          },
         ]
-        
-        # Return a special marker that indicates this needs aggregation pipeline processing
+
+        { "__aggregation_pipeline" => pipeline }
+      end
+    end
+
+    # A constraint for filtering objects writable by specific role names.
+    # Automatically adds "role:" prefix to role names.
+    #
+    #  # Find objects writable by Admin role (string - adds role: prefix)
+    #  Post.where(:ACL.writable_by_role => "Admin")
+    #
+    #  # Find objects writable by Role object
+    #  Post.where(:ACL.writable_by_role => admin_role)
+    #
+    #  # Find objects writable by multiple roles
+    #  Post.where(:ACL.writable_by_role => ["Admin", "Moderator"])
+    #
+    class ACLWritableByRoleConstraint < Constraint
+      # @!method writable_by_role
+      # @example
+      #  q.where :ACL.writable_by_role => "Admin"
+      # @return [ACLWritableByRoleConstraint]
+      register :writable_by_role
+
+      # @return [Hash] the compiled constraint using _wperm field.
+      def build
+        value = formatted_value
+        permissions_to_check = []
+
+        if value.is_a?(Parse::Role) || (value.respond_to?(:is_a?) && value.is_a?(Parse::Role))
+          permissions_to_check << "role:#{value.name}" if value.respond_to?(:name) && value.name.present?
+        elsif value.is_a?(Parse::Pointer) || (value.respond_to?(:parse_class) && value.respond_to?(:id))
+          # Handle pointer to Role - need to fetch it to get the name
+          if value.respond_to?(:parse_class) && (value.parse_class == "Role" || value.parse_class == "_Role")
+            begin
+              role = value.fetch if value.respond_to?(:fetch)
+              permissions_to_check << "role:#{role.name}" if role&.respond_to?(:name) && role.name.present?
+            rescue
+              # If fetching fails, skip this pointer
+            end
+          end
+        elsif value.is_a?(Array)
+          value.each do |item|
+            if item.is_a?(Parse::Role) || (item.respond_to?(:is_a?) && item.is_a?(Parse::Role))
+              permissions_to_check << "role:#{item.name}" if item.respond_to?(:name) && item.name.present?
+            elsif item.is_a?(Parse::Pointer) || (item.respond_to?(:parse_class) && item.respond_to?(:id))
+              if item.respond_to?(:parse_class) && (item.parse_class == "Role" || item.parse_class == "_Role")
+                begin
+                  role = item.fetch if item.respond_to?(:fetch)
+                  permissions_to_check << "role:#{role.name}" if role&.respond_to?(:name) && role.name.present?
+                rescue
+                  # If fetching fails, skip this pointer
+                end
+              end
+            elsif item.is_a?(String)
+              # Add role: prefix if not already present
+              permissions_to_check << (item.start_with?("role:") ? item : "role:#{item}")
+            end
+          end
+        elsif value.is_a?(String)
+          # Add role: prefix if not already present
+          permissions_to_check << (value.start_with?("role:") ? value : "role:#{value}")
+        else
+          raise ArgumentError, "ACLWritableByRoleConstraint: value must be a Role, Role Pointer, String, or Array of these types"
+        end
+
+        if permissions_to_check.empty?
+          raise ArgumentError, "ACLWritableByRoleConstraint: no valid role names found"
+        end
+
+        # Also include public access "*" in the check
+        permissions_with_public = permissions_to_check + ["*"]
+
+        pipeline = [
+          {
+            "$match" => {
+              "$or" => [
+                { "_wperm" => { "$in" => permissions_with_public } },
+                { "_wperm" => { "$exists" => false } },
+              ],
+            },
+          },
+        ]
+
         { "__aggregation_pipeline" => pipeline }
       end
     end
@@ -2168,7 +2715,7 @@ module Parse
     #
     #  # Find ObjectA where ObjectA.author equals ObjectA.project.owner
     #  ObjectA.where(:author.equals_linked_pointer => { through: :project, field: :owner })
-    #  
+    #
     #  # This generates a MongoDB aggregation pipeline with $lookup and $expr
     #  # to compare pointer fields across linked documents
     #
@@ -2203,7 +2750,7 @@ module Parse
         # Build the aggregation pipeline
         # Use clean alias name without _p_ prefix for readability
         lookup_alias = "#{through_field.to_s.camelize(:lower)}_data"
-        
+
         # Parse stores pointers as "ClassName$objectId" strings
         # We need to extract just the objectId part after the $
         pipeline = [
@@ -2213,29 +2760,29 @@ module Parse
                 "$substr" => [
                   "$#{formatted_through}",
                   target_collection.length + 1,  # Skip "ClassName$"
-                  -1  # Rest of string
-                ]
-              }
-            }
+                  -1,  # Rest of string
+                ],
+              },
+            },
           },
           {
             "$lookup" => {
               "from" => target_collection,
               "localField" => formatted_through,
-              "foreignField" => "_id", 
-              "as" => lookup_alias
-            }
+              "foreignField" => "_id",
+              "as" => lookup_alias,
+            },
           },
           {
             "$match" => {
               "$expr" => {
                 "$eq" => [
                   { "$arrayElemAt" => ["$#{lookup_alias}.#{formatted_target}", 0] },
-                  "$#{formatted_local}"
-                ]
-              }
-            }
-          }
+                  "$#{formatted_local}",
+                ],
+              },
+            },
+          },
         ]
 
         # Return a special marker that indicates this needs aggregation pipeline processing
@@ -2254,9 +2801,9 @@ module Parse
     # 2. Uses $match with $expr and $ne to find records where fields do NOT match
     #
     # @example Find assets where the project does not equal the capture's project
-    #   Asset.where(:project.does_not_equal_linked_pointer => { 
-    #     through: :capture, 
-    #     field: :project 
+    #   Asset.where(:project.does_not_equal_linked_pointer => {
+    #     through: :capture,
+    #     field: :project
     #   })
     class DoesNotEqualLinkedPointerConstraint < Constraint
       register :does_not_equal_linked_pointer
@@ -2272,22 +2819,22 @@ module Parse
 
         through_field = @value[:through]
         target_field = @value[:field]
-        
+
         # Convert field names to Parse format (snake_case to camelCase) with _p_ prefix for pointers
         local_field_name = format_field_name(@operation.operand, is_pointer: true)
         through_field_name = format_field_name(through_field, is_pointer: true)
         target_field_name = format_field_name(target_field, is_pointer: true)
-        
+
         # Determine the collection name for the lookup (Rails pluralization)
         through_class_name = through_field.to_s.classify
         lookup_collection = through_class_name
-        
+
         # Generate unique alias name for the joined data (use clean name without _p_ prefix)
         lookup_alias = "#{through_field.to_s.camelize(:lower)}_data"
-        
+
         # Build the MongoDB aggregation pipeline
         pipeline = []
-        
+
         # Parse stores pointers as "ClassName$objectId" strings
         # We need to extract just the objectId part after the $
         # Stage 1: Add field with extracted objectId
@@ -2297,43 +2844,43 @@ module Parse
               "$substr" => [
                 "$#{through_field_name}",
                 lookup_collection.length + 1,  # Skip "ClassName$"
-                -1  # Rest of string
-              ]
-            }
-          }
+                -1,  # Rest of string
+              ],
+            },
+          },
         }
         pipeline << add_fields_stage
-        
+
         # Stage 2: $lookup to join the linked collection
         lookup_stage = {
           "$lookup" => {
             "from" => lookup_collection,
             "localField" => through_field_name,
-            "foreignField" => "_id", 
-            "as" => lookup_alias
-          }
+            "foreignField" => "_id",
+            "as" => lookup_alias,
+          },
         }
         pipeline << lookup_stage
-        
+
         # Stage 2: $match with $expr to compare the fields using $ne (not equal)
         match_stage = {
           "$match" => {
             "$expr" => {
               "$ne" => [
                 { "$arrayElemAt" => ["$#{lookup_alias}.#{target_field_name}", 0] },
-                "$#{local_field_name}"
-              ]
-            }
-          }
+                "$#{local_field_name}",
+              ],
+            },
+          },
         }
         pipeline << match_stage
-        
+
         # Return a special marker that indicates this needs aggregation pipeline processing
         { "__aggregation_pipeline" => pipeline }
       end
-      
+
       private
-      
+
       # Converts field names from snake_case to camelCase for Parse Server compatibility
       # and adds _p_ prefix for pointer fields in MongoDB
       # @param field [Symbol, String] the field name to format
@@ -2343,6 +2890,309 @@ module Parse
         formatted = field.to_s.camelize(:lower)
         # Add _p_ prefix for pointer fields as they're stored that way in MongoDB
         is_pointer ? "_p_#{formatted}" : formatted
+      end
+    end
+
+    # Shared helper module for ACL constraint classes.
+    # Provides common normalization logic for converting various input types
+    # (User, Role, Pointer, symbols, strings) to ACL permission keys.
+    # @api private
+    module AclConstraintHelpers
+      private
+
+      # Normalize various input types to ACL permission keys.
+      # @param value [Array, String, Symbol, Parse::User, Parse::Role, nil]
+      # @return [Array<String>] normalized permission keys
+      # @note Returns empty array for nil, [], "none", or :none (indicating no permissions)
+      def normalize_acl_keys(value)
+        # Handle special "none" case for no permissions
+        return [] if value.nil?
+        return [] if value == "none" || value == :none
+        return [] if value.is_a?(Array) && value.empty?
+
+        Array(value).map do |item|
+          case item
+          when Parse::User
+            item.id
+          when Parse::Role
+            "role:#{item.name}"
+          when Parse::Pointer
+            item.id
+          when :public, :everyone, :world
+            "*"
+          when "public", "*"
+            "*"
+          when "none", :none
+            nil # Will be compacted out, but array will be non-empty so won't match "no permissions"
+          when String
+            item
+          when Symbol
+            item == :public ? "*" : item.to_s
+          else
+            item.respond_to?(:id) ? item.id : item.to_s
+          end
+        end.compact.uniq
+      end
+    end
+
+    # ACL Read Permission Query Constraint
+    # Query objects based on read permissions using MongoDB's internal _rperm field.
+    # Parse Server restricts direct queries on _rperm, so this uses aggregation pipeline.
+    #
+    # @example Find objects with NO read permissions (master key only / private)
+    #   Song.query.where(:acl.readable_by => [])
+    #
+    # @example Find objects readable by a specific user ID
+    #   Song.query.where(:acl.readable_by => "userId123")
+    #   Song.query.where(:acl.readable_by => current_user)
+    #
+    # @example Find objects readable by a role
+    #   Song.query.where(:acl.readable_by => "role:Admin")
+    #
+    # @example Find objects with public read access
+    #   Song.query.where(:acl.readable_by => "*")
+    #   Song.query.where(:acl.readable_by => :public)
+    #
+    # @example Find objects readable by ANY of the specified users/roles
+    #   Song.query.where(:acl.readable_by => [user1.id, "role:Admin", "*"])
+    #
+    # @note This constraint uses aggregation pipeline because Parse Server
+    #   restricts direct queries on the internal _rperm field.
+    class ReadableByConstraint < Constraint
+      include AclConstraintHelpers
+
+      # @!method readable_by
+      # A registered method on a symbol to create the constraint.
+      # @example
+      #  q.where :acl.readable_by => []
+      #  q.where :acl.readable_by => "userId"
+      #  q.where :acl.readable_by => ["userId", "role:Admin"]
+      # @return [ReadableByConstraint]
+      # NOTE: :readable_by is already registered by ACLReadableByConstraint above.
+      # This class provides simplified empty ACL queries and is used internally.
+
+      # @return [Hash] the compiled constraint using aggregation pipeline.
+      def build
+        keys = normalize_acl_keys(@value)
+
+        if keys.empty?
+          # Empty array = no read permissions (master key only)
+          # Match documents where _rperm is an empty array
+          pipeline = [
+            {
+              "$match" => {
+                "$or" => [
+                  { "_rperm" => { "$exists" => true, "$eq" => [] } },
+                  { "_rperm" => { "$exists" => false } },
+                ],
+              },
+            },
+          ]
+        else
+          # Find objects readable by ANY of the specified keys
+          # Use $in to match if _rperm contains any of the keys
+          pipeline = [
+            {
+              "$match" => {
+                "_rperm" => { "$in" => keys },
+              },
+            },
+          ]
+        end
+
+        { "__aggregation_pipeline" => pipeline }
+      end
+    end
+
+    # ACL Write Permission Query Constraint
+    # Query objects based on write permissions using MongoDB's internal _wperm field.
+    # Parse Server restricts direct queries on _wperm, so this uses aggregation pipeline.
+    #
+    # @example Find objects with NO write permissions (master key only / read-only)
+    #   Song.query.where(:acl.writeable_by => [])
+    #
+    # @example Find objects writable by a specific user ID
+    #   Song.query.where(:acl.writeable_by => "userId123")
+    #   Song.query.where(:acl.writeable_by => current_user)
+    #
+    # @example Find objects writable by a role
+    #   Song.query.where(:acl.writeable_by => "role:Admin")
+    #
+    # @note This constraint uses aggregation pipeline because Parse Server
+    #   restricts direct queries on the internal _wperm field.
+    class WriteableByConstraint < Constraint
+      include AclConstraintHelpers
+
+      # @!method writeable_by
+      # A registered method on a symbol to create the constraint.
+      # @example
+      #  q.where :acl.writeable_by => []
+      #  q.where :acl.writeable_by => "userId"
+      # @return [WriteableByConstraint]
+      register :writeable_by
+
+      # @return [Hash] the compiled constraint using aggregation pipeline.
+      def build
+        keys = normalize_acl_keys(@value)
+
+        if keys.empty?
+          # Empty array = no write permissions (master key only)
+          pipeline = [
+            {
+              "$match" => {
+                "$or" => [
+                  { "_wperm" => { "$exists" => true, "$eq" => [] } },
+                  { "_wperm" => { "$exists" => false } },
+                ],
+              },
+            },
+          ]
+        else
+          # Find objects writable by ANY of the specified keys
+          pipeline = [
+            {
+              "$match" => {
+                "_wperm" => { "$in" => keys },
+              },
+            },
+          ]
+        end
+
+        { "__aggregation_pipeline" => pipeline }
+      end
+    end
+
+    # Alias for writeable_by (American spelling)
+    # NOTE: :writable_by is already registered by ACLWritableByConstraint above.
+    # This class provides simplified empty ACL queries and is used internally.
+    class WritableByConstraint < WriteableByConstraint
+    end
+
+    # ACL NOT Readable By Constraint
+    # Query objects that are NOT readable by the specified users/roles.
+    # Useful for finding objects hidden from specific users.
+    #
+    # @example Find objects NOT readable by a user (hidden from them)
+    #   Song.query.where(:acl.not_readable_by => current_user)
+    #
+    # @example Find objects NOT publicly readable
+    #   Song.query.where(:acl.not_readable_by => "*")
+    #   Song.query.where(:acl.not_readable_by => :public)
+    #
+    # @note This constraint uses aggregation pipeline because Parse Server
+    #   restricts direct queries on the internal _rperm field.
+    class NotReadableByConstraint < Constraint
+      include AclConstraintHelpers
+
+      register :not_readable_by
+
+      def build
+        keys = normalize_acl_keys(@value)
+        return { "__aggregation_pipeline" => [] } if keys.empty?
+
+        # Find objects where _rperm does NOT contain any of the keys
+        pipeline = [
+          {
+            "$match" => {
+              "_rperm" => { "$nin" => keys },
+            },
+          },
+        ]
+
+        { "__aggregation_pipeline" => pipeline }
+      end
+    end
+
+    # ACL NOT Writable By Constraint
+    # Query objects that are NOT writable by the specified users/roles.
+    #
+    # @example Find objects NOT writable by a user
+    #   Song.query.where(:acl.not_writeable_by => current_user)
+    #
+    # @note This constraint uses aggregation pipeline because Parse Server
+    #   restricts direct queries on the internal _wperm field.
+    class NotWriteableByConstraint < Constraint
+      include AclConstraintHelpers
+
+      register :not_writeable_by
+
+      def build
+        keys = normalize_acl_keys(@value)
+        return { "__aggregation_pipeline" => [] } if keys.empty?
+
+        pipeline = [
+          {
+            "$match" => {
+              "_wperm" => { "$nin" => keys },
+            },
+          },
+        ]
+
+        { "__aggregation_pipeline" => pipeline }
+      end
+    end
+
+    # Alias for not_writeable_by (American spelling)
+    class NotWritableByConstraint < NotWriteableByConstraint
+      register :not_writable_by
+    end
+
+    # ACL Private/Master-Key-Only Constraint
+    # Query objects with completely empty ACL (no read or write permissions).
+    # These objects can only be accessed with the master key.
+    #
+    # @example Find all private objects
+    #   Song.query.where(:acl.private_acl => true)
+    #
+    # @example Find all non-private objects (have some permissions)
+    #   Song.query.where(:acl.private_acl => false)
+    #
+    # @note This constraint uses aggregation pipeline because Parse Server
+    #   restricts direct queries on internal ACL fields.
+    class PrivateAclConstraint < Constraint
+      register :private_acl
+      register :master_key_only
+
+      def build
+        is_private = @value == true
+
+        if is_private
+          # Match objects with empty or missing _rperm AND _wperm
+          pipeline = [
+            {
+              "$match" => {
+                "$and" => [
+                  {
+                    "$or" => [
+                      { "_rperm" => { "$exists" => true, "$eq" => [] } },
+                      { "_rperm" => { "$exists" => false } },
+                    ],
+                  },
+                  {
+                    "$or" => [
+                      { "_wperm" => { "$exists" => true, "$eq" => [] } },
+                      { "_wperm" => { "$exists" => false } },
+                    ],
+                  },
+                ],
+              },
+            },
+          ]
+        else
+          # Match objects that have SOME permissions (either read or write)
+          pipeline = [
+            {
+              "$match" => {
+                "$or" => [
+                  { "_rperm" => { "$exists" => true, "$ne" => [] } },
+                  { "_wperm" => { "$exists" => true, "$ne" => [] } },
+                ],
+              },
+            },
+          ]
+        end
+
+        { "__aggregation_pipeline" => pipeline }
       end
     end
   end

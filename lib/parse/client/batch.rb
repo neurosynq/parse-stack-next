@@ -41,7 +41,7 @@ module Parse
 
     # @!attribute responses
     #  @return [Array] the set of responses from this batch.
-    
+
     # @!attribute transaction
     #  @return [Boolean] whether this batch should be executed as a transaction.
     attr_accessor :requests, :responses, :transaction

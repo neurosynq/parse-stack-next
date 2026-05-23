@@ -116,7 +116,8 @@ module Parse
       #  Parse::Object subclass.
       def query(constraints = {})
         Parse::Query.new self.parse_class, constraints
-      end; 
+      end
+
       alias_method :where, :query
 
       # @param conditions (see Parse::Query#where)
@@ -160,7 +161,7 @@ module Parse
         batch_size = 250
         start_cursor = first(order: :created_at.asc, keys: :created_at)
         constraints.merge! cache: false, limit: batch_size, order: :created_at.asc
-        all_query = query(constraints)
+        _all_query = query(constraints) # used for reference in loop below
         cursor = start_cursor
         # the exclusion set is a set of ids not to include the next query.
         exclusion_set = []
@@ -247,14 +248,19 @@ module Parse
       #  @return [Array<Parse::Object>] if count > 1
       # @overload latest(constraints = {})
       #  @param constraints [Hash] a set of {Parse::Query} constraints.
+      #   Supports a :limit key to override the default limit of 1.
       #  @example
       #   Object.latest(category: "news") # => most recent object in news category
+      #   Object.latest(:user.eq => user, limit: 5) # => 5 most recent for user
       #  @return [Parse::Object] the most recently created object matching constraints.
       def latest(constraints = {})
         fetch_count = 1
         if constraints.is_a?(Numeric)
           fetch_count = constraints.to_i
           constraints = {}
+        else
+          # Allow limit to be specified in constraints hash
+          fetch_count = constraints.delete(:limit) || 1
         end
         constraints.merge!({ limit: fetch_count, order: :created_at.desc })
         res = query(constraints).results
@@ -271,14 +277,19 @@ module Parse
       #  @return [Array<Parse::Object>] if count > 1
       # @overload last_updated(constraints = {})
       #  @param constraints [Hash] a set of {Parse::Query} constraints.
+      #   Supports a :limit key to override the default limit of 1.
       #  @example
       #   Object.last_updated(status: "active") # => most recently updated active object
+      #   Object.last_updated(:user.eq => user, limit: 3) # => 3 most recently updated for user
       #  @return [Parse::Object] the most recently updated object matching constraints.
       def last_updated(constraints = {})
         fetch_count = 1
         if constraints.is_a?(Numeric)
           fetch_count = constraints.to_i
           constraints = {}
+        else
+          # Allow limit to be specified in constraints hash
+          fetch_count = constraints.delete(:limit) || 1
         end
         constraints.merge!({ limit: fetch_count, order: :updated_at.desc })
         res = query(constraints).results
@@ -367,23 +378,59 @@ module Parse
         query(constraints).cursor(limit: limit, order: order)
       end
 
+      # Subscribe to real-time updates for objects in this collection.
+      # Uses Parse LiveQuery WebSocket connection to receive push notifications
+      # when objects are created, updated, deleted, or enter/leave the query results.
+      #
+      # @example Basic subscription (all objects)
+      #   subscription = Song.subscribe
+      #   subscription.on(:create) { |song| puts "New song: #{song.title}" }
+      #   subscription.on(:update) { |song, original| puts "Updated!" }
+      #   subscription.on(:delete) { |song| puts "Deleted!" }
+      #
+      # @example Subscribe with query constraints
+      #   subscription = Song.subscribe(where: { artist: "Beatles" })
+      #   subscription.on_create { |song| puts "New Beatles song!" }
+      #
+      # @example With field filtering
+      #   subscription = User.subscribe(where: { status: "online" }, fields: ["name", "avatar"])
+      #   subscription.on_update { |user| puts "User changed: #{user.name}" }
+      #
+      # @example With session token for ACL-aware subscriptions
+      #   subscription = PrivateData.subscribe(session_token: current_user.session_token)
+      #
+      # @param where [Hash] query constraints for the subscription
+      # @param fields [Array<String>] specific fields to watch for changes (nil = all fields)
+      # @param session_token [String] session token for ACL-aware subscriptions
+      # @param client [Parse::LiveQuery::Client] custom LiveQuery client (optional)
+      # @return [Parse::LiveQuery::Subscription] the subscription object
+      # @see Parse::LiveQuery::Subscription
+      # @see Parse::Query#subscribe
+      def subscribe(where: {}, fields: nil, session_token: nil, client: nil)
+        query(where).subscribe(fields: fields, session_token: session_token, client: client)
+      end
+
       # Find objects for a given objectId in this collection. The result is a list
       # (or single item) of the objects that were successfully found.
+      # By default, bypasses the cache to ensure fresh data from the server.
       # @example
       #  Object.find "<objectId>"
       #  Object.find "<objectId>", "<objectId>"....
       #  Object.find ["<objectId>", "<objectId>"]
-      #  Object.find "<objectId>", cache: false  # bypass cache
+      #  Object.find "<objectId>", cache: true  # opt-in to cache
       # @param parse_ids [String] the objectId to find.
       # @param type [Symbol] the fetching methodology to use if more than one id was passed.
       #  - *:parallel* : Utilizes parrallel HTTP requests to fetch all objects requested.
       #  - *:batch* : This uses a batch fetch request using a contained_in clause.
       # @param compact [Boolean] whether to remove nil items from the returned array for objects
       #  that were not found.
-      # @param cache [Boolean] whether to use cache. Set to false to bypass cache entirely.
+      # @param cache [Boolean, Symbol] caching mode. Defaults to :write_only when Parse.cache_write_on_fetch is true.
+      #   - :write_only (default) - skip cache read, but update cache with fresh data
+      #   - true - read from and write to cache
+      #   - false - completely bypass cache (no read or write)
       # @return [Parse::Object] if only one id was provided as a parameter.
       # @return [Array<Parse::Object>] if more than one id was provided as a parameter.
-      def find(*parse_ids, type: :parallel, compact: true, cache: true)
+      def find(*parse_ids, type: :parallel, compact: true, cache: nil)
         # flatten the list of Object ids.
         parse_ids.flatten!
         parse_ids.compact!
@@ -391,13 +438,19 @@ module Parse
         as_array = parse_ids.count > 1
         results = []
 
+        # Default to write-only cache mode - find always gets fresh data
+        # but updates cache for future cached reads. Controlled by feature flag.
+        if cache.nil?
+          cache = Parse.cache_write_on_fetch ? :write_only : false
+        end
+
         # Extract cache option for client requests
-        client_opts = cache == false ? { cache: false } : {}
+        client_opts = { cache: cache }
 
         if type == :batch
           # use a .in query with the given id as a list
           query = self.class.query(:id.in => parse_ids)
-          query.cache = cache if cache == false
+          query.cache = cache
           results = query.results
         else
           # use Parallel to make multiple threaded requests for finding these objects.
@@ -415,8 +468,24 @@ module Parse
         results.compact! if compact
 
         as_array ? results : results.first
-      end; 
+      end
+
       alias_method :get, :find
+
+      # Find objects with caching enabled. This is a convenience method that calls
+      # find with cache: true.
+      # @example
+      #  Object.find_cached "<objectId>"
+      #  Object.find_cached "<objectId>", "<objectId>"....
+      # @param parse_ids [String] the objectId(s) to find.
+      # @param type [Symbol] the fetching methodology (:parallel or :batch).
+      # @param compact [Boolean] whether to remove nil items from the returned array.
+      # @return [Parse::Object] if only one id was provided as a parameter.
+      # @return [Array<Parse::Object>] if more than one id was provided as a parameter.
+      # @see #find
+      def find_cached(*parse_ids, type: :parallel, compact: true)
+        find(*parse_ids, type: type, compact: compact, cache: true)
+      end
     end # Querying
   end
 end

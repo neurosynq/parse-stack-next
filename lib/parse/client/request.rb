@@ -50,7 +50,7 @@ module Parse
 
     # Default configuration
     self.enable_request_id = true  # Enabled by default for production safety
-    self.request_id_header = 'X-Parse-Request-Id'  # Standard Parse header
+    self.request_id_header = "X-Parse-Request-Id"  # Standard Parse header
     self.idempotent_methods = [:post, :put, :patch]  # Methods that can benefit from idempotency
 
     # Creates a new request
@@ -67,13 +67,13 @@ module Parse
       unless method == :get || method == :put || method == :post || method == :delete
         raise ArgumentError, "Invalid method #{method} for request : '#{uri}'"
       end
-      
+
       self.method = method
       self.path = uri
       self.body = body
       self.headers = headers || {}
       self.opts = opts || {}
-      
+
       # Handle request ID for idempotency
       setup_request_id
     end
@@ -118,12 +118,12 @@ module Parse
     def setup_request_id
       # Check if idempotency should be enabled for this request
       should_use_request_id = determine_idempotency_requirement
-      
+
       return unless should_use_request_id
-      
+
       # Use custom request ID if provided, otherwise generate one
       @request_id = @opts[:request_id] || generate_request_id
-      
+
       # Add request ID to headers if not already present
       header_name = self.class.request_id_header
       @headers[header_name] ||= @request_id
@@ -134,18 +134,18 @@ module Parse
     def determine_idempotency_requirement
       # Explicit override in opts takes precedence
       return @opts[:idempotent] if @opts.key?(:idempotent)
-      
+
       # Check if request ID is already in headers (manually added)
       return true if @headers[self.class.request_id_header]
-      
+
       # Check global configuration and method
       return false unless self.class.enable_request_id
       return false unless self.class.idempotent_methods.include?(@method)
-      
+
       # Don't add request IDs to certain paths that are inherently idempotent
       # or where Parse handles idempotency differently
       return false if non_idempotent_path?
-      
+
       true
     end
 
@@ -154,7 +154,7 @@ module Parse
     def non_idempotent_path?
       # GET requests are naturally idempotent
       return true if @method == :get
-      
+
       # Some Parse endpoints handle their own idempotency or shouldn't be retried
       non_idempotent_patterns = [
         %r{/sessions},           # Session creation/management
@@ -163,9 +163,9 @@ module Parse
         %r{/functions/},         # Cloud functions (may have their own logic)
         %r{/jobs/},              # Background jobs
         %r{/events/},            # Analytics events
-        %r{/push}                # Push notifications
+        %r{/push},                # Push notifications
       ]
-      
+
       non_idempotent_patterns.any? { |pattern| @path =~ pattern }
     end
 
@@ -204,18 +204,12 @@ module Parse
       @request_id.present? && @headers[self.class.request_id_header].present?
     end
 
-    # Returns the request ID if present
-    # @return [String, nil]
-    def request_id
-      @request_id
-    end
-
     # Class methods for configuration
 
     # Enables request ID generation globally
     # @param methods [Array<Symbol>] HTTP methods to apply idempotency to
     # @param header [String] header name to use for request IDs
-    def self.enable_idempotency!(methods: [:post, :put, :patch], header: 'X-Parse-Request-Id')
+    def self.enable_idempotency!(methods: [:post, :put, :patch], header: "X-Parse-Request-Id")
       self.enable_request_id = true
       self.idempotent_methods = methods
       self.request_id_header = header
@@ -230,7 +224,7 @@ module Parse
     # @param enabled [Boolean] whether to enable idempotency
     # @param methods [Array<Symbol>] HTTP methods to apply idempotency to
     # @param header [String] header name to use for request IDs
-    def self.configure_idempotency(enabled: true, methods: [:post, :put, :patch], header: 'X-Parse-Request-Id')
+    def self.configure_idempotency(enabled: true, methods: [:post, :put, :patch], header: "X-Parse-Request-Id")
       self.enable_request_id = enabled
       self.idempotent_methods = methods
       self.request_id_header = header

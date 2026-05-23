@@ -1,7 +1,8 @@
 # encoding: UTF-8
 # frozen_string_literal: true
-require_relative "../object"
-require_relative "user"
+# Note: Do not require "../object" here - this file is loaded from object.rb
+# and adding that require would create a circular dependency.
+# user.rb is also loaded from object.rb before this file.
 
 module Parse
   # This class represents the data and columns contained in the standard Parse `_Product` collection.

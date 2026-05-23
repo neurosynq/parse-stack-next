@@ -3,14 +3,14 @@ require "faraday"
 # Attempt to load the persistent connection adapter for better performance.
 # Falls back gracefully to the default adapter if not available.
 NET_HTTP_PERSISTENT_AVAILABLE = begin
-  require "faraday/net_http_persistent"
-  true
-rescue LoadError
-  warn "[parse-stack] faraday-net_http_persistent gem not available. " \
-       "Using standard Net::HTTP adapter. For better performance, add " \
-       "'faraday-net_http_persistent' to your Gemfile."
-  false
-end
+    require "faraday/net_http_persistent"
+    true
+  rescue LoadError
+    warn "[parse-stack] faraday-net_http_persistent gem not available. " \
+         "Using standard Net::HTTP adapter. For better performance, add " \
+         "'faraday-net_http_persistent' to your Gemfile."
+    false
+  end
 
 require "active_support"
 require "moneta"
@@ -58,6 +58,25 @@ module Parse
 
     # An error when the session token provided in the request is invalid.
     class InvalidSessionTokenError < Error; end
+
+    # An error raised when a cloud function or job returns an error response
+    # (e.g. when the cloud code calls error!()). Carries the function name,
+    # Parse error code, HTTP status, and the underlying Response for debugging.
+    class CloudCodeError < Error
+      attr_reader :function_name, :code, :http_status, :response
+
+      def initialize(function_name, response)
+        @function_name = function_name
+        @response = response
+        @code = response.code
+        @http_status = response.http_status
+        super("Parse cloud function `#{function_name}` failed: [#{@code}] #{response.error} (HTTP #{@http_status})")
+      end
+
+      def inspect
+        "#<#{self.class} function=#{@function_name.inspect} code=#{@code.inspect} http_status=#{@http_status.inspect}>"
+      end
+    end
   end
 
   # Retrieve the App specific Parse configuration parameters. The configuration
@@ -175,7 +194,8 @@ module Parse
     #  The default retry count for the client when a specific request timesout or
     #  the service is unavailable. Defaults to {DEFAULT_RETRIES}.
     #  @return [String]
-    attr_accessor :cache, :retry_limit
+    attr_accessor :cache
+    attr_writer :retry_limit
     attr_reader :application_id, :api_key, :master_key, :server_url
     alias_method :app_id, :application_id
     # The client can support multiple sessions. The first session created, will be placed
@@ -220,7 +240,35 @@ module Parse
       def setup(opts = {}, &block)
         @clients[:default] = self.new(opts, &block)
       end
+
+      # @!visibility private
+      # Emit a redacted warning about a Parse::Response error to stderr.
+      #
+      # Routes the response error string through
+      # {Parse::Middleware::BodyBuilder.redact} to strip credentials (passwords,
+      # tokens, sessionTokens, access_tokens, authData) before logging, and
+      # truncates to {SAFE_WARN_MAX_ERROR_LENGTH} chars.
+      #
+      # @param tag [String] the bracketed prefix (e.g. "AuthenticationError").
+      # @param response [Parse::Response] the response carrying the error.
+      # @param name [String, nil] optional cloud-function or job name for context.
+      # @return [nil]
+      def _safe_warn(tag, response, name: nil)
+        err = Parse::Middleware::BodyBuilder.redact(response.error.to_s)[0, SAFE_WARN_MAX_ERROR_LENGTH]
+        if name
+          warn "[Parse:#{tag}] `#{name}` [#{response.code}] #{err} (HTTP #{response.http_status})"
+        else
+          warn "[Parse:#{tag}] [E-#{response.code}] #{response.request} : #{err} (#{response.http_status})"
+        end
+        nil
+      end
     end
+
+    # @!visibility private
+    # Maximum number of characters of a Parse::Response error string to include
+    # in safe warn output. Bounds log volume from chatty server errors or
+    # misbehaving cloud functions.
+    SAFE_WARN_MAX_ERROR_LENGTH = 200
 
     # Create a new client connected to the Parse Server REST API endpoint.
     # @param opts [Hash] a set of connection options to configure the client.
@@ -275,6 +323,21 @@ module Parse
     #    cache using the clear_cache! method on your Parse::Client instance.
     # @option opts [Hash] :faraday You may pass a hash of options that will be
     #    passed to the Faraday constructor.
+    # @option opts [String] :live_query_url The WebSocket URL for Parse LiveQuery server
+    #    (e.g., "wss://your-parse-server.com"). If not specified, falls back to
+    #    ENV["PARSE_LIVE_QUERY_URL"]. LiveQuery enables real-time subscriptions
+    #    to changes in Parse objects.
+    #    @example Enable LiveQuery
+    #      Parse.setup(
+    #        server_url: "https://your-server.com/parse",
+    #        application_id: "YOUR_APP_ID",
+    #        api_key: "YOUR_API_KEY",
+    #        live_query_url: "wss://your-server.com"
+    #      )
+    # @option opts [Hash] :live_query Advanced LiveQuery configuration options.
+    #    Pass a hash with custom settings for the LiveQuery client.
+    #    - :url [String] - WebSocket URL (alternative to :live_query_url)
+    #    - :auto_reconnect [Boolean] - Auto-reconnect on disconnect (default: true)
     # @raise Parse::Error::ConnectionError if the client was not properly configured with required keys or url.
     # @raise ArgumentError if the cache instance passed to the :cache option is not of Moneta::Transformer or Moneta::Expires
     # @see Parse::Middleware::BodyBuilder
@@ -286,6 +349,20 @@ module Parse
       @application_id = opts[:application_id] || opts[:app_id] || ENV["PARSE_SERVER_APPLICATION_ID"] || ENV["PARSE_APP_ID"]
       @api_key = opts[:api_key] || opts[:rest_api_key] || ENV["PARSE_SERVER_REST_API_KEY"] || ENV["PARSE_API_KEY"]
       @master_key = opts[:master_key] || ENV["PARSE_SERVER_MASTER_KEY"] || ENV["PARSE_MASTER_KEY"]
+
+      @require_https = opts.fetch(:require_https, ENV["PARSE_REQUIRE_HTTPS"] == "true")
+
+      # Security check for HTTP usage (except localhost/127.0.0.1 for development)
+      if @server_url&.start_with?("http://") && !@server_url.match?(%r{^http://(localhost|127\.0\.0\.1)(:|/)})
+        if @require_https
+          raise ArgumentError, "[Parse::Client] HTTPS required but server URL uses HTTP: #{@server_url}. " \
+                               "Set require_https: false or use an HTTPS URL."
+        else
+          warn "[Parse::Client] SECURITY WARNING: Using HTTP instead of HTTPS for Parse server. " \
+               "This exposes credentials and data to network interception. " \
+               "Use HTTPS in production: #{@server_url}"
+        end
+      end
 
       # Determine the HTTP adapter to use
       # Priority: explicit :adapter > :connection_pooling setting > default (pooling enabled)
@@ -367,33 +444,49 @@ module Parse
         # authentication information when building request and responses.
         conn.use Parse::Middleware::BodyBuilder
 
-        if opts[:cache].present? && opts[:expires].to_i > 0
-          # advanced: provide a REDIS url, we'll configure a Moneta Redis store.
-          if opts[:cache].is_a?(String) && opts[:cache].starts_with?("redis://")
-            begin
-              opts[:cache] = Moneta.new(:Redis, url: opts[:cache])
-            rescue LoadError
-              puts "[Parse::Middleware::Caching] Did you forget to load the redis gem (Gemfile)?"
-              raise
+        if opts[:cache].present?
+          if opts[:expires].to_i <= 0
+            warn "[Parse::Client] Cache store provided but :expires is not set or is 0. " \
+                 "Caching will be disabled. Set :expires to enable caching (e.g., expires: 10)."
+          else
+            # advanced: provide a REDIS url, we'll configure a Moneta Redis store.
+            if opts[:cache].is_a?(String) && opts[:cache].starts_with?("redis://")
+              begin
+                opts[:cache] = Moneta.new(:Redis, url: opts[:cache])
+              rescue LoadError
+                puts "[Parse::Middleware::Caching] Did you forget to load the redis gem (Gemfile)?"
+                raise
+              end
+            end
+
+            unless [:key?, :[], :delete, :store].all? { |method| opts[:cache].respond_to?(method) }
+              raise ArgumentError, "Parse::Client option :cache needs to be a type of Moneta store"
+            end
+            self.cache = opts[:cache]
+            conn.use Parse::Middleware::Caching, self.cache, { expires: opts[:expires].to_i }
+
+            # Inform about opt-in cache behavior
+            unless Parse.default_query_cache
+              warn "[Parse::Client] Caching middleware enabled (expires: #{opts[:expires]}s). " \
+                   "Queries do NOT use cache by default. Use `cache: true` on queries to opt-in, " \
+                   "or set `Parse.default_query_cache = true` for opt-out behavior."
             end
           end
-
-          unless [:key?, :[], :delete, :store].all? { |method| opts[:cache].respond_to?(method) }
-            raise ArgumentError, "Parse::Client option :cache needs to be a type of Moneta store"
-          end
-          self.cache = opts[:cache]
-          conn.use Parse::Middleware::Caching, self.cache, { expires: opts[:expires].to_i }
         end
 
         yield(conn) if block_given?
 
         # Configure the adapter with optional settings
-        # For net_http_persistent, options like pool_size and idle_timeout
-        # are passed via a block to configure the underlying Net::HTTP::Persistent
+        # For net_http_persistent:
+        # - pool_size must be passed as an adapter argument (constructor param, no setter)
+        # - idle_timeout and keep_alive have setters and are configured in the block
         if adapter_options.any?
-          conn.adapter adapter do |http|
+          # Extract constructor arguments for the adapter
+          adapter_args = {}
+          adapter_args[:pool_size] = adapter_options[:pool_size] if adapter_options[:pool_size]
+
+          conn.adapter adapter, **adapter_args do |http|
             http.idle_timeout = adapter_options[:idle_timeout] if adapter_options[:idle_timeout]
-            http.pool_size = adapter_options[:pool_size] if adapter_options[:pool_size]
             http.keep_alive = adapter_options[:keep_alive] if adapter_options[:keep_alive]
           end
         else
@@ -401,6 +494,31 @@ module Parse
         end
       end
       Parse::Client.clients[:default] ||= self
+
+      # Configure LiveQuery if URL provided
+      configure_live_query(opts)
+    end
+
+    # Configure LiveQuery with the given options
+    # @param opts [Hash] configuration options
+    # @option opts [String] :live_query_url WebSocket URL for LiveQuery server (wss://...)
+    # @api private
+    def configure_live_query(opts)
+      live_query_url = opts[:live_query_url] || ENV["PARSE_LIVE_QUERY_URL"]
+
+      return unless live_query_url || opts[:live_query]
+
+      require_relative "live_query"
+
+      live_query_opts = opts[:live_query].is_a?(Hash) ? opts[:live_query] : {}
+
+      Parse::LiveQuery.configure(
+        url: live_query_url || live_query_opts[:url],
+        application_id: @application_id,
+        client_key: @api_key,
+        master_key: @master_key,
+        **live_query_opts,
+      )
     end
 
     # If set, returns the current retry count for this instance. Otherwise,
@@ -498,6 +616,10 @@ module Parse
 
       if opts[:cache] == false
         headers[Parse::Middleware::Caching::CACHE_CONTROL] = "no-cache"
+      elsif opts[:cache] == :write_only
+        # Write-only mode: skip reading from cache, but still write to cache
+        # Useful for fetch!/reload! which want fresh data but should update cache
+        headers[Parse::Middleware::Caching::CACHE_WRITE_ONLY] = "true"
       elsif opts[:cache].is_a?(Numeric)
         # specify the cache duration of this request
         headers[Parse::Middleware::Caching::CACHE_EXPIRES_DURATION] = opts[:cache].to_s
@@ -524,41 +646,41 @@ module Parse
 
       case response.http_status
       when 401, 403
-        warn "[Parse:AuthenticationError] #{response}"
+        Parse::Client._safe_warn("AuthenticationError", response)
         raise Parse::Error::AuthenticationError, response
       when 400, 408
         if response.code == Parse::Response::ERROR_TIMEOUT || response.code == 143 #"net/http: timeout awaiting response headers"
-          warn "[Parse:TimeoutError] #{response}"
+          Parse::Client._safe_warn("TimeoutError", response)
           raise Parse::Error::TimeoutError, response
         end
       when 404
         unless response.object_not_found?
-          warn "[Parse:ConnectionError] #{response}"
+          Parse::Client._safe_warn("ConnectionError", response)
           raise Parse::Error::ConnectionError, response
         end
       when 405, 406
-        warn "[Parse:ProtocolError] #{response}"
+        Parse::Client._safe_warn("ProtocolError", response)
         raise Parse::Error::ProtocolError, response
       when 429 # Request over the throttle limit
-        warn "[Parse:RequestLimitExceededError] #{response}"
+        Parse::Client._safe_warn("RequestLimitExceededError", response)
         raise Parse::Error::RequestLimitExceededError, response
       when 500, 503
-        warn "[Parse:ServiceUnavailableError] #{response}"
+        Parse::Client._safe_warn("ServiceUnavailableError", response)
         raise Parse::Error::ServiceUnavailableError, response
       end
 
       if response.error?
         if response.code <= Parse::Response::ERROR_SERVICE_UNAVAILABLE
-          warn "[Parse:ServiceUnavailableError] #{response}"
+          Parse::Client._safe_warn("ServiceUnavailableError", response)
           raise Parse::Error::ServiceUnavailableError, response
         elsif response.code <= 100
-          warn "[Parse:ServerError] #{response}"
+          Parse::Client._safe_warn("ServerError", response)
           raise Parse::Error::ServerError, response
         elsif response.code == Parse::Response::ERROR_EXCEEDED_BURST_LIMIT
-          warn "[Parse:RequestLimitExceededError] #{response}"
+          Parse::Client._safe_warn("RequestLimitExceededError", response)
           raise Parse::Error::RequestLimitExceededError, response
         elsif response.code == 209 # Error 209: invalid session token
-          warn "[Parse:InvalidSessionTokenError] #{response}"
+          Parse::Client._safe_warn("InvalidSessionTokenError", response)
           raise Parse::Error::InvalidSessionTokenError, response
         end
       end
@@ -568,8 +690,17 @@ module Parse
       if _retry_count > 0
         warn "[Parse:Retry] Retries remaining #{_retry_count} : #{response.request}"
         _retry_count -= 1
-        backoff_delay = RETRY_DELAY * (self.retry_limit - _retry_count)
-        _retry_delay = [0, RETRY_DELAY, backoff_delay].sample
+        # Use Retry-After header if available, otherwise use exponential backoff
+        retry_after = response.retry_after if response.respond_to?(:retry_after)
+        if retry_after && retry_after > 0
+          _retry_delay = retry_after
+          warn "[Parse:Retry] Using Retry-After header: #{_retry_delay}s"
+        else
+          # Deterministic exponential backoff with +/-25% jitter. Never zero —
+          # zero-wait retries amplify DoS against upstream and stampede on 429.
+          backoff_delay = RETRY_DELAY * (self.retry_limit - _retry_count)
+          _retry_delay = backoff_delay * (0.75 + rand * 0.5)
+        end
         sleep _retry_delay if _retry_delay > 0
         retry
       end
@@ -579,7 +710,7 @@ module Parse
         warn "[Parse:Retry] Retries remaining #{_retry_count} : #{_request}"
         _retry_count -= 1
         backoff_delay = RETRY_DELAY * (self.retry_limit - _retry_count)
-        _retry_delay = [0, RETRY_DELAY, backoff_delay].sample
+        _retry_delay = backoff_delay * (0.75 + rand * 0.5)
         sleep _retry_delay if _retry_delay > 0
         retry
       end
@@ -646,7 +777,7 @@ module Parse
       module ClassMethods
 
         # @return [Parse::Client] the current client for :default.
-        attr_accessor :client
+        attr_writer :client
 
         def client
           @client ||= Parse::Client.client #defaults to :default tag
@@ -680,6 +811,15 @@ module Parse
     end
   end
 
+  # @!visibility private
+  # Unwrap the `{ "result" => ... }` envelope from a successful cloud-code response.
+  # Guards against unusual server payloads (non-Hash bodies) by returning the raw
+  # result rather than raising TypeError on `String#[]`/`Integer#[]`.
+  def self._extract_cloud_result(response)
+    r = response.result
+    r.is_a?(Hash) ? r["result"] : r
+  end
+
   # Helper method to trigger cloud jobs and get results.
   # @param name [String] the name of the cloud code job to trigger.
   # @param body [Hash] the set of parameters to pass to the job.
@@ -687,15 +827,34 @@ module Parse
   # @return (see Parse.call_function)
   def self.trigger_job(name, body = {}, **opts)
     conn = opts[:session] || opts[:client] || :default
-    
+
     # Extract request options for the API call
     request_opts = {}
     request_opts[:session_token] = opts[:session_token] if opts[:session_token]
     request_opts[:master_key] = opts[:master_key] if opts[:master_key]
-    
+
     response = Parse::Client.client(conn).trigger_job(name, body, opts: request_opts)
     return response if opts[:raw].present?
-    response.error? ? nil : response.result["result"]
+    if response.error?
+      Parse::Client._safe_warn("CloudCodeError", response, name: name)
+      return nil
+    end
+    _extract_cloud_result(response)
+  end
+
+  # Same as {Parse.trigger_job} but raises {Parse::Error::CloudCodeError} when
+  # the job returns an error instead of silently returning nil. HTTP-level
+  # errors (auth, timeouts, throttling, etc.) still raise their specific
+  # {Parse::Error} subclasses as the underlying client does.
+  # @param name (see Parse.trigger_job)
+  # @param body (see Parse.trigger_job)
+  # @param opts (see Parse.trigger_job) — :raw is ignored.
+  # @raise [Parse::Error::CloudCodeError] when the response indicates a cloud-code error.
+  # @return [Object] the result data of the response.
+  def self.trigger_job!(name, body = {}, **opts)
+    response = trigger_job(name, body, **opts.merge(raw: true))
+    raise Parse::Error::CloudCodeError.new(name, response) if response.error?
+    _extract_cloud_result(response)
   end
 
   # Helper method to trigger cloud jobs with a session token.
@@ -710,6 +869,20 @@ module Parse
     trigger_job(name, body, **opts)
   end
 
+  # Same as {Parse.trigger_job_with_session} but raises
+  # {Parse::Error::CloudCodeError} when the job returns an error instead of
+  # silently returning nil.
+  # @param name (see Parse.trigger_job_with_session)
+  # @param body (see Parse.trigger_job_with_session)
+  # @param session_token (see Parse.trigger_job_with_session)
+  # @param opts (see Parse.trigger_job_with_session)
+  # @raise [Parse::Error::CloudCodeError] when the response indicates a cloud-code error.
+  # @return [Object] the result data of the response.
+  def self.trigger_job_with_session!(name, body = {}, session_token, **opts)
+    opts[:session_token] = session_token
+    trigger_job!(name, body, **opts)
+  end
+
   # Helper method to call cloud functions and get results.
   # @param name [String] the name of the cloud code function to call.
   # @param body [Hash] the set of parameters to pass to the function.
@@ -722,15 +895,34 @@ module Parse
   # @return [Object] the result data of the response. nil if there was an error.
   def self.call_function(name, body = {}, **opts)
     conn = opts[:session] || opts[:client] || :default
-    
+
     # Extract request options for the API call
     request_opts = {}
     request_opts[:session_token] = opts[:session_token] if opts[:session_token]
     request_opts[:master_key] = opts[:master_key] if opts[:master_key]
-    
+
     response = Parse::Client.client(conn).call_function(name, body, opts: request_opts)
     return response if opts[:raw].present?
-    response.error? ? nil : response.result["result"]
+    if response.error?
+      Parse::Client._safe_warn("CloudCodeError", response, name: name)
+      return nil
+    end
+    _extract_cloud_result(response)
+  end
+
+  # Same as {Parse.call_function} but raises {Parse::Error::CloudCodeError}
+  # when the cloud function returns an error instead of silently returning nil.
+  # HTTP-level errors (auth, timeouts, throttling, etc.) still raise their
+  # specific {Parse::Error} subclasses as the underlying client does.
+  # @param name (see Parse.call_function)
+  # @param body (see Parse.call_function)
+  # @param opts (see Parse.call_function) — :raw is ignored.
+  # @raise [Parse::Error::CloudCodeError] when the response indicates a cloud-code error.
+  # @return [Object] the result data of the response.
+  def self.call_function!(name, body = {}, **opts)
+    response = call_function(name, body, **opts.merge(raw: true))
+    raise Parse::Error::CloudCodeError.new(name, response) if response.error?
+    _extract_cloud_result(response)
   end
 
   # Helper method to call cloud functions with a session token.
@@ -743,5 +935,19 @@ module Parse
   def self.call_function_with_session(name, body = {}, session_token, **opts)
     opts[:session_token] = session_token
     call_function(name, body, **opts)
+  end
+
+  # Same as {Parse.call_function_with_session} but raises
+  # {Parse::Error::CloudCodeError} when the cloud function returns an error
+  # instead of silently returning nil.
+  # @param name (see Parse.call_function_with_session)
+  # @param body (see Parse.call_function_with_session)
+  # @param session_token (see Parse.call_function_with_session)
+  # @param opts (see Parse.call_function_with_session)
+  # @raise [Parse::Error::CloudCodeError] when the response indicates a cloud-code error.
+  # @return [Object] the result data of the response.
+  def self.call_function_with_session!(name, body = {}, session_token, **opts)
+    opts[:session_token] = session_token
+    call_function!(name, body, **opts)
   end
 end

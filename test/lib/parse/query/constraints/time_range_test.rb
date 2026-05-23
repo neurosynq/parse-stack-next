@@ -17,10 +17,10 @@ class TestTimeRangeConstraint < Minitest::Test
       start_date, end_date = value
       formatted_start = Parse::Constraint.formatted_value(start_date)
       formatted_end = Parse::Constraint.formatted_value(end_date)
-      
-      { "field" => { 
+
+      { "field" => {
         "$gte" => formatted_start,
-        "$lte" => formatted_end
+        "$lte" => formatted_end,
       } }
     else
       { "field" => Parse::Constraint.formatted_value(value) }
@@ -31,11 +31,11 @@ class TestTimeRangeConstraint < Minitest::Test
     start_date = DateTime.new(2023, 1, 1)
     end_date = DateTime.new(2023, 12, 31)
     constraint = @klass.new(:created_at, [start_date, end_date])
-    
+
     expected_start = { __type: "Date", iso: start_date.utc.iso8601(3) }
     expected_end = { __type: "Date", iso: end_date.utc.iso8601(3) }
     expected = { created_at: { :$gte => expected_start, :$lte => expected_end } }
-    
+
     assert_equal expected, constraint.build
   end
 
@@ -43,11 +43,11 @@ class TestTimeRangeConstraint < Minitest::Test
     start_time = Time.new(2023, 6, 1, 12, 0, 0)
     end_time = Time.new(2023, 6, 30, 18, 0, 0)
     constraint = @klass.new(:created_at, [start_time, end_time])
-    
+
     expected_start = { __type: "Date", iso: start_time.utc.iso8601(3) }
     expected_end = { __type: "Date", iso: end_time.utc.iso8601(3) }
     expected = { created_at: { :$gte => expected_start, :$lte => expected_end } }
-    
+
     assert_equal expected, constraint.build
   end
 

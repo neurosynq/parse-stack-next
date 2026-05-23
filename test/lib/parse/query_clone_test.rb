@@ -1,5 +1,5 @@
-require_relative '../../test_helper'
-require 'minitest/autorun'
+require_relative "../../test_helper"
+require "minitest/autorun"
 
 # Test model for query cloning tests
 class CloneTestProduct < Parse::Object
@@ -66,7 +66,7 @@ class QueryCloneTest < Minitest::Test
       :name => "Test Product",
       :price.gt => 10.0,
       :active => true,
-      :tags.in => ["electronics", "gadgets"]
+      :tags.in => ["electronics", "gadgets"],
     )
 
     cloned = original.clone
@@ -104,7 +104,7 @@ class QueryCloneTest < Minitest::Test
 
     # Create query with ordering
     original = CloneTestProduct.where(:active => true)
-                              .order(:name.asc, :price.desc, :created_date.asc)
+      .order(:name.asc, :price.desc, :created_date.asc)
 
     cloned = original.clone
 
@@ -128,8 +128,8 @@ class QueryCloneTest < Minitest::Test
 
     # Create query with limit and skip
     original = CloneTestProduct.where(:active => true)
-                              .limit(50)
-                              .skip(100)
+      .limit(50)
+      .skip(100)
 
     cloned = original.clone
 
@@ -145,8 +145,8 @@ class QueryCloneTest < Minitest::Test
 
     # Create query with keys and includes
     original = CloneTestProduct.where(:active => true)
-                              .keys(:name, :price, :category)
-                              .includes(:author, :reviews)
+      .keys(:name, :price, :category)
+      .includes(:author, :reviews)
 
     cloned = original.clone
 
@@ -266,7 +266,7 @@ class QueryCloneTest < Minitest::Test
     # Create query with date constraints
     original = CloneTestProduct.where(
       :created_date.gte => test_date,
-      :created_date.lt => test_date + 30
+      :created_date.lt => test_date + 30,
     )
 
     cloned = original.clone
@@ -296,7 +296,7 @@ class QueryCloneTest < Minitest::Test
     # Create query with array and object constraints
     original = CloneTestProduct.where(
       :tags.all => ["electronics", "featured"],
-      :metadata => metadata_filter
+      :metadata => metadata_filter,
     )
 
     cloned = original.clone
@@ -385,7 +385,6 @@ class QueryCloneTest < Minitest::Test
       end
 
       assert_match(/Marshal failed.*falling back to dup/, output, "Should show fallback message")
-
     ensure
       # Restore original Marshal.dump
       Marshal.define_singleton_method(:dump, original_marshal_dump)
@@ -399,14 +398,14 @@ class QueryCloneTest < Minitest::Test
 
     # Create a complex query
     complex_query = CloneTestProduct.where(:active => true)
-                                   .where(:price.between => [10, 100])
-                                   .where(:tags.in => ["electronics", "gadgets", "accessories"])
-                                   .where(:category.ne => "discontinued")
-                                   .order(:name.asc, :price.desc)
-                                   .keys(:name, :price, :category, :tags)
-                                   .includes(:author, :reviews, :ratings)
-                                   .limit(50)
-                                   .skip(25)
+      .where(:price.between => [10, 100])
+      .where(:tags.in => ["electronics", "gadgets", "accessories"])
+      .where(:category.ne => "discontinued")
+      .order(:name.asc, :price.desc)
+      .keys(:name, :price, :category, :tags)
+      .includes(:author, :reviews, :ratings)
+      .limit(50)
+      .skip(25)
 
     # Test cloning performance
     start_time = Time.now

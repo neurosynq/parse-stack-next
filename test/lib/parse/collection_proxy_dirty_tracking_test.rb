@@ -1,4 +1,4 @@
-require_relative '../../test_helper'
+require_relative "../../test_helper"
 
 # Test model for collection proxy dirty tracking
 class CollectionDirtyTestParent < Parse::Object
@@ -16,7 +16,6 @@ class CollectionDirtyTestItem < Parse::Object
 end
 
 class CollectionProxyDirtyTrackingTest < Minitest::Test
-
   def test_modifying_nested_item_does_not_mark_parent_dirty
     # Create parent with items
     parent = CollectionDirtyTestParent.new

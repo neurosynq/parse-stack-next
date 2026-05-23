@@ -118,7 +118,7 @@ module Parse
           opts.reverse_merge!({ as: key, field: parse_class.columnize, scope_only: false })
           klassName = opts[:as].to_parse_class
           foreign_field = opts[:field].to_sym
-          ivar = :"@_has_one_#{key}"
+          _ivar = :"@_has_one_#{key}" # reserved for future caching
 
           if self.method_defined?(key)
             warn "Creating has_one :#{key} association. Will overwrite existing method #{self}##{key}."

@@ -32,7 +32,7 @@ namespace :test do
       puts "\n" + "="*80
       puts "Running: #{file}"
       puts "="*80
-      system("PARSE_TEST_USE_DOCKER=true ruby -Itest #{file}") || exit(1)
+      system("PARSE_TEST_USE_DOCKER=true ruby -Ilib:test #{file}") || exit(1)
     end
     puts "\n✅ All integration tests completed successfully!"
   end
@@ -52,7 +52,7 @@ namespace :test do
         next
       end
 
-      system("PARSE_TEST_USE_DOCKER=true ruby -Itest #{file}") || exit(1)
+      system("PARSE_TEST_USE_DOCKER=true ruby -Ilib:test #{file}") || exit(1)
     end
     puts "\n✅ All unit tests completed successfully!"
   end

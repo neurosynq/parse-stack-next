@@ -10,7 +10,8 @@ require "active_model/serializers/json"
 require "rack"
 require "ostruct"
 require_relative "client"
-require_relative "stack"
+# Note: Do not require "stack" here - this file is loaded from stack.rb
+# and adding that require would create a circular dependency.
 require_relative "model/object"
 require_relative "webhooks/payload"
 require_relative "webhooks/registration"
@@ -172,11 +173,11 @@ module Parse
 
         # Add ruby_initiated flag to payload for intelligent callback handling
         if payload
-          request_id = payload&.raw&.dig(:headers, 'x-parse-request-id') || 
-                      payload&.raw&.dig('headers', 'x-parse-request-id') ||
-                      payload&.raw&.dig(:headers, 'X-Parse-Request-Id') ||
-                      payload&.raw&.dig('headers', 'X-Parse-Request-Id')
-          ruby_initiated = request_id&.start_with?('_RB_')
+          request_id = payload&.raw&.dig(:headers, "x-parse-request-id") ||
+                       payload&.raw&.dig("headers", "x-parse-request-id") ||
+                       payload&.raw&.dig(:headers, "X-Parse-Request-Id") ||
+                       payload&.raw&.dig("headers", "X-Parse-Request-Id")
+          ruby_initiated = request_id&.start_with?("_RB_")
           payload.instance_variable_set(:@ruby_initiated, ruby_initiated)
         else
           ruby_initiated = false
@@ -215,7 +216,7 @@ module Parse
         elsif type == :after_save && (result == true || result.nil?) && payload&.parse_object.present? && payload.parse_object.is_a?(Parse::Object)
           # Handle after_save callbacks intelligently based on request origin
           is_new = payload.original.nil?
-          
+
           # Only run Ruby callbacks for NON-Ruby-initiated requests
           # This prevents callback loops while ensuring client-initiated operations trigger Ruby business logic
           payload.parse_object.run_after_create_callbacks if is_new && !ruby_initiated
@@ -244,7 +245,7 @@ module Parse
       # Returns the configured webhook key if available. By default it will use
       # the value of ENV['PARSE_SERVER_WEBHOOK_KEY'] if not configured.
       # @return [String]
-      attr_accessor :key
+      attr_writer :key
 
       def key
         @key ||= ENV["PARSE_SERVER_WEBHOOK_KEY"] || ENV["PARSE_WEBHOOK_KEY"]
@@ -268,10 +269,13 @@ module Parse
         request = Rack::Request.new env
         response = Rack::Response.new
 
-        if self.key.present? && self.key != request.env[HTTP_PARSE_WEBHOOK]
-          puts "[Parse::Webhooks] Invalid Parse-Webhook Key: #{request.env[HTTP_PARSE_WEBHOOK]}"
-          response.write error("Invalid Parse Webhook Key")
-          return response.finish
+        if self.key.present?
+          provided_key = request.env[HTTP_PARSE_WEBHOOK].to_s
+          unless ActiveSupport::SecurityUtils.secure_compare(self.key, provided_key)
+            puts "[Parse::Webhooks] Invalid Parse-Webhook Key received"
+            response.write error("Invalid Parse Webhook Key")
+            return response.finish
+          end
         end
 
         unless request.content_type.present? && request.content_type.include?(CONTENT_TYPE)
@@ -280,8 +284,13 @@ module Parse
         end
 
         request.body.rewind
+        body_str = request.body.read
+        if body_str.bytesize > 1_048_576
+          response.write error("Payload too large.")
+          return response.finish
+        end
         begin
-          payload = Parse::Webhooks::Payload.new request.body.read
+          payload = Parse::Webhooks::Payload.new body_str
         rescue => e
           warn "Invalid webhook payload format: #{e}"
           response.write error("Invalid payload format. Should be valid JSON.")
@@ -296,7 +305,7 @@ module Parse
           end
           if self.logging == :debug
             puts "[Webhooks::Payload] ----------------------------"
-            puts payload.as_json
+            puts Parse::Middleware::BodyBuilder.redact(payload.as_json.to_json)
             puts "----------------------------------------------------\n"
           end
         end

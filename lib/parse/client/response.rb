@@ -45,6 +45,9 @@ module Parse
     # The field name for the count result in a count response.
     COUNT = "count".freeze
 
+    # The Retry-After header name.
+    RETRY_AFTER = "Retry-After".freeze
+
     # @!attribute [rw] parse_class
     #  @return [String] the Parse class for this request
     # @!attribute [rw] code
@@ -58,12 +61,37 @@ module Parse
     # @!attribute [rw] request
     #  @return [Integer] the Parse::Request that generated this response.
     #  @see Parse::Request
+    # @!attribute [rw] headers
+    #  @return [Hash] the HTTP response headers.
     attr_accessor :parse_class, :code, :error, :result, :http_status,
-                  :request
+                  :request, :headers
     # You can query Parse for counting objects, which may not actually have
     # results.
     # @return [Integer] the count result from a count query request.
     attr_reader :count
+
+    # Get the Retry-After header value as seconds.
+    # The Retry-After header can be either a number of seconds or an HTTP-date.
+    # @return [Integer, nil] seconds to wait before retrying, or nil if not present.
+    def retry_after
+      return nil unless @headers.is_a?(Hash)
+      value = @headers[RETRY_AFTER] || @headers["retry-after"]
+      return nil if value.nil?
+
+      # Try parsing as integer (seconds)
+      if value.to_s =~ /\A\d+\z/
+        value.to_i
+      else
+        # Try parsing as HTTP-date
+        begin
+          date = Time.httpdate(value.to_s)
+          delay = (date - Time.now).ceil
+          delay > 0 ? delay : 1
+        rescue ArgumentError
+          nil
+        end
+      end
+    end
 
     # Create an instance with a Parse response JSON hash.
     # @param res [Hash] the JSON hash

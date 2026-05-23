@@ -22,7 +22,7 @@ module Parse
 
     # @!attribute [rw] field
     # @return [Symbol] the name of the field
-    attr_accessor :field
+    attr_reader :field
 
     # @!attribute [rw] direction
     # The direction of the sorting. This is either `:asc` or `:desc`.

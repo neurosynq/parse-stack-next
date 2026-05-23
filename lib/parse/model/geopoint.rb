@@ -27,9 +27,9 @@ module Parse
     ATTRIBUTES = { __type: :string, latitude: :float, longitude: :float }.freeze
 
     # @return [Float] latitude value between -90.0 and 90.0
-    attr_accessor :latitude
+    attr_reader :latitude
     # @return [Float] longitude value between -180.0 and 180.0
-    attr_accessor :longitude
+    attr_reader :longitude
     # The key field for latitude
     FIELD_LAT = "latitude".freeze
     # The key field for longitude

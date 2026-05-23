@@ -47,13 +47,13 @@ module Parse
         # @return [Logger]
         def default_logger
           @default_logger ||= begin
-            l = Logger.new(STDOUT)
-            l.progname = "Parse"
-            l.formatter = proc do |severity, datetime, progname, msg|
-              "[#{progname}] #{msg}\n"
+              l = Logger.new(STDOUT)
+              l.progname = "Parse"
+              l.formatter = proc do |severity, datetime, progname, msg|
+                "[#{progname}] #{msg}\n"
+              end
+              l
             end
-            l
-          end
         end
 
         # Get the configured logger or default
@@ -171,14 +171,14 @@ module Parse
         max_length = self.class.current_max_body_length
 
         content = if body.is_a?(String)
-          body
-        else
-          begin
-            body.to_json
-          rescue JSON::GeneratorError, Encoding::UndefinedConversionError
-            body.to_s
+            body
+          else
+            begin
+              body.to_json
+            rescue JSON::GeneratorError, Encoding::UndefinedConversionError
+              body.to_s
+            end
           end
-        end
 
         if content.length > max_length
           logger.debug "  [#{prefix} Body] #{content[0...max_length]}... (truncated, #{content.length} total)"

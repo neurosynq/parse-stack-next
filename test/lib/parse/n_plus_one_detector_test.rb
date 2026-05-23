@@ -1,8 +1,8 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-require_relative '../../test_helper'
-require 'minitest/autorun'
+require_relative "../../test_helper"
+require "minitest/autorun"
 
 class NPlusOneDetectorTest < Minitest::Test
   def setup
@@ -39,7 +39,7 @@ class NPlusOneDetectorTest < Minitest::Test
         source_class: "Song",
         association: :artist,
         target_class: "Artist",
-        object_id: "main_#{i}"
+        object_id: "main_#{i}",
       )
     end
 
@@ -53,7 +53,7 @@ class NPlusOneDetectorTest < Minitest::Test
           source_class: "Book",
           association: :author,
           target_class: "Author",
-          object_id: "thread_#{i}"
+          object_id: "thread_#{i}",
         )
       end
       Parse.n_plus_one_summary
@@ -78,7 +78,7 @@ class NPlusOneDetectorTest < Minitest::Test
         source_class: "Song",
         association: :artist,
         target_class: "Artist",
-        object_id: "id_#{i}"
+        object_id: "id_#{i}",
       )
     end
 
@@ -95,7 +95,7 @@ class NPlusOneDetectorTest < Minitest::Test
         source_class: "Song",
         association: :artist,
         target_class: "Artist",
-        object_id: "id_#{i}"
+        object_id: "id_#{i}",
       )
     end
 
@@ -107,7 +107,7 @@ class NPlusOneDetectorTest < Minitest::Test
       source_class: "Song",
       association: :artist,
       target_class: "Artist",
-      object_id: "id_3"
+      object_id: "id_3",
     )
 
     summary = Parse.n_plus_one_summary
@@ -122,7 +122,7 @@ class NPlusOneDetectorTest < Minitest::Test
         source: source,
         association: assoc,
         target: target,
-        count: count
+        count: count,
       }
     end
 
@@ -135,7 +135,7 @@ class NPlusOneDetectorTest < Minitest::Test
         source_class: "Song",
         association: :artist,
         target_class: "Artist",
-        object_id: "id_#{i}"
+        object_id: "id_#{i}",
       )
     end
 
@@ -162,7 +162,7 @@ class NPlusOneDetectorTest < Minitest::Test
         source_class: "Song",
         association: :artist,
         target_class: "Artist",
-        object_id: "id_#{i}"
+        object_id: "id_#{i}",
       )
     end
 
@@ -184,7 +184,7 @@ class NPlusOneDetectorTest < Minitest::Test
         source_class: "Song",
         association: :artist,
         target_class: "Artist",
-        object_id: "artist_#{i}"
+        object_id: "artist_#{i}",
       )
     end
 
@@ -194,7 +194,7 @@ class NPlusOneDetectorTest < Minitest::Test
         source_class: "Song",
         association: :album,
         target_class: "Album",
-        object_id: "album_#{i}"
+        object_id: "album_#{i}",
       )
     end
 
@@ -214,7 +214,7 @@ class NPlusOneDetectorTest < Minitest::Test
         source_class: "Song",
         association: :artist,
         target_class: "Artist",
-        object_id: "id_#{i}"
+        object_id: "id_#{i}",
       )
     end
 
@@ -283,7 +283,7 @@ class NPlusOneDetectorTest < Minitest::Test
           source_class: "Song",
           association: :artist,
           target_class: "Artist",
-          object_id: "id_#{i}"
+          object_id: "id_#{i}",
         )
       end
     end
@@ -305,7 +305,7 @@ class NPlusOneDetectorTest < Minitest::Test
         source_class: "Song",
         association: :artist,
         target_class: "Artist",
-        object_id: "id_#{i}"
+        object_id: "id_#{i}",
       )
     end
 
@@ -321,7 +321,7 @@ class NPlusOneDetectorTest < Minitest::Test
         source_class: "Song",
         association: :artist,
         target_class: "Artist",
-        object_id: "id_#{i}"
+        object_id: "id_#{i}",
       )
     end
 
@@ -345,7 +345,7 @@ class NPlusOneDetectorTest < Minitest::Test
           source_class: "Song",
           association: :artist,
           target_class: "Artist",
-          object_id: "id_#{i}"
+          object_id: "id_#{i}",
         )
       end
     end
@@ -429,7 +429,7 @@ class NPlusOneDetectorTest < Minitest::Test
         source_class: "Song",
         association: :artist,
         target_class: "Artist",
-        object_id: "id_#{i}"
+        object_id: "id_#{i}",
       )
     end
 
@@ -441,7 +441,7 @@ class NPlusOneDetectorTest < Minitest::Test
       source_class: "Song",
       association: :artist,
       target_class: "Artist",
-      object_id: "id_5"
+      object_id: "id_5",
     )
 
     summary = Parse.n_plus_one_summary
@@ -462,9 +462,8 @@ class NPlusOneDetectorTest < Minitest::Test
     mock_pointer = Object.new
 
     Parse::NPlusOneDetector.register_source(mock_pointer,
-      source_class: "Song",
-      association: :artist
-    )
+                                            source_class: "Song",
+                                            association: :artist)
 
     source_info = Parse::NPlusOneDetector.lookup_source(mock_pointer)
 
@@ -485,9 +484,8 @@ class NPlusOneDetectorTest < Minitest::Test
 
     mock_pointer = Object.new
     Parse::NPlusOneDetector.register_source(mock_pointer,
-      source_class: "Song",
-      association: :artist
-    )
+                                            source_class: "Song",
+                                            association: :artist)
 
     # Should not register when disabled
     assert_nil Parse::NPlusOneDetector.lookup_source(mock_pointer)
@@ -498,9 +496,8 @@ class NPlusOneDetectorTest < Minitest::Test
 
     mock_pointer = Object.new
     Parse::NPlusOneDetector.register_source(mock_pointer,
-      source_class: "Song",
-      association: :artist
-    )
+                                            source_class: "Song",
+                                            association: :artist)
 
     # Verify it's registered
     assert Parse::NPlusOneDetector.lookup_source(mock_pointer)
@@ -519,14 +516,12 @@ class NPlusOneDetectorTest < Minitest::Test
     obj2 = Object.new
 
     Parse::NPlusOneDetector.register_source(obj1,
-      source_class: "Song",
-      association: :artist
-    )
+                                            source_class: "Song",
+                                            association: :artist)
 
     Parse::NPlusOneDetector.register_source(obj2,
-      source_class: "Album",
-      association: :tracks
-    )
+                                            source_class: "Album",
+                                            association: :tracks)
 
     # Each object should have its own entry
     source1 = Parse::NPlusOneDetector.lookup_source(obj1)

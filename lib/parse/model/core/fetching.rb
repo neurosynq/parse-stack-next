@@ -45,6 +45,8 @@ module Parse
 
       # Force fetches and updates the current object with the data contained in the Parse collection.
       # The changes applied to the object are not dirty tracked.
+      # By default, bypasses cache reads but updates the cache with fresh data (write-only mode).
+      # This ensures you always get fresh data while keeping the cache updated for future reads.
       # @param keys [Array<Symbol, String>, nil] optional list of fields to fetch (partial fetch).
       #   If provided, only these fields will be fetched and the object will be marked as partially fetched.
       #   Use dot notation for nested fields (e.g., "author.name") - Parse automatically resolves the pointer.
@@ -54,9 +56,17 @@ module Parse
       #   By default (false), fetched fields accept server values and local changes are discarded.
       #   Unfetched fields always preserve their dirty state regardless of this setting.
       # @param opts [Hash] a set of options to pass to the client request.
+      # @option opts [Boolean, Symbol] :cache (:write_only) caching mode:
+      #   - :write_only (default) - skip cache read, but update cache with fresh data
+      #   - true - read from and write to cache
+      #   - false - completely bypass cache (no read or write)
       # @return [self] the current object, useful for chaining.
-      # @example Full fetch
+      # @example Full fetch (updates cache but doesn't read from it)
       #   post.fetch!
+      # @example Fetch with full caching (read and write)
+      #   post.fetch!(cache: true)
+      # @example Fetch completely bypassing cache
+      #   post.fetch!(cache: false)
       # @example Partial fetch with specific keys
       #   post.fetch!(keys: [:title, :content])
       # @example Partial fetch with nested fields (pointer auto-resolved)
@@ -66,12 +76,24 @@ module Parse
       # @example Preserve local changes during fetch
       #   post.fetch!(keys: [:title], preserve_changes: true)
       def fetch!(keys: nil, includes: nil, preserve_changes: false, **opts)
+        # Default to write-only cache mode - fetch fresh data but update cache
+        # This can be disabled globally with Parse.cache_write_on_fetch = false
+        unless opts.key?(:cache)
+          opts[:cache] = Parse.cache_write_on_fetch ? :write_only : false
+        end
+
         # Normalize keys and includes arrays once at the start for performance
         keys_array = keys.present? ? Array(keys) : nil
         includes_array = includes.present? ? Array(includes) : nil
 
         # Build formatted keys once (reused for query and tracking)
         formatted_keys = keys_array&.map { |k| Parse::Query.format_field(k) }
+
+        # Validate keys against model fields if validation is enabled
+        # Skip validation if warnings are disabled (nothing to report)
+        if keys_array && Parse.validate_query_keys && Parse.warn_on_query_issues
+          validate_fetch_keys(keys_array)
+        end
 
         # Build query parameters for partial fetch
         query = {}
@@ -148,7 +170,7 @@ module Parse
         if is_partial_fetch
           # Build the new fetched keys list (top-level keys only, without nested paths)
           # Reuse formatted_keys instead of calling format_field again
-          new_keys = formatted_keys.map { |k| k.split('.').first.to_sym }
+          new_keys = formatted_keys.map { |k| k.split(".").first.to_sym }
           new_keys << :id unless new_keys.include?(:id)
           new_keys << :objectId unless new_keys.include?(:objectId)
           new_keys.uniq!
@@ -230,6 +252,23 @@ module Parse
         end
 
         self
+      end
+
+      # Fetches the object with explicit caching enabled.
+      # This is a convenience method that calls fetch! with cache: true.
+      # Use this when you want to leverage cached responses for better performance.
+      # @param keys [Array<Symbol, String>, nil] optional list of fields to fetch (partial fetch).
+      # @param includes [Array<String>, nil] optional list of pointer fields to resolve.
+      # @param preserve_changes [Boolean] if true, re-apply local dirty values to fetched fields.
+      # @param opts [Hash] additional options to pass to the client request.
+      # @return [self] the current object, useful for chaining.
+      # @example Fetch with caching
+      #   post.fetch_cache!
+      # @example Partial fetch with caching
+      #   post.fetch_cache!(keys: [:title, :content])
+      # @see #fetch!
+      def fetch_cache!(keys: nil, includes: nil, preserve_changes: false, **opts)
+        fetch!(keys: keys, includes: includes, preserve_changes: preserve_changes, cache: true, **opts)
       end
 
       # Fetches the object from the Parse data store. Unlike fetchIfNeeded, this always
@@ -316,7 +355,7 @@ module Parse
           inc_str = inc.to_s
 
           # Skip includes with dots - these are internal references (e.g., "project.owner")
-          next if inc_str.include?('.')
+          next if inc_str.include?(".")
 
           inc_sym = inc_str.to_sym
           field_type = fields[inc_sym]
@@ -338,7 +377,43 @@ module Parse
           end
         end
       end
+
       private :validate_fetch_includes_vs_keys
+
+      # Validates that fetch keys match defined properties on the model.
+      # Warns about unknown keys that don't correspond to any field.
+      # Skips validation for base keys (objectId, createdAt, etc.) and nested keys.
+      # @param keys [Array] the keys array to validate
+      # @!visibility private
+      def validate_fetch_keys(keys)
+        return unless self.class.respond_to?(:fields)
+
+        model_fields = self.class.fields
+        unknown_keys = []
+
+        keys.each do |key|
+          key_str = key.to_s
+          # Extract top-level field (before any dot notation)
+          top_level_key = key_str.split(".").first.to_sym
+
+          # Skip base keys (objectId, createdAt, updatedAt, ACL)
+          next if Parse::Properties::BASE_KEYS.include?(top_level_key)
+          next if [:acl, :ACL, :objectId].include?(top_level_key)
+
+          # Check if field exists on the model
+          unless model_fields.key?(top_level_key)
+            unknown_keys << top_level_key
+          end
+        end
+
+        if unknown_keys.any?
+          unknown_keys.uniq!
+          puts "[Parse::Fetch] Warning: unknown keys #{unknown_keys.inspect} for #{self.class.name}. " \
+               "These fields are not defined on the model. (silence with Parse.validate_query_keys = false)"
+        end
+      end
+
+      private :validate_fetch_keys
 
       # Autofetches the object based on a key that is not part {Parse::Properties::BASE_KEYS}.
       # If the key is not a Parse standard key, and the current object is in a
@@ -363,7 +438,7 @@ module Parse
 
         # Capture caller stack BEFORE mutex for better error tracebacks
         # Filter out internal parse-stack frames to show where user code accessed the field
-        caller_stack = caller.reject { |frame| frame.include?('/lib/parse/') }
+        caller_stack = caller.reject { |frame| frame.include?("/lib/parse/") }
 
         # Use mutex for thread-safe check-and-fetch pattern
         fetch_mutex.synchronize do
@@ -382,7 +457,7 @@ module Parse
               source_class: source_class,
               association: association,
               target_class: self.class.name,
-              object_id: id
+              object_id: id,
             )
           end
 

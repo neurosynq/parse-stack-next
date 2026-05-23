@@ -323,7 +323,7 @@ module Parse
 
       # @!visibility private
       module ClassMethods
-        attr_accessor :relations
+        attr_writer :relations
 
         def relations
           @relations ||= {}

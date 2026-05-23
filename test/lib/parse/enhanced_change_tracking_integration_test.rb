@@ -1,11 +1,11 @@
-require_relative '../../test_helper_integration'
+require_relative "../../test_helper_integration"
 
 # Test model with enhanced change tracking for integration testing
 # Enhanced tracking preserves _was and _was_changed? methods in after_save hooks,
 # while _changed? methods maintain normal behavior (false after save)
 class TrackedProduct < Parse::Object
   parse_class "TrackedProduct"
-  
+
   property :name, :string
   property :price, :float
   property :sku, :string
@@ -13,7 +13,7 @@ class TrackedProduct < Parse::Object
   property :stock_quantity, :integer
   property :is_active, :boolean, default: true
   property :description, :string
-  
+
   # Track changes and hook execution
   attr_accessor :before_save_changes, :after_save_changes,
                 :before_save_was_values, :after_save_was_values,
@@ -34,7 +34,7 @@ class TrackedProduct < Parse::Object
 
   def capture_before_save_state
     @hook_execution_log << "before_save executed"
-    
+
     # Capture standard change tracking in before_save
     @before_save_changes = {
       name_changed: name_changed?,
@@ -42,9 +42,9 @@ class TrackedProduct < Parse::Object
       sku_changed: sku_changed?,
       category_changed: category_changed?,
       stock_quantity_changed: stock_quantity_changed?,
-      is_active_changed: is_active_changed?
+      is_active_changed: is_active_changed?,
     }
-    
+
     # Capture _was values in before_save
     @before_save_was_values = {
       name_was: (name_changed? ? name_was : nil),
@@ -52,9 +52,9 @@ class TrackedProduct < Parse::Object
       sku_was: (sku_changed? ? sku_was : nil),
       category_was: (category_changed? ? category_was : nil),
       stock_quantity_was: (stock_quantity_changed? ? stock_quantity_was : nil),
-      is_active_was: (is_active_changed? ? is_active_was : nil)
+      is_active_was: (is_active_changed? ? is_active_was : nil),
     }
-    
+
     # Capture _was_changed? methods in before_save
     @before_save_was_changed_values = {
       name_was_changed: (respond_to?(:name_was_changed?) ? name_was_changed? : false),
@@ -62,13 +62,13 @@ class TrackedProduct < Parse::Object
       sku_was_changed: (respond_to?(:sku_was_changed?) ? sku_was_changed? : false),
       category_was_changed: (respond_to?(:category_was_changed?) ? category_was_changed? : false),
       stock_quantity_was_changed: (respond_to?(:stock_quantity_was_changed?) ? stock_quantity_was_changed? : false),
-      is_active_was_changed: (respond_to?(:is_active_was_changed?) ? is_active_was_changed? : false)
+      is_active_was_changed: (respond_to?(:is_active_was_changed?) ? is_active_was_changed? : false),
     }
   end
 
   def capture_after_save_state
     @hook_execution_log << "after_save executed"
-    
+
     # Test what's available in after_save (should be cleared in standard ActiveModel)
     @after_save_changes = {
       name_changed: name_changed?,
@@ -76,7 +76,7 @@ class TrackedProduct < Parse::Object
       sku_changed: sku_changed?,
       category_changed: category_changed?,
       stock_quantity_changed: stock_quantity_changed?,
-      is_active_changed: is_active_changed?
+      is_active_changed: is_active_changed?,
     }
 
     # Test if _was values are available in after_save (enhanced tracking should preserve these)
@@ -86,9 +86,9 @@ class TrackedProduct < Parse::Object
       sku_was: (respond_to?(:sku_was) ? sku_was : "method_not_available"),
       category_was: (respond_to?(:category_was) ? category_was : "method_not_available"),
       stock_quantity_was: (respond_to?(:stock_quantity_was) ? stock_quantity_was : "method_not_available"),
-      is_active_was: (respond_to?(:is_active_was) ? is_active_was : "method_not_available")
+      is_active_was: (respond_to?(:is_active_was) ? is_active_was : "method_not_available"),
     }
-    
+
     # Test if _was_changed? methods are available in after_save (enhanced tracking should preserve these)
     @after_save_was_changed_values = {
       name_was_changed: (respond_to?(:name_was_changed?) ? name_was_changed? : false),
@@ -96,7 +96,7 @@ class TrackedProduct < Parse::Object
       sku_was_changed: (respond_to?(:sku_was_changed?) ? sku_was_changed? : false),
       category_was_changed: (respond_to?(:category_was_changed?) ? category_was_changed? : false),
       stock_quantity_was_changed: (respond_to?(:stock_quantity_was_changed?) ? stock_quantity_was_changed? : false),
-      is_active_was_changed: (respond_to?(:is_active_was_changed?) ? is_active_was_changed? : false)
+      is_active_was_changed: (respond_to?(:is_active_was_changed?) ? is_active_was_changed? : false),
     }
 
     # Test enhanced change tracking using previous_changes if available
@@ -107,30 +107,30 @@ class TrackedProduct < Parse::Object
 
   def process_enhanced_changes
     @hook_execution_log << "enhanced_changes processed"
-    
+
     # Use before_save captured data to generate change summary
     @change_summary = []
-    
+
     if @before_save_changes[:name_changed] && @before_save_was_values[:name_was]
       @change_summary << "Name: '#{@before_save_was_values[:name_was]}' → '#{name}'"
     end
-    
+
     if @before_save_changes[:price_changed] && @before_save_was_values[:price_was]
       @change_summary << "Price: $#{@before_save_was_values[:price_was]} → $#{price}"
     end
-    
+
     if @before_save_changes[:sku_changed] && @before_save_was_values[:sku_was]
       @change_summary << "SKU: '#{@before_save_was_values[:sku_was]}' → '#{sku}'"
     end
-    
+
     if @before_save_changes[:category_changed] && @before_save_was_values[:category_was]
       @change_summary << "Category: '#{@before_save_was_values[:category_was]}' → '#{category}'"
     end
-    
+
     if @before_save_changes[:stock_quantity_changed] && @before_save_was_values[:stock_quantity_was]
       @change_summary << "Stock: #{@before_save_was_values[:stock_quantity_was]} → #{stock_quantity}"
     end
-    
+
     if @before_save_changes[:is_active_changed] && !@before_save_was_values[:is_active_was].nil?
       @change_summary << "Active: #{@before_save_was_values[:is_active_was]} → #{is_active}"
     end
@@ -157,7 +157,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
   end
 
   def test_enhanced_change_tracking_on_create
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "enhanced change tracking on create test") do
@@ -171,7 +171,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
           category: "Electronics",
           stock_quantity: 100,
           is_active: true,
-          description: "A test product for change tracking"
+          description: "A test product for change tracking",
         )
 
         # Save the product
@@ -203,7 +203,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
   end
 
   def test_enhanced_change_tracking_on_update
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "enhanced change tracking on update test") do
@@ -216,10 +216,10 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
           sku: "ORG-0001",
           category: "Books",
           stock_quantity: 50,
-          is_active: true
+          is_active: true,
         )
         assert product.save, "Initial product should save"
-        
+
         # Clear tracking state
         product.hook_execution_log.clear
         product.change_summary.clear
@@ -259,7 +259,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
   end
 
   def test_enhanced_change_tracking_with_multiple_updates
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "enhanced change tracking with multiple updates test") do
@@ -272,7 +272,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
           sku: "MUP-0001",
           category: "Electronics",
           stock_quantity: 25,
-          is_active: true
+          is_active: true,
         )
         assert product.save, "Initial product should save"
 
@@ -317,7 +317,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
   end
 
   def test_enhanced_change_tracking_with_boolean_fields
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "enhanced change tracking with boolean fields test") do
@@ -328,7 +328,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
           name: "Boolean Test Product",
           price: 5.99,
           sku: "BTP-0001",
-          is_active: true
+          is_active: true,
         )
         assert product.save, "Product with boolean should save"
 
@@ -358,7 +358,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
   end
 
   def test_enhanced_change_tracking_with_nil_values
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "enhanced change tracking with nil values test") do
@@ -368,7 +368,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
         product = TrackedProduct.new(
           name: "Nil Test Product",
           price: 12.99,
-          sku: "NTP-0001"
+          sku: "NTP-0001",
           # category and stock_quantity intentionally nil
         )
         assert product.save, "Product with nil fields should save"
@@ -402,7 +402,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
   end
 
   def test_enhanced_change_tracking_persistence_across_saves
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "enhanced change tracking persistence test") do
@@ -412,7 +412,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
         product = TrackedProduct.new(
           name: "Persistence Test Product",
           price: 8.99,
-          sku: "PTP-0001"
+          sku: "PTP-0001",
         )
         assert product.save, "Initial save should succeed"
         original_id = product.id
@@ -420,13 +420,13 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
         # Fetch the product fresh from server
         fetched_product = TrackedProduct.find(original_id)
         assert fetched_product, "Should be able to fetch product"
-        
+
         # Update the fetched product
         fetched_product.hook_execution_log = []  # Initialize tracking
         fetched_product.change_summary = []
         fetched_product.price = 12.99
         fetched_product.name = "Updated Persistence Test"
-        
+
         assert fetched_product.save, "Update of fetched product should save"
 
         # Verify change tracking works on fetched object
@@ -439,7 +439,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
   end
 
   def test_after_save_hook_availability
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "after_save hook availability test") do
@@ -449,7 +449,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
         product = TrackedProduct.new(
           name: "Hook Test Product",
           price: 7.50,
-          sku: "HTP-0001"
+          sku: "HTP-0001",
         )
         assert product.save, "Product should save"
 
@@ -483,11 +483,11 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
         # Enhanced tracking: _changed? methods have normal behavior (false after save)
         refute product.after_save_changes[:name_changed], "name_changed? should be false after save (normal behavior)"
         refute product.after_save_changes[:price_changed], "price_changed? should be false after save (normal behavior)"
-        
+
         # But _was methods should still be available in after_save with enhanced tracking
         assert_equal "Hook Test Product", product.after_save_was_values[:name_was], "name_was should be available in after_save"
         assert_equal 7.50, product.after_save_was_values[:price_was], "price_was should be available in after_save"
-        
+
         # And _was_changed? methods should be populated in after_save with enhanced tracking
         assert product.after_save_was_changed_values[:name_was_changed], "name_was_changed? should be true in after_save"
         assert product.after_save_was_changed_values[:price_was_changed], "price_was_changed? should be true in after_save"
@@ -498,7 +498,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
   end
 
   def test_previous_changes_functionality
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "previous_changes functionality test") do
@@ -509,7 +509,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
           name: "Previous Changes Test",
           price: 15.00,
           sku: "PCT-0001",
-          category: "Electronics"
+          category: "Electronics",
         )
         assert product.save, "Product should save"
 
@@ -525,7 +525,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
 
         # Verify previous_changes is available and accurate
         assert product.previous_changes_snapshot.present?, "previous_changes should be available in after_save"
-        
+
         changes = product.previous_changes_snapshot
         assert_equal ["Previous Changes Test", "Updated Previous Changes Test"], changes["name"], "previous_changes should track name change"
         assert_equal [15.0, 20.0], changes["price"], "previous_changes should track price change"
@@ -543,7 +543,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
   end
 
   def test_enhanced_tracking_vs_standard_tracking_comparison
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV['PARSE_TEST_USE_DOCKER'] == 'true'
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_timeout(15, "enhanced vs standard tracking comparison test") do
@@ -553,7 +553,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
         product = TrackedProduct.new(
           name: "Comparison Test Product",
           price: 25.00,
-          sku: "CTP-0001"
+          sku: "CTP-0001",
         )
         assert product.save, "Product should save"
 
@@ -567,7 +567,7 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
         puts "\n--- Comparison Results ---"
         puts "before_save tracking (standard ActiveModel):"
         puts "  name_changed?: #{product.before_save_changes[:name_changed]}"
-        puts "  price_changed?: #{product.before_save_changes[:price_changed]}" 
+        puts "  price_changed?: #{product.before_save_changes[:price_changed]}"
         puts "  name_was: #{product.before_save_was_values[:name_was]}"
         puts "  price_was: #{product.before_save_was_values[:price_was]}"
 
@@ -587,11 +587,11 @@ class EnhancedChangeTrackingIntegrationTest < Minitest::Test
         # Key assertion: _changed? methods have normal behavior (false after save)
         refute product.after_save_changes[:name_changed], "Enhanced: name_changed? should be false after save (normal behavior)"
         refute product.after_save_changes[:price_changed], "Enhanced: price_changed? should be false after save (normal behavior)"
-        
+
         # Key assertion: _was methods still work in after_save with enhanced tracking
         assert_equal "Comparison Test Product", product.after_save_was_values[:name_was], "Enhanced: name_was should work in after_save"
         assert_equal 25.0, product.after_save_was_values[:price_was], "Enhanced: price_was should work in after_save"
-        
+
         # Key assertion: _was_changed? methods work in after_save with enhanced tracking
         assert product.after_save_was_changed_values[:name_was_changed], "Enhanced: name_was_changed? should be true in after_save"
         assert product.after_save_was_changed_values[:price_was_changed], "Enhanced: price_was_changed? should be true in after_save"

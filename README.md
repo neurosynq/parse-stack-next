@@ -10,16 +10,27 @@ A full featured Active Model ORM and Ruby REST API for Parse-Server. [Parse Stac
 
 **This is an extended and enhanced fork with additional features including:**
 - MongoDB Aggregation Framework support
+- **MongoDB Atlas Search** - Full-text search, autocomplete, faceted search with direct MongoDB access
+- **Direct MongoDB Queries** - Bypass Parse Server for high-performance read operations
+- **Schema Introspection & Migration** - Compare local models with server schema and generate migrations
+- **Enhanced Role Management** - Helper methods for role hierarchies, user management, and membership queries
+- **Read Preference Support** - Direct read queries to MongoDB secondary replicas
+- **Class-Level Permissions (CLP)** - Define and filter protected fields based on roles and user ownership
 - Advanced ACL query constraints (readable_by, writable_by)
 - Full transaction support with automatic retry
 - Comprehensive integration testing with Docker
 - Enhanced change tracking and webhooks
-- Request idempotency system
+- Request idempotency system with Retry-After header support
 - Timezone support for date operations
 - Partial fetch with smart autofetch and serialization control
+- Multi-Factor Authentication (MFA/2FA) support
+- LiveQuery real-time subscriptions with TLS/SSL, circuit breaker, health monitoring (experimental)
+- AI/LLM Agent integration with security hardening (rate limiting, injection protection)
 - And many more improvements (see [CHANGELOG.md](./CHANGELOG.md))
 
-Below is a [quick start guide](#overview), but you can also check out the full *[API Reference](https://www.modernistik.com/gems/parse-stack/index.html)* for more detailed information about our Parse Server SDK.
+Below is a [quick start guide](#overview). See also the [Usage Guide](./USAGE_GUIDE.md) for practical examples covering queries, aggregation, ACLs, and more.
+
+> **Note:** The [Modernistik API Reference](https://www.modernistik.com/gems/parse-stack/index.html) documents v1.9 only and does not cover features added in v2.x or v3.x.
 
 ### Credits
 
@@ -147,133 +158,59 @@ result = Parse.call_function :myFunctionName, {param: value}
 
 ```
 
-## What's New in 2.0
+## What's New in 3.x
 
-Version 2.0 represents a major upgrade with extensive new functionality and breaking changes. **Minimum Ruby version is now 3.2+**.
+**Current version: 3.3.0** | **Ruby 3.1+ required**
 
-### Transaction Support
+### 3.3 - Ruby Version Update
+- Minimum Ruby version bumped to 3.1 (Ruby 3.0 reached EOL March 2024)
+- CI tests against Ruby 3.1, 3.2, 3.3, and 3.4
 
-Full atomic transaction support with automatic retry on conflicts:
+### 3.2 - Class-Level Permissions (CLP)
+Define operation permissions and protected fields directly in models:
 
 ```ruby
-# Explicit batch operations
-Parse::Object.transaction do |batch|
-  song.name = "New Name"
-  batch.save(song)
-
-  artist.popularity += 1
-  batch.save(artist)
-end
-
-# Automatic batching via return values
-Parse::Object.transaction do
-  song.update(name: "New Name")
-  artist.update(popularity: artist.popularity + 1)
+class Document < Parse::Object
+  set_clp :find, public: true
+  set_clp :delete, public: false, roles: ["Admin"]
+  protect_fields "*", [:internal_notes, :secret_data]
 end
 ```
 
-### MongoDB Aggregation Framework
+### 3.1 - Atlas Search, MongoDB Direct, Schema Tools
+- **MongoDB Atlas Search** - Full-text search, autocomplete, faceted search
+- **Direct MongoDB Queries** - `results_direct`, `first_direct` bypassing Parse Server
+- **Schema Introspection** - `Parse::Schema.diff`, `Parse::Schema.migration`
+- **Read Preference** - `read_pref(:secondary)` for replica set reads
+- **Role Management** - `find_or_create`, `add_users`, `add_child_role`, `all_users`
 
-Powerful aggregation capabilities including group_by, count_distinct, and custom pipelines:
+### 3.0 - Push, Sessions, AI Agent
+- **Push Builder API** - Fluent pattern with `to_channel`, `with_alert`, `silent!`, `send!`
+- **Session Management** - `expired?`, `time_remaining`, `logout_all!`
+- **Installation Channels** - `subscribe`, `unsubscribe`, `subscribed_to?`
+- **AI/LLM Agent** - `Parse::Agent` with natural language queries
+- **MFA Support** - TOTP and SMS-based two-factor authentication
+- **LiveQuery** (Experimental) - Real-time WebSocket subscriptions
 
-```ruby
-# Group by with aggregation
-Song.query.group_by(:artist,
-  count: true,
-  sum: :plays,
-  avg: :duration
-)
+## What's New in 2.x
 
-# Group by date with timezone support
-Song.query.group_by_date(:released, :month,
-  timezone: "America/New_York",
-  count: true
-)
+**Ruby 3.0+ required** | See detailed docs in later sections
 
-# Count distinct values
-Song.query.count_distinct(:artist)
+### Key Features
+- **Transactions** - `Parse::Object.transaction` with automatic retry
+- **MongoDB Aggregation** - `group_by`, `count_distinct`, custom pipelines
+- **ACL Query Constraints** - `readable_by`, `writable_by`, `publicly_readable`
+- **Request Idempotency** - Automatic duplicate prevention (enabled by default)
+- **Enhanced Change Tracking** - Works correctly in `after_save` hooks
+- **LiveQuery** (Experimental) - Real-time subscriptions with circuit breaker
 
-# Custom aggregation pipeline
-Song.query.aggregate([
-  { "$match" => { "plays" => { "$gt" => 1000 } } },
-  { "$group" => { "_id" => "$artist", "total" => { "$sum" => "$plays" } } }
-])
-```
+### Breaking Changes from 1.x
+- Minimum Ruby 3.0+
+- `distinct` returns object IDs by default (use `return_pointers: true` for pointers)
+- Faraday 2.x (removed faraday_middleware)
+- Fixed typo "constaint" to "constraint"
 
-### ACL Query Constraints
-
-Filter queries based on ACL permissions:
-
-```ruby
-# Find all songs readable by a specific user
-songs = Song.all(:ACL.readable_by => current_user)
-
-# Find songs writable by any of multiple users/roles
-songs = Song.all(:ACL.writable_by => [user1, user2, "AdminRole"])
-
-# Works with User objects, role names, and Parse::Pointers
-songs = Song.all(:ACL.readable_by => Parse::Pointer.new("_User", user_id))
-```
-
-### Enhanced Change Tracking
-
-Improved change tracking that works correctly in `after_save` hooks:
-
-```ruby
-class Song < Parse::Object
-  after_save :notify_if_published
-
-  def notify_if_published
-    # Now works correctly in after_save
-    if published_was == false && published == true
-      send_notification("Song published!")
-    end
-  end
-end
-```
-
-### Request Idempotency (Enabled by Default)
-
-Automatic request idempotency prevents duplicate operations:
-
-```ruby
-# Idempotency is enabled by default
-song.save  # Uses unique request ID
-
-# Control per-request
-Parse.client.idempotency = false
-song.save  # No request ID
-Parse.client.idempotency = true
-```
-
-### Advanced Query Operations
-
-New query methods for common patterns:
-
-```ruby
-# Get latest records
-recent_songs = Song.query.latest.limit(10)
-
-# Get last updated records
-updated_songs = Song.query.last_updated.limit(10)
-
-# Combine queries with OR
-query1 = Song.query(genre: "rock")
-query2 = Song.query(genre: "pop")
-combined = Parse::Query.or(query1, query2)
-
-# Range queries
-songs = Song.all(:plays.between => [100, 1000])
-```
-
-### Breaking Changes
-
-- **Minimum Ruby 3.2+** (dropped support for Ruby < 3.2)
-- **`distinct` method** now returns object IDs by default. Use `distinct(field, return_pointers: true)` for Parse::Pointer objects
-- **Faraday 2.x** (removed faraday_middleware dependency)
-- **Fixed typo** "constaint" → "constraint" throughout codebase
-
-For complete details, see [CHANGELOG.md](./CHANGELOG.md) and [Releases](https://github.com/neurosynq/parse-stack-next/releases).
+For complete details, see the [CHANGELOG](./CHANGELOG.md) and [Releases](https://github.com/neurosynq/parse-stack-next/releases).
 
 ## Table of Contents
 
@@ -300,6 +237,13 @@ For complete details, see [CHANGELOG.md](./CHANGELOG.md) and [Releases](https://
   - [Parse::Bytes](#parsebytes)
   - [Parse::TimeZone](#parsetimezone)
   - [Parse::ACL](#parseacl)
+  - [Parse::CLP (Class-Level Permissions)](#parseclp-class-level-permissions)
+    - [Defining CLPs in Models](#defining-clps-in-models)
+    - [Filtering Data for Webhook Responses](#filtering-data-for-webhook-responses)
+    - [Protected Fields Intersection Logic](#protected-fields-intersection-logic)
+    - [Push CLPs to Parse Server](#push-clps-to-parse-server)
+    - [Fetch and Inspect CLPs](#fetch-and-inspect-clps)
+    - [Owner-Based Access with userField](#owner-based-access-with-userfield)
   - [Parse::Session](#parsesession)
   - [Parse::Installation](#parseinstallation)
   - [Parse::Product](#parseproduct)
@@ -401,6 +345,14 @@ For complete details, see [CHANGELOG.md](./CHANGELOG.md) and [Releases](https://
 - [Active Model Callbacks](#active-model-callbacks)
 - [Schema Upgrades and Migrations](#schema-upgrades-and-migrations)
 - [Push Notifications](#push-notifications)
+  - [Builder Pattern API](#builder-pattern-api)
+  - [Silent Push](#silent-push-ios-background-notifications)
+  - [Rich Push](#rich-push-ios-notification-extensions)
+  - [Localization](#localization)
+  - [Badge Management](#badge-management)
+  - [Saved Audiences](#saved-audiences)
+  - [Push Status Tracking](#push-status-tracking)
+  - [Installation Channel Management](#installation-channel-management)
 - [Cloud Code Webhooks](#cloud-code-webhooks)
   - [Cloud Code Functions](#cloud-code-functions)
   - [Cloud Code Triggers](#cloud-code-triggers)
@@ -408,6 +360,15 @@ For complete details, see [CHANGELOG.md](./CHANGELOG.md) and [Releases](https://
   - [Register Webhooks](#register-webhooks)
 - [Parse REST API Client](#parse-rest-api-client)
   - [Request Caching](#request-caching)
+- [Atlas Search](#atlas-search)
+  - [Setup](#setup)
+  - [Full-Text Search](#full-text-search)
+  - [Autocomplete](#autocomplete-search-as-you-type)
+  - [Faceted Search](#faceted-search)
+  - [Search Builder](#search-builder-advanced)
+  - [Query Integration](#query-integration)
+  - [Index Management](#index-management)
+  - [Creating Search Indexes](#creating-search-indexes)
 - [Contributing](#contributing)
 - [Testing](#testing)
   - [Docker Integration Tests](#docker-integration-tests)
@@ -993,6 +954,157 @@ data.acl # => ACL({"role:Admin"=>{"read"=>true, "write"=>true}})
 
 For more information about Parse record ACLs, see the documentation at  [Security](http://docs.parseplatform.org/rest/guide/#security)
 
+### Parse::CLP (Class-Level Permissions)
+
+Class-Level Permissions (CLPs) control access at the schema level, determining who can perform operations on a class and which fields are visible to different users/roles. Unlike ACLs (which are per-object), CLPs apply to the entire class.
+
+#### Defining CLPs in Models
+
+Use the `set_clp` and `protect_fields` DSL methods to define CLPs:
+
+```ruby
+class Song < Parse::Object
+  property :title, :string
+  property :artist, :string
+  property :internal_notes, :string
+  property :royalty_data, :string
+  belongs_to :owner
+
+  # Set operation-level permissions
+  set_clp :find, public: true
+  set_clp :get, public: true
+  set_clp :create, public: false, roles: ["Admin", "Editor"]
+  set_clp :update, public: false, roles: ["Admin", "Editor"]
+  set_clp :delete, public: false, roles: ["Admin"]
+
+  # Protect fields from certain users (use camelCase for JSON field names)
+  protect_fields "*", [:internalNotes, :royaltyData]  # Hidden from everyone
+  protect_fields "role:Admin", []                      # Admins see everything
+  protect_fields "userField:owner", []                 # Owners see their own data
+end
+```
+
+**Supported Operations:** `:find`, `:get`, `:count`, `:create`, `:update`, `:delete`, `:addField`
+
+**Supported Patterns:**
+- `"*"` - Public (everyone)
+- `"role:RoleName"` - Users with specific role
+- `"userField:fieldName"` - Users referenced in a pointer field
+- `"authenticated"` - Any authenticated user
+- User objectId string - Specific user
+
+#### Filtering Data for Webhook Responses
+
+When returning data from webhooks, use `filter_for_user` to apply CLP field protection:
+
+```ruby
+# In a webhook handler
+def after_find(request)
+  user = request.user
+  roles = Song.roles_for_user(user)
+
+  # Filter each object for the requesting user
+  filtered_results = request.objects.map do |song|
+    song.filter_for_user(user, roles: roles)
+  end
+
+  # Or use the class method for arrays
+  filtered_results = Song.filter_results_for_user(request.objects, user, roles: roles)
+
+  { objects: filtered_results }
+end
+```
+
+#### Protected Fields Intersection Logic
+
+When a user matches multiple patterns, the protected fields are the **intersection** of all matching patterns. A field is only hidden if it's protected by ALL patterns that apply to the user:
+
+```ruby
+protect_fields "*", [:owner, :secret, :internal]  # Hide from everyone
+protect_fields "role:Admin", [:owner]             # Admins: only owner hidden
+protect_fields "userField:owner", []              # Owners see everything
+
+# User with Admin role matches "*" and "role:Admin":
+# - "*" protects: [owner, secret, internal]
+# - "role:Admin" protects: [owner]
+# - Intersection: [owner] - only this field is hidden
+# - "secret" and "internal" become visible (cleared by role pattern)
+
+# An empty array [] means "no fields protected" (user sees everything)
+# If ANY matching pattern has [], the intersection is empty (nothing hidden)
+```
+
+#### Push CLPs to Parse Server
+
+CLPs are automatically included when upgrading schemas:
+
+```ruby
+# Include CLPs in schema upgrade (default)
+Song.auto_upgrade!
+
+# Skip CLPs during schema upgrade
+Song.auto_upgrade!(include_clp: false)
+
+# Update only CLPs (no schema changes)
+Song.update_clp!
+```
+
+#### Fetch and Inspect CLPs
+
+```ruby
+# Fetch current CLPs from server
+clp = Song.fetch_clp
+
+# Check operation permissions
+clp.find_allowed?("*")           # => true (public find allowed)
+clp.create_allowed?("*")         # => false (public create denied)
+clp.role_allowed?(:create, "Admin")  # => true
+clp.requires_authentication?(:update)  # => false
+
+# Get protected fields for a pattern
+clp.protected_fields_for("*")          # => ["internalNotes", "royaltyData"]
+clp.protected_fields_for("role:Admin") # => []
+
+# Use fetched CLP for filtering
+filtered = song.filter_for_user(user, roles: roles, clp: clp)
+```
+
+#### Owner-Based Access with userField
+
+The `userField:fieldName` pattern allows owners (users referenced in a pointer field) to have different visibility:
+
+```ruby
+class Document < Parse::Object
+  property :content, :string
+  property :secret, :string
+  belongs_to :owner
+
+  # Hide secret and owner from everyone
+  protect_fields "*", [:secret, :owner]
+  # But owners of the document can see everything
+  protect_fields "userField:owner", []
+end
+
+# When filtering:
+doc_data = {
+  "content" => "Public content",
+  "secret" => "Private data",
+  "owner" => { "objectId" => "user123", "__type" => "Pointer" }
+}
+
+clp = Document.class_permissions
+
+# Owner sees everything
+clp.filter_fields(doc_data, user: "user123")
+# => { "content" => "...", "secret" => "...", "owner" => {...} }
+
+# Non-owner has protected fields hidden
+clp.filter_fields(doc_data, user: "other_user")
+# => { "content" => "..." }
+```
+
+This also works with arrays of pointers (e.g., `owners: [user1, user2]`).
+
 ### [Parse::Session](https://www.modernistik.com/gems/parse-stack/Parse/Session.html)
 This class represents the data and columns contained in the standard Parse `_Session` collection. You may add additional properties and methods to this class. See [Session API Reference](https://www.modernistik.com/gems/parse-stack/Parse/Session.html). You may call `Parse.use_shortnames!` to use `Session` in addition to `Parse::Session`.
 
@@ -1022,6 +1134,33 @@ This class represents the data and columns contained in the standard Parse `_Pro
 
 ### [Parse::Role](https://www.modernistik.com/gems/parse-stack/Parse/Role.html)
 This class represents the data and columns contained in the standard Parse `_Role` collection. You may add additional properties and methods to this class. See [Roles API Reference](https://www.modernistik.com/gems/parse-stack/Parse/Role.html). You may call `Parse.use_shortnames!` to use `Role` in addition to `Parse::Role`.
+
+#### Role Management Helpers
+
+Parse::Role provides convenient methods for managing users and role hierarchies:
+
+```ruby
+# Find or create roles
+admin = Parse::Role.find_by_name("Admin")
+moderator = Parse::Role.find_or_create("Moderator")
+
+# Manage users
+admin.add_user(user).save
+admin.add_users(user1, user2, user3).save
+admin.remove_user(user).save
+admin.has_user?(user)  # => true
+
+# Role hierarchy (Admins inherit Moderator permissions)
+admin.add_child_role(moderator).save
+admin.has_child_role?(moderator)  # => true
+admin.all_child_roles              # => All child roles recursively
+admin.all_users                    # => Users from this role AND child roles
+
+# Counts
+admin.users_count        # Direct users
+admin.child_roles_count  # Direct child roles
+admin.total_users_count  # All users including child roles
+```
 
 ### [Parse::User](https://www.modernistik.com/gems/parse-stack/Parse/User.html)
 This class represents the data and columns contained in the standard Parse `_User` collection. You may add additional properties and methods to this class. See [User API Reference](https://www.modernistik.com/gems/parse-stack/Parse/User.html). You may call `Parse.use_shortnames!` to use `User` in addition to `Parse::User`.
@@ -1119,6 +1258,92 @@ user = Parse::User.first
 Parse::User.request_password_reset user
 # or email
 Parse::User.request_password_reset("user@example.com")
+```
+
+#### Multi-Factor Authentication (MFA)
+
+Parse-Stack provides comprehensive MFA support that integrates with Parse Server's built-in MFA adapter. This enables TOTP (Time-based One-Time Password) authentication with apps like Google Authenticator, Authy, or 1Password.
+
+**Prerequisites:**
+- Parse Server must have the MFA adapter enabled
+- Add optional gems to your Gemfile: `gem 'rotp'` and `gem 'rqrcode'`
+
+**Parse Server Configuration:**
+```javascript
+{
+  auth: {
+    mfa: {
+      enabled: true,
+      options: ["TOTP"],
+      digits: 6,
+      period: 30,
+      algorithm: "SHA1"
+    }
+  }
+}
+```
+
+**Setting Up MFA:**
+```ruby
+# Configure the issuer name shown in authenticator apps
+Parse::MFA.configure do |config|
+  config[:issuer] = "MyApp"
+end
+
+# Step 1: Generate a TOTP secret
+secret = Parse::MFA.generate_secret
+
+# Step 2: Display QR code to the user
+qr_svg = user.mfa_qr_code(secret, issuer: "MyApp")
+# Render in HTML: <%= raw qr_svg %>
+
+# Step 3: User scans QR and enters code from their authenticator
+recovery_codes = user.setup_mfa!(secret: secret, token: "123456")
+# IMPORTANT: Display recovery codes to user - they can only see them once!
+```
+
+**Logging In with MFA:**
+```ruby
+# Login with username, password, and MFA token
+user = Parse::User.login_with_mfa("username", "password", "123456")
+
+# Check if MFA is required before login
+if Parse::User.mfa_required?("username")
+  # Prompt for MFA token
+end
+```
+
+**Managing MFA:**
+```ruby
+# Check MFA status
+user.mfa_enabled?  # => true
+user.mfa_status    # => :enabled, :disabled, or :unknown
+
+# Disable MFA (requires current token)
+user.disable_mfa!(current_token: "123456")
+
+# Admin reset (requires master key)
+user.disable_mfa_admin!
+```
+
+**SMS MFA (requires Parse Server SMS callback):**
+```ruby
+# Initiate SMS setup
+user.setup_sms_mfa!(mobile: "+1234567890")
+
+# Confirm with received code
+user.confirm_sms_mfa!(mobile: "+1234567890", token: "123456")
+```
+
+**Error Handling:**
+```ruby
+begin
+  user = Parse::User.login_with_mfa(username, password, token)
+rescue Parse::MFA::RequiredError
+  # MFA token was not provided but is required
+rescue Parse::MFA::VerificationError
+  # Invalid MFA token
+end
 ```
 
 
@@ -2762,14 +2987,31 @@ cursor.each_page { |page| process(page) }  # Continues where it left off
 ```
 
 #### :cache
-A `true`, `false` or integer value. If you are using the built-in caching middleware, `Parse::Middleware::Caching`, setting this to `false` will prevent it from using a previously cached result if available. You may pass an integer value, which will allow this request to be cached for the specified number of seconds. The default value is `true`, which uses the [`:expires`](#expires) value that was passed when [configuring the client](#connection-setup).
+A `true`, `false` or integer value. If you are using the built-in caching middleware, `Parse::Middleware::Caching`, setting this to `true` will use a previously cached result if available. Setting to `false` will prevent caching. You may pass an integer value, which will allow this request to be cached for the specified number of seconds. **The default value is `false`** (queries do not use cache unless explicitly enabled).
 
 ```ruby
-# don't use a cached result if available
-Song.all limit: 500, cache: false
+# explicitly use cache for this request
+Song.all limit: 500, cache: true
 
 # cache this particular request for 60 seconds
 Song.all limit: 500, cache: 1.minute
+
+# don't use cache (default behavior)
+Song.all limit: 500, cache: false
+```
+
+To change the default caching behavior globally, use the `Parse.default_query_cache` configuration:
+
+```ruby
+# Enable cache by default (opt-out behavior)
+Parse.default_query_cache = true
+Song.first                           # Uses cache
+Song.query(cache: false).first       # Explicitly bypasses cache
+
+# Disable cache by default (opt-in behavior, this is the default)
+Parse.default_query_cache = false
+Song.first                           # Does NOT use cache
+Song.query(cache: true).first        # Explicitly uses cache
 ```
 
 You may access the shared cache for the default client connection through `Parse.cache`. This is useful if you
@@ -2947,10 +3189,21 @@ q.where :tags.size => { lte: 4 }     # size <= 4
 q.where :tags.size => { ne: 0 }      # size != 0
 q.where :tags.size => { gte: 2, lt: 10 }  # range: 2 <= size < 10
 
-# Empty/non-empty shortcuts
-q.where :tags.arr_empty => true     # empty arrays
-q.where :tags.arr_nempty => true    # non-empty arrays
+# Empty/non-empty shortcuts (index-friendly)
+q.where :tags.arr_empty => true     # empty arrays (uses { field: [] })
+q.where :tags.arr_empty => false    # non-empty arrays
+q.where :tags.arr_nempty => true    # non-empty arrays (alias)
+
+# Empty OR nil/missing - combines both checks
+q.where :tags.empty_or_nil => true  # matches [] OR nil/missing
+q.where :tags.empty_or_nil => false # matches non-empty arrays only
+
+# Not empty - opposite of empty_or_nil
+q.where :tags.not_empty => true     # must exist AND have elements
+q.where :tags.not_empty => false    # matches [] OR nil/missing
 ```
+
+**Performance Note:** `arr_empty` and `empty_or_nil` use index-friendly equality checks (`{ field: [] }`) instead of `$size: 0` for better MongoDB index utilization.
 
 ##### Array Equality (Order-Dependent)
 Match arrays with exact elements in exact order:
@@ -3568,9 +3821,9 @@ ActiveModel callbacks can now halt operations by returning `false`. When a `befo
 ```ruby
 class Song < Parse::Object
   before_save :validate_song
-  
+
   private
-  
+
   def validate_song
     if name.blank?
       puts "Song name cannot be blank"
@@ -3579,6 +3832,59 @@ class Song < Parse::Object
     true
   end
 end
+```
+
+### Validation Context (on: :create / on: :update)
+
+Parse Stack supports ActiveRecord-style validation context for `before_validation`, `after_validation`, and `around_validation` callbacks. This allows you to run callbacks only when creating or updating objects:
+
+```ruby
+class Project < Parse::Object
+  property :name, :string, required: true
+  property :status, :string, required: true
+  property :owner, :pointer
+  property :completed_at, :date
+
+  # Set defaults only when creating new objects
+  before_validation :set_defaults, on: :create
+
+  # Validate completion date only on updates
+  validates :completed_at, presence: true, on: :update, if: -> { status == "completed" }
+
+  def set_defaults
+    self.status ||= "pending"
+    self.owner ||= current_team_owner
+  end
+end
+```
+
+**Why use `before_validation` instead of `before_create`?**
+
+The callback order is: `before_validation` → validations → `before_save` → `before_create` → save
+
+If you need to set default values for required fields, `before_create` runs *after* validations, so the validation will fail before your defaults are applied. Use `before_validation on: :create` instead:
+
+```ruby
+class Task < Parse::Object
+  property :name, :string, required: true
+  property :priority, :integer, required: true
+
+  # This WON'T work - before_create runs AFTER validation
+  before_create do
+    self.priority ||= 1  # Too late! Validation already failed
+  end
+
+  # This WILL work - before_validation runs BEFORE validation
+  before_validation :set_priority_default, on: :create
+
+  def set_priority_default
+    self.priority ||= 1  # Sets default before validation runs
+  end
+end
+
+# Now this works:
+task = Task.new(name: "My Task")
+task.save  # priority is set to 1 before validation
 ```
 
 ### Enhanced Change Tracking
@@ -3616,31 +3922,384 @@ You may change your local Parse ruby classes by adding new properties. To easily
 ```
 
 ## Push Notifications
-Push notifications are implemented through the `Parse::Push` class. To send push notifications through the REST API, you must enable `REST push enabled?` option in the `Push Notification Settings` section of the `Settings` page in your Parse application. Push notifications targeting uses the Installation Parse class to determine which devices receive the notification. You can provide any query constraint, similar to using `Parse::Query`, in order to target the specific set of devices you want given the columns you have configured in your `Installation` class. The `Parse::Push` class supports many other options not listed here.
+Push notifications are implemented through the `Parse::Push` class. To send push notifications through the REST API, you must enable `REST push enabled?` option in the `Push Notification Settings` section of the `Settings` page in your Parse application. Push notifications targeting uses the Installation Parse class to determine which devices receive the notification. You can provide any query constraint, similar to using `Parse::Query`, in order to target the specific set of devices you want given the columns you have configured in your `Installation` class.
+
+### Builder Pattern API
+
+The recommended way to send push notifications is using the fluent builder pattern:
 
 ```ruby
+# Simple channel push
+Parse::Push.new
+  .to_channel("news")
+  .with_alert("Breaking news!")
+  .send!
 
- push = Parse::Push.new
- push.send( "Hello World!") # to everyone
+# Rich push with all options
+Parse::Push.new
+  .to_channels("sports", "alerts")
+  .with_title("Game Alert")
+  .with_body("Your team is playing now!")
+  .with_badge(1)
+  .with_sound("alert.caf")
+  .with_data(game_id: "12345", action: "open_game")
+  .schedule(1.hour.from_now)
+  .expires_in(3600)
+  .send!
 
- # simple channel push
- push = Parse::Push.new
- push.channels = ["addicted2salsa"]
- push.send "You are subscribed to Addicted2Salsa!"
+# Query-based targeting
+Parse::Push.new
+  .to_query { |q| q.where(device_type: "ios", :app_version.gte => "2.0") }
+  .with_alert("iOS 2.0+ users only")
+  .send!
 
- # advanced targeting
- push = Parse::Push.new( {..where query constraints..} )
- # or use `where()`
- push.where :device_type.in => ['ios','android'], :location.near => some_geopoint
- push.alert = "Hello World!"
- push.sound = "soundfile.caf"
+# Class method shortcuts
+Parse::Push.to_channel("alerts").with_alert("Important!").send!
+```
 
-  # additional payload data
- push.data = { uri: "app://deep_link_path" }
+### Silent Push (iOS Background Notifications)
 
- # Send the push
- push.send
+Send background notifications that wake the app without displaying an alert:
 
+```ruby
+Parse::Push.new
+  .to_channel("sync")
+  .silent!
+  .with_data(action: "refresh", resource: "users")
+  .send!
+```
+
+### Rich Push (iOS Notification Extensions)
+
+Send rich notifications with images, categories, and mutable content:
+
+```ruby
+Parse::Push.new
+  .to_channel("media")
+  .with_title("New Photo")
+  .with_body("Check out this photo!")
+  .with_image("https://example.com/photo.jpg")  # Auto-enables mutable-content
+  .with_category("PHOTO_ACTIONS")
+  .send!
+```
+
+### Localization
+
+Send language-specific messages based on device locale:
+
+```ruby
+Parse::Push.new
+  .to_channel("international")
+  .with_alert("Default message")
+  .with_localized_alerts(
+    en: "Hello!",
+    fr: "Bonjour!",
+    es: "Hola!",
+    de: "Hallo!"
+  )
+  .with_localized_titles(
+    en: "Welcome",
+    fr: "Bienvenue"
+  )
+  .send!
+```
+
+### Badge Management
+
+```ruby
+# Increment badge by 1
+Parse::Push.new.to_channel("messages").increment_badge.with_alert("New!").send!
+
+# Increment by custom amount
+Parse::Push.new.to_channel("bulk").increment_badge(5).with_alert("5 new!").send!
+
+# Clear badge
+Parse::Push.new.to_channel("read").clear_badge.silent!.send!
+```
+
+### Saved Audiences
+
+Target pre-defined audiences stored in the `_Audience` collection:
+
+```ruby
+# Target by audience name
+Parse::Push.new
+  .to_audience("VIP Users")
+  .with_alert("Exclusive offer!")
+  .send!
+
+# Manage audiences
+audience = Parse::Audience.new(name: "Premium iOS", query: { "deviceType" => "ios", "premium" => true })
+audience.save
+
+Parse::Audience.find_by_name("VIP Users")
+Parse::Audience.installation_count("VIP Users")
+```
+
+### Push Status Tracking
+
+Track push delivery status via the `_PushStatus` collection:
+
+```ruby
+status = Parse::PushStatus.find(push_id)
+
+status.succeeded?      # => true
+status.num_sent        # => 1250
+status.num_failed      # => 12
+status.success_rate    # => 99.05
+status.sent_per_type   # => {"ios" => 800, "android" => 450}
+
+# Query scopes
+Parse::PushStatus.succeeded.all
+Parse::PushStatus.failed.all
+Parse::PushStatus.recent.limit(10)
+```
+
+### Installation Channel Management
+
+Manage channel subscriptions on installations:
+
+```ruby
+installation = Parse::Installation.first
+
+# Subscribe/unsubscribe
+installation.subscribe("news", "weather")
+installation.unsubscribe("sports")
+installation.subscribed_to?("news")  # => true
+
+# Query channels
+Parse::Installation.all_channels              # All unique channels
+Parse::Installation.subscribers("news").all   # Installations in channel
+Parse::Installation.subscribers_count("news") # Count subscribers
+```
+
+### Traditional API
+
+The traditional API is still supported:
+
+```ruby
+push = Parse::Push.new
+push.send("Hello World!")  # to everyone
+
+# Channel push
+push = Parse::Push.new
+push.channels = ["mychannel"]
+push.send "You are subscribed!"
+
+# Advanced targeting
+push = Parse::Push.new
+push.where :device_type.in => ['ios','android'], :location.near => some_geopoint
+push.alert = "Hello World!"
+push.sound = "soundfile.caf"
+push.data = { uri: "app://deep_link_path" }
+push.send
+```
+
+## AI Agent Integration (Experimental)
+
+Parse Stack includes experimental support for AI/LLM agents to interact with your Parse data through a standardized tool interface. This enables natural language querying and intelligent data exploration.
+
+### Basic Usage
+
+```ruby
+require 'parse/stack'
+
+# Create an agent
+agent = Parse::Agent.new
+
+# Execute tools directly
+result = agent.execute(:get_all_schemas)
+result = agent.execute(:query_class, class_name: "Song", limit: 10)
+result = agent.execute(:count_objects, class_name: "Song", where: { plays: { "$gte" => 1000 } })
+
+# Ask natural language questions (requires LLM endpoint)
+response = agent.ask("How many songs have more than 1000 plays?")
+puts response[:answer]
+```
+
+### Permission Levels
+
+Agents support three permission levels:
+
+```ruby
+# Readonly (default) - queries only
+agent = Parse::Agent.new(permissions: :readonly)
+
+# Write - adds create/update
+agent = Parse::Agent.new(permissions: :write)
+
+# Admin - full access including delete
+agent = Parse::Agent.new(permissions: :admin)
+```
+
+### Agent Metadata DSL
+
+Annotate your models with agent-friendly metadata:
+
+```ruby
+class Song < Parse::Object
+  agent_visible  # Include in agent schema listings
+  agent_description "A music track in the catalog"
+
+  property :title, :string, _description: "The song title"
+  property :plays, :integer, _description: "Total play count"
+
+  # Expose methods with permission levels
+  agent_readonly :find_popular, "Find songs with high play counts"
+  agent_write :increment_plays, "Increment the play counter"
+
+  def self.find_popular(min_plays: 1000)
+    query(:plays.gte => min_plays).limit(100)
+  end
+end
+```
+
+### MCP Server
+
+Run an HTTP server for external AI agents. Requires dual-gating for safety:
+
+```bash
+# Step 1: Set environment variable
+export PARSE_MCP_ENABLED=true
+```
+
+```ruby
+# Step 2: Enable in code and start server
+Parse.mcp_server_enabled = true
+Parse::Agent.enable_mcp!(port: 3001)
+```
+
+Both the environment variable AND the code flag must be set. This prevents accidental enablement in production.
+
+### Security
+
+Built-in protections:
+- **Rate limiting**: 60 requests/minute default
+- **Pipeline validation**: Blocks dangerous aggregation stages (`$out`, `$merge`, `$function`)
+- **Permission levels**: Restrict agent capabilities (readonly/write/admin)
+
+Configure LLM endpoint via environment:
+```bash
+export LLM_ENDPOINT="http://127.0.0.1:1234/v1"
+export LLM_MODEL="qwen2.5-7b-instruct"
+```
+
+### Multi-turn Conversations
+
+Agents support multi-turn conversations with context maintained across questions:
+
+```ruby
+agent = Parse::Agent.new
+
+# Initial question
+agent.ask("How many users are there?")
+
+# Follow-up questions maintain context
+agent.ask_followup("What about admins?")
+agent.ask_followup("Show me the most recent 5")
+
+# Clear history to start fresh
+agent.clear_conversation!
+```
+
+### Token Usage & Cost Estimation
+
+Track LLM token usage and estimate costs:
+
+```ruby
+agent = Parse::Agent.new(pricing: { prompt: 0.01, completion: 0.03 })
+
+agent.ask("How many users?")
+agent.ask_followup("What about admins?")
+
+# Check token usage
+puts agent.token_usage
+# => { prompt_tokens: 450, completion_tokens: 120, total_tokens: 570 }
+
+# Get estimated cost
+puts agent.estimated_cost  # => 0.0234
+
+# Reset counters
+agent.reset_token_counts!
+```
+
+### Callbacks/Hooks
+
+Register callbacks for debugging, logging, and custom behavior:
+
+```ruby
+agent = Parse::Agent.new
+
+# Before tool execution
+agent.on_tool_call { |tool, args| puts "Calling: #{tool}" }
+
+# After tool execution
+agent.on_tool_result { |tool, args, result| log_result(tool, result) }
+
+# On any error
+agent.on_error { |error, context| notify_slack(error) }
+
+# After LLM response
+agent.on_llm_response { |response| log_llm_usage(response) }
+```
+
+### Streaming Support
+
+Stream responses as they arrive from the LLM:
+
+```ruby
+agent.ask_streaming("Analyze user growth trends") do |chunk|
+  print chunk
+end
+```
+
+**Important Limitation:** Streaming mode does **not** support tool calls. The agent cannot query the database or perform Parse operations while streaming. Use `ask` for database queries:
+
+```ruby
+# DON'T: This won't query the database
+agent.ask_streaming("How many users?") { |c| print c }
+
+# DO: Use ask for database queries
+result = agent.ask("How many users?")
+```
+
+### Conversation Export/Import
+
+Serialize and restore conversation state:
+
+```ruby
+agent = Parse::Agent.new
+agent.ask("How many users?")
+agent.ask_followup("What about admins?")
+
+# Export state
+state = agent.export_conversation
+File.write("conversation.json", state)
+
+# Later, restore in a new session
+new_agent = Parse::Agent.new
+new_agent.import_conversation(File.read("conversation.json"))
+new_agent.ask_followup("Show me the most recent ones")
+```
+
+### Configuration Options
+
+Additional agent configuration:
+
+```ruby
+# Custom system prompt
+agent = Parse::Agent.new(system_prompt: "You are a music database expert...")
+
+# Or append to the default prompt
+agent = Parse::Agent.new(system_prompt_suffix: "Focus on performance data.")
+
+# Configure operation log size (circular buffer, default: 1000)
+agent = Parse::Agent.new(max_log_size: 5000)
+
+# Access debugging info
+agent.last_request   # Last LLM request sent
+agent.last_response  # Last LLM response received
+agent.operation_log  # Recent operations
 ```
 
 ## Cloud Code Webhooks
@@ -3925,6 +4584,440 @@ Parse.cache.fetch("all:records") do |key|
 end
 
 ```
+
+## Direct MongoDB Access
+
+Parse-Stack provides direct MongoDB access for performance-critical operations that bypass Parse Server. This is useful for read-heavy operations and advanced features like Atlas Search.
+
+### Configuration
+
+```ruby
+# Configure direct MongoDB access
+Parse::MongoDB.configure(
+  uri: "mongodb://localhost:27017/parse",
+  enabled: true
+)
+
+# Check if available
+Parse::MongoDB.available?  # => true
+```
+
+### Query Methods
+
+Execute queries directly against MongoDB using familiar Parse-Stack query syntax:
+
+```ruby
+# Execute query directly - returns Parse objects
+songs = Song.query(:plays.gt => 1000).results_direct
+
+# Get first result directly
+song = Song.query(:plays.gt => 1000).order(:plays.desc).first_direct
+
+# Get count directly
+count = Song.query(:plays.gt => 1000).count_direct
+
+# Get first N results
+top_songs = Song.query(:plays.gt => 1000).order(:plays.desc).first_direct(5)
+
+# Get raw Parse-formatted hashes instead of objects
+hashes = Song.query(:plays.gt => 1000).results_direct(raw: true)
+```
+
+**Supported Operators:**
+
+All standard query operators work with MongoDB direct:
+
+```ruby
+# Comparison operators
+Song.query(:plays.gt => 1000, :rating.gte => 4).results_direct
+
+# Date range queries
+Event.query(:event_date.gt => Time.now).results_direct
+Event.query(:event_date.gte => start_date, :event_date.lte => end_date).results_direct
+
+# Array operators
+Song.query(:tags.size => 3).results_direct
+Song.query(:tags.contains_all => ["rock", "classic"]).results_direct
+Song.query(:tags.empty_or_nil => true).results_direct
+
+# String/Regex operators
+Product.query(:name.like => /iphone/i).results_direct
+Product.query(:name.starts_with => "iPhone").results_direct
+
+# Relational queries (in_query/not_in_query)
+Song.query(:artist.in_query => Artist.query(:verified => true)).results_direct
+
+# Complex combinations
+Song.query(
+  :artist.in_query => Artist.query(:verified => true),
+  :tags.empty_or_nil => false,
+  :plays.gt => 1000
+).results_direct
+```
+
+**Include/Eager Loading:**
+
+Eager load related objects via MongoDB `$lookup`:
+
+```ruby
+# Include related artist data (resolved via $lookup)
+songs = Song.query(:plays.gt => 1000).includes(:artist).results_direct
+songs.each do |song|
+  puts "#{song.title} by #{song.artist.name}"  # No additional queries!
+end
+
+# Multiple includes
+songs = Song.query.includes(:artist, :album).results_direct
+```
+
+### Low-Level Direct Access
+
+For advanced use cases, access MongoDB directly:
+
+```ruby
+# Direct find with options
+docs = Parse::MongoDB.find("Song", { plays: { "$gt" => 1000 } },
+  limit: 10,
+  sort: { plays: -1 }
+)
+
+# Aggregation pipelines
+results = Parse::MongoDB.aggregate("Song", [
+  { "$match" => { "genre" => "Rock" } },
+  { "$group" => { "_id" => "$artist", "total" => { "$sum" => "$plays" } } }
+])
+
+# List Atlas Search indexes
+indexes = Parse::MongoDB.list_search_indexes("Song")
+```
+
+### Document Conversion
+
+MongoDB documents are automatically converted to Parse format:
+- `_id` → `objectId`
+- `_created_at` → `createdAt`
+- `_updated_at` → `updatedAt`
+- `_p_fieldName` → `fieldName` (pointers)
+- `_acl` → `ACL` (with r/w → read/write)
+- BSON dates → Parse Date format
+
+### Performance Benefits
+
+- Bypasses Parse Server REST API overhead
+- Direct MongoDB aggregation pipeline execution
+- Automatic pointer resolution with `$lookup`
+- Native BSON date handling
+- Ideal for read-heavy operations and analytics
+
+### Keys Projection
+
+Use `keys` with `mongo_direct` to fetch only specific fields, returning partially fetched objects:
+
+```ruby
+songs = Song.query(:genre => "Rock")
+            .keys(:title, :plays)
+            .results(mongo_direct: true)
+
+song = songs.first
+song.title              # => "My Song"
+song.partially_fetched? # => true
+song.fetched_keys       # => [:title, :plays, :id, :objectId]
+```
+
+Required fields (`objectId`, `createdAt`, `updatedAt`, `ACL`) are always included.
+
+### Aggregation Results
+
+Custom aggregation results support both hash and method access with automatic camelCase to snake_case conversion:
+
+```ruby
+pipeline = [
+  { "$group" => { "_id" => "$genre", "totalPlays" => { "$sum" => "$playCount" } } }
+]
+results = Song.query.aggregate(pipeline, mongo_direct: true).results
+
+results.first.total_plays   # => 5000 (method access)
+results.first["totalPlays"] # => 5000 (hash access)
+```
+
+### Field Name Conventions
+
+When writing aggregation pipelines, use MongoDB's native field names:
+
+| Field Type | Ruby Property | MongoDB Field |
+|------------|---------------|---------------|
+| Regular fields | `release_date` | `releaseDate` |
+| Pointer fields | `artist` | `_p_artist` |
+| Built-in dates | `created_at` | `_created_at` |
+
+```ruby
+pipeline = [
+  { "$match" => { "releaseDate" => { "$lt" => Time.utc(2024, 1, 1) } } },
+  { "$group" => { "_id" => "$_p_artist", "total" => { "$sum" => "$playCount" } } }
+]
+```
+
+### ACL Filtering
+
+Filter objects by ACL permissions using MongoDB's `_rperm` and `_wperm` fields:
+
+**`readable_by` / `writable_by`** - Exact permission strings:
+```ruby
+Song.query.readable_by("user123").results(mongo_direct: true)       # User ID
+Song.query.readable_by("role:Admin").results(mongo_direct: true)    # Role (explicit prefix)
+Song.query.readable_by(current_user).results(mongo_direct: true)    # User object
+Song.query.readable_by("public").results(mongo_direct: true)        # Public access (alias for "*")
+Song.query.readable_by("none").results(mongo_direct: true)          # Empty _rperm (master key only)
+```
+
+**`readable_by_role` / `writable_by_role`** - Adds "role:" prefix automatically:
+```ruby
+Song.query.readable_by_role("Admin").results(mongo_direct: true)              # → "role:Admin"
+Song.query.readable_by_role(admin_role).results(mongo_direct: true)           # Role object
+Song.query.writable_by_role(["Admin", "Editor"]).results(mongo_direct: true)  # Multiple roles
+```
+
+**Note:** Requires the `mongo` gem. Add `gem 'mongo'` to your Gemfile.
+
+### ACL Dirty Tracking
+
+Parse-Stack provides intelligent dirty tracking for ACL objects, correctly handling in-place modifications and content comparison.
+
+**`acl_was` Captures Original State:**
+
+When modifying an ACL in place (via `apply`, `apply_role`, etc.), `acl_was` correctly returns the state *before* any modifications:
+
+```ruby
+obj = MyObject.find(id)
+obj.clear_changes!
+
+# Original ACL is empty
+obj.acl.as_json  # => {}
+
+# Modify ACL in place
+obj.acl.apply(:public, true, false)
+obj.acl.apply_role("Admin", true, true)
+
+# acl_was correctly shows original state
+obj.acl_was.as_json  # => {} (not the mutated state)
+obj.acl.as_json      # => {"*"=>{"read"=>true}, "role:Admin"=>{"read"=>true, "write"=>true}}
+obj.acl_changed?     # => true
+```
+
+**Content-Based Comparison:**
+
+Setting an ACL to identical values does not mark the object as dirty:
+
+```ruby
+membership = Membership.find(id)
+membership.clear_changes!
+
+# Rebuild ACL to the same values (common in before_save hooks)
+membership.acl = Parse::ACL.new
+membership.acl.apply(:public, true, false)
+membership.acl.apply_role("Admin", true, true)
+# ... same permissions as before ...
+
+# If content is identical, object is NOT dirty
+membership.acl_changed?  # => false
+membership.dirty?        # => false
+membership.save          # No unnecessary server request
+```
+
+**New Objects:**
+
+New objects always include ACL in changes to ensure it's sent on first save:
+
+```ruby
+obj = MyObject.new(title: "Test")
+obj.acl = Parse::ACL.new
+obj.acl.apply(:public, true, false)
+
+obj.new?                      # => true
+obj.changed.include?("acl")   # => true (always included for new objects)
+```
+
+**Implementation Notes:**
+
+The ACL dirty tracking system uses several techniques to ensure correctness:
+- A snapshot of the ACL is captured before any in-place modifications via `acl_will_change!`
+- Content comparison uses JSON serialization to detect actual changes vs reference changes
+- The `changed` method safely duplicates arrays before modification to avoid interfering with ActiveModel internals
+- Nil-safe checks prevent errors when ACL is unset
+
+## Atlas Search
+
+MongoDB Atlas Search integration provides full-text search, autocomplete, and faceted search capabilities directly through MongoDB.
+
+### Setup
+
+```ruby
+# Configure MongoDB and Atlas Search
+Parse::MongoDB.configure(uri: "mongodb+srv://...", enabled: true)
+Parse::AtlasSearch.configure(enabled: true, default_index: "default")
+```
+
+### Full-Text Search
+
+```ruby
+# Basic search
+result = Parse::AtlasSearch.search("Song", "love ballad")
+result.each { |song| puts "#{song.title} (score: #{song.search_score})" }
+
+# Search with options
+result = Parse::AtlasSearch.search("Song", "love",
+  fields: [:title, :lyrics],    # Limit to specific fields
+  fuzzy: true,                   # Enable fuzzy matching
+  limit: 20,                     # Max results
+  highlight_field: :title        # Get highlighted matches
+)
+
+# Access highlights
+result.each do |song|
+  puts song.search_highlights if song.respond_to?(:search_highlights)
+end
+```
+
+### Autocomplete (Search-as-you-type)
+
+```ruby
+# Basic autocomplete
+result = Parse::AtlasSearch.autocomplete("Song", "Lov", field: :title)
+result.suggestions  # => ["Love Story", "Lovely Day", "Love Me Do"]
+
+# With fuzzy matching
+result = Parse::AtlasSearch.autocomplete("Song", "lvoe",
+  field: :title,
+  fuzzy: true,
+  limit: 5
+)
+```
+
+### Faceted Search
+
+```ruby
+# Define facets
+facets = {
+  genre: { type: :string, path: :genre, num_buckets: 10 },
+  decade: { type: :number, path: :year, boundaries: [1970, 1980, 1990, 2000, 2010, 2020] }
+}
+
+# Execute faceted search
+result = Parse::AtlasSearch.faceted_search("Song", "rock", facets, limit: 20)
+
+# Access facet counts
+result.facets[:genre]
+# => [{ value: "Rock", count: 150 }, { value: "Alternative", count: 45 }, ...]
+
+result.total_count  # => 195
+result.results      # => matching Song objects
+```
+
+### Search Builder (Advanced)
+
+For complex searches, use the fluent SearchBuilder:
+
+```ruby
+builder = Parse::AtlasSearch::SearchBuilder.new(index_name: "song_search")
+
+# Chain multiple operators
+builder
+  .text(query: "love", path: :title, fuzzy: true)
+  .phrase(query: "broken heart", path: :lyrics, slop: 2)
+  .range(path: :plays, gte: 1000)
+  .with_highlight(path: :title)
+  .with_count
+
+# Build the $search stage
+search_stage = builder.build
+
+# Use in aggregation pipeline
+pipeline = [search_stage, { "$limit" => 10 }]
+results = Parse::MongoDB.aggregate("Song", pipeline)
+```
+
+### Query Integration
+
+Atlas Search is also available directly on queries:
+
+```ruby
+# Search through Query
+songs = Song.query.atlas_search("love ballad", fields: [:title, :lyrics], limit: 10)
+
+# Autocomplete through Query
+suggestions = Song.query.atlas_autocomplete("Lov", field: :title)
+
+# Faceted search through Query
+result = Song.query.atlas_facets("rock", { genre: { type: :string, path: :genre } })
+```
+
+### Index Management
+
+```ruby
+# List indexes for a collection
+indexes = Parse::AtlasSearch.indexes("Song")
+# => [{ "name" => "default", "queryable" => true, ... }]
+
+# Check if index is ready
+Parse::AtlasSearch.index_ready?("Song", "default")  # => true
+
+# Refresh index cache
+Parse::AtlasSearch.refresh_indexes("Song")
+```
+
+### Creating Search Indexes
+
+Atlas Search requires indexes to be created on your MongoDB Atlas cluster. Indexes define which fields are searchable and how they should be analyzed.
+
+**Via MongoDB Atlas UI:**
+1. Navigate to your cluster → **Atlas Search** tab
+2. Click **Create Search Index**
+3. Select your database and collection
+4. Define your index mappings
+
+**Via MongoDB Shell:**
+
+```javascript
+// Basic dynamic index (indexes all fields)
+db.Song.createSearchIndex("default", {
+  mappings: { dynamic: true }
+});
+
+// Index with autocomplete support
+db.Song.createSearchIndex("default", {
+  mappings: {
+    fields: {
+      title: [
+        { type: "string" },
+        { type: "autocomplete", tokenization: "edgeGram", minGrams: 2, maxGrams: 15 }
+      ],
+      genre: [
+        { type: "string" },
+        { type: "stringFacet" }
+      ]
+    }
+  }
+});
+
+// Check index status
+db.Song.getSearchIndexes();
+```
+
+**Parse Collection Names:**
+- Custom classes use their class name directly: `Song`, `Artist`, `Album`
+- Built-in classes have underscore prefixes: `_User`, `_Role`, `_Session`
+
+**Local Development:**
+
+For local development, use MongoDB Atlas Local:
+
+```bash
+docker run -d -p 27017:27017 mongodb/mongodb-atlas-local:latest
+```
+
+Or use the provided Docker Compose setup - see [CHANGELOG.md](./CHANGELOG.md) for detailed index examples and [Testing](#testing) for Docker-based setup.
+
+**Note:** Atlas Search requires MongoDB Atlas or a local Atlas deployment. See [Testing](#testing) for Docker-based local setup.
 
 ## Contributing
 

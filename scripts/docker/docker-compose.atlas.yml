@@ -1,0 +1,40 @@
+# Docker Compose configuration for Atlas Search integration tests
+# Uses the official mongodb/mongodb-atlas-local image which supports Atlas Search
+#
+# Usage:
+#   Start:  docker-compose -f scripts/docker/docker-compose.atlas.yml up -d
+#   Stop:   docker-compose -f scripts/docker/docker-compose.atlas.yml down
+#   Logs:   docker-compose -f scripts/docker/docker-compose.atlas.yml logs -f atlas-init
+#   Reset:  docker-compose -f scripts/docker/docker-compose.atlas.yml down -v && docker-compose -f scripts/docker/docker-compose.atlas.yml up -d
+#
+# Run tests:
+#   ATLAS_URI="mongodb://localhost:27020/parse_atlas_test?directConnection=true" ruby -Ilib:test test/lib/parse/atlas_search_integration_test.rb
+
+services:
+  atlas-local:
+    image: mongodb/mongodb-atlas-local:8.0
+    container_name: parse-stack-atlas-local
+    ports:
+      - "27020:27017"
+    volumes:
+      - atlas-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  atlas-init:
+    image: mongodb/mongodb-atlas-local:8.0
+    container_name: parse-stack-atlas-init
+    depends_on:
+      atlas-local:
+        condition: service_healthy
+    volumes:
+      - ./atlas-init.js:/atlas-init.js:ro
+    entrypoint: ["mongosh", "--quiet", "mongodb://atlas-local:27017/parse_atlas_test", "/atlas-init.js"]
+    restart: "no"
+
+volumes:
+  atlas-data:

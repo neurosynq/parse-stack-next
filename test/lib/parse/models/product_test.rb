@@ -1,6 +1,6 @@
 require_relative "../../../test_helper"
 
-class TestProduct < Minitest::Test
+class ProductModelTest < Minitest::Test
   CORE_FIELDS = Parse::Object.fields.merge({
     :id => :string,
     :created_at => :date,

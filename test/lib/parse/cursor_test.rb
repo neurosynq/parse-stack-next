@@ -1,8 +1,8 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-require_relative '../../test_helper'
-require 'minitest/autorun'
+require_relative "../../test_helper"
+require "minitest/autorun"
 
 class CursorTest < Minitest::Test
   # Mock query for testing cursor without real Parse server
@@ -163,7 +163,7 @@ class CursorTest < Minitest::Test
     results = [
       MockParseObject.new(id: "obj1"),
       MockParseObject.new(id: "obj2"),
-      MockParseObject.new(id: "obj3")
+      MockParseObject.new(id: "obj3"),
     ]
     query.set_mock_results(results)
 
@@ -305,7 +305,7 @@ class CursorTest < Minitest::Test
       class_name: "NonExistentClass12345",
       page_size: 50,
       order_field: "createdAt",
-      order_direction: "asc"
+      order_direction: "asc",
     })
 
     assert_raises(ArgumentError) do
