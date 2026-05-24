@@ -452,6 +452,39 @@ class CreateLockTest < Minitest::Test
     end
   end
 
+  # --- Regression: store without #create degrades gracefully -----------
+
+  # Mimics the pre-fix Parse::Cache::Redis wrapper shape: a non-Memory/Null
+  # class name and no #create method. Before the 5.0.1 fix this was classified
+  # as a healthy cross-process store, every acquire raised NoMethodError, and
+  # the lock spun until the wait budget elapsed and raised
+  # Parse::CreateLockTimeoutError.
+  class NoCreateFakeWrapper
+    def initialize; @h = {}; end
+    def [](k); @h[k]; end
+    def key?(k); @h.key?(k); end
+    def store(k, v, _opts = {}); @h[k] = v; end
+    def delete(k); @h.delete(k); end
+  end
+
+  def test_store_without_create_degrades_to_process_local_mutex
+    Parse.synchronize_create_store = NoCreateFakeWrapper.new
+    capture_stderr do
+      result = Parse::CreateLock.synchronize(
+        parse_class: "Order",
+        query_attrs: { ref: "Y" },
+        options: { ttl: 2, wait: 0.5, on_degraded: :proceed },
+      ) { :acquired }
+      assert_equal :acquired, result
+    end
+  end
+
+  def test_parse_cache_redis_wrapper_is_treated_as_cross_process_store
+    skip "Parse::Cache::Redis not loaded" unless defined?(Parse::Cache::Redis)
+    refute Parse::CreateLock.send(:degraded_store?, Parse::Cache::Redis.allocate),
+           "Parse::Cache::Redis wrapper must be classified as cross-process"
+  end
+
   # --- Query-option partition (regression for the cache: TTL escape hatch) -
 
   def test_parse_query_option_key_predicate_recognizes_query_shape_keys

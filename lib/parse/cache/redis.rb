@@ -105,6 +105,19 @@ module Parse
         @pool.store(key, value, options)
       end
 
+      # Atomic SETNX. Required so `Parse::CreateLock` can acquire
+      # cross-process locks when this wrapper is the configured cache /
+      # `synchronize_create_store`. Returns `true` only when the key did
+      # not already exist.
+      def create(key, value, options = {})
+        @pool.create(key, value, options)
+      end
+
+      # Atomic counter increment. Forwarded for Moneta surface parity.
+      def increment(key, amount = 1, options = {})
+        @pool.increment(key, amount, options)
+      end
+
       # Clear cached entries belonging to this wrapper. Required for
       # `Parse::Client#clear_cache!` compatibility.
       #
@@ -115,8 +128,23 @@ module Parse
       # the backing DB — same blast radius as previous versions, but
       # only for unnamespaced deployments. To opt into the wide
       # FLUSHDB explicitly (e.g. ops tooling), call {#flush_db!}.
-      def clear
-        if @namespace
+      #
+      # @param scope [String, nil] explicit namespace prefix to scan-delete.
+      #   When provided, overrides the wrapper's configured `@namespace` and
+      #   SCAN-deletes `<scope>:*` regardless of how the wrapper was built.
+      #   This is the safe escape hatch for tenants that share a non-
+      #   namespaced wrapper but still want to evict only their own keys
+      #   without `FLUSHDB`-ing siblings (and without wiping
+      #   `parse-stack:foc:v1:*` create-lock keys that live on the same DB).
+      #   The scope must be a non-empty String; the trailing `:` is added
+      #   automatically and any trailing `:` in the input is stripped so
+      #   `"tenant_x"` and `"tenant_x:"` are equivalent.
+      def clear(scope: nil)
+        if scope
+          prefix = normalize_namespace(scope)
+          raise ArgumentError, "scope: must be a non-empty namespace string" if prefix.nil?
+          delete_keys_matching!("#{prefix}:*")
+        elsif @namespace
           delete_keys_matching!("#{@namespace}:*")
         else
           @pool.clear
