@@ -421,12 +421,13 @@ class EmbeddingsCohereTest < Minitest::Test
   end
 
   def with_env(overrides)
+    previous = nil
     previous = {}
     overrides.each_key { |k| previous[k] = ENV[k] }
     overrides.each { |k, v| ENV[k] = v }
     yield
   ensure
-    previous.each { |k, v| ENV[k] = v }
+    previous&.each { |k, v| ENV[k] = v }
   end
 
   def fake_response(count, dim)

@@ -766,6 +766,13 @@ module Parse
     # @see Parse::Protocol
     # @see Parse::Request
     def request(method, uri = nil, body: nil, query: nil, headers: nil, opts: {})
+      # Pre-declare locals referenced inside rescue blocks so CodeQL's
+      # uninitialized-variable analysis is satisfied even if an exception
+      # raises before the natural assignment site.
+      response     = nil
+      _retry_count = nil
+      _retry_delay = nil
+      _request     = nil
       # Kwarg-absorption guard. The `**opts` splat in API helper methods
       # (lib/parse/api/*.rb) absorbs a caller-passed `opts: { ... }`
       # keyword as a key named `:opts` rather than as the request options

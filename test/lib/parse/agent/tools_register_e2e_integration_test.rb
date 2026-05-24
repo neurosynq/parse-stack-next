@@ -67,8 +67,9 @@ class ToolsRegisterE2EIntegrationTest < Minitest::Test
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
       unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
-    items = []
+    items = nil
     with_parse_server do
+      items = []
       3.times do
         item = MCPRegisteredItem.new(name: "alpha", category: "test")
         item.save
@@ -105,7 +106,7 @@ class ToolsRegisterE2EIntegrationTest < Minitest::Test
                       "Should count at least 3 'alpha' items, got: #{data.inspect}"
     end
   ensure
-    items.each { |i| i.destroy rescue nil }
+    items&.each { |i| i.destroy rescue nil }
     T.reset_registry!
   end
 

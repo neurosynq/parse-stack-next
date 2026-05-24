@@ -469,8 +469,9 @@ class MCPServerE2EIntegrationTest < Minitest::Test
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
       unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
-    items = []
+    items = nil
     with_parse_server do
+      items = []
       # Seed at least one MCPE2EItem so the class exists on the server.
       item = MCPE2EItem.new(name: "e2e_seed", score: 1)
       item.save
@@ -486,7 +487,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
       end
     end
   ensure
-    items.each { |i| i.destroy rescue nil }
+    items&.each { |i| i.destroy rescue nil }
   end
 
   # =========================================================================
@@ -497,8 +498,9 @@ class MCPServerE2EIntegrationTest < Minitest::Test
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
       unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
-    items = []
+    items = nil
     with_parse_server do
+      items = []
       5.times do |i|
         item = MCPE2EItem.new(name: "item_#{i}", score: i * 10)
         item.save
@@ -522,15 +524,16 @@ class MCPServerE2EIntegrationTest < Minitest::Test
       end
     end
   ensure
-    items.each { |i| i.destroy rescue nil }
+    items&.each { |i| i.destroy rescue nil }
   end
 
   def test_tools_call_query_class_with_where_constraint
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
       unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
-    items = []
+    items = nil
     with_parse_server do
+      items = []
       item = MCPE2EItem.new(name: "target_item", score: 99)
       item.save
       items << item
@@ -553,7 +556,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
       end
     end
   ensure
-    items.each { |i| i.destroy rescue nil }
+    items&.each { |i| i.destroy rescue nil }
   end
 
   # =========================================================================
@@ -609,8 +612,9 @@ class MCPServerE2EIntegrationTest < Minitest::Test
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
       unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
-    items = []
+    items = nil
     with_parse_server do
+      items = []
       item = MCPE2EItem.new(name: "resource_seed", score: 1)
       item.save
       items << item
@@ -628,7 +632,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
       end
     end
   ensure
-    items.each { |i| i.destroy rescue nil }
+    items&.each { |i| i.destroy rescue nil }
   end
 
   def test_resources_list_resource_shape

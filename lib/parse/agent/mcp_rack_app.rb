@@ -683,8 +683,16 @@ module Parse
         # @param dispatcher_blk [Proc] called with one argument (the
         #   {#progress_callback} Proc); must return the same
         #   `{ status:, body: }` hash that MCPDispatcher.call returns.
+        # @param heartbeat_waiter [Proc, nil] test hook. Called as
+        #   `waiter.call(dispatcher_thread, interval)` once per heartbeat
+        #   iteration; must block until either the dispatcher finishes or
+        #   `interval` elapses. Default delegates to
+        #   `dispatcher_thread.join(interval)`. Tests inject a queue-driven
+        #   waiter so heartbeat cadence is deterministic and not subject
+        #   to OS scheduler jitter.
         def initialize(progress_token, req_id, interval, logger,
-                       cancellation_token: nil, on_close: nil, &dispatcher_blk)
+                       cancellation_token: nil, on_close: nil,
+                       heartbeat_waiter: nil, &dispatcher_blk)
           @progress_token         = progress_token
           # Heartbeats use a dedicated server-generated progressToken so
           # the elapsed-seconds scale of heartbeats never appears on the
@@ -699,6 +707,9 @@ module Parse
           @dispatcher_blk         = dispatcher_blk
           @cancellation_token     = cancellation_token
           @on_close               = on_close
+          @heartbeat_waiter       = heartbeat_waiter ||
+                                    Thread.current[:parse_mcp_sse_heartbeat_waiter] ||
+                                    ->(t, i) { t.join(i) }
           @queue                  = Queue.new
           @worker                 = nil
           # Flipped to true by #each when the DONE sentinel is consumed.
@@ -884,7 +895,7 @@ module Parse
               end
 
               while dispatcher_thread.alive?
-                dispatcher_thread.join(@interval)
+                @heartbeat_waiter.call(dispatcher_thread, @interval)
                 # Skip the heartbeat when the tool has already reported
                 # work-unit progress on the same progressToken. Mixing
                 # elapsed-seconds heartbeats with work-unit values would

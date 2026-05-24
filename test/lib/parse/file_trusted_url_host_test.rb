@@ -49,7 +49,7 @@ class TestFileTrustedUrlHost < Minitest::Test
     err = assert_raises(Parse::File::UntrustedHostError) do
       file.attributes = { "name" => "a.png", "url" => "https://attacker.example.com/a.png" }
     end
-    assert_match(/attacker\.example\.com/, err.message)
+    assert_includes err.message, "attacker.example.com"
   end
 
   def test_legacy_tfss_filename_accepted_on_any_host
@@ -60,14 +60,14 @@ class TestFileTrustedUrlHost < Minitest::Test
       "name" => "tfss-abcd1234-1234-1234-1234-1234567890ab-x.png",
       "url"  => "https://cdn.thirdparty.example/tfss-abcd1234-1234-1234-1234-1234567890ab-x.png",
     }
-    assert_match(%r{cdn\.thirdparty\.example}, file.url)
+    assert_match(%r{\Ahttps://cdn\.thirdparty\.example/}, file.url)
   end
 
   def test_files_parsetfss_com_is_default_trusted
     Parse::File.untrusted_url_policy = :raise
     file = Parse::File.new(name: "a.png", contents: nil)
     file.attributes = { "name" => "a.png", "url" => "https://files.parsetfss.com/abc/a.png" }
-    assert_match %r{files\.parsetfss\.com}, file.url
+    assert_match %r{\Ahttps://files\.parsetfss\.com/}, file.url
   end
 
   def test_custom_trusted_host_allowed
@@ -75,7 +75,7 @@ class TestFileTrustedUrlHost < Minitest::Test
     Parse::File.trusted_url_hosts = ["cdn.example.com"]
     file = Parse::File.new(name: "a.png", contents: nil)
     file.attributes = { "name" => "a.png", "url" => "https://cdn.example.com/a.png" }
-    assert_match %r{cdn\.example\.com}, file.url
+    assert_match %r{\Ahttps://cdn\.example\.com/}, file.url
   end
 
   def test_wildcard_trusted_host_matches_subdomains
@@ -83,11 +83,11 @@ class TestFileTrustedUrlHost < Minitest::Test
     Parse::File.trusted_url_hosts = [".example.com"]
     file = Parse::File.new(name: "a.png", contents: nil)
     file.attributes = { "name" => "a.png", "url" => "https://files.example.com/a.png" }
-    assert_match %r{files\.example\.com}, file.url
+    assert_match %r{\Ahttps://files\.example\.com/}, file.url
 
     file2 = Parse::File.new(name: "b.png", contents: nil)
     file2.attributes = { "name" => "b.png", "url" => "https://example.com/b.png" }
-    assert_match %r{://example\.com}, file2.url
+    assert_match %r{\Ahttps://example\.com/}, file2.url
   end
 
   def test_wildcard_does_not_match_unrelated_host

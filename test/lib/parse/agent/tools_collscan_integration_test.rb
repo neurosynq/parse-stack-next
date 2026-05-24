@@ -41,11 +41,12 @@ class ToolsCollscanIntegrationTest < Minitest::Test
   # Helper: seed probe records and yield; always cleans up and resets flags.
   # -------------------------------------------------------------------------
   def with_collscan_probes
-    probes = []
+    probes = nil
     Parse::Agent::Tools.reset_registry!
     Parse::Agent.refuse_collscan = false
     Parse::Agent.expose_explain  = false
 
+    probes = []
     RECORD_COUNT.times do |i|
       probe = MCPCollscanProbe.new(
         random_field: "rf_#{i}_#{SecureRandom.hex(4)}",
@@ -57,7 +58,7 @@ class ToolsCollscanIntegrationTest < Minitest::Test
 
     yield probes
   ensure
-    probes.each { |p| p.destroy rescue nil }
+    probes&.each { |p| p.destroy rescue nil }
     Parse::Agent::Tools.reset_registry!
     Parse::Agent.refuse_collscan = false
     Parse::Agent.expose_explain  = false
