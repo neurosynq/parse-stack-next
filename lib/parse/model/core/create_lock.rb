@@ -255,6 +255,13 @@ module Parse
 
       def degraded_store?(store)
         return true if store.nil?
+        # The Parse::Cache::Redis wrapper (and its Pool) are known
+        # cross-process stores even though they don't expose a Moneta
+        # `.adapter` chain to walk. Anything that can't forward `#create`
+        # cannot serve as a lock store, so fall back to the process-local
+        # path rather than spinning until timeout on NoMethodError.
+        return false if defined?(Parse::Cache::Redis) && store.is_a?(Parse::Cache::Redis)
+        return true unless store.respond_to?(:create)
         bottom = walk_to_adapter(store)
         return true if bottom.nil?
         klass_name = bottom.class.name.to_s
@@ -366,8 +373,13 @@ module Parse
         @plain_sha_warned = true
         warn "[Parse::CreateLock:SECURITY] No PARSE_STACK_LOCK_SECRET configured and Redis-backed store detected. " \
              "Falling back to plain SHA256 for lock-key derivation so cross-process locking actually works. " \
-             "Lock keys are deterministic and may expose query_attrs content via Redis MONITOR/snapshots. " \
-             "Set PARSE_STACK_LOCK_SECRET (or Parse.synchronize_create_secret = '…') to enable HMAC keying."
+             "Risks of running without an HMAC secret: (1) lock keys are deterministic and may expose query_attrs " \
+             "content via Redis MONITOR/snapshots; (2) when the response cache and the lock store share a Redis DB, " \
+             "any caller with write access to Parse.cache can plant a `parse-stack:foc:v1:<sha>` key under a guessable " \
+             "digest of (app_id, class, principal, query_attrs) and suppress first_or_create!/create_or_update! for " \
+             "that tuple until TTL expiry — a targeted DoS / create-pinning primitive. " \
+             "Set PARSE_STACK_LOCK_SECRET (or Parse.synchronize_create_secret = '…') to enable HMAC keying, or " \
+             "point Parse.synchronize_create_store at a separate Redis DB from the response cache."
       end
 
       def instrument(event, key, payload = {})

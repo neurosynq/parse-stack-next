@@ -175,7 +175,7 @@ result = Parse.call_function :myFunctionName, {param: value}
 
 ## Release History
 
-**Current version: 5.0.0** | **Ruby 3.2+ required**
+**Current version: 5.0.1** | **Ruby 3.2+ required**
 
 The 5.0 highlights (vector search / RAG, pooled Redis cache, AS::N instrumentation, MCP transport hardening, GraphQL type generation) are summarized in the [What's new in 5.0](#whats-new-in-50) section above. Earlier releases are recorded below.
 

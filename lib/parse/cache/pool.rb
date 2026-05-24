@@ -51,6 +51,21 @@ module Parse
         @pool.with { |store| store.store(key, value, options) }
       end
 
+      # Atomic SETNX-style write. Required by `Parse::CreateLock` to acquire
+      # cross-process locks against Redis-backed stores. Forwards to the
+      # underlying Moneta store's `#create`, which returns `true` only if
+      # the key was absent and is now set.
+      def create(key, value, options = {})
+        @pool.with { |store| store.create(key, value, options) }
+      end
+
+      # Atomic counter increment. Forwarded for parity with Moneta so
+      # callers expecting the full Moneta surface (counters, rate limits)
+      # work transparently through the pool.
+      def increment(key, amount = 1, options = {})
+        @pool.with { |store| store.increment(key, amount, options) }
+      end
+
       # Clear the underlying backend. Pooled Moneta stores all point at the
       # same Redis DB, so a single checkout suffices — issuing `clear` on
       # one connection flushes the DB for every connection.
