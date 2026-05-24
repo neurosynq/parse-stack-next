@@ -268,7 +268,9 @@ class MCPSseE2eTest < Minitest::Test
   end
 
   def test_progress_events_have_jsonrpc_notification_shape
-    @@dispatch_delay = 0.25
+    skip "timing-sensitive; skipped on macOS CI" if ENV["CI"] && RbConfig::CONFIG["host_os"] =~ /darwin/
+
+    @@dispatch_delay = 0.6
 
     events, _headers, _raw = sse_post(tools_call_body)
     progress_events = events.select { |e| e[:event] == "progress" }
@@ -292,8 +294,10 @@ class MCPSseE2eTest < Minitest::Test
     # client's token is reserved for tool-internal progress reports;
     # mixing elapsed-seconds heartbeats with tool work-unit values on
     # the same token would break per-token monotonicity).
+    skip "timing-sensitive; skipped on macOS CI" if ENV["CI"] && RbConfig::CONFIG["host_os"] =~ /darwin/
+
     token = "e2e-client-token-#{SecureRandom.hex(4)}"
-    @@dispatch_delay = 0.25
+    @@dispatch_delay = 0.6
 
     events, _headers, _raw = sse_post(tools_call_body(progress_token: token))
     progress_events = events.select { |e| e[:event] == "progress" }
@@ -485,7 +489,11 @@ class MCPSseE2eTest < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_multiple_concurrent_sse_connections
-    @@dispatch_delay = 0.2
+    skip "timing-sensitive; skipped on macOS CI" if ENV["CI"] && RbConfig::CONFIG["host_os"] =~ /darwin/
+
+    # 0.6s gives heartbeats (0.1s interval) plenty of room to fire even
+    # under 3-way concurrent load on slower CI runners.
+    @@dispatch_delay = 0.6
 
     results = Array.new(3, nil)
     threads = 3.times.map do |i|

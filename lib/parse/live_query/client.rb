@@ -805,11 +805,12 @@ module Parse
       # Dispatch event to subscription (called from event queue processor)
       # @param item [Hash] contains :subscription and :event
       def dispatch_event(item)
+        event = nil
         subscription = item[:subscription]
         event = item[:event]
         subscription.handle_event(event)
       rescue => e
-        Logging.error("Event dispatch error", error: e, event_type: event.type)
+        Logging.error("Event dispatch error", error: e, event_type: event&.type)
       end
 
       # Handle server error

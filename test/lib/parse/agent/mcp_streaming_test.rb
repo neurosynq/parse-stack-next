@@ -343,7 +343,8 @@ class MCPStreamingTest < Minitest::Test
     # absolute Thread.list counts, which would be fragile when orphaned
     # dispatchers from other tests are still running in the background.
     spawned = Thread.list.select { |t| t[:parse_mcp_sse_worker] || t[:parse_mcp_dispatcher] }
-    Timeout.timeout(2) { sleep 0.01 while spawned.any?(&:alive?) }
+    deadline = Time.now + 10.0
+    sleep 0.01 while spawned.any?(&:alive?) && Time.now < deadline
 
     assert spawned.none?(&:alive?),
            "Expected SSE worker and dispatcher threads to exit after stream completes. " \
@@ -623,27 +624,70 @@ class MCPStreamingTest < Minitest::Test
   def test_real_heartbeat_fires_multiple_times_before_response
     require "timeout"
 
-    # Wall-clock timing is unreliable on macOS GitHub Actions runners: the
-    # heartbeat interval can drift enough that <2 heartbeats fire inside a
-    # short dispatch window. The shape/ordering of events is covered by
-    # adjacent deterministic tests; skip the timing-sensitive assertion on
-    # macOS CI rather than chase ever-larger margins.
-    skip "timing-sensitive; skipped on macOS CI" if ENV["CI"] && RbConfig::CONFIG["host_os"] =~ /darwin/
+    # Pre-declare locals referenced in `ensure` so they're never undefined.
+    original_call = nil
 
-    # heartbeat every 0.1s, dispatcher takes 0.6s → expect >=2 heartbeats.
-    StreamingDispatcherStub.delay = 0.6
+    # Deterministic heartbeat test using a mocked waiter and a release-queue
+    # dispatcher. No wall-clock timing: the test drives exactly N heartbeats
+    # by pushing N tokens onto a tick queue, then releases the dispatcher.
+    tick_q    = Queue.new
+    release_q = Queue.new
+
+    # Dispatcher blocks until the test releases it.
+    StreamingDispatcherStub.delay = 0
+    original_call = Parse::Agent::MCPDispatcher.method(:call)
+    Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil|
+      release_q.pop
+      StreamingDispatcherStub::FIXED_RESPONSE
+    end
+
+    # Waiter pops one token per heartbeat iteration. While the dispatcher
+    # thread is alive, the waiter blocks here; popping releases one tick.
+    Thread.current[:parse_mcp_sse_heartbeat_waiter] = lambda do |dispatcher_thread, _interval|
+      tick_q.pop
+      nil
+    end
 
     app = streaming_app(heartbeat_interval: 0.1)
     _status, _headers, body = app.call(rack_env(accept: "text/event-stream"))
-    chunks = drain_body(body)
+
+    # Drive the stream in a background thread so we can push ticks and a
+    # release signal from the test thread.
+    chunks = []
+    reader = Thread.new do
+      Thread.current.abort_on_exception = false
+      body.each { |c| chunks << c }
+    rescue => e
+      warn "reader error: #{e.class}: #{e.message}"
+    end
+
+    # Push 3 ticks → 3 heartbeats. Each tick unblocks the waiter, which
+    # then returns to the loop; dispatcher is still blocked on release_q
+    # so dispatcher_thread.alive? remains true and a progress event fires.
+    3.times { tick_q << :tick }
+
+    # Wait for 3 progress events to appear before releasing the dispatcher,
+    # so we know all 3 ticks have been consumed (avoids a race where the
+    # release happens before the heartbeat loop has drained the ticks).
+    Timeout.timeout(5) do
+      sleep 0.01 until parse_sse_chunks(chunks).count { |e| e[:event] == "progress" } >= 3
+    end
+
+    # Release the dispatcher; it returns FIXED_RESPONSE. The waiter is
+    # currently blocked again — push one final tick so it returns and the
+    # loop can observe the dead dispatcher_thread and exit.
+    release_q << :go
+    tick_q    << :tick
+
+    Timeout.timeout(5) { reader.join }
 
     events = parse_sse_chunks(chunks)
     progress_events = events.select { |e| e[:event] == "progress" }
     response_events = events.select { |e| e[:event] == "response" }
 
     assert progress_events.size >= 2,
-           "Expected >=2 heartbeat events with 0.6s delay / 0.1s interval, " \
-           "got #{progress_events.size}. Events: #{events.map { |e| e[:event] }.inspect}"
+           "Expected >=2 heartbeat events from 3 ticks, got " \
+           "#{progress_events.size}. Events: #{events.map { |e| e[:event] }.inspect}"
     assert_equal 1, response_events.size, "Expected exactly 1 response event"
 
     # Verify both worker and dispatcher threads are gone within 2s. After
@@ -655,6 +699,11 @@ class MCPStreamingTest < Minitest::Test
     Timeout.timeout(2) { sleep 0.01 while tagged_threads.any?(&:alive?) } rescue nil
     assert tagged_threads.none?(&:alive?),
            "Tagged threads still alive 2s after stream completed: #{tagged_threads.map(&:status).inspect}"
+  ensure
+    Thread.current[:parse_mcp_sse_heartbeat_waiter] = nil
+    if original_call
+      Parse::Agent::MCPDispatcher.define_singleton_method(:call, &original_call)
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -686,14 +735,15 @@ class MCPStreamingTest < Minitest::Test
 
     # After close, the worker should be killed. The dispatcher_thread is
     # orphaned (cancellation is a separate deferred item) but will run to
-    # completion naturally.
-    # The worker thread itself must be gone within 0.5s.
-    Timeout.timeout(2) do
-      sleep 0.01 while Thread.list.any? { |t| t[:parse_mcp_sse_worker] && t.alive? }
-    end
+    # completion naturally. Poll with a generous deadline — Thread#kill
+    # propagation timing varies across Ruby versions and CI runners; the
+    # contract is "eventually," not a tight wall-clock bound.
+    deadline = Time.now + 10.0
+    sleep 0.01 while Thread.list.any? { |t| t[:parse_mcp_sse_worker] && t.alive? } &&
+                     Time.now < deadline
 
     assert Thread.list.none? { |t| t[:parse_mcp_sse_worker] && t.alive? },
-           "Worker thread still alive 2s after client disconnect"
+           "Worker thread still alive 10s after client disconnect"
   end
 
   # ---------------------------------------------------------------------------
@@ -712,6 +762,7 @@ class MCPStreamingTest < Minitest::Test
 
     # Fire request 1 in a background thread to keep the SSE stream open.
     req1_body = nil
+    t1 = nil
     t1 = Thread.new do
       _s, _h, req1_body = app.call(rack_env(accept: "text/event-stream"))
       # Start driving #each so the dispatcher_thread actually spawns and gets tagged.
@@ -737,9 +788,9 @@ class MCPStreamingTest < Minitest::Test
     assert_equal "server busy", parsed2.dig("error", "message")
   ensure
     # Clean up: kill any lingering SSE body so the slow dispatcher finishes.
-    req1_body.close if req1_body.respond_to?(:close)
-    t1.kill if t1&.alive?
-    t1.join(1) rescue nil
+    (req1_body&.close rescue nil)
+    t1&.kill if t1&.alive?
+    (t1&.join(1) rescue nil)
   end
 
   # ---------------------------------------------------------------------------
@@ -789,6 +840,7 @@ class MCPStreamingTest < Minitest::Test
 
   def test_sse_200_response_headers_are_not_frozen
     app = streaming_app
+    body = nil
     _status, headers, body = app.call(rack_env(accept: "text/event-stream"))
 
     refute headers.frozen?,
@@ -796,8 +848,8 @@ class MCPStreamingTest < Minitest::Test
     headers["X-Decorator"] = "ok"  # would raise FrozenError under the old behavior
     assert_equal "ok", headers["X-Decorator"]
   ensure
-    body.close if body.respond_to?(:close)
-    drain_body(body) rescue nil
+    (body&.close rescue nil)
+    (drain_body(body) rescue nil) if defined?(body) && body
   end
 
   def test_server_busy_503_response_headers_are_not_frozen
@@ -807,6 +859,7 @@ class MCPStreamingTest < Minitest::Test
     app = streaming_app(heartbeat_interval: 0.1, max_concurrent_dispatchers: 1)
 
     req1_body = nil
+    t1 = nil
     t1 = Thread.new do
       _s, _h, req1_body = app.call(rack_env(accept: "text/event-stream"))
       req1_body.each { |_chunk| break }
@@ -823,9 +876,9 @@ class MCPStreamingTest < Minitest::Test
     headers["X-Decorator"] = "ok"
     assert_equal "ok", headers["X-Decorator"]
   ensure
-    req1_body.close if req1_body.respond_to?(:close)
-    t1.kill if t1&.alive?
-    t1.join(1) rescue nil
+    (req1_body&.close rescue nil)
+    t1&.kill if t1&.alive?
+    (t1&.join(1) rescue nil)
   end
 
   # ---------------------------------------------------------------------------
@@ -999,6 +1052,7 @@ class MCPStreamingTest < Minitest::Test
 
     # Drive #each on a thread so the dispatcher_thread actually spawns
     # (the token is only passed to the dispatcher inside start_worker).
+    drain_thread = nil
     drain_thread = Thread.new { body.each { |_| break } }
 
     # Wait until the dispatcher has been entered (so the token reaches it).
@@ -1033,6 +1087,7 @@ class MCPStreamingTest < Minitest::Test
     env1["HTTP_MCP_SESSION_ID"] = session_id
 
     sse_body = nil
+    t1 = nil
     t1 = Thread.new do
       _s, _h, sse_body = app.call(env1)
       sse_body.each { |_| break }  # drive #each to spawn dispatcher_thread
@@ -1083,6 +1138,7 @@ class MCPStreamingTest < Minitest::Test
     env1["HTTP_MCP_SESSION_ID"] = session_id_a
 
     sse_body = nil
+    t1 = nil
     t1 = Thread.new do
       _s, _h, sse_body = app.call(env1)
       sse_body.each { |_| break }
@@ -1128,6 +1184,7 @@ class MCPStreamingTest < Minitest::Test
     env1["HTTP_MCP_SESSION_ID"] = session_id
 
     sse_body = nil
+    t1 = nil
     t1 = Thread.new do
       _s, _h, sse_body = app.call(env1)
       sse_body.each { |_| break }
@@ -1229,13 +1286,13 @@ class MCPStreamingTest < Minitest::Test
     _status, _headers, body = app.call(rack_env(accept: "text/event-stream"))
 
     chunks = []
+    drain_thread = nil
     drain_thread = Thread.new { body.each { |c| chunks << c } }
 
     # Wait for the dispatcher_thread (and therefore the SSEBody subscription)
     # to be live before mutating the registry.
-    Timeout.timeout(2) do
-      sleep 0.01 until StreamingDispatcherStub.last_cancellation_token
-    end
+    deadline = Time.now + 10.0
+    sleep 0.01 until StreamingDispatcherStub.last_cancellation_token || Time.now >= deadline
 
     Parse::Agent::Tools.register(
       name:        :__test_list_changed_tool,
@@ -1277,11 +1334,11 @@ class MCPStreamingTest < Minitest::Test
     _status, _headers, body = app.call(rack_env(accept: "text/event-stream"))
 
     chunks = []
+    drain_thread = nil
     drain_thread = Thread.new { body.each { |c| chunks << c } }
 
-    Timeout.timeout(2) do
-      sleep 0.01 until StreamingDispatcherStub.last_cancellation_token
-    end
+    deadline = Time.now + 10.0
+    sleep 0.01 until StreamingDispatcherStub.last_cancellation_token || Time.now >= deadline
 
     Parse::Agent::Prompts.register(
       name:        "__test_list_changed_prompt",

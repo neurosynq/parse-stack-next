@@ -723,12 +723,13 @@ class EmbeddingsOpenAITest < Minitest::Test
   # Temporarily override ENV vars for the duration of a block, restoring
   # whatever was there before. Used by build_connection proxy tests.
   def with_env(overrides)
+    previous = nil
     previous = {}
     overrides.each_key { |k| previous[k] = ENV[k] }
     overrides.each { |k, v| ENV[k] = v }
     yield
   ensure
-    previous.each { |k, v| ENV[k] = v }
+    previous&.each { |k, v| ENV[k] = v }
   end
 
   def fake_response(count, dim)

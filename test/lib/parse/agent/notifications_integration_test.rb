@@ -87,6 +87,7 @@ class NotificationsIntegrationTest < Minitest::Test
   # unsubscribes in ensure.  Caller is responsible for items cleanup.
   # -------------------------------------------------------------------------
   def with_notif_collector
+    collector = nil
     collector = NotifCollector.new
     Parse::Agent::Tools.reset_registry!
     Parse::Agent.refuse_collscan = false
@@ -94,7 +95,7 @@ class NotificationsIntegrationTest < Minitest::Test
     collector.subscribe!
     yield collector
   ensure
-    collector.unsubscribe!
+    collector&.unsubscribe!
     Parse::Agent::Tools.reset_registry!
     Parse::Agent.refuse_collscan = false
     Parse::Agent.expose_explain  = false
@@ -156,8 +157,9 @@ class NotificationsIntegrationTest < Minitest::Test
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
       unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
-    items = []
+    items = nil
     with_parse_server do
+      items = []
       item = MCPNotificationItem.new(label: "notif_test_#{SecureRandom.hex(3)}")
       item.save
       items << item
@@ -185,7 +187,7 @@ class NotificationsIntegrationTest < Minitest::Test
       end
     end
   ensure
-    items.each { |i| i.destroy rescue nil }
+    items&.each { |i| i.destroy rescue nil }
   end
 
   def test_query_class_args_keys_does_not_contain_other_sensitive_keys
@@ -285,8 +287,9 @@ class NotificationsIntegrationTest < Minitest::Test
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
       unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
-    items = []
+    items = nil
     with_parse_server do
+      items = []
       item = MCPNotificationItem.new(label: "sec_test")
       item.save
       items << item
@@ -314,7 +317,7 @@ class NotificationsIntegrationTest < Minitest::Test
       end
     end
   ensure
-    items.each { |i| i.destroy rescue nil }
+    items&.each { |i| i.destroy rescue nil }
   end
 
   # =========================================================================

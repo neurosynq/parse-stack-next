@@ -171,6 +171,8 @@ module Parse
             # check if the store was from a legacy parse-stack cache value which
             # is stored as Faraday::Env. T\he new system stores less content in a simple hash
             # for improved interoperability and access time.
+            body             = nil
+            response_headers = nil
             if cache_data.is_a?(Faraday::Env)
               body = cache_data.respond_to?(:body) ? cache_data.body : nil
               response_headers = cache_data.response_headers || {}

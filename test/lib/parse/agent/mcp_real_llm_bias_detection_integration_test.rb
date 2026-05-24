@@ -104,6 +104,9 @@ class MCPBiasDetectionTest < Minitest::Test
   # (which need both).  Yields students, teachers, grades.  Teardown in
   # reverse order in ensure so a mid-seed failure still cleans up.
   def with_bias_fixtures
+    students = nil
+    teachers = nil
+    grades   = nil
     students = []
     teachers = []
     grades   = []
@@ -139,9 +142,9 @@ class MCPBiasDetectionTest < Minitest::Test
 
     yield students, teachers, grades
   ensure
-    grades.each   { |g| g.destroy rescue nil }
-    teachers.each { |t| t.destroy rescue nil }
-    students.each { |s| s.destroy rescue nil }
+    grades&.each   { |g| g.destroy rescue nil }
+    teachers&.each { |t| t.destroy rescue nil }
+    students&.each { |s| s.destroy rescue nil }
   end
 
   # ==========================================================================

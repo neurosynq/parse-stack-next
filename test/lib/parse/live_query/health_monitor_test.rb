@@ -162,8 +162,8 @@ class TestLiveQueryHealthMonitor < Minitest::Test
   def test_ping_is_sent_after_interval
     @monitor.start
 
-    # Wait for ping interval plus a bit
-    sleep 0.15
+    deadline = Time.now + 2.0
+    sleep 0.01 until @mock_client.ping_sent || Time.now > deadline
 
     assert @mock_client.ping_sent
   end
@@ -171,10 +171,12 @@ class TestLiveQueryHealthMonitor < Minitest::Test
   def test_stale_connection_handled_when_no_pong
     @monitor.start
 
-    # Wait for ping + pong timeout + margin
-    sleep 0.25
+    # ping_interval=0.1 + pong_timeout=0.05 = 0.15s minimum before stale
+    # is detected. Poll with a generous deadline rather than a fixed sleep
+    # so scheduler jitter on slower CI runners can't cause a false fail.
+    deadline = Time.now + 2.0
+    sleep 0.01 until @mock_client.stale_handled || Time.now > deadline
 
-    # Connection should be detected as stale
     assert @mock_client.stale_handled
   end
 end
