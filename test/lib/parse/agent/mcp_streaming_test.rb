@@ -335,6 +335,12 @@ class MCPStreamingTest < Minitest::Test
     StreamingDispatcherStub.delay = 0
 
     app = streaming_app(heartbeat_interval: 0.1)
+
+    # Snapshot any pre-existing tagged threads BEFORE we make our call.
+    # Orphan dispatchers from prior tests (random test order) may still be
+    # sleeping; we must not assert on them.
+    pre_existing = Thread.list.select { |t| t[:parse_mcp_sse_worker] || t[:parse_mcp_dispatcher] }
+
     _status, _headers, body = app.call(rack_env(accept: "text/event-stream"))
     drain_body(body)
 
@@ -342,7 +348,7 @@ class MCPStreamingTest < Minitest::Test
     # specific call to exit. We track tagged threads rather than comparing
     # absolute Thread.list counts, which would be fragile when orphaned
     # dispatchers from other tests are still running in the background.
-    spawned = Thread.list.select { |t| t[:parse_mcp_sse_worker] || t[:parse_mcp_dispatcher] }
+    spawned = Thread.list.select { |t| t[:parse_mcp_sse_worker] || t[:parse_mcp_dispatcher] } - pre_existing
     deadline = Time.now + 10.0
     sleep 0.01 while spawned.any?(&:alive?) && Time.now < deadline
 
@@ -673,13 +679,21 @@ class MCPStreamingTest < Minitest::Test
       sleep 0.01 until parse_sse_chunks(chunks).count { |e| e[:event] == "progress" } >= 3
     end
 
-    # Release the dispatcher; it returns FIXED_RESPONSE. The waiter is
-    # currently blocked again — push one final tick so it returns and the
-    # loop can observe the dead dispatcher_thread and exit.
+    # Release the dispatcher; it returns FIXED_RESPONSE. The worker is
+    # blocked in the waiter on tick_q.pop. There is an inherent race: after
+    # the waiter returns, the worker re-checks dispatcher_thread.alive?, and
+    # if the dispatcher hasn't yet finished its rescue/return, the worker
+    # will emit one more progress event and loop back into the waiter. So
+    # rather than pushing exactly one tick (which can deadlock if the race
+    # plays out adversely on CI), we keep feeding ticks until the reader
+    # thread exits — once dispatcher_thread is dead, the next loop iteration
+    # observes that, pushes response + DONE, and the reader drains.
     release_q << :go
-    tick_q    << :tick
-
-    Timeout.timeout(5) { reader.join }
+    Timeout.timeout(10) do
+      until reader.join(0.05)
+        tick_q << :tick
+      end
+    end
 
     events = parse_sse_chunks(chunks)
     progress_events = events.select { |e| e[:event] == "progress" }
