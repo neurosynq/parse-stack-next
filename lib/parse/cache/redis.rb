@@ -105,6 +105,19 @@ module Parse
         @pool.store(key, value, options)
       end
 
+      # Atomic SETNX. Required so `Parse::CreateLock` can acquire
+      # cross-process locks when this wrapper is the configured cache /
+      # `synchronize_create_store`. Returns `true` only when the key did
+      # not already exist.
+      def create(key, value, options = {})
+        @pool.create(key, value, options)
+      end
+
+      # Atomic counter increment. Forwarded for Moneta surface parity.
+      def increment(key, amount = 1, options = {})
+        @pool.increment(key, amount, options)
+      end
+
       # Clear cached entries belonging to this wrapper. Required for
       # `Parse::Client#clear_cache!` compatibility.
       #
@@ -115,8 +128,22 @@ module Parse
       # the backing DB — same blast radius as previous versions, but
       # only for unnamespaced deployments. To opt into the wide
       # FLUSHDB explicitly (e.g. ops tooling), call {#flush_db!}.
-      def clear
-        if @namespace
+      #
+      # @param scope [String, nil] explicit namespace prefix to scan-delete.
+      #   When provided, overrides the wrapper's configured `@namespace` and
+      #   SCAN-deletes `<scope>:*` regardless of how the wrapper was built.
+      #   This is the safe escape hatch for tenants that share a non-
+      #   namespaced wrapper but still want to evict only their own keys
+      #   without `FLUSHDB`-ing siblings (and without wiping
+      #   `parse-stack:foc:v1:*` create-lock keys that live on the same DB).
+      #   The scope must be a non-empty String; the trailing `:` is added
+      #   automatically and any trailing `:` in the input is stripped so
+      #   `"tenant_x"` and `"tenant_x:"` are equivalent.
+      def clear(scope: nil)
+        if scope
+          prefix = validate_scope!(scope)
+          delete_keys_matching!("#{prefix}:*")
+        elsif @namespace
           delete_keys_matching!("#{@namespace}:*")
         else
           @pool.clear
@@ -184,6 +211,38 @@ module Parse
       def normalize_namespace(ns)
         s = ns.to_s.chomp(":")
         s.empty? ? nil : s
+      end
+
+      # Validate a caller-supplied `scope:` for `clear(scope:)`. Returns the
+      # normalized prefix or raises ArgumentError. We enforce:
+      #
+      # - must be a String (Symbol / Integer / nil would silently `.to_s`
+      #   under `normalize_namespace` and expand the deletion target —
+      #   `scope: 0` would clear `0:*`)
+      # - must be non-empty after trimming a trailing `:`
+      # - must not contain Redis SCAN glob metacharacters (`*`, `?`, `[`,
+      #   `]`, `\`) — otherwise `scope: "*"` would SCAN-delete the whole
+      #   DB, defeating the whole point of having `flush_db!` as the
+      #   explicit wide-blast-radius escape hatch
+      # - must not contain a null byte (defense-in-depth against keys
+      #   crafted to terminate early in some Redis client paths)
+      GLOB_METACHARS = /[\*\?\[\]\\\x00]/.freeze
+      private_constant :GLOB_METACHARS
+
+      def validate_scope!(scope)
+        unless scope.is_a?(String)
+          raise ArgumentError, "scope: must be a String (got #{scope.class})"
+        end
+        prefix = scope.chomp(":")
+        if prefix.empty?
+          raise ArgumentError, "scope: must be a non-empty namespace string"
+        end
+        if prefix.match?(GLOB_METACHARS)
+          raise ArgumentError,
+                "scope: must not contain Redis SCAN glob characters (*, ?, [, ], \\, or NUL); " \
+                "use flush_db! for a full-DB flush"
+        end
+        prefix
       end
     end
   end

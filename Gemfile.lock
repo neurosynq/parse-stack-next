@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    parse-stack-next (5.0.0)
+    parse-stack-next (5.0.1)
       activemodel (>= 6.1, < 9)
       activesupport (>= 6.1, < 9)
       connection_pool (>= 2.2, < 4)
