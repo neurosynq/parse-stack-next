@@ -1,0 +1,1222 @@
+/* parse-stack-next YARD theme overlay
+ *
+ * Loaded after YARD's default common.css, so every rule here is an
+ * intentional override. Palette:
+ *
+ *   Ruby red    #B22234 / #E63946 (accent, links, headings)
+ *   Parse blue  #169CEE / #4FB8F4 (highlights, borders, code)
+ *   Graphite    #1E1F22 / #2A2C30 (dark bg / surfaces)
+ *   Slate       #6B7280 / #9CA3AF (muted text, dividers)
+ *   Bone        #F8F9FA / #FFFFFF (light bg / surfaces)
+ *
+ * Honors prefers-color-scheme for automatic dark mode.
+ */
+
+:root {
+  --ruby:       #B22234;
+  --ruby-hi:    #E63946;
+  --parse:      #169CEE;
+  --parse-hi:   #4FB8F4;
+  --graphite:   #1E1F22;
+  --graphite-2: #2A2C30;
+  --graphite-3: #34373C;
+  --slate:      #6B7280;
+  --slate-2:    #9CA3AF;
+  --bone:       #F8F9FA;
+  --paper:      #FFFFFF;
+  --ink:        #1F2328;
+  --rule:       #E5E7EB;
+
+  --bg:         var(--paper);
+  --bg-soft:    var(--bone);
+  --bg-code:    #F3F5F7;
+  --fg:         var(--ink);
+  --fg-muted:   var(--slate);
+  --accent:     var(--ruby);
+  --accent-hi:  var(--ruby-hi);
+  --link:       var(--parse);
+  --link-hover: var(--ruby);
+  --border:     var(--rule);
+  /* Inline-code text color. Lighter pink-rose so the inline `tags`
+   * read as a separate color family from h1/h2 ruby accents. */
+  --code-inline: #C2185B;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter",
+               Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Menlo", "Consolas",
+               "Liberation Mono", "DejaVu Sans Mono", monospace;
+
+  --radius:    8px;
+  --radius-sm: 4px;
+  --shadow:    0 1px 2px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.06);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:         var(--graphite);
+    --bg-soft:    var(--graphite-2);
+    --bg-code:    var(--graphite-3);
+    --fg:         #E6E8EB;
+    --fg-muted:   var(--slate-2);
+    --border:     #3A3D42;
+    --link:       #88CDFD;       /* sky / Github-Dark blue, lighter than parse-hi */
+    --link-hover: var(--ruby-hi);
+    --accent:     #FF8FA3;       /* rose-pink for h1/h2/h3 accents in dark mode */
+    --accent-hi:  #FFB4C2;
+    --code-inline: #FF8FA3;       /* lighter rose-pink for inline code in dark mode */
+    --shadow:     0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.5);
+  }
+}
+
+/* -------- base -------- */
+
+html, body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#main, #content, .docstring, .tags {
+  color: var(--fg);
+  background: var(--bg);
+}
+
+a, a:visited {
+  color: var(--link);
+  text-decoration: none;
+  transition: color .15s ease;
+}
+
+a:hover, a:focus {
+  color: var(--link-hover);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+/* YARD's style.css ships `#content a { color: #05a }` and
+ * `#content a:hover { background: #ffffa5 }` (highlighter yellow,
+ * straight from 2010). Re-target with matching specificity. */
+#content a,
+#content a:visited,
+#filecontents a,
+#filecontents a:visited,
+.docstring a,
+.docstring a:visited,
+.tags a,
+.tags a:visited {
+  color: var(--link);
+  text-decoration: none;
+}
+
+#content a:hover,
+#filecontents a:hover,
+.docstring a:hover,
+.tags a:hover {
+  color: var(--link-hover);
+  background: transparent;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+p, li {
+  color: var(--fg);
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 2rem 0;
+}
+
+/* -------- headings -------- */
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-sans);
+  color: var(--fg);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  margin-top: 1.6em;
+  margin-bottom: 0.6em;
+}
+
+h1 {
+  font-size: 1.9em;
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: .35em;
+  /* NB: do NOT set display: inline-block here -- the README #toc is
+   * float:right, and an inline-block h1 establishes a new block
+   * formatting context which refuses to flow next to the float,
+   * pushing the rest of the page far below the ToC. Keep h1 a block. */
+  display: block;
+}
+
+h2 {
+  font-size: 1.45em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: .3em;
+  color: var(--accent);
+}
+
+h3 { font-size: 1.18em; color: var(--accent); }
+h4 { font-size: 1.05em; color: var(--fg); }
+
+/* -------- header / top nav -------- */
+
+#header, .nav_wrap {
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+}
+
+#menu, #footer {
+  background: var(--bg-soft);
+  color: var(--fg-muted);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+#menu a, #footer a {
+  color: var(--link);
+}
+
+#search a {
+  background: var(--graphite-2);
+  color: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+}
+
+@media (prefers-color-scheme: dark) {
+  #search a { background: var(--parse); border-color: var(--parse); }
+}
+
+#full_list, #full_list_nav, #content {
+  font-family: var(--font-sans);
+}
+
+/* -------- sidebar / full-list pane -------- */
+
+#full_list {
+  background: var(--bg-soft);
+  color: var(--fg);
+  border-right: 1px solid var(--border);
+}
+
+#full_list li, #full_list .clear { color: var(--fg); }
+
+#full_list li a {
+  color: var(--fg);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+}
+
+#full_list li a:hover,
+#full_list li.collapsed > a:hover {
+  background: var(--parse);
+  color: #fff;
+  text-decoration: none;
+}
+
+#full_list li.odd { background: transparent; }
+#full_list li.even { background: rgba(0,0,0,.02); }
+
+@media (prefers-color-scheme: dark) {
+  #full_list li.even { background: rgba(255,255,255,.03); }
+}
+
+#nav_inactive, #nav_active {
+  color: var(--fg-muted);
+}
+
+/* -------- code -------- */
+
+code, kbd, pre, tt {
+  font-family: var(--font-mono);
+  font-size: .92em;
+}
+
+code, tt {
+  background: var(--bg-code);
+  color: var(--code-inline);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+a > code, a > tt, h1 code, h2 code, h3 code, h4 code {
+  color: inherit;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+pre, pre.code, .source_code pre {
+  background: var(--bg-code);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--parse);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  overflow-x: auto;
+  box-shadow: var(--shadow);
+  line-height: 1.5;
+}
+
+pre code, pre tt {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: inherit;
+}
+
+/* method signatures (top of method docs) */
+.method_details_list .method_details {
+  border-top: 1px solid var(--border);
+  padding-top: 1.2em;
+  margin-top: 1.5em;
+}
+
+.signature, .method_details .method_signature {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
+
+.summary_signature {
+  background: var(--bg-soft);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+}
+
+.summary_signature a, .summary_signature a:visited {
+  color: var(--accent);
+}
+
+/* -------- docstring boxes -------- */
+
+.docstring, .tags {
+  font-family: var(--font-sans);
+  color: var(--fg);
+}
+
+.note {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--parse);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin: 1em 0;
+  color: var(--fg);
+}
+
+.note.deprecated {
+  border-left-color: var(--accent);
+  background: rgba(178, 34, 52, .06);
+}
+
+.note.private {
+  border-left-color: var(--slate);
+  color: var(--fg-muted);
+}
+
+.note.title {
+  font-weight: 600;
+}
+
+/* -------- tags / categories -------- */
+
+.tags ul.param > li, .tags ul.return > li {
+  border-left: 2px solid var(--border);
+  padding-left: 12px;
+  margin: 6px 0;
+}
+
+.tags h3, .tags h4 {
+  color: var(--accent);
+  font-size: 1em;
+  margin-top: 1.4em;
+}
+
+.tag_title {
+  text-transform: uppercase;
+  font-size: .78em;
+  letter-spacing: .06em;
+  color: var(--fg-muted);
+  font-weight: 700;
+}
+
+/* -------- tables -------- */
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1em 0;
+  font-size: .95em;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+th, td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  background: var(--bg-soft);
+  color: var(--fg);
+  font-weight: 600;
+  border-bottom: 2px solid var(--border);
+}
+
+tr:last-child td { border-bottom: 0; }
+
+tr:hover td { background: var(--bg-soft); }
+
+/* -------- blockquotes -------- */
+
+blockquote {
+  border-left: 3px solid var(--parse);
+  background: var(--bg-soft);
+  margin: 1em 0;
+  padding: 8px 16px;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  color: var(--fg);
+}
+
+/* -------- search box -------- */
+
+#search input[type=text],
+#search input[type=search],
+.search input,
+.search input[type=search],
+input#search_box,
+input[name=q],
+.frames #search input {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  font-family: var(--font-sans);
+  outline: none;
+}
+
+input#search_box:focus,
+input[name=q]:focus,
+.search input:focus {
+  border-color: var(--parse);
+  box-shadow: 0 0 0 2px rgba(22, 156, 238, .2);
+}
+
+input#search_box::placeholder,
+input[name=q]::placeholder {
+  color: var(--fg-muted);
+}
+
+/* -------- index page -------- */
+
+#listing ul.alpha {
+  list-style: none;
+  padding: 0;
+}
+
+#listing ul.alpha li.letter {
+  margin-top: 1.4em;
+}
+
+#listing ul.alpha li.letter h2 {
+  color: var(--accent);
+  border-bottom: 2px solid var(--accent);
+  display: inline-block;
+  padding: 0 .8em .2em 0;
+}
+
+#listing ul li a {
+  border-bottom: 1px dotted var(--border);
+}
+
+/* -------- inheritance / mixin lists -------- */
+
+dl.box {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+}
+
+dl.box dt {
+  color: var(--fg-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: .78em;
+  letter-spacing: .05em;
+}
+
+dl.box dd {
+  margin: 4px 0 12px;
+  color: var(--fg);
+}
+
+/* -------- type signatures inline -------- */
+
+.type, .object_link a {
+  color: var(--link);
+}
+
+.docstring h3, .docstring h4 {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: .25em;
+}
+
+/* -------- subtle "this method only on" badges -------- */
+
+.permalink {
+  color: var(--fg-muted);
+  text-decoration: none;
+  margin-right: 6px;
+  opacity: .6;
+}
+
+.permalink:hover {
+  color: var(--accent);
+  opacity: 1;
+  text-decoration: none;
+}
+
+/* -------- selection -------- */
+
+::selection {
+  background: rgba(22, 156, 238, .25);
+  color: var(--fg);
+}
+
+/* -------- scrollbars (webkit) -------- */
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--bg-soft); }
+::-webkit-scrollbar-thumb { background: var(--slate-2); border-radius: 6px; border: 2px solid var(--bg-soft); }
+::-webkit-scrollbar-thumb:hover { background: var(--parse); }
+
+/* -------- README Table of Contents (#toc) --------
+ *
+ * The #toc element is injected by app.js (`generateTOC`) as the
+ * first child of #content with YARD's default `float: right`. The
+ * earlier banner-image cap (max-width: 480px on the first <p> img
+ * inside #filecontents) is enough to let the float layout work as
+ * YARD intended -- so we keep the float and just restyle.
+ */
+
+#toc {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--parse);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  color: var(--fg);
+  max-width: 300px;
+  padding: 16px 22px 16px 18px;
+}
+
+/* Banner / wide images at the very top of a file page. Cap the
+ * leading hero image so it doesn't fight the ToC for horizontal
+ * real estate. Regular inline images can still go full width. */
+#filecontents > p:first-child > img,
+#filecontents > p:first-child + p > img {
+  max-width: 480px;
+  height: auto;
+  display: block;
+  margin: 0 0 16px;
+}
+
+#filecontents img {
+  max-width: 100%;
+  height: auto;
+}
+
+@media (max-width: 900px) {
+  /* Stack on narrow viewports: drop the float and let the ToC live
+   * in normal flow at the top of the article. */
+  #toc {
+    float: none;
+    max-width: none;
+    margin: 0 0 16px;
+  }
+}
+
+#toc .title {
+  color: var(--accent);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+#toc a,
+#toc a:visited {
+  color: var(--link);
+}
+
+#toc a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+#toc.hidden,
+#toc.hidden:hover {
+  background: var(--bg-soft);
+  box-shadow: none;
+}
+
+/* -------- Iframe sidebar host (left rail) --------
+ * The class-list iframe lives inside #nav (or similar); make sure the
+ * surrounding container doesn't show a stale white background while
+ * the iframe is loading.
+ */
+
+iframe#nav,
+#nav {
+  background: var(--bg-soft);
+  border-right: 1px solid var(--border);
+}
+
+#footer {
+  color: var(--fg-muted);
+  font-size: .85em;
+  text-align: center;
+  padding: 20px 0;
+}
+
+#footer a, #footer a:visited { color: var(--link); }
+
+/* ============================================================
+ * High-specificity overrides for YARD's style.css
+ * ------------------------------------------------------------
+ * style.css ships rules like `*:not(pre) > code { background:
+ * #f7f7f9 }` and `.docstring pre.code { background: #f7f7f9 }`
+ * whose specificity beats our simpler `code {}` / `pre {}` rules.
+ * Match or exceed their specificity here so the dark palette
+ * applies inside docstrings, notes, and #filecontents.
+ * ============================================================ */
+
+/* Inline code (anywhere except inside pre). */
+*:not(pre) > code,
+*:not(pre) > tt {
+  background: var(--bg-code);
+  color: var(--code-inline);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+}
+
+/* Inline code/tt inside paragraph text in docstrings + tags. */
+.docstring p > code,
+.docstring p > tt,
+.docstring li > code,
+.docstring li > tt,
+.tags p > code,
+.tags p > tt,
+#filecontents p > code,
+#filecontents p > tt,
+#filecontents li > code,
+#filecontents li > tt {
+  background: var(--bg-code);
+  color: var(--code-inline);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+}
+
+/* Code blocks (fenced + indented + tag examples). */
+.docstring pre.code,
+#filecontents pre.code,
+.tags pre.example,
+.source_code pre {
+  background: var(--bg-code);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--parse);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  line-height: 1.5;
+  overflow-x: auto;
+  box-shadow: var(--shadow);
+}
+
+pre.code,
+pre.code .info.file {
+  color: var(--fg);
+}
+
+pre.code a {
+  color: var(--link);
+  border-bottom: 1px dotted var(--parse);
+}
+
+/* Note boxes — every variant needs explicit override because each
+ * carries a single-class selector with a hardcoded light background
+ * (.note.todo, .note.deprecated, .note.private, .note.returns_void). */
+.note,
+.note.todo,
+.note.returns_void,
+.note.deprecated,
+.note.private,
+.note.title.deprecated,
+.docstring .note {
+  background: var(--bg-soft);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--parse);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin: 1em 0;
+}
+
+.note.deprecated,
+.note.title.deprecated {
+  border-left-color: var(--accent);
+  background: rgba(178, 34, 52, .08);
+}
+
+.note.private {
+  border-left-color: var(--slate-2);
+  color: var(--fg-muted);
+}
+
+.note.todo {
+  border-left-color: #E5A93B; /* amber */
+}
+
+/* Tag titles ("Returns:", "Parameters:", etc.) often render against
+ * a YARD-supplied yellow/blue strip — neutralize. */
+.tags .tag_title,
+.tags h3.tag_title {
+  background: transparent;
+  color: var(--accent);
+}
+
+/* Method-summary section header strip and inheritance bar. */
+h2.h2_sum,
+.summary h2,
+.method_details_list .method_details h3,
+#filecontents h2 small a,
+.docstring h2 small a {
+  background: var(--bg-soft);
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+/* Inheritance / mixin "subclass" inline boxes. */
+.box_info {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+
+.box_info dt {
+  background: transparent;
+  color: var(--fg-muted);
+  border-color: var(--border);
+}
+
+.box_info dd {
+  background: transparent;
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+/* ============================================================
+ * Ruby syntax highlighting — dark-mode palette
+ * ------------------------------------------------------------
+ * YARD's stock token colors are tuned for light backgrounds:
+ * .comment is #0066ff, .val/.tstring is #036a07, .kw is #0000ff,
+ * .label is #c5060b -- all invisible-to-unreadable on graphite.
+ * Re-target the token classes with a high-contrast palette that
+ * stays in the ruby/parse-blue family.
+ * ============================================================ */
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Pull the code panel DARKER than the surrounding page (--bg is
+     * #1E1F22) so the bright syntax tokens have something to pop
+     * against. */
+    --bg-code: #0B0C0E;
+  }
+}
+
+/* Default (light) — leave YARD's stock colors alone. Only re-skin in dark. */
+@media (prefers-color-scheme: dark) {
+  pre.code,
+  pre.code .info.file {
+    color: #E6E8EB;
+  }
+
+  /* Strings + string-like literals. */
+  pre.code .val,
+  pre.code .tstring_content,
+  pre.code .heredoc_beg,
+  pre.code .heredoc_end,
+  pre.code .qwords_beg,
+  pre.code .qwords_end,
+  pre.code .qwords_sep,
+  pre.code .words_beg,
+  pre.code .words_end,
+  pre.code .words_sep,
+  pre.code .qsymbols_beg,
+  pre.code .qsymbols_end,
+  pre.code .qsymbols_sep,
+  pre.code .symbols_beg,
+  pre.code .symbols_end,
+  pre.code .symbols_sep,
+  pre.code .tstring,
+  pre.code .dstring,
+  pre.code .regexp,
+  .dregexp {
+    color: #A5E2A5; /* lighter green, was #036a07 */
+  }
+
+  /* Method names / function ids. */
+  pre.code .fid,
+  pre.code .rubyid_new,
+  pre.code .rubyid_to_s,
+  pre.code .rubyid_to_sym,
+  pre.code .rubyid_to_f,
+  pre.code .dot + pre.code .id,
+  pre.code .rubyid_to_i pre.code .rubyid_each {
+    color: #82D4F4; /* parse-blue tint */
+  }
+
+  /* Comments — most important to brighten. */
+  pre.code .comment {
+    color: #9CA3AF; /* slate, was #0066ff */
+    font-style: italic;
+  }
+
+  /* Constants (class names). */
+  pre.code .const,
+  pre.code .constant {
+    color: #FFB86C; /* warm amber-orange */
+  }
+
+  /* Symbols and labels. */
+  pre.code .label,
+  pre.code .symbol {
+    color: #FF9580; /* salmon */
+  }
+
+  /* Keywords (def, class, require, etc.). */
+  pre.code .kw,
+  pre.code .rubyid_require,
+  pre.code .rubyid_extend,
+  pre.code .rubyid_include {
+    color: #FF7B96; /* ruby-pink */
+    font-weight: 600;
+  }
+
+  pre.code .ivar         { color: #79C0FF; }
+  pre.code .gvar,
+  pre.code .rubyid_backref,
+  pre.code .rubyid_nth_ref { color: #D2A8FF; }
+
+  /* Object link colors inside highlighted code. */
+  #content .summary_desc pre.code .id > .object_link a,
+  #content .docstring pre.code .id > .object_link a,
+  pre.code a {
+    color: #82D4F4;
+    border-bottom-color: #82D4F4;
+  }
+  #content .summary_desc pre.code .const > .object_link a,
+  #content .docstring pre.code .const > .object_link a {
+    color: #FFB86C;
+  }
+}
+
+/* ============================================================
+ * Class header info box (Inherits / Includes / Defined in)
+ * ------------------------------------------------------------
+ * YARD's stripe rules `.box_info dl:nth-child(odd/even) > *`
+ * hardcode #eee and #fff. Match the same specificity with our
+ * dark palette so the rows are legible.
+ * ============================================================ */
+
+.box_info dl dt,
+.box_info dl dd {
+  background: var(--bg);
+  color: var(--fg);
+  border-color: var(--border) !important;
+}
+
+.box_info dl:nth-child(odd) > * {
+  background: var(--bg-soft);
+}
+
+.box_info dl:nth-child(even) > * {
+  background: var(--bg);
+}
+
+.box_info dl:last-child > * {
+  border-bottom-color: var(--border) !important;
+}
+
+.box_info dl dd a,
+.box_info dl dd a:visited {
+  color: var(--link);
+}
+
+/* "show all" toggle button. */
+.box_info .more_info_link {
+  color: var(--link);
+}
+
+/* Breadcrumb at top of class pages. The "current page" item often
+ * renders in a low-contrast gray; bump it. */
+#menu .title {
+  color: var(--fg);
+}
+
+/* ============================================================
+ * Sidebar/iframe extras: toggle arrows + top-bar layout
+ * ============================================================ */
+
+/* The collapse arrows in the class-tree iframe are a base64 PNG
+ * sprite of dark glyphs on a transparent background — invisible
+ * against our dark surface. CSS filter inverts them in place. */
+#full_list li a.toggle {
+  filter: invert(0.85) hue-rotate(180deg) brightness(1.6);
+}
+
+/* ============================================================
+ * Final-pass inline-code + toggle-button overrides
+ * ------------------------------------------------------------
+ * YARD ships several places that re-color inline code (e.g.
+ * <code class="highlighter-rouge"> from kramdown markdown) and
+ * "summary_toggle" / "constants_summary_toggle" / "more_info_link"
+ * buttons. Belt-and-braces overrides with !important so the dark
+ * palette always wins, regardless of YARD's inline / cascade order.
+ * ============================================================ */
+
+/* Every inline code or tt outside <pre> in docstring / file / tags / summary.
+ * This also catches kramdown's `<code class="highlighter-rouge">`. */
+.docstring code,
+.docstring tt,
+.tags code,
+.tags tt,
+.summary code,
+.summary tt,
+#filecontents code,
+#filecontents tt,
+.discussion code,
+.discussion tt,
+.method_details code,
+.method_details tt {
+  background: var(--bg-code) !important;
+  color: var(--code-inline) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm);
+  padding: 1px 6px !important;
+}
+
+/* But never on the code blocks themselves (the pre.code descendants). */
+pre code,
+pre tt,
+pre.code code,
+pre.code tt {
+  background: transparent !important;
+  border: 0 !important;
+  padding: 0 !important;
+  color: inherit !important;
+}
+
+/* "show all" / "more" link inside the .box_info inheritance bar. */
+.more_info_link,
+a.more_info_link,
+a.show_link {
+  background: var(--bg-soft) !important;
+  color: var(--link) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm) !important;
+  padding: 2px 8px !important;
+  font-size: 0.85em;
+  font-weight: 600;
+  text-decoration: none !important;
+}
+
+.more_info_link:hover,
+a.show_link:hover {
+  background: var(--parse) !important;
+  color: #fff !important;
+  border-color: var(--parse) !important;
+}
+
+/* "collapse" / "expand" toggle pills on summary sections. */
+.summary_toggle,
+.constants_summary_toggle,
+a.summary_toggle,
+a.constants_summary_toggle {
+  background: var(--bg-soft) !important;
+  color: var(--link) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 999px;
+  padding: 2px 10px !important;
+  font-size: 0.8em;
+  font-weight: 600;
+  text-decoration: none !important;
+  margin-left: 8px;
+  text-transform: lowercase;
+  letter-spacing: .02em;
+  vertical-align: middle;
+}
+
+.summary_toggle:hover,
+.constants_summary_toggle:hover {
+  background: var(--parse) !important;
+  color: #fff !important;
+  border-color: var(--parse) !important;
+}
+
+/* The hide_toc anchor inside the README ToC. */
+#toc .hide_toc,
+#toc .hide_toc a {
+  color: var(--link);
+  text-decoration: none;
+}
+
+#toc .hide_toc:hover,
+#toc .hide_toc a:hover {
+  color: var(--accent);
+}
+
+/* "collapse" / "expand" arrow indicators on summary lists, if any. */
+.summary li > a.summary_signature::before {
+  color: var(--fg-muted);
+}
+
+/* ============================================================
+ * Method / attribute signature bars
+ * ------------------------------------------------------------
+ * YARD ships `p.signature, h3.signature { background: #e8f4ff }`
+ * which is a hardcoded light blue — fights every dark surface.
+ * Re-skin with matching specificity.
+ * ============================================================ */
+
+p.signature,
+h3.signature,
+.method_details p.signature,
+.method_details h3.signature {
+  background: var(--bg-soft) !important;
+  color: var(--fg) !important;
+  border: 1px solid var(--border) !important;
+  border-left: 3px solid var(--accent) !important;
+  border-radius: var(--radius);
+  padding: 8px 14px !important;
+  font-family: var(--font-mono);
+}
+
+p.signature .extras,
+h3.signature .extras {
+  color: var(--fg-muted) !important;
+  font-family: var(--font-sans);
+}
+
+p.signature .not_defined_here,
+h3.signature .not_defined_here,
+p.signature .aliases,
+h3.signature .aliases {
+  color: var(--fg-muted) !important;
+  font-family: var(--font-sans);
+}
+
+p.signature tt,
+h3.signature tt,
+p.signature code,
+h3.signature code {
+  background: transparent !important;
+  border: 0 !important;
+  color: var(--fg) !important;
+  padding: 0 !important;
+  font-family: var(--font-mono);
+}
+
+/* The strong/method-name portion inside the signature (e.g. `#field`)
+ * was rendering near-invisible because YARD's #content a { color: #05a }
+ * lost out to nothing and links inside .signature became near-transparent.
+ * Force the method name to the foreground color. */
+p.signature strong,
+h3.signature strong,
+p.signature a,
+h3.signature a,
+p.signature a:visited,
+h3.signature a:visited {
+  color: var(--fg) !important;
+  font-weight: 700;
+}
+
+/* The "Object" return-type pill inside attribute signatures keeps
+ * its tt-wrapper; let it carry the inline-code background. */
+h3.signature > tt,
+p.signature > tt {
+  background: var(--bg-code) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm);
+  padding: 1px 6px !important;
+  color: var(--code-inline) !important;
+}
+
+.method_details {
+  border-top: 1px solid var(--border);
+  margin-top: 24px;
+  padding-top: 8px;
+}
+
+/* ============================================================
+ * Object links, "show all", "more..."
+ * ============================================================ */
+
+/* `.summary_desc .object_link a, .docstring .object_link a` ships with
+ * background #edf4fa + color #05a (light bg, dark link). Re-skin. */
+.summary_desc .object_link a,
+.docstring .object_link a,
+.tags .object_link a,
+#filecontents .object_link a,
+.discussion .object_link a {
+  background: var(--bg-code) !important;
+  color: var(--code-inline) !important;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px !important;
+  font-family: var(--font-mono);
+}
+
+.summary_desc .object_link a:hover,
+.docstring .object_link a:hover,
+.tags .object_link a:hover,
+#filecontents .object_link a:hover {
+  background: var(--parse) !important;
+  color: #fff !important;
+  border-color: var(--parse);
+}
+
+/* Object links inside <pre.code> stay transparent (YARD already sets
+ * `background: inherit` there; we re-pin to avoid !important fighting). */
+.summary_desc pre.code .object_link a,
+.docstring pre.code .object_link a,
+pre.code .object_link a {
+  background: transparent !important;
+  border: 0 !important;
+  padding: 0 !important;
+  color: var(--link) !important;
+}
+
+/* "show all" inheritance-tree toggle inside .box_info. */
+a.inheritanceTree,
+.box_info a.inheritanceTree,
+.inheritanceTree {
+  background: var(--bg-soft) !important;
+  color: var(--link) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm) !important;
+  padding: 1px 8px !important;
+  font-size: 0.85em;
+  font-weight: 600;
+  text-decoration: none !important;
+}
+
+a.inheritanceTree:hover {
+  background: var(--parse) !important;
+  color: #fff !important;
+  border-color: var(--parse) !important;
+}
+
+/* "more..." / "(less)" toggle inserted by createDefineLinks(). */
+a.toggleDefines,
+.toggleDefines {
+  background: var(--bg-soft) !important;
+  color: var(--link) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm) !important;
+  padding: 1px 8px !important;
+  font-size: 0.8em;
+  font-weight: 600;
+  text-decoration: none !important;
+  margin-left: 4px;
+}
+
+a.toggleDefines:hover {
+  background: var(--parse) !important;
+  color: #fff !important;
+  border-color: var(--parse) !important;
+}
+
+/* `.defines` is the hidden detail span the toggle reveals; keep its
+ * text inheriting the page palette (it was a light surface in stock). */
+.defines {
+  color: var(--fg-muted);
+}
+
+/* ============================================================
+ * .note.title.* badges (Private, Readonly, Writeonly, Constructor)
+ * ------------------------------------------------------------
+ * These are the inline pill badges next to method signatures. YARD
+ * ships hardcoded pastel backgrounds for each — too light to read
+ * on a dark surface. Specificity 0,3,0 (three classes) so we need
+ * to match it.
+ * ============================================================ */
+
+.note.title {
+  background: var(--bg-soft) !important;
+  color: var(--fg) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm);
+  padding: 1px 8px !important;
+  font-size: 0.78em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  vertical-align: middle;
+}
+
+.note.title.private {
+  background: var(--bg-soft) !important;
+  color: var(--fg-muted) !important;
+  border-color: var(--slate) !important;
+}
+
+.note.title.readonly {
+  background: rgba(22, 156, 238, .18) !important;
+  color: var(--link) !important;
+  border-color: var(--parse) !important;
+}
+
+.note.title.writeonly {
+  background: rgba(69, 166, 56, .18) !important;
+  color: #7ED4A6 !important;
+  border-color: #4D8E48 !important;
+}
+
+.note.title.constructor {
+  background: rgba(255, 143, 163, .15) !important;
+  color: var(--accent) !important;
+  border-color: var(--accent) !important;
+}
+
+.note.title.not_defined_here,
+.note.title.deprecated {
+  background: rgba(255, 107, 122, .15) !important;
+  color: var(--accent-hi) !important;
+  border-color: var(--accent) !important;
+}
+
+/* Strike-through line for deprecated entries already comes from
+ * .deprecated rules elsewhere — leave it alone. */

@@ -59,7 +59,9 @@ module Parse
   # @note This collection is consumed by external scheduling tooling, not by
   #   Parse Server itself. {#params} is stored as a JSON string (not an
   #   Object) per the canonical Parse Server schema; use {#parsed_params} to
-  #   decode. Master-key access is typically required.
+  #   decode. `_JobSchedule` is hardcoded master-key-only at Parse Server's
+  #   REST layer (`SharedRest.js`) — CLP changes via
+  #   {Parse::Object.set_clp} have no effect.
   # @see Parse::JobStatus
   # @see Parse::Object
   class JobSchedule < Parse::Object

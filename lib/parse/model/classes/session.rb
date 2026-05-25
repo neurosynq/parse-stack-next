@@ -27,6 +27,13 @@ module Parse
   #      has_one :installation, ->{ where(installation_id: i.installation_id) }, scope_only: true
   #   end
   #
+  # @note CLP on `_Session` is mostly redundant: non-master `find` queries
+  #   are silently rewritten by Parse Server's REST layer
+  #   (`RestQuery.js`) to scope by `user = <current user>`, so a caller
+  #   never sees another user's sessions regardless of CLP. `find` also
+  #   requires a session token. You cannot grant cross-user session
+  #   visibility through {Parse::Object.set_clp}.
+  #
   # @see Parse::Object
   class Session < Parse::Object
     parse_class Parse::Model::CLASS_SESSION

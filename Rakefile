@@ -563,7 +563,11 @@ end
 
 desc "Start the yard server"
 task "docs" do
-  exec "rm -rf ./yard && yard server --reload"
+  # `-t docs/yard-template` is required: `yard server` does not honor
+  # the --template-path line in .yardopts (that's only read by
+  # `yard doc`), so the custom theme overlay only takes effect when
+  # the path is passed on the command line.
+  exec "rm -rf ./yard && yard server --reload -t docs/yard-template"
 end
 
 YARD::Rake::YardocTask.new do |t|

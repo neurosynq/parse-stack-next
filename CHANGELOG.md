@@ -1,5 +1,112 @@
 ## parse-stack-next Changelog
 
+### 5.1.0
+
+#### `_User` field-visibility DSL — `master_only_fields` and `self_visible_fields`
+
+- **NEW**: `Parse::User.master_only_fields(*fields)` declares fields that
+  should be hidden from query/get responses for every non-master caller,
+  including the owning user themselves. Useful for admin-only metadata
+  living on `_User` (e.g. internal scoring, moderation notes). Expands
+  internally to a `protect_fields "*"` entry. Effective only when Parse
+  Server is started with `protectedFieldsOwnerExempt: false` — the
+  default `true` exempts the owning user from every `protectedFields`
+  rule on `_User` and would silently negate the protection. The SDK
+  documents the dependency on the helper's YARD and surfaces it in the
+  one-time advisory described below. (`lib/parse/model/classes/user.rb`)
+- **NEW**: `Parse::User.self_visible_fields(*fields, via: :self)`
+  declares fields that should be hidden from public, role, and other-
+  user callers but visible to the owning user on their own row.
+  Expands internally to a `protect_fields "*"` plus a
+  `protect_fields "userField:<via>"` pair whose intersection resolves
+  to "owner sees the field, nobody else does". Requires (a) Parse
+  Server option `protectedFieldsOwnerExempt: false` and (b) a
+  self-pointer field on `_User` (default field name `:self`) populated
+  by a `beforeSave('_User')` Cloud Code trigger. The SDK cannot
+  install either — both are server-side configuration — and the helper
+  documents both prerequisites inline. (`lib/parse/model/classes/user.rb`)
+- **NEW**: One-time process-scoped advisories when the new DSL helpers
+  or raw `protect_fields` are called on `Parse::User`:
+  - First invocation of `master_only_fields` or `self_visible_fields`
+    surfaces the `protectedFieldsOwnerExempt: false` server-option
+    prerequisite. With the default `true`, the owning user is silently
+    exempted from every `protectedFields` rule on `_User`, so a field
+    declared master-only would still be visible to the user themselves
+    on their own row. The SDK cannot introspect Parse Server's startup
+    options, so the advisory fires at class declaration so it's
+    surfaceable before deploy.
+  - First invocation of `self_visible_fields` also surfaces the
+    self-pointer prerequisite: the `via:` field has to exist on `_User`
+    and be populated by a `beforeSave('_User')` Cloud Code trigger,
+    AND pre-existing user rows need a one-shot backfill before the
+    `userField:<via>` group matches them.
+  - Direct calls to `protect_fields` on `Parse::User` outside the
+    helpers point the caller at `master_only_fields` /
+    `self_visible_fields` plus the same `protectedFieldsOwnerExempt`
+    reminder. Behavior is otherwise unchanged. The helpers themselves
+    set a class-level bypass flag so the raw-protect_fields advisory
+    does not double-fire. Internal SDK callers (e.g. the
+    `parse_reference` embedded-reference DSL auto-install in
+    `lib/parse/model/core/parse_reference.rb`) also bypass the
+    raw-protect_fields advisory so gem boot stays quiet on apps that
+    use embedded references on `_User`. (`lib/parse/model/classes/user.rb`,
+    `lib/parse/model/core/parse_reference.rb`)
+
+#### `_Installation` CLP advisory
+
+- **NEW**: One-time process-scoped advisory emitted from
+  `Parse::Installation` when any of `set_clp`, `set_class_access`,
+  `set_read_user_fields`, or `set_write_user_fields`
+  is invoked on the class. Parse Server hardcodes `find` and `delete`
+  on `_Installation` to master-key-only at the REST layer
+  (`SharedRest.js`), and gates `create` / `update` on the
+  `X-Parse-Installation-Id` header rather than CLP — so most CLP
+  changes on `_Installation` either do nothing or break the SDK's
+  device-registration flow. The advisory enumerates which operations
+  CLP actually controls on this class (`get`, `count`, `addField`,
+  `protectedFields`) and points the caller at the
+  `beforeSave('_Installation')` Cloud Code pattern for login-required
+  write policy. Behavior is otherwise unchanged. (`lib/parse/model/classes/installation.rb`)
+
+#### Documentation
+
+- **NEW**: `docs/acl_clp_guide.md` is the canonical reference for ACL,
+  CLP, `protectedFields`, role hierarchy, and field-guard write
+  protection across parse-stack-next. Covers the five enforcement
+  layers (CLP, ACL, `protectedFields`, field guards, master-key
+  bypass); the system-class CLP matrix (which classes actually honor
+  CLP versus the ones hardcoded master-key-only at the REST layer:
+  `_JobStatus`, `_PushStatus`, `_Hooks`, `_GlobalConfig`,
+  `_GraphQLConfig`, `_JobSchedule`, `_Audience`, `_Idempotency`,
+  `_Join:*`); the `_Installation` hardcoded asymmetry; the `_User`
+  field-visibility recipe with `protectedFieldsOwnerExempt` and the
+  self-pointer pattern; role hierarchy direction (the
+  `inherits_capabilities_from!` vs `add_child_role` distinction); the
+  field-guard modes and their webhook dependency; the REST-aggregate
+  vs `Parse::MongoDB.aggregate` enforcement asymmetry (REST aggregate
+  is master-key-only and enforces NEITHER CLP nor ACL nor
+  `protectedFields`); Atlas Search inheriting SDK-side enforcement
+  through the mongo-direct path; and a pitfalls section. (`docs/acl_clp_guide.md`)
+- **CHANGED**: `docs/client_sdk_guide.md` §4 now opens with a banner
+  pointing readers at the new comprehensive ACL/CLP guide. Sections
+  added in this release for `_Installation` CLP semantics (§6.3),
+  the full system-class CLP matrix (§6.5), and the `_User` field-
+  visibility recipe with the intersection-resolution table (§6.6)
+  remain in the SDK guide as a client-mode quickstart. (`docs/client_sdk_guide.md`)
+- **CHANGED**: YARD `@note` on `Parse::JobStatus`, `Parse::PushStatus`,
+  `Parse::Audience`, and `Parse::JobSchedule` now states that the
+  class is hardcoded master-key-only at Parse Server's REST layer and
+  that CLP changes are ignored. YARD on `Parse::Session` documents the
+  non-master find auto-scoping to `user = <current user>`, so CLP
+  cannot grant cross-user session visibility. YARD on
+  `Parse::Installation` carries the full operation-by-operation CLP
+  effectiveness table. (`lib/parse/model/classes/job_status.rb`,
+  `lib/parse/model/classes/push_status.rb`,
+  `lib/parse/model/classes/audience.rb`,
+  `lib/parse/model/classes/job_schedule.rb`,
+  `lib/parse/model/classes/session.rb`,
+  `lib/parse/model/classes/installation.rb`)
+
 ### 5.0.1
 
 #### Redis cache wrapper compatibility with `Parse::CreateLock`

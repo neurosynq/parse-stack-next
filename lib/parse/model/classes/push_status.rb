@@ -43,7 +43,10 @@ module Parse
   #   recent = Parse::PushStatus.recent.limit(10).all
   #   recent.each { |s| puts "#{s.status}: #{s.num_sent} sent" }
   #
-  # @note This collection requires master key access
+  # @note `_PushStatus` is hardcoded master-key-only at Parse Server's
+  #   REST layer (`SharedRest.js`). CLP changes via
+  #   {Parse::Object.set_clp} have no effect — all reads and writes
+  #   require a master-key client.
   # @see Parse::Push
   # @see Parse::Object
   class PushStatus < Parse::Object

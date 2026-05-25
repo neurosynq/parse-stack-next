@@ -13,6 +13,9 @@ group :test, :development do
   gem 'minitest-reporters'
   gem "pry"
   gem "yard", ">= 0.9.11"
+  # Rack 3 removed Rack::Server (used by `yard server`); the rackup gem
+  # restores it. Drop this once YARD's server adapter stops referencing it.
+  gem "rackup"
   gem "redcarpet"
   gem "rufo"
   gem "mongo"
