@@ -1,0 +1,105 @@
+name: Bug report
+description: Report a defect in parse-stack-next
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Please fill out the sections below so we can reproduce and diagnose the issue quickly.
+
+        Before submitting, please search [existing issues](https://github.com/neurosynq/parse-stack-next/issues) to avoid duplicates.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A clear and concise description of the bug.
+      placeholder: When I call `Parse::Query#results_direct` with ..., it raises ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal code sample or steps needed to reproduce the behavior.
+      render: ruby
+      placeholder: |
+        class Post < Parse::Object
+          property :title, :string
+        end
+
+        Post.query(title: "hello").results
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include full stack traces if applicable.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: gem-version
+    attributes:
+      label: parse-stack-next version
+      placeholder: e.g. 5.0.0
+    validations:
+      required: true
+
+  - type: input
+    id: ruby-version
+    attributes:
+      label: Ruby version
+      placeholder: e.g. ruby 3.3.5
+    validations:
+      required: true
+
+  - type: input
+    id: parse-server-version
+    attributes:
+      label: Parse Server version
+      placeholder: e.g. 7.3.0
+    validations:
+      required: false
+
+  - type: input
+    id: mongodb-version
+    attributes:
+      label: MongoDB version
+      placeholder: e.g. 7.0 / Atlas
+    validations:
+      required: false
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      description: How is Parse Server / MongoDB hosted?
+      options:
+        - Self-hosted
+        - MongoDB Atlas
+        - Local Docker (scripts/docker/*)
+        - Other
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Logs, screenshots, related issues, or anything else that may help.
+    validations:
+      required: false

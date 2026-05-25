@@ -1,0 +1,67 @@
+name: Feature request
+description: Suggest a new feature or enhancement for parse-stack-next
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing a new feature. Please describe the problem you're trying to solve before proposing a specific implementation.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem are you trying to solve? What is the user-facing pain point?
+      placeholder: When working with ..., it's difficult to ... because ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the API, behavior, or capability you'd like to see.
+      render: ruby
+      placeholder: |
+        # Example of the proposed usage
+        Post.query.where(...).some_new_method(...)
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or alternative designs have you considered?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the SDK does this affect?
+      options:
+        - Model / Properties
+        - Query
+        - Associations
+        - Schema / Migrations
+        - Client / HTTP
+        - ACL / CLP / Security
+        - Roles / Users
+        - Atlas Search
+        - MongoDB direct
+        - Webhooks / Cloud Code
+        - Documentation
+        - Other
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Links to related issues, prior art in other libraries, references to Parse Server docs, etc.
+    validations:
+      required: false
