@@ -2,6 +2,36 @@
 
 ### 5.1.0
 
+#### Client setup fixes — `Parse.setup` and `live_query_url`
+
+- **FIXED**: `Parse.setup` (the module-level helper) silently no-op'd on every
+  call after the first. The implementation routed through `Parse::Client.new`,
+  whose constructor registers itself with `Parse::Client.clients[:default] ||= self`
+  — so once a default was set, subsequent `Parse.setup` invocations built a
+  new client, ran all the Faraday and LiveQuery configuration, and then
+  threw the result away because `||=` would not overwrite. The class-level
+  `Parse::Client.setup` uses `=` and did overwrite, so the two entry points
+  behaved differently despite being documented as equivalent. `Parse.setup`
+  now delegates to `Parse::Client.setup`, so re-configuring the default
+  client (Rake tasks that need to point at a prod URL after a development
+  initializer ran, multi-tenant boot, test isolation) works without
+  manually clearing `Parse::Client.clients[:default]` first. The `||=`
+  guard in `Parse::Client#initialize` is preserved so ad-hoc
+  `Parse::Client.new(...)` for secondary clients still does not hijack
+  the `:default` slot. (`lib/parse/client.rb`)
+- **FIXED**: Passing `live_query_url:` (or any `live_query: {...}` options)
+  to `Parse.setup` / `Parse::Client.new` raised
+  `ArgumentError: wrong number of arguments (given 1, expected 0)`.
+  `Parse::Client#configure_live_query` was calling
+  `Parse::LiveQuery.configure(url:, application_id:, client_key:, master_key:, **opts)`
+  with keyword arguments, but `Parse::LiveQuery.configure` takes no
+  arguments and only yields a configuration block. The configuration is
+  now applied through the block form, assigning each option via the
+  `Parse::LiveQuery::Configuration` setters and skipping any unknown
+  keys with `respond_to?`. Boot-time LiveQuery configuration via
+  `Parse.setup(live_query_url: ...)` now matches the documented behavior.
+  (`lib/parse/client.rb`)
+
 #### `_User` field-visibility DSL — `master_only_fields` and `self_visible_fields`
 
 - **NEW**: `Parse::User.master_only_fields(*fields)` declares fields that

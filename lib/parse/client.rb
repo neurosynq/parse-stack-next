@@ -1031,11 +1031,12 @@ module Parse
   # @return (see Parse::Client.setup)
   # @see Parse::Client.setup
   def self.setup(opts = {}, &block)
-    if block_given?
-      Parse::Client.new(opts, &block)
-    else
-      Parse::Client.new(opts)
-    end
+    # Delegate to Parse::Client.setup so repeated Parse.setup calls overwrite
+    # the registered :default client. Going through Parse::Client.new instead
+    # would hit the `@clients[:default] ||= self` guard inside #initialize and
+    # silently keep the first-registered client, while Parse::Client.setup
+    # uses `=` and replaces it. Both entry points must behave identically.
+    Parse::Client.setup(opts, &block)
   end
 
   # @!visibility private
