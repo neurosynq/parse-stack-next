@@ -259,6 +259,143 @@ class ParseLockTest < Minitest::Test
     assert_match(/acquire error/, err)
   end
 
+  # ---- HMAC secret resolution (TODO #1 — v5.1.0 deferred follow-up) ----
+  #
+  # `Parse::Lock.acquire(secret:)` accepts `:auto` (default — use the
+  # backend's secret lookup, including PARSE_STACK_LOCK_SECRET /
+  # `Parse.synchronize_create_secret`), `nil` (explicit plain SHA-256
+  # opt-out, no warn), or a `String` (caller-supplied HMAC key). The
+  # default-on HMAC keying means a configured operator secret is
+  # consumed by BOTH `Parse::Lock` and `Parse::CreateLock` without
+  # the operator having to opt in twice.
+
+  def test_acquire_rejects_invalid_secret
+    [42, :nope, true, false, "", []].each do |bad|
+      err = assert_raises(ArgumentError) { Parse::Lock.acquire("k", secret: bad) { :unreachable } }
+      assert_match(/secret must be :auto/, err.message, "value=#{bad.inspect}")
+    end
+  end
+
+  def test_acquire_rejects_short_secret
+    # Round-3-of-round-3 hardening: an explicit `secret:` shorter than
+    # SECRET_MIN_BYTES is refused at the boundary. Without this, a
+    # caller misconfiguration like `secret: "x"` would silently
+    # degrade the lock-pinning resistance the HMAC keying is supposed
+    # to provide.
+    [
+      "a",                                          # 1 byte
+      "shortie",                                    # 7 bytes
+      "a" * (Parse::Lock::SECRET_MIN_BYTES - 1),    # just under the line
+    ].each do |bad|
+      err = assert_raises(ArgumentError) do
+        Parse::Lock.acquire("k", ttl: 1, secret: bad) { flunk "must not run" }
+      end
+      assert_match(/at least #{Parse::Lock::SECRET_MIN_BYTES} bytes/, err.message,
+        "value=#{bad.inspect} should be rejected")
+    end
+  end
+
+  def test_acquire_accepts_minimum_length_secret
+    min_secret = "a" * Parse::Lock::SECRET_MIN_BYTES
+    Parse::Lock.acquire("k", ttl: 5, secret: min_secret) { :ok }
+  end
+
+  def test_acquire_explicit_secret_produces_hmac_keyed_store_entry
+    # With an explicit secret, the cache-store key is HMAC-SHA256
+    # rather than plain SHA-256. Verify the digest matches the
+    # expected HMAC of the raw key.
+    require "openssl"
+    secret = "test-secret-DO-NOT-LEAK"
+    expected = "#{Parse::Lock::KEY_PREFIX}#{OpenSSL::HMAC.hexdigest("SHA256", secret, "billing-2026-Q4")}"
+
+    Parse::Lock.acquire("billing-2026-Q4", ttl: 5, secret: secret) do
+      keys = @lock_store.each_key.to_a
+      assert_equal 1, keys.length
+      assert_equal expected, keys.first,
+        "HMAC-keyed store entry must match OpenSSL::HMAC.hexdigest"
+    end
+  end
+
+  def test_acquire_nil_secret_produces_plain_sha_keyed_store_entry
+    require "digest"
+    expected = "#{Parse::Lock::KEY_PREFIX}#{Digest::SHA256.hexdigest("billing-2026-Q4")}"
+
+    Parse::Lock.acquire("billing-2026-Q4", ttl: 5, secret: nil) do
+      keys = @lock_store.each_key.to_a
+      assert_equal 1, keys.length
+      assert_equal expected, keys.first,
+        "secret: nil must use plain SHA-256"
+    end
+  end
+
+  def test_acquire_different_secrets_produce_different_store_keys
+    # Same raw key, two different HMAC secrets, two different store
+    # keys — so the same logical lock under two different secrets
+    # does NOT serialize. Important: two services sharing one Redis
+    # but using different secrets get isolated locks for the same
+    # raw key. Both secrets are ≥ SECRET_MIN_BYTES (16) to satisfy
+    # the validate_secret! length floor.
+    keys_seen = []
+    Parse::Lock.acquire("alpha", ttl: 5, secret: "operator-secret-A-aaaaaa") do
+      keys_seen << @lock_store.each_key.to_a.first
+    end
+    Parse::Lock.acquire("alpha", ttl: 5, secret: "operator-secret-B-bbbbbb") do
+      keys_seen << @lock_store.each_key.to_a.last
+    end
+    refute_equal keys_seen[0], keys_seen[1],
+      "different secrets must produce different store keys for the same raw key"
+  end
+
+  def test_acquire_auto_secret_picks_up_env_var
+    prior_env  = ENV["PARSE_STACK_LOCK_SECRET"]
+    prior_attr = Parse.respond_to?(:synchronize_create_secret) ? Parse.synchronize_create_secret : nil
+    ENV["PARSE_STACK_LOCK_SECRET"] = "env-test-secret"
+    # Force a refresh so any cached state is cleared.
+    Parse::LockBackend.reset!
+
+    expected = "#{Parse::Lock::KEY_PREFIX}#{OpenSSL::HMAC.hexdigest("SHA256", "env-test-secret", "thing")}"
+    Parse::Lock.acquire("thing", ttl: 5) do
+      assert_equal expected, @lock_store.each_key.to_a.first
+    end
+  ensure
+    ENV["PARSE_STACK_LOCK_SECRET"] = prior_env
+    Parse.synchronize_create_secret = prior_attr if Parse.respond_to?(:synchronize_create_secret=)
+    Parse::LockBackend.reset!
+  end
+
+  def test_acquire_auto_secret_picks_up_synchronize_create_secret_accessor
+    prior_attr = Parse.synchronize_create_secret if Parse.respond_to?(:synchronize_create_secret)
+    Parse.synchronize_create_secret = "accessor-test-secret"
+    Parse::LockBackend.reset!
+
+    expected = "#{Parse::Lock::KEY_PREFIX}#{OpenSSL::HMAC.hexdigest("SHA256", "accessor-test-secret", "alpha")}"
+    Parse::Lock.acquire("alpha", ttl: 5) do
+      assert_equal expected, @lock_store.each_key.to_a.first
+    end
+  ensure
+    Parse.synchronize_create_secret = prior_attr
+    Parse::LockBackend.reset!
+  end
+
+  def test_auto_secret_shared_with_create_lock_when_env_set
+    # An operator setting PARSE_STACK_LOCK_SECRET expects ONE
+    # configuration to harden both APIs. Verify the same env var
+    # resolves to the same secret from both LockBackend.lock_secret_for
+    # (called from Parse::Lock) and the CreateLock-internal version
+    # (now also going through LockBackend).
+    prior = ENV["PARSE_STACK_LOCK_SECRET"]
+    ENV["PARSE_STACK_LOCK_SECRET"] = "shared-secret"
+    Parse::LockBackend.reset!
+
+    s1 = Parse::LockBackend.lock_secret_for(store: @lock_store, source: "Parse::Lock")
+    s2 = Parse::LockBackend.lock_secret_for(store: @lock_store, source: "Parse::CreateLock")
+    assert_equal "shared-secret", s1
+    assert_equal "shared-secret", s2
+  ensure
+    ENV["PARSE_STACK_LOCK_SECRET"] = prior
+    Parse::LockBackend.reset!
+  end
+
   def test_namespace_does_not_collide_with_create_lock
     # Parse::Lock uses "parse-stack:lock:v1:" prefix; CreateLock uses
     # "parse-stack:foc:v1:". A Parse::Lock on key "billing-cycle" must

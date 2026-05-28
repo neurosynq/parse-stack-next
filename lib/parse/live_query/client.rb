@@ -294,9 +294,15 @@ module Parse
       #   opt-in. See {Subscription#initialize} for the trade-offs.
       #   Requires this client to have been constructed with a
       #   `master_key` (otherwise the kwarg is a no-op).
+      # @yield [subscription] runs the block with the freshly-
+      #   constructed {Subscription} BEFORE the subscribe frame is
+      #   sent to the server, so callbacks registered inside the block
+      #   (`sub.on(:create) { … }`, etc.) are wired before any server
+      #   events can arrive. Optional — callers may still capture the
+      #   returned subscription and register callbacks later.
       # @return [Subscription]
       def subscribe(class_name, where: {}, fields: nil, session_token: nil,
-                    use_master_key: false)
+                    use_master_key: false, &block)
         # Handle Parse::Object subclass
         if class_name.is_a?(Class) && class_name < Parse::Object
           class_name = class_name.parse_class
@@ -337,6 +343,29 @@ module Parse
         Logging.debug("Subscription created",
                       request_id: subscription.request_id,
                       class_name: class_name)
+
+        # Yield the subscription BEFORE the subscribe frame goes out so
+        # caller-registered callbacks are wired before any server event
+        # can arrive on this request_id. Order matters: subscribe-frame-
+        # then-yield would race a fast server response against the
+        # callback registration on a hot socket.
+        #
+        # If the caller's block raises, ROLL BACK the registry insert
+        # before re-raising. Without this, the failed-block
+        # subscription stays in `@subscriptions` and the next
+        # `resubscribe_all` (triggered by a reconnect) wire-sends it
+        # to the server — a ghost subscription the caller thought
+        # they had aborted.
+        if block_given?
+          begin
+            yield(subscription)
+          rescue
+            @monitor.synchronize do
+              @subscriptions.delete(subscription.request_id)
+            end
+            raise
+          end
+        end
 
         # Send subscribe message if connected
         if connected?

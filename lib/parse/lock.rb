@@ -3,6 +3,7 @@
 
 require "securerandom"
 require "digest"
+require "openssl"
 require_relative "lock_backend"
 
 module Parse
@@ -79,6 +80,17 @@ module Parse
     MAX_TTL      = 30
     MAX_WAIT     = 30
 
+    # Minimum byte-length for an explicit `secret:` kwarg. 16 bytes
+    # ≈ 128 bits of separation between tenants — short enough not to
+    # burden an operator who already has a real secret, long enough
+    # that a `secret: "a"` misconfiguration is refused at the
+    # boundary rather than silently degrading the lock-pinning
+    # resistance claim. Applies ONLY to the `secret:` kwarg path; the
+    # operator-configured `PARSE_STACK_LOCK_SECRET` path is not
+    # length-checked here (different threat model — that's the
+    # operator's process-boot configuration, not a per-call argument).
+    SECRET_MIN_BYTES = 16
+
     # Raised when {Parse::Lock.acquire} cannot obtain the lock within
     # the configured `wait:` budget. Distinct from
     # `Parse::CreateLockTimeoutError` (the `first_or_create!` /
@@ -103,20 +115,20 @@ module Parse
       # default; if you need finer control, build it locally.)
       #
       # @param key [String] a stable identifier for the resource being
-      #   guarded. Hashed with SHA-256 before hitting the store so the
-      #   raw caller-supplied String does not appear verbatim in
-      #   `KEYS *` output. **This is obfuscation, not authentication**
-      #   — an attacker with `KEYS *` access who knows the input space
-      #   (e.g. "this app uses stripe-webhook:<evt_id>" keys with
-      #   guessable `evt_id` prefixes) can recover the original via
-      #   wordlist. For unguessable inputs (UUIDs, opaque opaque
-      #   tokens) the SHA is effectively non-reversible; for
-      #   semi-structured inputs (`tenant_<id>:order_<id>`) treat
-      #   `KEYS *` access as equivalent to read access on the input
-      #   space itself. Must be a non-empty String of at most 1024
-      #   bytes — longer keys are refused (a runaway-string bug that
-      #   turned into a multi-megabyte key would silently break Redis
-      #   perf).
+      #   guarded. By default hashed via HMAC-SHA256 keyed with the
+      #   operator-configured secret (`PARSE_STACK_LOCK_SECRET` or
+      #   `Parse.synchronize_create_secret`); when no secret is
+      #   configured AND the store is cross-process (Redis), falls
+      #   back to plain SHA-256 with a one-time `[Parse::Lock:SECURITY]`
+      #   warning that names the enumeration + lock-pinning risks and
+      #   the remediation knob. When the store is process-local
+      #   (Memory / Null / nil), an auto-derived per-process secret
+      #   is used regardless — process-local locking already implies
+      #   single-process, so a per-process secret doesn't break
+      #   cross-process equality. Use `secret:` to override per call.
+      #   Must be a non-empty String of at most 1024 bytes — longer
+      #   keys are refused (a runaway-string bug that turned into a
+      #   multi-megabyte key would silently break Redis perf).
       # @param ttl [Integer] seconds the lock is held before
       #   self-clearing. Clamped to 1..30. Pick a value comfortably
       #   longer than your expected critical-section duration; the
@@ -128,19 +140,44 @@ module Parse
       #   process-local: `:warn` (default — one warning per call),
       #   `:warn_throttled` (one warning per minute), `:proceed`
       #   (silent), `:raise` (raise Parse::Lock::UnavailableError).
+      #   **Asymmetric-degradation residual risk:** if two processes
+      #   target the same Redis but disagree on degraded-detection
+      #   (e.g. process A has `Parse.synchronize_create_store = nil`
+      #   while process B has it wired to Redis), A takes the
+      #   `auto_secret` branch and B takes the `nil`/plain-SHA branch.
+      #   They derive different store keys for the same raw key and
+      #   silently fail to mutually exclude. The `:warn` mode fires
+      #   only on the degraded process (A); the operator may not
+      #   connect "A logged a degraded warning" with "B is also
+      #   running but with a different effective lock surface."
+      #   Mitigation: set `Parse.synchronize_create_store` uniformly
+      #   across deployment workers, OR pass `on_degraded: :raise`
+      #   so any disagreement surfaces loudly.
+      # @param secret [Symbol, String, nil] HMAC secret selection.
+      #   `:auto` (default) uses {Parse::LockBackend.lock_secret_for}
+      #   — picks up `PARSE_STACK_LOCK_SECRET` /
+      #   `Parse.synchronize_create_secret` when set, auto-derives
+      #   a per-process secret for degraded stores, falls back to
+      #   plain SHA-256 with a security warn for cross-process
+      #   stores without a configured secret. A `String` overrides
+      #   the resolution and uses that secret directly (useful when
+      #   a single flow needs a different keying than the global
+      #   default). `nil` explicitly opts out of HMAC and uses plain
+      #   SHA-256 — no warn, since the opt-out is deliberate.
       # @yield runs the block with the lock held.
       # @return [Object] the block's return value.
       # @raise [ArgumentError] on invalid `key` / `ttl` / `wait` /
-      #   `on_degraded`.
+      #   `on_degraded` / `secret`.
       # @raise [Parse::Lock::TimeoutError] when `wait` elapses without
       #   acquisition.
       # @raise [Parse::Lock::UnavailableError] when `on_degraded: :raise`
       #   and the store is process-local.
       def acquire(key, ttl: DEFAULT_TTL, wait: DEFAULT_WAIT,
-                  on_degraded: :warn, &block)
+                  on_degraded: :warn, secret: :auto, &block)
         raise ArgumentError, "block required" unless block_given?
         validated_key = validate_key!(key)
         validate_on_degraded!(on_degraded)
+        validate_secret!(secret)
         normalized_ttl  = clamp(Integer(ttl),  1,   MAX_TTL)
         normalized_wait = clamp(Float(wait),   0.0, MAX_WAIT)
 
@@ -149,8 +186,23 @@ module Parse
         # ("parse-stack:lock:v1:") is distinct from CreateLock's
         # ("parse-stack:foc:v1:") so the two namespaces cannot
         # collide even on literally-equal-named keys.
-        store_key = "#{KEY_PREFIX}#{Digest::SHA256.hexdigest(validated_key)}"
-        store     = Parse::LockBackend.lock_store
+        store = Parse::LockBackend.lock_store
+
+        # Resolve HMAC secret (or nil for plain SHA) per the
+        # `secret:` kwarg semantics above. The `:auto` branch picks
+        # up the operator-configured secret if one exists; the
+        # explicit-String branch overrides it; the explicit-nil
+        # branch opts out without a warn.
+        resolved_secret =
+          case secret
+          when :auto   then Parse::LockBackend.lock_secret_for(store: store, source: "Parse::Lock")
+          when String  then secret
+          when nil     then nil
+          end
+        digest = resolved_secret \
+          ? OpenSSL::HMAC.hexdigest("SHA256", resolved_secret, validated_key) \
+          : Digest::SHA256.hexdigest(validated_key)
+        store_key = "#{KEY_PREFIX}#{digest}"
 
         if Parse::LockBackend.degraded_store?(store)
           Parse::LockBackend.handle_degraded(
@@ -204,6 +256,24 @@ module Parse
               "#{VALID_ON_DEGRADED.inspect} (got #{value.inspect}). " \
               "Refusing to silently fall back to :warn on an unknown safety knob — " \
               "a typo like :riase would otherwise become silent-warn and mask intent."
+      end
+
+      def validate_secret!(value)
+        return if value == :auto || value.nil?
+        unless value.is_a?(String) && !value.empty?
+          raise ArgumentError,
+                "Parse::Lock.acquire: secret must be :auto (use the backend's " \
+                "resolution), nil (opt out to plain SHA-256), or a non-empty String " \
+                "(explicit HMAC key) — got #{value.inspect}."
+        end
+        if value.bytesize < SECRET_MIN_BYTES
+          raise ArgumentError,
+                "Parse::Lock.acquire: explicit `secret:` must be at least " \
+                "#{SECRET_MIN_BYTES} bytes (got #{value.bytesize}). A short HMAC " \
+                "key reduces the separation between tenants sharing one Redis and " \
+                "defeats the lock-pinning resistance the HMAC keying is supposed to " \
+                "provide. Use SecureRandom.hex(32) or a real operator secret."
+        end
       end
 
       def validate_key!(key)

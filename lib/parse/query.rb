@@ -2972,9 +2972,13 @@ module Parse
     #   ACL/CLP enforcement for this subscription. Lets one client
     #   service both end-user (session-token-scoped) and administrative
     #   (master-key-scoped) subscriptions on the same socket.
+    # @yield [subscription] runs the block with the freshly-constructed
+    #   {Parse::LiveQuery::Subscription} BEFORE the subscribe frame is
+    #   sent so caller-registered callbacks are wired before any server
+    #   events can arrive. Optional.
     # @return [Parse::LiveQuery::Subscription] the subscription object
     # @see Parse::LiveQuery::Subscription
-    def subscribe(fields: nil, session_token: nil, client: nil, use_master_key: false)
+    def subscribe(fields: nil, session_token: nil, client: nil, use_master_key: false, &block)
       require_relative "live_query"
 
       lq_client = client || Parse::LiveQuery.client
@@ -2984,6 +2988,7 @@ module Parse
         fields: fields,
         session_token: session_token || @session_token,
         use_master_key: use_master_key,
+        &block
       )
     end
 

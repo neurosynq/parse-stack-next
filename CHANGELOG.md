@@ -2,105 +2,161 @@
 
 ### 5.1.0
 
-#### `Parse::File` — storage-adapter prep: `@key` field, signed-URL refusal, inspect hardening, `log_filter`
+#### `Parse::File` — URL normalization, presigned-URL stash, leak hardening
 
-Foundational changes that unblock the upcoming pluggable storage-adapter
-work (S3 + presigned direct upload). The fixes correct latent issues
-that surface the moment a file's canonical URL diverges from the legacy
-`name == File.basename(url)` shape, and harden the model so short-TTL
-signed URLs cannot leak through default Ruby formatters or be
-accidentally cached on the instance.
+The model is hardened so signed URLs never persist in `@url` — they
+get stripped to a canonical bare URL and stashed separately with a
+data-driven expiry parsed from the URL's own query parameters. The
+single URL normalization point applies uniformly to every writer
+(caller-side `url=`, hydration `attributes=`) so the rule is the same
+whether the file pointer arrived from Parse Server's REST surface
+(which may include a freshly-signed URL when Parse Server's
+S3FilesAdapter is configured with `presignedUrl: true`) or from a
+direct caller-side assignment. The change also lays groundwork for
+pluggable storage-adapter work in a later release without committing
+that surface area in this one.
 
-- **NEW**: `Parse::File#key` accessor — optional bucket-relative object
-  key set by storage adapters to record the canonical location of a
-  file independent of `@name` (human filename) or `@url` (hostable URL).
-  Round-trips through `as_json` / `attributes=` for adapter-stored
-  files (the field is omitted from `as_json` when `@key` is blank so
-  legacy Parse-hosted files preserve the canonical `{__type, name, url}`
-  wire shape). Validating setter caps `@key` at 1024 bytes
-  (`Parse::File::MAX_KEY_BYTESIZE` — the S3 hard limit) and raises
-  `Parse::File::InvalidKeyError` past that; closes a memory-amplification
-  vector where a malformed row could ship multi-MB strings into
-  `inspect` output and exception reporters.
+**Migration callout — `@url` value change:** the `@url` field now
+drops signed-URL query parameters before storage. Any application
+code that assigned a presigned URL directly to `Parse::File#url=`
+(uncommon, but possible when wiring up custom file-serve flows) will
+find that `file.url` now returns the bare canonical URL; the
+original signed URL is available via the new `file.presigned_url`
+accessor with its expiry in `file.presigned_url_expires_at`. The
+`Parse::File#to_s` / `<%= file %>` ERB rendering path is unchanged
+in shape (still returns `@url`), but the value emitted is now the
+canonical bare URL rather than whatever was assigned — apps relying
+on inline ERB to render a freshly-signed URL must switch to
+`file.presigned_url` (or the new
+`Parse::File#presigned_url_valid?` predicate) explicitly.
+
+**Migration callout — error reporter payload shape:**
+`Parse::File#inspect` no longer includes the URL at all. Anything
+that captures exception inspect output — Sentry, Honeybadger,
+Rollbar, Bugsnag, Rails' default error pages, custom log scrubbers
+— will see a different payload shape the day an app upgrades to
+5.1.0. Tests that pattern-matched on `@url='https://...'` in
+inspect output will need to be updated, and dashboards / alerts
+that grouped errors by inspect string fingerprints will see a
+one-time shift in fingerprint values. The new format emits
+`@name`, `@mime_type`, `@contents` (presence), and `@url=set|blank`
+— enough to debug, none of the URL content.
+
+- **NEW**: `Parse::File#url=` and `Parse::File#attributes=` now route
+  through a single private normalization point. When the incoming URL
+  carries a recognized signed-URL query parameter
+  (`X-Amz-Signature`, `X-Amz-Credential`, `X-Amz-Security-Token`,
+  `AWSAccessKeyId`, `Key-Pair-Id`), the query string is stripped
+  entirely; the bare canonical URL is stored in `@url`; the original
+  signed URL is stashed in `@presigned_url` with its expiry parsed
+  into `@presigned_url_expires_at`. The expiry is data-driven —
+  computed from `X-Amz-Date + X-Amz-Expires` (SigV4) or `Expires`
+  (SigV2 / CloudFront) — never hardcoded SDK-side. The `@url`
+  invariant is now structural: the field never holds a short-TTL
+  signed URL. (`lib/parse/model/file.rb`)
+- **NEW**: `Parse::File#presigned_url` and
+  `Parse::File#presigned_url_expires_at` accessors expose the
+  stashed signed URL and its parsed expiry. Useful today for apps
+  with Parse Server's `S3FilesAdapter` configured with
+  `presignedUrl: true`: the SDK normalizes the URL Parse Server
+  hands back on every read, the bare canonical value lands in
+  `@url`, and the freshly-signed URL is available via
+  `file.presigned_url` until `file.presigned_url_expires_at`. The
+  stash is invalidated automatically on any URL reassignment
+  (signed → canonical, signed → signed, or assignment to nil), so
+  callers reading `file.presigned_url` are never handed a value
+  staler than `@url`. (`lib/parse/model/file.rb`)
+- **NEW**: `Parse::File#presigned_url_valid?(buffer: 60)` returns
+  true when `@presigned_url` is set and `@presigned_url_expires_at`
+  is at least `buffer` seconds in the future. Default 60 seconds —
+  a margin that absorbs network RTT, client clock skew, and one
+  retry. Eliminates the hand-rolled `expires_at && expires_at -
+  Time.now.utc > N` pattern every caller would otherwise write to
+  gate a refetch. (`lib/parse/model/file.rb`)
+- **NEW**: `Parse::File.signed_url_policy` global accessor controls
+  how the URL normalization point reacts to incoming signed URLs.
+  Values: `:strip` (default — strip and stash, the pragmatic
+  behavior for any deployment where Parse Server's S3FilesAdapter
+  returns presigned URLs on read) or `:raise` (refuse the
+  assignment with `SignedUrlError`). Strict mode for apps that can
+  guarantee Parse Server is NOT issuing signed URLs and want a
+  loud failure on any signed-URL assignment instead of silent
+  normalization. The policy applies uniformly to both
+  caller-side `url=` and hydration `attributes=` — asymmetric
+  writer behavior was an explicit anti-goal. (`lib/parse/model/file.rb`)
+- **NEW**: `Parse::File.parse_presigned_expiry(url)` class method
+  extracts the expiry time (UTC) from any signed URL by parsing its
+  own query parameters. Supports SigV4 and SigV2 / CloudFront
+  shapes. Returns nil for URLs without parseable presigned-URL
+  expiry data. (`lib/parse/model/file.rb`)
+- **FIXED**: `Parse::File#saved?` basename comparison now strips the
+  URL's query string before computing basename, so short-TTL
+  presigned URLs that Parse Server's S3FilesAdapter returns on every
+  read (`https://bucket.s3.../doc.pdf?X-Amz-Signature=...`) don't
+  break `saved?` on reload. The signature bytes used to leak into
+  the comparison and cause false negatives.
   (`lib/parse/model/file.rb`)
-- **FIXED**: `Parse::File#saved?` no longer returns false for
-  adapter-stored files whose URL terminal segment diverges from
-  `@name`. The legacy `@name == File.basename(@url)` predicate is now
-  only applied when `@key` is blank (preserving every existing
-  Parse-Server-hosted code path); when `@key` is present, presence of
-  `@url` + `@name` is sufficient. Previously, a file stored at
-  `https://bucket.s3.amazonaws.com/tenants/abc/uuid-doc.pdf` with
-  `@name = "doc.pdf"` would report `saved? == false` and re-trigger
-  the upload guard on every `save` call.
+- **FIXED**: `Hash#parse_file?` strips the URL's query string before
+  the basename equality check so presigned URLs round-trip cleanly
+  through file-pointer recognition. Previously the signature bytes
+  leaked into the comparison and could cause false negatives.
   (`lib/parse/model/file.rb`)
-- **FIXED**: `Hash#parse_file?` now recognizes adapter-stored file
-  hashes — `{name, url, key}` (count == 3) and
-  `{__type: "File", name, url, key}` (any count). The legacy basename
-  equality is enforced only when `key` is absent. Previously, an
-  adapter-stored file hash with `key` present was misidentified as a
-  non-file hash because the original `count == 2` guard was too tight
-  and the basename equality predicate was unconditional.
+- **CHANGED**: `Parse::File#inspect` no longer includes the full
+  `@url` string. Inspect output lands in exception messages, Rails
+  error pages, log captures, and every error reporter the app uses
+  (Sentry / Honeybadger / Rollbar / Bugsnag); defaulting to URL
+  emission is a future leak waiting to happen even after the
+  normalization guarantees `@url` is canonical. The new format
+  emits `@name`, `@mime_type`, `@contents` (presence), and
+  `@url=set|blank`. See the migration callout above for the
+  error-reporter payload shift.
   (`lib/parse/model/file.rb`)
-- **NEW**: `Parse::File#as_json` now emits `key` when set so
-  adapter-stored files survive a save+reload cycle. Legacy files
-  (where `@key` is blank) continue to serialize as the canonical
-  `{__type, name, url}` three-key file pointer the Parse Server wire
-  format documents — adding the field would otherwise break wire
-  compatibility for every Parse-hosted row.
-  (`lib/parse/model/file.rb`)
-- **NEW**: `Parse::File::SignedUrlError` is raised when caller code
-  attempts to assign a signed URL to `Parse::File#url=` (or when a
-  hydration carries one in the `url` field). Recognized signature
-  parameters: `X-Amz-Signature`, `X-Amz-Credential`,
-  `X-Amz-Security-Token`, `AWSAccessKeyId`, `Key-Pair-Id`. Structural
-  enforcement of the "@url is the canonical URL, never a signed URL"
-  invariant — signed URLs will surface via a future
-  `Parse::File#download_url(as:, ttl:)` API that returns them and
-  never assigns them to `@url`. Without this guard, the most natural
-  Ruby pattern (`file.url = presigned`) would silently leak the
-  capability through `#to_s`, `<%= file %>` in ERB, `String(file)`,
-  and every exception that interpolates the file.
-  `Parse::File.url_signature_param?(url_string)` exposes the detection
-  predicate publicly. (`lib/parse/model/file.rb`)
-- **CHANGED**: `Parse::File#inspect` no longer includes the full `@url`
-  string. Inspect output lands in exception messages, Rails error
-  pages, and log captures; defaulting to URL emission is a future leak
-  waiting to happen. The new format emits `@name`, `@mime_type`,
-  `@contents` (presence), `@key` (when present), and `@url=set|blank`
-  — enough to debug, none of the URL content. **Migration:** callers
-  that previously scraped `file.inspect` output to extract the URL
-  must switch to `file.url` directly. Test assertions that
-  pattern-match on `@url='https://...'` in inspect output will need to
-  be updated. (`lib/parse/model/file.rb`)
-- **CHANGED**: `Parse::File#to_s` is deliberately left returning `@url`
-  unchanged — ERB templates and `<img src="<%= file %>">` callers
-  continue to work. Combined with the new `url=` signed-URL refusal
-  above, this makes the "@url is canonical" invariant structural
-  rather than convention-based — `to_s` cannot leak a signed URL
-  because such a URL can never reach `@url`.
+- **NEW**: `Parse::File::SignedUrlError` is raised when
+  `signed_url_policy = :raise` is set and an incoming URL carries
+  a signed-URL signature parameter. Apps that want strict-mode
+  enforcement no longer need to subclass or monkey-patch — flip
+  the policy and the SDK's normalization point does the work.
+  `Parse::File.url_signature_param?(url_string)` and the
+  `SIGNATURE_QUERY_PARAMS` constant remain public for caller-side
+  custom detection logic. (`lib/parse/model/file.rb`)
 - **NEW**: `Parse::File.log_filter` returns a frozen `Regexp` that
-  matches any HTTP(S) URL carrying an unambiguously AWS-style
-  signed-URL parameter — SigV4 (`X-Amz-*`), legacy SigV2
-  (`AWSAccessKeyId`), or CloudFront (`Key-Pair-Id`). Designed to be
-  plugged into `lograge` / `semantic_logger` / custom log scrubbers so
-  accidental `Rails.logger.info(file_url)` calls do not leak read
-  capabilities into log aggregators. Bare `Signature=` / `Policy=`
-  query params are intentionally NOT matched on their own — they
-  collide with too many unrelated app conventions (webhook
-  signatures, privacy_policy form fields); CloudFront URLs always
-  carry `Key-Pair-Id` alongside `Signature` / `Policy`, which IS
-  matched. Known limitations documented in the YARD: JSON-encoded
-  URLs (`\u0026` for `&`) and log lines wrapped mid-querystring
-  bypass the regex. (`lib/parse/model/file.rb`)
+  matches any plain-text HTTP(S) URL carrying an unambiguously
+  AWS-style signed-URL parameter — SigV4 (`X-Amz-Signature`,
+  `X-Amz-Credential`, `X-Amz-Security-Token`, `X-Amz-Algorithm`,
+  `X-Amz-Date`, `X-Amz-Expires`, `X-Amz-SignedHeaders`), legacy
+  SigV2 (`AWSAccessKeyId`), or CloudFront (`Key-Pair-Id`). Designed
+  to be plugged into `lograge` / `semantic_logger` / custom log
+  scrubbers so accidental `Rails.logger.info(file_url)` calls do
+  not leak read capabilities into log aggregators. Bare
+  `Signature=` / `Policy=` query params are intentionally NOT
+  matched on their own — they collide with too many unrelated app
+  conventions (webhook signatures, privacy_policy form fields);
+  CloudFront URLs always carry `Key-Pair-Id` alongside `Signature`
+  / `Policy`, which IS matched. (`lib/parse/model/file.rb`)
+- **NEW**: `Parse::File.log_filter_strict` returns the same
+  signature-detection regex but ALSO accepts the JSON-encoded
+  query separator (`\u0026` for `&`). Required for scrubbing
+  error-reporter event bodies (Sentry, Honeybadger, Rollbar,
+  Bugsnag) where the URL string has been JSON-encoded once before
+  reaching the scrubber and the literal `&` appears as `\u0026`.
+  The default `log_filter` would silently miss those — operators
+  shipping to a JSON-encoding error reporter should wire
+  `log_filter_strict` into the before-send hook. (`lib/parse/model/file.rb`)
 - **NEW**: `Parse::File.filter_parameter_names` returns an
   `Array<Regexp>` for `Rails.application.config.filter_parameters`.
   Defaults to AWS-prefixed names only (`X-Amz-*`, `AWSAccessKeyId`,
   `Key-Pair-Id`) so the list never over-redacts a Rails app's
   privacy_policy / e-signature / policy_id form fields. Companion
   `Parse::File.cloudfront_signed_param_names` returns the bare
-  `Signature` / `Policy` / `Expires` regexes as an opt-in extension
-  for CloudFront-heavy deployments that have confirmed no app-side
-  collision. (`lib/parse/model/file.rb`)
+  `Signature` / `Policy` / `Expires` regexes as an opt-in
+  extension for CloudFront-heavy deployments that have confirmed
+  no app-side collision. (`lib/parse/model/file.rb`)
+- **CHANGED**: `Parse::File#to_s` is deliberately left returning
+  `@url` unchanged — ERB templates and `<img src="<%= file %>">`
+  callers continue to work. Combined with the URL normalization
+  above, this makes the "@url is canonical" invariant structural
+  rather than convention-based — `to_s` cannot leak a signed URL
+  because such a URL is stripped before reaching `@url`.
 
 #### `Parse::Lock` — public TTL-bounded mutual-exclusion primitive
 
@@ -137,18 +193,51 @@ accidentally cached on the instance.
 - **NEW**: `Parse::LockBackend` — `@api private` module hosting the
   shared lock primitives (`lock_store`, `degraded_store?`,
   `handle_degraded`, `try_acquire`, `release`, `poll_interval`,
-  `process_mutex`). Both `Parse::Lock` and `Parse::CreateLock`
-  consume the backend directly instead of one reaching into the
-  other's privates. The extraction eliminates the `.send(:private)`
-  coupling that the v5.1.0 round-2 review called out as fragile —
-  any future refactor of the SETNX semantics, the
-  degraded-detection heuristic, or the in-process-Mutex fallback
-  registry happens in exactly one place. `Parse::CreateLock`
-  retains its own clamp/HMAC-secret helpers (`clamp`,
-  `lock_secret_for`, `configured_secret`, `auto_secret`,
-  `warn_plain_sha_once`) — those are specific to the
-  find-or-create surface and don't belong in the backend.
+  `process_mutex`, `lock_secret_for`, `configured_secret`,
+  `auto_secret`, `warn_plain_sha_once`). Both `Parse::Lock` and
+  `Parse::CreateLock` consume the backend directly instead of one
+  reaching into the other's privates. The extraction eliminates
+  the `.send(:private)` coupling that the v5.1.0 round-2 review
+  called out as fragile — any future refactor of the SETNX
+  semantics, the degraded-detection heuristic, the in-process-Mutex
+  fallback registry, OR the HMAC secret resolution happens in
+  exactly one place. `Parse::CreateLock` retains only its
+  CreateLock-specific helpers (`clamp` for input range).
   (`lib/parse/lock_backend.rb`, `lib/parse/model/core/create_lock.rb`)
+- **NEW**: `Parse::Lock.acquire(secret:)` — HMAC keying option.
+  `:auto` (default) picks up the operator-configured
+  `PARSE_STACK_LOCK_SECRET` / `Parse.synchronize_create_secret`,
+  auto-derives a per-process secret for degraded stores, falls
+  back to plain SHA-256 with a one-time `[Parse::Lock:SECURITY]`
+  warn for cross-process stores without a configured secret. A
+  `String` value overrides the resolution per call; `nil`
+  explicitly opts out of HMAC (no warn — the opt-out is
+  deliberate). Closes the parity gap with `Parse::CreateLock`: an
+  operator setting one secret hardens both APIs without a second
+  config knob. Different secrets isolate locks on the same raw
+  key — useful for multi-tenant deployments sharing one Redis
+  where tenants must not block each other on coincidentally-equal
+  lock names. Real-Redis integration coverage in
+  `test/lib/parse/lock_redis_integration_test.rb` (7 cases, all
+  Queue-gated to eliminate sleep-based race flakes:
+  HMAC-keyed entry shape, plain-SHA opt-out, cross-process
+  contention, fast-fail under `wait: 0`, different-secret
+  isolation, shared-secret-with-CreateLock via env var, namespace
+  separation from `first_or_create!`). Explicit `secret:` kwarg
+  values are length-validated at the boundary —
+  `Parse::Lock::SECRET_MIN_BYTES` (= 16) is the floor for any
+  caller-supplied HMAC key. A `secret: "a"` misconfiguration is
+  refused with `ArgumentError` rather than silently degrading the
+  lock-pinning resistance HMAC keying is supposed to provide. The
+  operator-configured `PARSE_STACK_LOCK_SECRET` path is not
+  length-checked (different threat model — process-boot
+  configuration, not per-call argument). The `on_degraded:` YARD
+  now documents the asymmetric-degradation residual risk: if two
+  processes target the same Redis but disagree on degraded
+  detection, they derive different store keys for the same raw
+  key and silently fail to mutually exclude — mitigated by
+  uniform `Parse.synchronize_create_store` configuration or
+  `on_degraded: :raise`. (`lib/parse/lock.rb`)
 - **NEW**: `Parse::Lock` and `Parse::LockBackend` are autoloaded —
   `Parse::Lock.acquire(…)` works without an explicit
   `require 'parse/lock'`. (`lib/parse/stack.rb`)
@@ -182,6 +271,30 @@ accidentally cached on the instance.
   reject (round-3 review tightening).
   (`lib/parse/model/core/querying.rb`, `lib/parse/query.rb`,
   `lib/parse/live_query/client.rb`, `lib/parse/live_query/subscription.rb`)
+- **NEW**: `Klass.subscribe`, `Query#subscribe`, and
+  `Parse::LiveQuery::Client#subscribe` all accept an optional `&block`
+  yielded the freshly-constructed `Subscription` **before** the
+  subscribe frame is sent to the server, so callbacks registered
+  inside the block (`sub.on(:create) { … }`) are wired before any
+  server event can arrive on the request_id. Order matters and is
+  tested — yielding AFTER the wire send would race a fast server
+  response against the callback registration on a hot socket. The
+  capture-then-wire form (`sub = Post.subscribe(…); sub.on(…)`)
+  still works for callers that prefer it. Matches the Parse JS
+  client's block-form convention. **If the block raises, the
+  subscription is rolled back out of the client's internal
+  `@subscriptions` registry before the exception propagates** —
+  without the rollback, the next reconnect's `resubscribe_all`
+  would silently wire-send the ghost subscription to the server
+  (round-3 review finding). (`lib/parse/live_query/client.rb`,
+  `lib/parse/query.rb`, `lib/parse/model/core/querying.rb`)
+
+  ```ruby
+  Post.subscribe(where: { published: true }) do |sub|
+    sub.on(:create) { |obj| puts "new: #{obj.id}" }
+    sub.on(:update) { |obj, _prev| puts "updated: #{obj.id}" }
+  end
+  ```
 - **CHANGED**: `Parse::LiveQuery::SubscriptionError` now carries
   `request_id` and `class_name` as structured attributes, and the
   `message` is auto-prefixed with `request_id=<n> class=<X>` when
@@ -258,7 +371,12 @@ accidentally cached on the instance.
   and `mk:`, so legacy cache entries written before this feature
   cannot re-hydrate into a tenanted request and vice versa.
   Fiber-local — composes safely with `async` and concurrent web
-  frameworks; restored on block exit even when the block raises.
+  frameworks; restored on block exit even when the block raises,
+  even when the owning Thread is killed mid-block (`Thread#kill`
+  runs `ensure` clauses, which matters for Puma's recycled thread
+  pool). Scope set in Fiber A is NOT visible to a concurrently-
+  running Fiber B; scope set in Thread A is NOT visible to Thread
+  B or the main thread — both explicitly tested.
   AS::N payload (`parse.cache.{hit,miss,store,delete,error}`)
   carries `:cache_tenant` so subscribers can budget cache
   performance per tenant. Strictly a key-namespacing mechanism —

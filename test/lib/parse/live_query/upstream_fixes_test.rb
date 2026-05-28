@@ -174,7 +174,8 @@ class LiveQueryUpstreamFixesTest < Minitest::Test
     end
 
     # Mirror Client#subscribe's signature so the kwarg propagation is exercised.
-    def subscribe(class_name, where: {}, fields: nil, session_token: nil, use_master_key: false)
+    def subscribe(class_name, where: {}, fields: nil, session_token: nil,
+                  use_master_key: false, &block)
       sub = Parse::LiveQuery::Subscription.new(
         client: self,
         class_name: class_name.to_s,
@@ -183,6 +184,7 @@ class LiveQueryUpstreamFixesTest < Minitest::Test
         session_token: session_token,
         use_master_key: use_master_key,
       )
+      yield(sub) if block_given?
       @captured_subscribe = sub
       sub
     end
@@ -207,6 +209,129 @@ class LiveQueryUpstreamFixesTest < Minitest::Test
     sub = FakePost.subscribe(client: fake)
     refute sub.use_master_key?
     refute sub.to_subscribe_message.key?(:masterKey)
+  end
+
+  # ---- block-form binding (TODO #4 — v5.1.0 deferred follow-up) ----
+  #
+  # Klass.subscribe / Query#subscribe / Client#subscribe now accept an
+  # optional &block. The block is invoked with the freshly-constructed
+  # Subscription BEFORE the subscribe frame is sent so caller-
+  # registered callbacks are wired before any server event can arrive
+  # on the request_id. Order matters — yielding AFTER the wire send
+  # would race a fast server response against the callback registration
+  # on a hot socket.
+
+  # Test-only client that records the order of operations so we can
+  # assert the yield happens BEFORE the wire send (not after).
+  class OrderRecordingClient
+    attr_reader :events, :master_key
+
+    def initialize
+      @events = []
+      @master_key = nil
+    end
+
+    def subscribe(class_name, where: {}, fields: nil, session_token: nil,
+                  use_master_key: false, &block)
+      sub = Parse::LiveQuery::Subscription.new(
+        client: self,
+        class_name: class_name.to_s,
+        query: where,
+        fields: fields,
+        session_token: session_token,
+        use_master_key: use_master_key,
+      )
+      @events << :subscription_created
+      yield(sub) if block_given?
+      @events << :wire_send  # would be `send_message(sub.to_subscribe_message)` in production
+      sub
+    end
+  end
+
+  def test_klass_subscribe_yields_subscription_to_block
+    fake = FakeLiveQueryClient.new
+    yielded = []
+    sub = FakePost.subscribe(client: fake) { |s| yielded << s }
+    assert_equal [sub], yielded,
+      "block must receive the Subscription instance that was returned"
+  end
+
+  def test_klass_subscribe_block_runs_before_wire_send
+    rec = OrderRecordingClient.new
+    FakePost.subscribe(client: rec) do |sub|
+      # If yield happened AFTER wire send, `:wire_send` would be in
+      # `rec.events` by the time the block ran. It must NOT be.
+      refute_includes rec.events, :wire_send,
+        "block must run BEFORE the wire frame is sent (race-window safety)"
+      sub.on(:create) { |_obj| } # representative callback registration
+    end
+    assert_equal %i[subscription_created wire_send], rec.events,
+      "operation order must be: construct → yield → wire_send"
+  end
+
+  def test_query_subscribe_yields_subscription
+    fake = FakeLiveQueryClient.new
+    yielded = nil
+    sub = Parse::Query.new(FakePost.parse_class).subscribe(client: fake) { |s| yielded = s }
+    assert_same sub, yielded
+  end
+
+  def test_klass_subscribe_without_block_still_returns_subscription
+    fake = FakeLiveQueryClient.new
+    sub = FakePost.subscribe(client: fake)
+    assert_kind_of Parse::LiveQuery::Subscription, sub
+  end
+
+  # Regression for the round-3-of-round-3 bug: if the caller's block
+  # raises, the subscription must be rolled back out of
+  # `@subscriptions` before the exception propagates. Without the
+  # rollback, the failed-block subscription stays in the registry and
+  # the next `resubscribe_all` (triggered by a reconnect) silently
+  # wire-sends it to the server — a ghost subscription the caller
+  # thought they had aborted.
+  def test_client_subscribe_block_raise_rolls_back_registration
+    # Use a real Parse::LiveQuery::Client so the @subscriptions
+    # registry behavior is the actual production code path.
+    require "parse/live_query"
+    prev_enabled = Parse.live_query_enabled?
+    Parse.live_query_enabled = true
+    client = Parse::LiveQuery::Client.new(
+      url: "wss://test.example/parse",
+      application_id: "app-id-test",
+      auto_connect: false,
+    )
+
+    begin
+      registry = client.instance_variable_get(:@subscriptions)
+      assert_equal 0, registry.size
+
+      assert_raises(RuntimeError) do
+        client.subscribe("Post") do |_sub|
+          raise "caller decided to abort"
+        end
+      end
+
+      assert_equal 0, registry.size,
+        "subscription must be rolled back out of @subscriptions when block raises — " \
+        "otherwise next reconnect's resubscribe_all silently wire-sends it"
+    ensure
+      Parse.live_query_enabled = prev_enabled
+    end
+  end
+
+  def test_klass_subscribe_block_can_register_callbacks_on_subscription
+    fake = FakeLiveQueryClient.new
+    sub = FakePost.subscribe(client: fake) do |s|
+      s.on(:create) { |obj| obj }
+      s.on(:update) { |obj, _prev| obj }
+    end
+    # Verify callbacks landed on the subscription. Inspect the internal
+    # callback registry via the existing `to_h` surface plus the
+    # event-emission path: emit and check no error.
+    captured = nil
+    sub.on(:create) { |obj| captured = obj }
+    sub.send(:emit, :create, "x")
+    assert_equal "x", captured
   end
 
   # ---- run_until_signal! (item 6) -------------------------------------

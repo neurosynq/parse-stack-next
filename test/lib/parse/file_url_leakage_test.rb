@@ -59,20 +59,14 @@ class TestFileUrlLeakage < Minitest::Test
 
   def test_inspect_does_not_emit_full_url_for_adapter_stored_file
     file = Parse::File.new(name: "doc.pdf", contents: nil)
-    file.attributes = {
-      "name" => "doc.pdf",
-      "url"  => "https://bucket.s3.amazonaws.com/tenants/abc/uuid-doc.pdf",
-      "key"  => "tenants/abc/uuid-doc.pdf",
-    }
+    file.url = "https://bucket.s3.amazonaws.com/tenants/abc/uuid-doc.pdf"
     out = file.inspect
     refute_includes out, "https://",
                     "inspect must not include any URL scheme"
     refute_includes out, "bucket.s3.amazonaws.com",
                     "inspect must not include the URL host"
-    # Note: the URL terminal segment (`uuid-doc.pdf`) DOES appear inside
-    # `@key` (which is the bucket-relative object key, intentionally
-    # shown for debugging). The leak we are guarding against is the
-    # SCHEME + HOST that turns `@key` back into a fetchable resource.
+    refute_includes out, "uuid-doc.pdf",
+                    "inspect must not include URL path components"
   end
 
   def test_inspect_signals_url_presence_without_revealing_url
@@ -87,21 +81,13 @@ class TestFileUrlLeakage < Minitest::Test
     assert_match(/@url=blank/, unset_file.inspect)
   end
 
-  def test_inspect_includes_name_mime_type_and_key
+  def test_inspect_includes_name_mime_type_and_url_state
     file = Parse::File.new(name: "doc.pdf", contents: nil)
-    file.attributes = {
-      "name" => "doc.pdf",
-      "url"  => "https://bucket.s3.amazonaws.com/t/u-doc.pdf",
-      "key"  => "t/u-doc.pdf",
-    }
+    file.url = "https://bucket.s3.amazonaws.com/t/u-doc.pdf"
     out = file.inspect
     assert_includes out, "doc.pdf"            # @name
-    assert_includes out, "t/u-doc.pdf"        # @key (non-secret, helpful for debugging)
-  end
-
-  def test_inspect_omits_key_section_when_key_blank
-    file = Parse::File.new("doc.pdf", "bytes", "application/pdf")
-    refute_match(/@key=/, file.inspect)
+    assert_match(/@mime_type=/, out)
+    assert_match(/@url=set/, out)
   end
 
   # ------------------------------------------------------------------
@@ -200,6 +186,49 @@ class TestFileUrlLeakage < Minitest::Test
     # at runtime. Each access returns the same frozen instance.
     assert_predicate Parse::File.log_filter, :frozen?
     assert_same Parse::File.log_filter, Parse::File.log_filter
+  end
+
+  # ------------------------------------------------------------------
+  # log_filter_strict — JSON-encoded URLs in error-reporter payloads
+  # ------------------------------------------------------------------
+
+  def test_log_filter_strict_matches_json_encoded_url_separator
+    # Sentry / Honeybadger / Rollbar event bodies serialize URLs
+    # with `&` as `\u0026`. The default log_filter requires literal
+    # `&`; the strict variant accepts both forms.
+    json_encoded = "https://bucket.s3.amazonaws.com/d.pdf?" \
+                   "X-Amz-Algorithm=AWS4-HMAC-SHA256\\u0026" \
+                   "X-Amz-Signature=abc123"
+    assert_match Parse::File.log_filter_strict, json_encoded
+  end
+
+  def test_log_filter_strict_also_matches_plain_text_urls
+    # The strict variant is a superset — plain `&` URLs still match.
+    plain = "https://bucket.s3.amazonaws.com/d.pdf?" \
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=abc"
+    assert_match Parse::File.log_filter_strict, plain
+  end
+
+  def test_log_filter_strict_does_not_match_canonical_url
+    # No over-redaction beyond what log_filter already catches.
+    refute_match Parse::File.log_filter_strict,
+                 "https://bucket.s3.amazonaws.com/d.pdf"
+  end
+
+  def test_log_filter_strict_is_frozen_singleton
+    assert_predicate Parse::File.log_filter_strict, :frozen?
+    assert_same Parse::File.log_filter_strict, Parse::File.log_filter_strict
+  end
+
+  def test_log_filter_strict_scrubbing_round_trip
+    # End-to-end: a JSON-encoded URL in an error payload gets
+    # replaced cleanly without disturbing surrounding text.
+    payload = %({"url":"https://b.s3.amazonaws.com/d?X-Amz-Signature=abc\\u0026X-Amz-Date=20260528T120000Z","msg":"ok"})
+    scrubbed = payload.gsub(Parse::File.log_filter_strict, "[FILTERED]")
+    refute_includes scrubbed, "X-Amz-Signature"
+    refute_includes scrubbed, "abc"
+    assert_includes scrubbed, "[FILTERED]"
+    assert_includes scrubbed, "ok"
   end
 
   # ------------------------------------------------------------------

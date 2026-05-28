@@ -139,11 +139,9 @@ module Parse
 
       # @!visibility private
       def reset!
-        @auto_secret = nil
-        @plain_sha_warned = nil
-        # Backend-owned state (@degraded_warned_at, @process_mutex_registry)
-        # lives on Parse::LockBackend now — extracted in v5.1.0 so
-        # Parse::Lock and Parse::CreateLock share one implementation.
+        # All resettable state lives on Parse::LockBackend now —
+        # @degraded_warned_at, @process_mutex_registry, @auto_secret,
+        # @plain_sha_warned. v5.1.0 extraction.
         LockBackend.reset!
       end
 
@@ -251,60 +249,19 @@ module Parse
         end
       end
 
-      # The store discovery, degraded detection, atomic-SETNX,
-      # release semantics, poll-interval jitter, and process-mutex
-      # registry all live on {Parse::LockBackend} now (v5.1.0
-      # extraction). The two private helpers below — `clamp` and
-      # `lock_secret_for` — are CreateLock-specific (input clamping
-      # on the public API, HMAC secret resolution) and stay here.
+      # All the lock infrastructure — store discovery, degraded
+      # detection, atomic-SETNX, release semantics, poll-interval
+      # jitter, process-mutex registry, AND HMAC secret resolution —
+      # lives on {Parse::LockBackend} now (v5.1.0 extraction). The
+      # only CreateLock-specific helper still here is `clamp` for
+      # the public API's input range.
 
       def clamp(value, lo, hi)
         [lo, value, hi].sort[1]
       end
 
       def lock_secret_for(store:)
-        configured = configured_secret
-        return configured if configured && !configured.empty?
-
-        # No operator-configured secret. Behavior depends on store type:
-        # - Memory/Null adapter: locking is already process-local, so a
-        #   per-process auto-derived HMAC secret is fine and preserves
-        #   privacy in tests / single-process deployments.
-        # - Redis (or any cross-process store): a per-process secret would
-        #   break cross-process key equality, defeating the lock. Fall back
-        #   to plain SHA256 with a one-time warning so operators know to
-        #   harden key material.
-        if LockBackend.degraded_store?(store)
-          auto_secret
-        else
-          warn_plain_sha_once
-          nil
-        end
-      end
-
-      def configured_secret
-        if Parse.respond_to?(:synchronize_create_secret) && Parse.synchronize_create_secret
-          return Parse.synchronize_create_secret.to_s
-        end
-        ENV["PARSE_STACK_LOCK_SECRET"]
-      end
-
-      def auto_secret
-        @auto_secret ||= SecureRandom.hex(32)
-      end
-
-      def warn_plain_sha_once
-        return if @plain_sha_warned
-        @plain_sha_warned = true
-        warn "[Parse::CreateLock:SECURITY] No PARSE_STACK_LOCK_SECRET configured and Redis-backed store detected. " \
-             "Falling back to plain SHA256 for lock-key derivation so cross-process locking actually works. " \
-             "Risks of running without an HMAC secret: (1) lock keys are deterministic and may expose query_attrs " \
-             "content via Redis MONITOR/snapshots; (2) when the response cache and the lock store share a Redis DB, " \
-             "any caller with write access to Parse.cache can plant a `parse-stack:foc:v1:<sha>` key under a guessable " \
-             "digest of (app_id, class, principal, query_attrs) and suppress first_or_create!/create_or_update! for " \
-             "that tuple until TTL expiry — a targeted DoS / create-pinning primitive. " \
-             "Set PARSE_STACK_LOCK_SECRET (or Parse.synchronize_create_secret = '…') to enable HMAC keying, or " \
-             "point Parse.synchronize_create_store at a separate Redis DB from the response cache."
+        LockBackend.lock_secret_for(store: store, source: "Parse::CreateLock")
       end
 
       def instrument(event, key, payload = {})
