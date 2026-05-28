@@ -66,4 +66,38 @@ class TestSetupDefaultClient < Minitest::Test
       "Parse::Client.new must not overwrite an already-registered :default client"
     assert_equal primary.object_id, Parse::Client.client(:default).object_id
   end
+
+  # Pin the return value: Parse.setup must return the registered client,
+  # not an orphan. Under the pre-fix code Parse.setup(@opts_b) returned
+  # the newly-constructed but never-registered Parse::Client instance
+  # (because `||=` had kept the first one in the slot). Callers that did
+  # `client = Parse.setup(...)` and reused it would have ended up with
+  # a client that was NOT the default — every subsequent Parse.* call
+  # would still route through the first registration. assert_same checks
+  # object identity, not just equality.
+  def test_parse_setup_returns_the_registered_default_client
+    returned = Parse.setup(@opts_a)
+    assert_same returned, Parse::Client.client(:default),
+      "Parse.setup must return the same instance it registered as :default"
+
+    returned2 = Parse.setup(@opts_b)
+    assert_same returned2, Parse::Client.client(:default),
+      "Parse.setup on second call must return the newly-registered :default, not the prior one"
+  end
+
+  # The delegation from Parse.setup to Parse::Client.setup must forward
+  # the block so callers can still customise the Faraday connection.
+  # Parse::Client#initialize yields the Faraday `conn` once it's
+  # constructed (see `yield(conn) if block_given?` in client.rb).
+  def test_parse_setup_forwards_block_to_faraday_connection
+    yielded = []
+    Parse.setup(@opts_a) do |conn|
+      yielded << conn
+    end
+
+    assert_equal 1, yielded.length,
+      "Parse.setup must forward its block to Parse::Client.new exactly once"
+    assert_kind_of Faraday::Connection, yielded.first,
+      "The block must receive the Faraday connection, as it did pre-delegation"
+  end
 end

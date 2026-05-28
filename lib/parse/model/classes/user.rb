@@ -225,6 +225,24 @@ module Parse
     # @return [Array<Parse::Session>] A list of active Parse::Session objects.
     has_many :active_sessions, as: :session
 
+    # @!attribute installations
+    # A `has_many` query-form association resolving to all
+    # {Parse::Installation} records whose `user` pointer is this user.
+    # Useful for targeted push — e.g. sending a notification to every
+    # device the user is signed into. This is a query (no column is
+    # stored on `_User`); each access issues a `find` against
+    # `_Installation` for `where(user: self)`.
+    #
+    # **Requires a master-key client.** Parse Server hardcodes
+    # `_Installation` `find` to master-key-only at the REST layer, so
+    # this association will return an empty array (or fail-closed
+    # depending on agent scope) under a session-token-only / sessionless
+    # client. The `user` pointer is also not a reliable owner identity
+    # — devices outlive sessions and can change users — see
+    # {Parse::Installation} for the full caveat list.
+    # @return [Array<Parse::Installation>]
+    has_many :installations, as: :installation
+
     # CHANGE -- ACLs can be managed
     # before_save do
     #   # You cannot specify user ACLs.

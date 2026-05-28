@@ -27,10 +27,60 @@
   with keyword arguments, but `Parse::LiveQuery.configure` takes no
   arguments and only yields a configuration block. The configuration is
   now applied through the block form, assigning each option via the
-  `Parse::LiveQuery::Configuration` setters and skipping any unknown
-  keys with `respond_to?`. Boot-time LiveQuery configuration via
-  `Parse.setup(live_query_url: ...)` now matches the documented behavior.
+  `Parse::LiveQuery::Configuration` setters. Boot-time LiveQuery
+  configuration via `Parse.setup(live_query_url: ...)` now matches the
+  documented behavior. (`lib/parse/client.rb`)
+- **FIXED**: `live_query_url:` (top-level) now correctly wins over
+  `live_query: { url: ... }` when both are passed. The first pass of
+  the block-form rewrite iterated `live_query_opts` after applying the
+  resolved URL, so the loop would re-write `config.url` from the hash
+  and silently invert the documented precedence. The hash's `:url`
+  key is now skipped in the loop and the resolved URL is applied last.
   (`lib/parse/client.rb`)
+- **NEW**: `Parse::Client#configure_live_query` now refuses an explicit
+  `ws://` URL against a non-loopback host unless
+  `live_query: { allow_insecure: true }` is also passed. The downstream
+  `Parse::LiveQuery::Client#derive_websocket_url` path already enforced
+  this for URLs derived from a Parse Server `http://` URL, but an
+  explicit `live_query: { url: "ws://prod-host" }` (or top-level
+  `live_query_url: "ws://prod-host"` / `PARSE_LIVE_QUERY_URL=ws://...`)
+  bypassed the check. The connect frame carries the master key and any
+  session token in cleartext on a non-TLS socket, so the explicit-URL
+  path now applies the same guard with the same `LOOPBACK_HOSTS`
+  exemption (`localhost`, `127.0.0.1`, `::1`, `[::1]`, `0.0.0.0`) and
+  the same `allow_insecure` escape hatch. (`lib/parse/client.rb`)
+- **NEW**: `Parse::Client#configure_live_query` now warns on unknown
+  `live_query: { ... }` keys instead of silently dropping them. The
+  pre-fix kwargs form raised `ArgumentError: unknown keyword` on a
+  typo, so e.g. `live_query: { ssl_min_versoin: :TLSv1_3 }` would have
+  failed loudly; the block-form rewrite silently dropped them, leaving
+  the operator's intent invisible. The warning enumerates the unknown
+  keys and lists the valid setter surface; the call still proceeds so
+  this is a soft failure, not a hard one. (`lib/parse/client.rb`)
+
+#### `Parse::Installation` and `Parse::User` — `user` pointer association
+
+- **NEW**: `Parse::Installation` now declares `belongs_to :user`,
+  exposing the `user` pointer that Parse Server populates on
+  `_Installation` when the row is created or updated by an
+  authenticated client. The association is purely ergonomics — read
+  `installation.user` to find which user a device is currently signed
+  in as, write `installation.user = user; installation.save` from a
+  master-key context for targeted push grouping. The YARD prose calls
+  out the existing caveat from the class-level CLP notes: the `user`
+  pointer is not a reliable owner identity (devices outlive sessions
+  and can change users), so it should not be used for ACL or CLP
+  scoping. (`lib/parse/model/classes/installation.rb`)
+- **NEW**: `Parse::User` now declares `has_many :installations, as: :installation`
+  as the query-form symmetric association. Each access issues a
+  `find` against `_Installation` for `where(user: self)`. Because
+  Parse Server hardcodes `_Installation` `find` to master-key-only at
+  the REST layer, this association only returns rows under a
+  master-key client; sessioned / sessionless clients get an empty
+  array (or fail closed under scoped agents). Useful for targeted
+  push — finding every device a user is signed into. The YARD
+  documents both the master-key requirement and the owner-identity
+  caveat. (`lib/parse/model/classes/user.rb`)
 
 #### `_User` field-visibility DSL — `master_only_fields` and `self_visible_fields`
 

@@ -242,6 +242,21 @@ module Parse
     # @return [Parse::Session] The associated {Parse::Session} that might be tied to this installation
     has_one :session, -> { where(installation_id: i.installation_id) }, scope_only: true
 
+    # @!attribute user
+    # The {Parse::User} associated with this installation. Parse Server
+    # populates this pointer when the installation is created or updated
+    # by an authenticated client (the session-token holder on the
+    # request). It is useful for targeted push delivery — finding all
+    # installations belonging to a given user.
+    #
+    # **Caveat — do not use for ACL or CLP scoping.** Devices outlive
+    # sessions and can change users (account switch, sign-out, shared
+    # device), so the `user` pointer on `_Installation` is not a
+    # reliable owner identity. See the "What you should NOT do with
+    # `set_clp`" notes above for the broader context.
+    # @return [Parse::User]
+    belongs_to :user
+
     # =========================================================================
     # Channel Management - Class Methods
     # =========================================================================

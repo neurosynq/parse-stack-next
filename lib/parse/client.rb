@@ -678,6 +678,12 @@ module Parse
     end
     private :validate_faraday_opts!
 
+    # Hosts considered "loopback" for the cleartext-ws:// guard in
+    # {#configure_live_query}. Mirrors
+    # {Parse::LiveQuery::Client::LOOPBACK_HOSTS} so the explicit-URL
+    # path and the derived-URL path agree on what counts as local.
+    LIVE_QUERY_LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1 [::1] 0.0.0.0].freeze
+
     # Configure LiveQuery with the given options
     # @param opts [Hash] configuration options
     # @option opts [String] :live_query_url WebSocket URL for LiveQuery server (wss://...)
@@ -692,17 +698,72 @@ module Parse
       live_query_opts = opts[:live_query].is_a?(Hash) ? opts[:live_query] : {}
       resolved_url = live_query_url || live_query_opts[:url]
 
+      # Refuse explicit `ws://` against a non-loopback host unless
+      # `allow_insecure: true` is also passed in `live_query:`. The
+      # downstream `derive_websocket_url` path already enforces this for
+      # URLs derived from a Parse Server `http://` URL, but an explicit
+      # `live_query: { url: "ws://prod-host" }` or
+      # `live_query_url: "ws://prod-host"` bypassed it — the master key
+      # and any session token would ride the connect frame in cleartext.
+      validate_live_query_url!(resolved_url, allow_insecure: live_query_opts[:allow_insecure])
+
+      # Warn (don't raise) on `live_query: { ... }` keys that are not
+      # `Parse::LiveQuery::Configuration` setters. The block form would
+      # otherwise silently swallow typos like
+      # `live_query: { ssl_min_versoin: :TLSv1_3 }` and leave TLS at the
+      # default, losing the operator's intent. The pre-fix kwargs form
+      # raised `ArgumentError` here; this restores the surface without
+      # making it a hard failure for unknown-but-harmless keys.
+      warn_about_unknown_live_query_keys!(live_query_opts)
+
       Parse::LiveQuery.configure do |config|
-        config.url = resolved_url if resolved_url
         config.application_id = @application_id if @application_id
         config.client_key = @api_key if @api_key
         config.master_key = @master_key if @master_key
 
+        # Apply hash-form options first so the resolved URL (which honors
+        # top-level `live_query_url:` over `live_query: { url: }`) wins.
+        # Without this, the loop would re-write `config.url` from the
+        # hash and silently invert the documented precedence.
         live_query_opts.each do |key, value|
+          next if key == :url
           setter = "#{key}="
           config.public_send(setter, value) if config.respond_to?(setter)
         end
+
+        config.url = resolved_url if resolved_url
       end
+    end
+
+    # @api private
+    def validate_live_query_url!(url, allow_insecure:)
+      return unless url.is_a?(String) && url.start_with?("ws://")
+
+      host = URI.parse(url).host.to_s rescue ""
+      return if LIVE_QUERY_LOOPBACK_HOSTS.include?(host)
+      return if allow_insecure
+
+      raise ArgumentError,
+        "[Parse::Client] Refusing explicit insecure LiveQuery URL #{url.inspect}. " \
+        "The connect frame carries the master key and any session token in " \
+        "plaintext on this socket. Use wss:// for routable hosts, or pass " \
+        "`live_query: { allow_insecure: true }` to opt into cleartext for " \
+        "local development on a non-loopback address."
+    end
+
+    # @api private
+    def warn_about_unknown_live_query_keys!(live_query_opts)
+      return unless live_query_opts.is_a?(Hash) && live_query_opts.any?
+
+      probe = Parse::LiveQuery::Configuration.new
+      unknown = live_query_opts.keys.reject { |k| probe.respond_to?("#{k}=") }
+      return if unknown.empty?
+
+      warn "[Parse::Client] Ignoring unknown live_query option(s): " \
+           "#{unknown.inspect}. Valid keys are Parse::LiveQuery::Configuration " \
+           "setters (url, application_id, client_key, master_key, ping_interval, " \
+           "pong_timeout, allow_insecure, ssl_min_version, ssl_max_version, " \
+           "logging_enabled, log_level, ...). Check for typos."
     end
 
     # If set, returns the current retry count for this instance. Otherwise,

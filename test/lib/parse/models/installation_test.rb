@@ -38,13 +38,20 @@ class TestInstallation < Minitest::Test
     :pushType => :string,
     :time_zone => :timezone,
     :timeZone => :timezone,
+    :user => :pointer,
   })
 
   def test_properties
     assert Parse::Installation < Parse::Object
     assert_equal CORE_FIELDS, Parse::Installation.fields
-    assert_empty Parse::Installation.references
+    # `belongs_to :user` registers a single pointer reference. The
+    # references-map class name is derived via `:user.to_parse_class`,
+    # which yields "User" (not "_User") — that's the SDK's existing
+    # convention for the references map, where the underscore prefix
+    # for system classes is applied by downstream consumers.
+    assert_equal({ user: "User" }, Parse::Installation.references)
     assert_empty Parse::Installation.relations
     assert Parse::Installation.method_defined?(:session)
+    assert Parse::Installation.method_defined?(:user)
   end
 end
