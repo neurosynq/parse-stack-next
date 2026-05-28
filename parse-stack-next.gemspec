@@ -9,8 +9,8 @@ Gem::Specification.new do |spec|
   spec.authors = ["Anthony Persaud", "Henry Spindell", "Adrian Curtin"]
   spec.email = ["adrian+parse-stack@neurosynq.net"]
 
-  spec.summary = %q{Parse Server Ruby Client SDK (parse-stack-next fork)}
-  spec.description = %q{Parse Server Ruby Client. Perform Object-relational mapping between Parse Server and Ruby classes, with authentication, cloud code webhooks, push notifications and more built in. parse-stack-next is a fork of parse-stack with additional features: vector search, Atlas Search, agent ACL scopes, GraphQL, MongoDB-direct pipeline enforcement, and ongoing maintenance.}
+  spec.summary = %q{Parse Server SDK for Ruby — ORM, queries, auth, and MongoDB-direct access}
+  spec.description = %q{Production-grade Ruby client for Parse Server. Map Parse classes to Ruby models with typed properties, associations, and validations; build queries with a chainable DataMapper-style DSL; handle auth, sessions, MFA, cloud code webhooks, and push; introspect and migrate schemas; manage role hierarchies; scope access with per-agent ACL/CLP; generate GraphQL types; run Atlas Search and vector search; and bypass REST for high-throughput reads via the MongoDB-direct pipeline.}
   spec.homepage = "https://github.com/neurosynq/parse-stack-next"
   spec.license = "MIT"
 

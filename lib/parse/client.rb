@@ -690,14 +690,19 @@ module Parse
       require_relative "live_query"
 
       live_query_opts = opts[:live_query].is_a?(Hash) ? opts[:live_query] : {}
+      resolved_url = live_query_url || live_query_opts[:url]
 
-      Parse::LiveQuery.configure(
-        url: live_query_url || live_query_opts[:url],
-        application_id: @application_id,
-        client_key: @api_key,
-        master_key: @master_key,
-        **live_query_opts,
-      )
+      Parse::LiveQuery.configure do |config|
+        config.url = resolved_url if resolved_url
+        config.application_id = @application_id if @application_id
+        config.client_key = @api_key if @api_key
+        config.master_key = @master_key if @master_key
+
+        live_query_opts.each do |key, value|
+          setter = "#{key}="
+          config.public_send(setter, value) if config.respond_to?(setter)
+        end
+      end
     end
 
     # If set, returns the current retry count for this instance. Otherwise,
