@@ -1,0 +1,16 @@
+{
+  "$search": {
+    "index": "test_index",
+    "near": {
+      "origin": {
+        "coordinates": [
+          -122.4194,
+          37.7749
+        ],
+        "type": "Point"
+      },
+      "path": "location",
+      "pivot": 1000.0
+    }
+  }
+}

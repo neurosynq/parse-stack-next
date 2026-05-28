@@ -1,0 +1,21 @@
+{
+  "$match": {
+    "$or": [
+      {
+        "_rperm": {
+          "$in": [
+            "*",
+            "role:Admin",
+            "role:Editor",
+            "u_alice"
+          ]
+        }
+      },
+      {
+        "_rperm": {
+          "$exists": false
+        }
+      }
+    ]
+  }
+}

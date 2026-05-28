@@ -1,0 +1,13 @@
+{
+  "$search": {
+    "autocomplete": {
+      "fuzzy": {
+        "maxEdits": 1
+      },
+      "path": "title",
+      "query": "rub",
+      "tokenOrder": "sequential"
+    },
+    "index": "test_index"
+  }
+}

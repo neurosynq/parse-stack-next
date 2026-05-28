@@ -290,8 +290,13 @@ module Parse
       # @param where [Hash] query constraints
       # @param fields [Array<String>] specific fields to watch
       # @param session_token [String] session token for ACL-aware subscriptions
+      # @param use_master_key [Boolean] per-subscription master-key
+      #   opt-in. See {Subscription#initialize} for the trade-offs.
+      #   Requires this client to have been constructed with a
+      #   `master_key` (otherwise the kwarg is a no-op).
       # @return [Subscription]
-      def subscribe(class_name, where: {}, fields: nil, session_token: nil)
+      def subscribe(class_name, where: {}, fields: nil, session_token: nil,
+                    use_master_key: false)
         # Handle Parse::Object subclass
         if class_name.is_a?(Class) && class_name < Parse::Object
           class_name = class_name.parse_class
@@ -322,6 +327,7 @@ module Parse
           query: where,
           fields: fields,
           session_token: session_token,
+          use_master_key: use_master_key,
         )
 
         @monitor.synchronize do

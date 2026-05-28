@@ -1,0 +1,9 @@
+{
+  "where": {
+    "author": {
+      "__type": "Pointer",
+      "className": "_User",
+      "objectId": "<<OBJECT_ID>>"
+    }
+  }
+}

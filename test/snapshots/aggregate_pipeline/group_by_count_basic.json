@@ -1,0 +1,17 @@
+[
+  {
+    "$group": {
+      "_id": "$category",
+      "count": {
+        "$sum": 1
+      }
+    }
+  },
+  {
+    "$project": {
+      "_id": 0,
+      "count": 1,
+      "objectId": "$_id"
+    }
+  }
+]

@@ -35,10 +35,48 @@ module Parse
     # configuration.
     class UntrustedHostError < Parse::Error; end
 
+    # Raised when caller code attempts to assign a presigned / signed URL
+    # to {#url}. The `@url` field is reserved for stable canonical URLs;
+    # short-TTL signed URLs must come from {#download_url} (added in a
+    # later phase) and never be cached on the instance. Fail-loud so the
+    # leak vector is caught at the point of error rather than discovered
+    # in logs or a CDN access trail.
+    class SignedUrlError < Parse::Error; end
+
+    # Raised when `@key` is set to a value longer than
+    # {MAX_KEY_BYTESIZE}. Matches the underlying object-storage hard
+    # limit (S3 maxes object keys at 1024 bytes) and prevents pathological
+    # `inspect` payload sizes from amplifying into exception reporters.
+    class InvalidKeyError < Parse::Error; end
+
     # Regular expression that matches the old legacy Parse hosted file name
     LEGACY_FILE_RX = /^tfss-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}-/
     # The default attributes in a Parse File hash.
-    ATTRIBUTES = { __type: :string, name: :string, url: :string }.freeze
+    # `:key` is included for adapter-stored files (S3 / GCS / Azure object
+    # key) so it round-trips through `as_json` / `attributes=` and survives
+    # save+reload cycles. Legacy Parse-hosted files leave `@key` nil and
+    # the field is omitted from `as_json` output (see {#as_json}).
+    ATTRIBUTES = { __type: :string, name: :string, url: :string, key: :string }.freeze
+    # @!visibility private
+    # Maximum allowed byte size for `@key`. Matches the S3 object-key
+    # hard limit; values past this can only come from a malformed row or
+    # a buggy adapter, and on `inspect` they'd amplify into multi-MB
+    # strings that show up in exception reporters.
+    MAX_KEY_BYTESIZE = 1024
+    # @!visibility private
+    # Query-string parameter names that mark a URL as a presigned /
+    # signed URL — i.e. one whose POSSESSION grants temporary
+    # capability. Must never appear in `@url`; download URLs come
+    # from {#download_url} (added in a later phase) and are returned,
+    # never assigned. Used by {.url_signature_param?} and the public
+    # log scrubber helpers ({.log_filter}, {.filter_parameter_names}).
+    SIGNATURE_QUERY_PARAMS = %w[
+      X-Amz-Signature
+      X-Amz-Credential
+      X-Amz-Security-Token
+      AWSAccessKeyId
+      Key-Pair-Id
+    ].freeze
 
     # @!visibility private
     # Default cap on remote-fetched file size (50 MiB). Override via
@@ -72,8 +110,30 @@ module Parse
     # {Parse::File.sanitize_hydrated_url} validator that hydration uses,
     # so caller-supplied URLs (e.g. `parse_file.url = params[:url]`) get
     # the same trusted-host check as JSON-hydrated rows.
+    #
+    # Refuses any URL whose query string carries a known signed-URL
+    # parameter (`X-Amz-Signature`, `X-Amz-Credential`,
+    # `X-Amz-Security-Token`, `AWSAccessKeyId`, `Key-Pair-Id`). Presigned
+    # URLs are SHORT-TTL CAPABILITIES — assigning one to `@url` would
+    # silently leak the capability through `#to_s`, ERB interpolation,
+    # `String(file)`, exception messages, and every code path that
+    # reads `@url`. The structural enforcement converts the
+    # "@url is canonical, never presigned" invariant from a convention
+    # adapters might forget into a `Parse::File::SignedUrlError` at
+    # the point of error. Download URLs come from `#download_url`
+    # (added in a later phase) and are returned, never assigned.
+    #
     # @param value [String, nil] the URL to assign.
+    # @raise [Parse::File::SignedUrlError] if `value` is a signed URL.
     def url=(value)
+      if value.is_a?(String) && Parse::File.url_signature_param?(value)
+        raise SignedUrlError,
+              "Parse::File#url= refuses a signed URL (query carries a " \
+              "presigned-URL signature parameter). Signed URLs are " \
+              "short-TTL capabilities — keep them out of `@url` so they " \
+              "do not leak through `#to_s` / `inspect` / ERB. Mint signed " \
+              "GET URLs via `Parse::File#download_url(as:, ttl:)` instead."
+      end
       @url = Parse::File.sanitize_hydrated_url(value, fallback: @url, name: @name)
     end
 
@@ -82,6 +142,35 @@ module Parse
 
     # @return [String] the mime-type of the file whe
     attr_accessor :mime_type
+
+    # @return [String, nil] the storage-adapter object key for this file,
+    #   when present. Set by storage adapters (e.g.
+    #   `Parse::Storage::S3Adapter`) to record the bucket-relative object
+    #   key — distinct from `#name` (the human filename) and `#url` (the
+    #   canonical hostable URL).
+    #
+    #   When `@key` is set, {saved?} skips its legacy
+    #   `name == File.basename(url)` predicate, since adapter-stored files
+    #   commonly use prefixed keys (`workspaces/<id>/<uuid>-report.pdf`)
+    #   whose terminal segment does not equal `@name`.
+    attr_reader :key
+
+    # Set the storage-adapter object key. Refuses values longer than
+    # {MAX_KEY_BYTESIZE} (the S3 hard limit) so a malformed row or a
+    # buggy adapter cannot inject a multi-MB payload into `inspect`
+    # output and amplify into exception reporters / log aggregators.
+    # @param value [String, nil]
+    # @raise [Parse::File::InvalidKeyError] if `value` exceeds the cap.
+    def key=(value)
+      if value.is_a?(String) && value.bytesize > MAX_KEY_BYTESIZE
+        raise InvalidKeyError,
+              "Parse::File#key exceeds #{MAX_KEY_BYTESIZE} bytes " \
+              "(got #{value.bytesize}). The storage backend's hard limit " \
+              "is 1024 bytes; values past that can only come from a " \
+              "malformed row or a buggy adapter."
+      end
+      @key = value
+    end
     # @return [Model::TYPE_FILE]
     def self.parse_class; TYPE_FILE; end
     # @return [Model::TYPE_FILE]
@@ -92,6 +181,11 @@ module Parse
     FIELD_NAME = "name"
     # @!visibility private
     FIELD_URL = "url"
+    # @!visibility private
+    # The storage-adapter object key field in a Parse File hash.
+    # Populated by adapter-stored files (S3 / GCS / Azure) and
+    # round-tripped through `as_json` / `attributes=`.
+    FIELD_KEY = "key"
     class << self
 
       # @return [String] the default mime-type
@@ -175,6 +269,112 @@ module Parse
       attr_writer :allowed_remote_ports
       def allowed_remote_ports
         @allowed_remote_ports ||= DEFAULT_ALLOWED_REMOTE_PORTS.dup
+      end
+
+      # Regex that matches any HTTP(S) URL carrying an unambiguously
+      # AWS-style signed-URL parameter — SigV4 (`X-Amz-*`), legacy
+      # SigV2 (`AWSAccessKeyId`), or CloudFront (`Key-Pair-Id`).
+      # Designed to be plugged into log scrubbers / `lograge` /
+      # `semantic_logger` filters so accidental
+      # `Rails.logger.info(file_url)` calls do not leak short-TTL
+      # download credentials into log aggregators.
+      #
+      # Bare `Signature=` and `Policy=` are NOT matched on their own —
+      # they collide with too many unrelated app conventions (webhook
+      # signatures, privacy_policy fields). CloudFront URLs always
+      # carry `Key-Pair-Id` alongside `Signature` / `Policy`, so the
+      # `Key-Pair-Id` match catches the whole URL substring.
+      #
+      # Known limitations operators should be aware of:
+      # - JSON-encoded URLs (`\u0026` for `&`) bypass the literal `&`
+      #   alternative below. Decode before scrubbing if your log
+      #   pipeline JSON-encodes.
+      # - Log lines wrapped at fixed widths split the URL mid-querystring.
+      #   Scrub before line-wrapping.
+      #
+      # @example Rails — scrub presigned URLs out of all log lines
+      #   config.lograge.custom_payload do |controller|
+      #     payload = { ... }
+      #     payload.transform_values do |v|
+      #       v.is_a?(String) ? v.gsub(Parse::File.log_filter, "[FILTERED_PRESIGNED_URL]") : v
+      #     end
+      #   end
+      #
+      # @example Rails — `filter_parameters` for params with these names
+      #   Rails.application.config.filter_parameters += Parse::File.filter_parameter_names
+      #
+      # @return [Regexp]
+      def log_filter
+        @log_filter ||= %r{
+          https?://[^\s'"<>]+      # URL prefix
+          [?&]                     # query separator
+          (?:
+            X-Amz-Signature        |
+            X-Amz-Credential       |
+            X-Amz-Security-Token   |
+            X-Amz-Algorithm        |
+            X-Amz-Date             |
+            X-Amz-Expires          |
+            X-Amz-SignedHeaders    |
+            AWSAccessKeyId         |
+            Key-Pair-Id
+          )
+          =[^&\s'"<>]+             # signature value
+          (?:&[^\s'"<>]*)?         # trailing params
+        }xi.freeze
+      end
+
+      # Parameter names operators should add to
+      # `Rails.application.config.filter_parameters` so presigned-URL
+      # query params are scrubbed from request logs by Rails itself.
+      #
+      # Defaults are AWS-prefixed only (`X-Amz-*`, `AWSAccessKeyId`,
+      # `Key-Pair-Id`) so the list never over-redacts a Rails app's
+      # `privacy_policy` / e-signature / `policy_id` form fields. For
+      # CloudFront-heavy deployments that need bare `Signature` /
+      # `Policy` / `Expires` matched as well, append
+      # {.cloudfront_signed_param_names}.
+      #
+      # @return [Array<Regexp>]
+      def filter_parameter_names
+        @filter_parameter_names ||= [
+          /\AX-Amz-/i,
+          /\AAWSAccessKeyId\z/i,
+          /\AKey-Pair-Id\z/i,
+        ].freeze
+      end
+
+      # CloudFront-signed-URL parameter names (`Signature`, `Policy`,
+      # `Expires`). Opt-in extension to {.filter_parameter_names} for
+      # apps that proxy CloudFront-signed URLs through Rails params.
+      #
+      # WARNING: these names collide with legitimate app params —
+      # `policy` (privacy_policy, policy_id), `signature` (DocuSign /
+      # webhook signatures), `expires` (any cache-control style field).
+      # Append only when the operator has confirmed no such collision
+      # exists in the app's request surface.
+      #
+      # @return [Array<Regexp>]
+      def cloudfront_signed_param_names
+        @cloudfront_signed_param_names ||= [
+          /\ASignature\z/i,
+          /\APolicy\z/i,
+          /\AExpires\z/i,
+        ].freeze
+      end
+
+      # @!visibility private
+      # True when the URL's query string carries any known signed-URL
+      # parameter from {SIGNATURE_QUERY_PARAMS}. Implementation detail
+      # behind {SignedUrlError} / `url=`; uses `String#include?` for
+      # cheap substring detection rather than building a Regexp on
+      # every assignment.
+      def url_signature_param?(url_string)
+        return false unless url_string.is_a?(String)
+        return false unless url_string.include?("?") || url_string.include?("&")
+        SIGNATURE_QUERY_PARAMS.any? do |param|
+          url_string.include?("?#{param}=") || url_string.include?("&#{param}=")
+        end
       end
 
       # @!visibility private
@@ -351,10 +551,24 @@ module Parse
       file
     end
 
-    # A File object is considered saved if the basename of the URL and the name parameters are equal
+    # A File object is considered saved when it has a URL the SDK can hand
+    # to clients.
+    #
+    # - For **adapter-stored files** (any file whose storage adapter has
+    #   populated `@key`): `@url`, `@name`, and `@key` must all be present.
+    #   The legacy `@name == File.basename(@url)` predicate is **not**
+    #   applied — adapter keys frequently include a path prefix
+    #   (e.g. `posts/<objectId>/<uuid>-report.pdf`) whose terminal segment
+    #   diverges from `@name`.
+    # - For **legacy Parse-hosted files** (`@key` blank): the original
+    #   `@name == File.basename(@url)` check is preserved so existing
+    #   `client.create_file` flows behave unchanged.
+    #
     # @return [Boolean] true if this file has already been saved.
     def saved?
-      @url.present? && @name.present? && @name == File.basename(@url)
+      return false unless @url.present? && @name.present?
+      return true if @key.present?
+      @name == File.basename(@url)
     end
 
     # Returns the url string for this Parse::File pointer. If the *force_ssl* option is
@@ -387,8 +601,46 @@ module Parse
       elsif h.is_a?(Hash)
         raw_url = h[FIELD_URL] || h[:url]
         @name = h[FIELD_NAME] || h[:name] || @name
+        # `key` is the storage-adapter object key; round-trip it through
+        # hydration so adapter-stored files reconstruct their
+        # `saved?` invariant correctly on reload. Route through the
+        # validating setter so the {MAX_KEY_BYTESIZE} cap applies on
+        # hydration too — hostile or malformed rows can carry
+        # multi-MB payloads that would otherwise amplify through
+        # `inspect`.
+        provided_key = h.key?(FIELD_KEY) ? h[FIELD_KEY] : h[:key]
+        self.key = provided_key if provided_key
+      end
+      # NOTE: routes through the validating `url=` setter, which refuses
+      # presigned URLs via {SignedUrlError}. On hydration this means a
+      # row whose `url` field somehow carries an X-Amz-Signature param
+      # will RAISE on read. That's intentional — such a row indicates
+      # either DB corruption or an adapter that violated the
+      # "@url is canonical, never presigned" invariant, and the loud
+      # failure surfaces the bug at the point of error.
+      if raw_url.is_a?(String) && Parse::File.url_signature_param?(raw_url)
+        raise SignedUrlError,
+              "Parse::File hydrated with a signed URL in `url` (query " \
+              "carries a presigned-URL signature parameter). The `@url` " \
+              "field is reserved for canonical URLs; signed URLs must " \
+              "be minted via `Parse::File#download_url(as:, ttl:)`."
       end
       @url = Parse::File.sanitize_hydrated_url(raw_url, fallback: @url, name: @name)
+    end
+
+    # @return [Hash] the JSON representation of this Parse::File.
+    #   Includes `key` only when {#key} is set, so legacy Parse-hosted
+    #   files (which never populate `@key`) continue to serialize as
+    #   the canonical three-key file pointer the Parse Server wire
+    #   format documents.
+    def as_json(*_args)
+      h = {
+        Parse::Model::TYPE_FIELD => parse_class,
+        FIELD_NAME               => @name,
+        FIELD_URL                => @url,
+      }
+      h[FIELD_KEY] = @key if @key.present?
+      h
     end
 
     # @!visibility private
@@ -511,8 +763,18 @@ module Parse
     end
 
     # @!visibility private
+    # Inspect output deliberately omits `@url` to keep short-TTL
+    # adapter-issued URLs (e.g. S3/CloudFront presigned download URLs)
+    # out of exception messages, Rails error reports, and log captures.
+    # The invariant for the public {url} accessor is that `@url` is
+    # always a stable canonical URL — never a signed URL — but `inspect`
+    # is conservative on principle: callers who explicitly want the URL
+    # ask for `file.url`.
     def inspect
-      "<Parse::File @name='#{@name}' @mime_type='#{@mime_type}' @contents=#{@contents.nil?} @url='#{@url}'>"
+      url_state = @url.present? ? "set" : "blank"
+      key_part  = @key.present? ? " @key=#{@key.inspect}" : ""
+      "<Parse::File @name=#{@name.inspect} @mime_type=#{@mime_type.inspect} " \
+      "@contents=#{@contents.nil?}#{key_part} @url=#{url_state}>"
     end
 
     # @return [String] the url
@@ -525,15 +787,51 @@ end
 
 # Adds extensions to Hash class.
 class Hash
-  # Determines if the hash contains Parse File json metadata fields. This is determined whether
-  # the key `__type` exists and is of type `__File` and whether the `name` field matches the File.basename
-  # of the `url` field.
+  # Determines whether the hash contains Parse File JSON metadata fields.
+  #
+  # Recognizes two file-pointer shapes:
+  #
+  # - **Canonical Parse-hosted** — `{name, url}` with `name ==
+  #   File.basename(url)`, or `{__type: "File", name, url}` with the
+  #   same basename equality. This is the original Parse Server wire
+  #   format.
+  # - **Adapter-stored** — `{__type: "File", name, url, key}` where
+  #   `key` is the storage-adapter object key (S3 / GCS / Azure). The
+  #   basename equality predicate is intentionally NOT applied because
+  #   adapter keys commonly use a structured prefix
+  #   (`tenants/<id>/<uuid>-doc.pdf`) whose terminal segment diverges
+  #   from `name`.
+  #
+  # The count check guards the bare `{name, url}` shape against being
+  # confused with arbitrary user hashes; when `__type == "File"` is
+  # explicit, the count is unconstrained.
   #
   # @return [Boolean] True if this hash contains Parse file metadata.
   def parse_file?
     url = self[Parse::File::FIELD_URL]
     name = self[Parse::File::FIELD_NAME]
-    (count == 2 || self["__type"] == Parse::File.parse_class) &&
-    url.present? && name.present? && name == ::File.basename(url)
+    return false unless url.present? && name.present?
+    typed = self["__type"] == Parse::File.parse_class
+    has_key = self[Parse::File::FIELD_KEY].present? ||
+              self[Parse::File::FIELD_KEY.to_sym].present?
+    if typed
+      # Explicit __type: "File" — relax the basename check for
+      # adapter-stored files (key present); enforce it for canonical
+      # files (key absent) so a row whose `name` was tampered with
+      # away from `File.basename(url)` is still rejected.
+      has_key ? true : name == ::File.basename(url)
+    else
+      # No __type marker — accept only the bare canonical shape
+      # `{name, url}` (count == 2) or the adapter shape with a `key`
+      # field (count == 3). Either case still requires basename
+      # equality for the canonical path.
+      if count == 2
+        name == ::File.basename(url)
+      elsif count == 3 && has_key
+        true
+      else
+        false
+      end
+    end
   end
 end

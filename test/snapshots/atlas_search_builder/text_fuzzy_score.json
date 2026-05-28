@@ -1,0 +1,21 @@
+{
+  "$search": {
+    "index": "test_index",
+    "text": {
+      "fuzzy": {
+        "maxEdits": 2,
+        "prefixLength": 1
+      },
+      "path": [
+        "title",
+        "body"
+      ],
+      "query": "ruby",
+      "score": {
+        "boost": {
+          "value": 2
+        }
+      }
+    }
+  }
+}

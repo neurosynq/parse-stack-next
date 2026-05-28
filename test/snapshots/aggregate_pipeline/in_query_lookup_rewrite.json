@@ -1,0 +1,55 @@
+{
+  "mongo_direct": false,
+  "pipeline": [
+    {
+      "$addFields": {
+        "_lookup_workspace_id": {
+          "$arrayElemAt": [
+            {
+              "$split": [
+                "$_p_workspace",
+                {
+                  "$literal": "$"
+                }
+              ]
+            },
+            1
+          ]
+        }
+      }
+    },
+    {
+      "$lookup": {
+        "as": "_lookup_workspace_result",
+        "from": "SnapWorkspace",
+        "let": {
+          "lookupId": "$_lookup_workspace_id"
+        },
+        "pipeline": [
+          {
+            "$match": {
+              "$expr": {
+                "$eq": [
+                  "$_id",
+                  "$$lookupId"
+                ]
+              }
+            }
+          },
+          {
+            "$match": {
+              "active": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "$match": {
+        "_lookup_workspace_result": {
+          "$ne": []
+        }
+      }
+    }
+  ]
+}

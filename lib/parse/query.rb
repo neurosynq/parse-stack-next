@@ -2966,9 +2966,15 @@ module Parse
     # @param fields [Array<String>] specific fields to watch for changes (nil = all fields)
     # @param session_token [String] session token for ACL-aware subscriptions
     # @param client [Parse::LiveQuery::Client] custom LiveQuery client (optional)
+    # @param use_master_key [Boolean] per-subscription master-key opt-in.
+    #   When true and the underlying client has a master_key configured,
+    #   the subscribe frame carries `masterKey` so the server skips
+    #   ACL/CLP enforcement for this subscription. Lets one client
+    #   service both end-user (session-token-scoped) and administrative
+    #   (master-key-scoped) subscriptions on the same socket.
     # @return [Parse::LiveQuery::Subscription] the subscription object
     # @see Parse::LiveQuery::Subscription
-    def subscribe(fields: nil, session_token: nil, client: nil)
+    def subscribe(fields: nil, session_token: nil, client: nil, use_master_key: false)
       require_relative "live_query"
 
       lq_client = client || Parse::LiveQuery.client
@@ -2977,6 +2983,7 @@ module Parse
         where: compile_where,
         fields: fields,
         session_token: session_token || @session_token,
+        use_master_key: use_master_key,
       )
     end
 
@@ -5420,6 +5427,17 @@ module Parse
   # Helper class for executing arbitrary MongoDB aggregation pipelines.
   # Provides a consistent interface with results, raw, and result_pointers methods.
   class Aggregation
+    # @return [Array<Hash>] the MongoDB aggregation pipeline stages this
+    #   Aggregation will execute. Useful for previewing the routed pipeline
+    #   before {#execute!}, for snapshot-based regression tests, and for
+    #   debugging the REST-vs-mongo-direct translation.
+    attr_reader :pipeline
+
+    # @return [Boolean] whether {#execute!} will route through
+    #   {Parse::MongoDB.aggregate} instead of Parse Server's REST
+    #   `/aggregate` endpoint.
+    attr_reader :mongo_direct
+
     # @param query [Parse::Query] the base query object
     # @param pipeline [Array<Hash>] the MongoDB aggregation pipeline stages
     # @param verbose [Boolean, nil] whether to print verbose output (nil means use query's setting)

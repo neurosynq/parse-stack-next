@@ -435,10 +435,13 @@ module Parse
       # @param fields [Array<String>] specific fields to watch for changes (nil = all fields)
       # @param session_token [String] session token for ACL-aware subscriptions
       # @param client [Parse::LiveQuery::Client] custom LiveQuery client (optional)
+      # @param use_master_key [Boolean] per-subscription master-key opt-in.
+      #   See {Parse::Query#subscribe} for the full description.
       # @return [Parse::LiveQuery::Subscription] the subscription object
       # @see Parse::LiveQuery::Subscription
       # @see Parse::Query#subscribe
-      def subscribe(where: {}, fields: nil, session_token: nil, client: nil)
+      def subscribe(where: {}, fields: nil, session_token: nil, client: nil,
+                    use_master_key: false)
         # Fall through to the ambient set by `Parse.with_session` / `Parse.login`
         # so a caller wrapping a region with `with_session(user) { Klass.subscribe ... }`
         # gets an ACL-aware subscription without re-threading the token.
@@ -446,7 +449,12 @@ module Parse
           ambient = Parse.current_session_token
           session_token = ambient if ambient.is_a?(String) && !ambient.empty?
         end
-        query(where).subscribe(fields: fields, session_token: session_token, client: client)
+        query(where).subscribe(
+          fields: fields,
+          session_token: session_token,
+          client: client,
+          use_master_key: use_master_key,
+        )
       end
 
       # Find objects for a given objectId in this collection. The result is a list

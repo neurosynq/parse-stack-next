@@ -1,0 +1,10 @@
+{
+  "$search": {
+    "index": "test_index",
+    "regex": {
+      "allowAnalyzedField": true,
+      "path": "title",
+      "query": "ru[bt]y"
+    }
+  }
+}

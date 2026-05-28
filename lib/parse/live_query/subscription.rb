@@ -74,13 +74,25 @@ module Parse
       # @param query [Hash] query constraints (where clause)
       # @param fields [Array<String>, nil] specific fields to watch
       # @param session_token [String, nil] session token for authentication
-      def initialize(client:, class_name:, query: {}, fields: nil, session_token: nil)
+      # @param use_master_key [Boolean] when true, the subscribe frame
+      #   carries `masterKey` instead of (or in addition to) a session
+      #   token, so the server skips per-row ACL/CLP enforcement for
+      #   this subscription. Requires the parent client to have been
+      #   constructed with a master_key (otherwise the kwarg is a no-op
+      #   and the wire field is suppressed). Per-subscription opt-in
+      #   parallels the Parse JS client's `useMasterKey` flag — useful
+      #   when one client services subscriptions for both end-users
+      #   (session-token-scoped) and administrative tooling (master-
+      #   key-scoped) on the same socket. Defaults to false.
+      def initialize(client:, class_name:, query: {}, fields: nil,
+                     session_token: nil, use_master_key: false)
         @monitor = Monitor.new
         @client = client
         @class_name = class_name
         @query = query
         @fields = fields
         @session_token = session_token
+        @use_master_key = use_master_key == true
         @request_id = generate_request_id
         @state = :pending
         @callbacks = Hash.new { |h, k| h[k] = [] }
@@ -214,8 +226,28 @@ module Parse
 
         msg[:query][:fields] = fields if fields&.any?
         msg[:sessionToken] = session_token if session_token
+        # Per-subscription master-key opt-in. Only emit when:
+        # (a) the subscription was constructed with use_master_key: true,
+        # (b) the parent client responds to master_key,
+        # (c) the master_key is a non-empty String. The empty-String
+        #     check is the v5.1.0 round-3 tightening — a misconfigured
+        #     client returning `""` for master_key would have emitted
+        #     `masterKey: ""` on the wire, which the LiveQuery server
+        #     may reject silently. Treat empty as "no master key" so
+        #     the wire frame is well-formed (and the parent client's
+        #     own auth context applies instead).
+        master_key = @client.master_key if @client.respond_to?(:master_key)
+        if @use_master_key && master_key.is_a?(String) && !master_key.empty?
+          msg[:masterKey] = master_key
+        end
 
         msg
+      end
+
+      # @return [Boolean] whether this subscription opted into
+      #   per-subscription master-key auth via `use_master_key: true`.
+      def use_master_key?
+        @use_master_key == true
       end
 
       # Build the unsubscribe message
@@ -252,9 +284,19 @@ module Parse
       # @api private
       def fail!(error)
         @monitor.synchronize { @state = :error }
-        error = SubscriptionError.new(error) if error.is_a?(String)
+        # Promote String errors (which come back from the LiveQuery
+        # server with messages like "Permission denied (code: 101)")
+        # to typed SubscriptionError instances carrying the request_id
+        # and class_name as structured context. The resulting
+        # `e.message` reads `request_id=<n> class=<X> <server message>`,
+        # so a single-line log captures the operational context the
+        # raw server string lacks.
+        if error.is_a?(String)
+          error = SubscriptionError.new(error, request_id: @request_id, class_name: @class_name)
+        end
         Logging.error("Subscription failed",
                       request_id: @request_id,
+                      class_name: @class_name,
                       error: error)
         emit(:error, error)
       end

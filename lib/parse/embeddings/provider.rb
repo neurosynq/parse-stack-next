@@ -41,14 +41,28 @@ module Parse
 
       # @param sources [Array<URI, IO, String>] image sources — URI for
       #   remote, IO for streamed bytes, String for base64. Concrete
-      #   providers document which forms they accept.
+      #   providers document which forms they accept. In v5.1 (URL-only
+      #   path), every source is a `String` URL that has already been
+      #   validated by {Parse::Embeddings.validate_image_url!} and
+      #   canonicalized — providers MUST forward it verbatim rather
+      #   than re-parsing.
       # @param input_type [Symbol] `:search_query` or `:search_document`,
       #   parallel to {#embed_text}.
+      # @param allow_insecure [Boolean] **contract kwarg** —
+      #   {Parse::Core::EmbedManaged.recompute_embedding!} unconditionally
+      #   forwards this from the directive declaration. Concrete
+      #   `embed_image` overrides MUST either accept `allow_insecure:`
+      #   explicitly (passing it through to
+      #   {Parse::Embeddings.validate_image_url!}) or absorb it via
+      #   `**opts`. Dropping `**opts` from the override signature
+      #   without accepting `allow_insecure:` will raise
+      #   `ArgumentError: unknown keyword: allow_insecure` from the
+      #   managed-embedding save path. Default `false`.
       # @param opts [Hash] provider-specific options (e.g. `dim:` for
       #   Matryoshka-style truncation). Forward-compatible escape hatch.
       # @return [Array<Array<Float>>] vectors aligned 1:1 with `sources`.
       # @raise [NotImplementedError] image embedding is a v5.1+ feature.
-      def embed_image(sources, input_type: :search_document, **opts)
+      def embed_image(sources, input_type: :search_document, allow_insecure: false, **opts)
         raise NotImplementedError, "#{self.class} does not support image embedding"
       end
 

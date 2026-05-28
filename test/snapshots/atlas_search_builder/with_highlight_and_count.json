@@ -1,0 +1,15 @@
+{
+  "$search": {
+    "count": {
+      "type": "total"
+    },
+    "highlight": {
+      "path": "title"
+    },
+    "index": "test_index",
+    "text": {
+      "path": "title",
+      "query": "ruby"
+    }
+  }
+}

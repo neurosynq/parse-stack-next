@@ -481,7 +481,10 @@ class CreateLockTest < Minitest::Test
 
   def test_parse_cache_redis_wrapper_is_treated_as_cross_process_store
     skip "Parse::Cache::Redis not loaded" unless defined?(Parse::Cache::Redis)
-    refute Parse::CreateLock.send(:degraded_store?, Parse::Cache::Redis.allocate),
+    # `degraded_store?` lives on Parse::LockBackend now (v5.1.0
+    # extraction); both Parse::CreateLock and Parse::Lock consume it
+    # from there.
+    refute Parse::LockBackend.degraded_store?(Parse::Cache::Redis.allocate),
            "Parse::Cache::Redis wrapper must be classified as cross-process"
   end
 

@@ -1,0 +1,9 @@
+{
+  "$search": {
+    "index": "test_index",
+    "text": {
+      "path": "title",
+      "query": "ruby"
+    }
+  }
+}

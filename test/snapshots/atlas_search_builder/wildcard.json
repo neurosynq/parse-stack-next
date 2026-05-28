@@ -1,0 +1,9 @@
+{
+  "$search": {
+    "index": "test_index",
+    "wildcard": {
+      "path": "title",
+      "query": "rub*"
+    }
+  }
+}

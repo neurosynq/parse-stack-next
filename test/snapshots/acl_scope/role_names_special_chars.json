@@ -1,0 +1,22 @@
+{
+  "$match": {
+    "$or": [
+      {
+        "_rperm": {
+          "$in": [
+            "*",
+            "role:foo-bar",
+            "role:scope:reporting",
+            "role:team.alpha",
+            "role:weird*name"
+          ]
+        }
+      },
+      {
+        "_rperm": {
+          "$exists": false
+        }
+      }
+    ]
+  }
+}

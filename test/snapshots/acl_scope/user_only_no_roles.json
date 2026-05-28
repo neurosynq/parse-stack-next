@@ -1,0 +1,19 @@
+{
+  "$match": {
+    "$or": [
+      {
+        "_rperm": {
+          "$in": [
+            "*",
+            "u_alice"
+          ]
+        }
+      },
+      {
+        "_rperm": {
+          "$exists": false
+        }
+      }
+    ]
+  }
+}

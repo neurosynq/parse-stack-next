@@ -1,0 +1,31 @@
+{
+  "$search": {
+    "compound": {
+      "minimumShouldMatch": 1,
+      "must": [
+        {
+          "text": {
+            "path": "title",
+            "query": "ruby"
+          }
+        }
+      ],
+      "mustNot": [
+        {
+          "exists": {
+            "path": "archived_at"
+          }
+        }
+      ],
+      "should": [
+        {
+          "phrase": {
+            "path": "body",
+            "query": "open source"
+          }
+        }
+      ]
+    },
+    "index": "test_index"
+  }
+}

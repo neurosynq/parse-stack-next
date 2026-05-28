@@ -1,0 +1,10 @@
+{
+  "$search": {
+    "index": "test_index",
+    "phrase": {
+      "path": "body",
+      "query": "open source",
+      "slop": 2
+    }
+  }
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "$match": {
+      "likes": {
+        "$gt": 5
+      }
+    }
+  },
+  {
+    "$sort": {
+      "likes": -1
+    }
+  },
+  {
+    "$skip": 5
+  },
+  {
+    "$limit": 10
+  },
+  {
+    "$project": {
+      "likes": 1,
+      "title": 1
+    }
+  }
+]

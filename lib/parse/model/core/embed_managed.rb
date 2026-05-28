@@ -88,17 +88,33 @@ module Parse
       # field write; the guard is otherwise closed.
       WRITER_KEY = :parse_embed_managed_writer
 
-      # Frozen value-object capturing one `embed` declaration. Stored on
-      # the owning class under `embed_directives[into]` and passed to
+      # Frozen value-object capturing one `embed` or `embed_image`
+      # declaration. Stored on the owning class under
+      # `embed_directives[into]` and passed to
       # {EmbedManaged.recompute_embedding!} from the per-class
       # before_save callback.
+      #
+      # `modality` is `nil` (treated as `:text`) for {.embed}-declared
+      # directives and `:image` for {.embed_image}. The image path
+      # routes through `Parse::Embeddings.validate_image_url!` and
+      # `Provider#embed_image` rather than `Provider#embed_text`;
+      # digest tracking is over the file URL String rather than the
+      # concatenated source text.
+      #
+      # `allow_insecure` is forwarded to {.validate_image_url!} for
+      # image directives only; ignored for text.
       EmbedDirective = Struct.new(
         :sources, :into, :digest_field, :input_type, :provider_name,
+        :modality, :allow_insecure,
         keyword_init: true,
       ) do
         def freeze
           sources.freeze
           super
+        end
+
+        def image?
+          modality == :image
         end
       end
 
@@ -186,6 +202,99 @@ module Parse
           into
         end
 
+        # Declare a managed image embedding. Mirrors {.embed} but the
+        # source field is a `:file` property (Parse::File) and the
+        # provider call routes through {Parse::Embeddings::Provider#embed_image}
+        # rather than `#embed_text`. v5.1 ships URL-only: the SDK
+        # extracts the file's URL, validates it through
+        # {Parse::Embeddings.validate_image_url!} (sentinel-gated egress
+        # opt-in, CIDR / port / host allowlist), and forwards the
+        # canonicalized URL to the provider. The SDK does NOT download
+        # image bytes — bytes-fetch is the v5.3 path.
+        #
+        # **Digest is the URL string, not the file contents.** Replacing
+        # the Parse::File with one pointing to a different URL re-embeds;
+        # re-saving the same URL is a no-op (zero provider calls).
+        # Cloud-stored Parse files have stable URLs unless overwritten,
+        # so this is the right cache key for most uploads. If you mutate
+        # the underlying bytes at the SAME URL (e.g. PUT-replace on S3
+        # without renaming), the embedding will NOT refresh; rename the
+        # file or set `:#{into}_digest` to nil and resave to force re-embed.
+        #
+        # @param source_field [Symbol] one `:file` property whose URL
+        #   feeds the provider. (v5.1 accepts a single source per
+        #   directive; multi-image-per-record support is deferred.)
+        # @param into [Symbol] the `:vector` property to populate.
+        #   Must already be declared with `provider:` metadata.
+        # @param input_type [Symbol] forwarded to {Provider#embed_image}.
+        #   Defaults to `:search_document`.
+        # @param digest_field [Symbol, nil] override for the URL-digest
+        #   sibling. Defaults to `:"#{into}_digest"`. Auto-declared as
+        #   `:string` if not already declared.
+        # @param allow_insecure [Boolean] forwarded to
+        #   {Parse::Embeddings.validate_image_url!}; permit `http://`
+        #   for local-dev CDN proxies. Default false.
+        # @return [Symbol] the target vector field name.
+        # @raise [InvalidEmbedDeclaration] on declaration-time misuse.
+        def embed_image(source_field, into:, input_type: :search_document,
+                        digest_field: nil, allow_insecure: false)
+          into = into.to_sym
+          unless vector_properties.key?(into)
+            raise InvalidEmbedDeclaration,
+                  "#{self}.embed_image: `into: :#{into}` is not a declared :vector property " \
+                  "(declared :vector fields: #{vector_properties.keys.inspect})."
+          end
+          provider_name = vector_properties.dig(into, :provider)
+          if provider_name.nil?
+            raise InvalidEmbedDeclaration,
+                  "#{self}.embed_image: `into: :#{into}` has no `provider:` declared on its " \
+                  ":vector property. Add `provider: :voyage` (or another registered name) " \
+                  "to the property declaration."
+          end
+
+          source = source_field.to_sym
+          unless fields.key?(source)
+            raise InvalidEmbedDeclaration,
+                  "#{self}.embed_image: source field #{source.inspect} is not declared on this class."
+          end
+          unless fields[source] == :file
+            raise InvalidEmbedDeclaration,
+                  "#{self}.embed_image: source field #{source.inspect} must be a :file property " \
+                  "(got #{fields[source].inspect}). v5.1 image embedding accepts Parse::File " \
+                  "sources only — text sources go through `embed`."
+          end
+
+          digest_field = (digest_field || :"#{into}_digest").to_sym
+          unless fields.key?(digest_field)
+            property digest_field, :string
+          end
+
+          directive = EmbedDirective.new(
+            sources: [source],
+            into: into,
+            digest_field: digest_field,
+            input_type: input_type,
+            provider_name: provider_name,
+            modality: :image,
+            allow_insecure: allow_insecure,
+          ).freeze
+          embed_directives[into] = directive
+
+          callback_method = :"_auto_embed_#{into}!"
+          define_method(callback_method) do
+            Parse::Core::EmbedManaged.recompute_embedding!(self, directive)
+          end
+
+          already_registered = _save_callbacks.any? do |cb|
+            cb.kind == :before && (cb.filter.to_sym rescue cb.filter) == callback_method
+          end
+          before_save callback_method unless already_registered
+
+          install_embed_writer_guard!(into, [source])
+
+          into
+        end
+
         # @!visibility private
         # Prepend a module that intercepts the public `<into>=` setter
         # and raises {ProtectedFieldError} unless the current thread has
@@ -225,19 +334,19 @@ module Parse
       end
 
       # @!visibility private
-      # before_save body. Computes the SHA-256 digest of the
-      # concatenated source-field values. If the digest matches the
-      # stored sibling AND the target vector is already populated, the
-      # method returns without contacting the provider. Otherwise it
-      # calls the provider, validates the response shape, wraps the
-      # vector, and writes both the vector and digest under the writer
-      # guard (so the public setters' dirty-tracking fires).
+      # before_save body. Dispatches on `directive.modality`: text
+      # directives concatenate source-field values and call
+      # `Provider#embed_text`; image directives extract the source
+      # Parse::File's URL, validate it via
+      # `Parse::Embeddings.validate_image_url!`, and call
+      # `Provider#embed_image`. Digest tracking elides the provider
+      # call when the source has not changed since last save.
       def self.recompute_embedding!(record, directive)
-        text = build_source_text(record, directive.sources)
+        input = build_source_input(record, directive)
         stored_digest = record.public_send(directive.digest_field)
         target_present = !record.public_send(directive.into).nil?
 
-        if text.empty?
+        if input.nil? || input.empty?
           if target_present || !stored_digest.nil?
             with_writer(directive.into) do
               record.public_send(:"#{directive.into}=", nil)
@@ -247,11 +356,11 @@ module Parse
           return
         end
 
-        digest = digest_for(text)
+        digest = digest_for(input)
         return if stored_digest == digest && target_present
 
         provider = Parse::Embeddings.provider(directive.provider_name)
-        vectors = provider.embed_text([text], input_type: directive.input_type)
+        vectors = call_provider(provider, directive, input)
         unless vectors.is_a?(Array) && vectors.length == 1 && vectors.first.is_a?(Array)
           raise Parse::Embeddings::InvalidResponseError,
                 "Parse::Core::EmbedManaged (#{record.class}##{directive.into}): provider " \
@@ -271,6 +380,46 @@ module Parse
           record.public_send(:"#{directive.into}=", vector)
         end
         record.public_send(:"#{directive.digest_field}=", digest)
+      end
+
+      # @!visibility private
+      # Build the provider input for `directive`: concatenated text for
+      # text directives; the raw image URL for image directives.
+      # Returns `nil` (treated as "clear the embedding") when the source
+      # is absent, empty, or — for images — has no URL.
+      #
+      # **Image path does not validate here.** Validation runs once,
+      # inside the provider's `embed_image` call. Validating here
+      # would double-resolve every URL (round-2 audit LOW #3) since
+      # provider implementations call `validate_image_url!` again.
+      # The digest is computed from the raw URL string, which is fine
+      # — the digest is a content fingerprint, not a security boundary.
+      # If validation fails, the provider raises `InvalidImageURL` /
+      # `ConfirmationRequired` from inside `recompute_embedding!`, which
+      # surfaces from `before_save` exactly as before.
+      def self.build_source_input(record, directive)
+        if directive.image?
+          source_field = directive.sources.first
+          file = record.public_send(source_field)
+          return nil if file.nil?
+          url = file.respond_to?(:url) ? file.url : nil
+          return nil if url.nil? || url.to_s.empty?
+          url.to_s
+        else
+          build_source_text(record, directive.sources)
+        end
+      end
+
+      # @!visibility private
+      # Dispatch the provider call based on directive modality.
+      def self.call_provider(provider, directive, input)
+        if directive.image?
+          provider.embed_image([input],
+            input_type: directive.input_type,
+            allow_insecure: directive.allow_insecure ? true : false)
+        else
+          provider.embed_text([input], input_type: directive.input_type)
+        end
       end
 
       # @!visibility private

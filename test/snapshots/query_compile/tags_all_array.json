@@ -1,0 +1,11 @@
+{
+  "where": {
+    "tags": {
+      "$all": [
+        "jazz",
+        "pop",
+        "rock"
+      ]
+    }
+  }
+}

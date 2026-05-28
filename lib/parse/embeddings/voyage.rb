@@ -272,6 +272,108 @@ module Parse
         end
       end
 
+      # @return [Array<Symbol>] Voyage's multimodal models support
+      #   `[:text, :image]`; text-only models report `[:text]`.
+      def modalities
+        MULTIMODAL_MODELS.include?(@model) ? %i[text image] : [:text]
+      end
+
+      # Embed a batch of image URLs through Voyage's
+      # `/v1/multimodalembeddings` endpoint. v5.1 ships URL-only — the
+      # provider receives a public URL and issues its own fetch. The
+      # SDK does NOT download the image; it validates the URL through
+      # {Parse::Embeddings.validate_image_url!} (CIDR / port / host
+      # allowlist, sentinel-gated egress opt-in) and forwards the
+      # canonicalized URL string in the `{ type: "image_url",
+      # image_url: ... }` content row.
+      #
+      # **Multimodal model required.** Voyage's text-only models
+      # (`voyage-3`, `voyage-4`, etc.) do not accept image inputs;
+      # calling `embed_image` on a provider configured with one of
+      # those raises {BadRequestError} before any network call.
+      #
+      # **Bytes-fetch path is v5.3.** A future `bytes:` option will
+      # download via {Parse::File.safe_open_url}, MIME-sniff the
+      # leading bytes, optionally EXIF-strip, and forward as
+      # base64. URL-only ships first because it sidesteps EXIF /
+      # MIME-confusion class issues entirely.
+      #
+      # @param sources [Array<String>] image URLs. Each must satisfy
+      #   {Parse::Embeddings.validate_image_url!} — failing entries
+      #   raise the corresponding {Parse::Embeddings::InvalidImageURL}
+      #   / {Parse::Embeddings::ConfirmationRequired} and ABORT the
+      #   whole batch (no partial forwarding).
+      # @param input_type [Symbol] one of {INPUT_TYPE_WIRE_VALUES}'s
+      #   keys; mapped to Voyage's `input_type` field. Defaults to
+      #   `:search_document`.
+      # @param allow_insecure [Boolean] forwarded to the URL
+      #   validator; permit `http://` for local-dev CDN proxies.
+      # @return [Array<Array<Float>>] vectors aligned 1:1 with `sources`.
+      def embed_image(sources, input_type: :search_document, allow_insecure: false)
+        unless MULTIMODAL_MODELS.include?(@model)
+          raise BadRequestError,
+                "Parse::Embeddings::Voyage#embed_image: model #{@model.inspect} does not " \
+                "accept image inputs. Configure the provider with a multimodal model " \
+                "(supported: #{MULTIMODAL_MODELS.inspect})."
+        end
+        unless sources.is_a?(Array)
+          raise ArgumentError,
+                "Parse::Embeddings::Voyage#embed_image expects Array of image URLs " \
+                "(got #{sources.class})."
+        end
+        return [] if sources.empty?
+
+        unless INPUT_TYPE_WIRE_VALUES.key?(input_type)
+          raise ArgumentError,
+                "Parse::Embeddings::Voyage#embed_image input_type #{input_type.inspect} not in " \
+                "#{INPUT_TYPE_WIRE_VALUES.keys.inspect}."
+        end
+        # Voyage caps multimodal requests at the same per-request size
+        # as the text endpoint. The text path goes through
+        # `embed_text_batched` which chunks automatically; the image
+        # path has no chunker yet (every directive is a single URL in
+        # v5.1), so guard the direct-API caller against a silent 400.
+        if sources.length > @embed_batch_size
+          raise ArgumentError,
+                "Parse::Embeddings::Voyage#embed_image: batch size #{sources.length} exceeds " \
+                "the configured cap #{@embed_batch_size} (Voyage per-request max: 128). " \
+                "Split the input and call embed_image once per chunk."
+        end
+
+        # Validate every URL up-front so a malformed entry in slot N
+        # does not get past validation while slots 0..N-1 are already
+        # in the wire body. The validator returns the canonicalized
+        # URL — we forward exactly that, not the caller's raw input.
+        canonical_urls = sources.each_with_index.map do |url, i|
+          unless url.is_a?(String)
+            raise ArgumentError,
+                  "Parse::Embeddings::Voyage#embed_image sources[#{i}] is not a String " \
+                  "(#{url.class}). v5.1 ships URL-only — bytes/IO support is v5.3."
+          end
+          Parse::Embeddings.validate_image_url!(url, allow_insecure: allow_insecure)
+        end
+
+        wire_input_type = INPUT_TYPE_WIRE_VALUES[input_type]
+        body = {
+          inputs: canonical_urls.map { |u|
+            { content: [{ type: "image_url", image_url: u }] }
+          },
+          model: @model,
+          truncation: @truncation,
+        }
+        body[:input_type] = wire_input_type if wire_input_type
+
+        instrument_embed(sources.length, input_type, modality: :image) do |emit_payload|
+          payload = post_embeddings(body, path: "multimodalembeddings")
+          if payload.is_a?(Hash) && payload["usage"].is_a?(Hash)
+            tt = payload["usage"]["total_tokens"]
+            emit_payload[:total_tokens] = tt if tt.is_a?(Integer) && tt >= 0
+          end
+          vectors = extract_vectors!(payload, sources.length)
+          validate_response!(sources.length, vectors)
+        end
+      end
+
       def inspect_attrs
         super.merge(base: safe_base_host, retries: @max_retries)
       end

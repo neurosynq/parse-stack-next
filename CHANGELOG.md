@@ -2,6 +2,425 @@
 
 ### 5.1.0
 
+#### `Parse::File` — storage-adapter prep: `@key` field, signed-URL refusal, inspect hardening, `log_filter`
+
+Foundational changes that unblock the upcoming pluggable storage-adapter
+work (S3 + presigned direct upload). The fixes correct latent issues
+that surface the moment a file's canonical URL diverges from the legacy
+`name == File.basename(url)` shape, and harden the model so short-TTL
+signed URLs cannot leak through default Ruby formatters or be
+accidentally cached on the instance.
+
+- **NEW**: `Parse::File#key` accessor — optional bucket-relative object
+  key set by storage adapters to record the canonical location of a
+  file independent of `@name` (human filename) or `@url` (hostable URL).
+  Round-trips through `as_json` / `attributes=` for adapter-stored
+  files (the field is omitted from `as_json` when `@key` is blank so
+  legacy Parse-hosted files preserve the canonical `{__type, name, url}`
+  wire shape). Validating setter caps `@key` at 1024 bytes
+  (`Parse::File::MAX_KEY_BYTESIZE` — the S3 hard limit) and raises
+  `Parse::File::InvalidKeyError` past that; closes a memory-amplification
+  vector where a malformed row could ship multi-MB strings into
+  `inspect` output and exception reporters.
+  (`lib/parse/model/file.rb`)
+- **FIXED**: `Parse::File#saved?` no longer returns false for
+  adapter-stored files whose URL terminal segment diverges from
+  `@name`. The legacy `@name == File.basename(@url)` predicate is now
+  only applied when `@key` is blank (preserving every existing
+  Parse-Server-hosted code path); when `@key` is present, presence of
+  `@url` + `@name` is sufficient. Previously, a file stored at
+  `https://bucket.s3.amazonaws.com/tenants/abc/uuid-doc.pdf` with
+  `@name = "doc.pdf"` would report `saved? == false` and re-trigger
+  the upload guard on every `save` call.
+  (`lib/parse/model/file.rb`)
+- **FIXED**: `Hash#parse_file?` now recognizes adapter-stored file
+  hashes — `{name, url, key}` (count == 3) and
+  `{__type: "File", name, url, key}` (any count). The legacy basename
+  equality is enforced only when `key` is absent. Previously, an
+  adapter-stored file hash with `key` present was misidentified as a
+  non-file hash because the original `count == 2` guard was too tight
+  and the basename equality predicate was unconditional.
+  (`lib/parse/model/file.rb`)
+- **NEW**: `Parse::File#as_json` now emits `key` when set so
+  adapter-stored files survive a save+reload cycle. Legacy files
+  (where `@key` is blank) continue to serialize as the canonical
+  `{__type, name, url}` three-key file pointer the Parse Server wire
+  format documents — adding the field would otherwise break wire
+  compatibility for every Parse-hosted row.
+  (`lib/parse/model/file.rb`)
+- **NEW**: `Parse::File::SignedUrlError` is raised when caller code
+  attempts to assign a signed URL to `Parse::File#url=` (or when a
+  hydration carries one in the `url` field). Recognized signature
+  parameters: `X-Amz-Signature`, `X-Amz-Credential`,
+  `X-Amz-Security-Token`, `AWSAccessKeyId`, `Key-Pair-Id`. Structural
+  enforcement of the "@url is the canonical URL, never a signed URL"
+  invariant — signed URLs will surface via a future
+  `Parse::File#download_url(as:, ttl:)` API that returns them and
+  never assigns them to `@url`. Without this guard, the most natural
+  Ruby pattern (`file.url = presigned`) would silently leak the
+  capability through `#to_s`, `<%= file %>` in ERB, `String(file)`,
+  and every exception that interpolates the file.
+  `Parse::File.url_signature_param?(url_string)` exposes the detection
+  predicate publicly. (`lib/parse/model/file.rb`)
+- **CHANGED**: `Parse::File#inspect` no longer includes the full `@url`
+  string. Inspect output lands in exception messages, Rails error
+  pages, and log captures; defaulting to URL emission is a future leak
+  waiting to happen. The new format emits `@name`, `@mime_type`,
+  `@contents` (presence), `@key` (when present), and `@url=set|blank`
+  — enough to debug, none of the URL content. **Migration:** callers
+  that previously scraped `file.inspect` output to extract the URL
+  must switch to `file.url` directly. Test assertions that
+  pattern-match on `@url='https://...'` in inspect output will need to
+  be updated. (`lib/parse/model/file.rb`)
+- **CHANGED**: `Parse::File#to_s` is deliberately left returning `@url`
+  unchanged — ERB templates and `<img src="<%= file %>">` callers
+  continue to work. Combined with the new `url=` signed-URL refusal
+  above, this makes the "@url is canonical" invariant structural
+  rather than convention-based — `to_s` cannot leak a signed URL
+  because such a URL can never reach `@url`.
+- **NEW**: `Parse::File.log_filter` returns a frozen `Regexp` that
+  matches any HTTP(S) URL carrying an unambiguously AWS-style
+  signed-URL parameter — SigV4 (`X-Amz-*`), legacy SigV2
+  (`AWSAccessKeyId`), or CloudFront (`Key-Pair-Id`). Designed to be
+  plugged into `lograge` / `semantic_logger` / custom log scrubbers so
+  accidental `Rails.logger.info(file_url)` calls do not leak read
+  capabilities into log aggregators. Bare `Signature=` / `Policy=`
+  query params are intentionally NOT matched on their own — they
+  collide with too many unrelated app conventions (webhook
+  signatures, privacy_policy form fields); CloudFront URLs always
+  carry `Key-Pair-Id` alongside `Signature` / `Policy`, which IS
+  matched. Known limitations documented in the YARD: JSON-encoded
+  URLs (`\u0026` for `&`) and log lines wrapped mid-querystring
+  bypass the regex. (`lib/parse/model/file.rb`)
+- **NEW**: `Parse::File.filter_parameter_names` returns an
+  `Array<Regexp>` for `Rails.application.config.filter_parameters`.
+  Defaults to AWS-prefixed names only (`X-Amz-*`, `AWSAccessKeyId`,
+  `Key-Pair-Id`) so the list never over-redacts a Rails app's
+  privacy_policy / e-signature / policy_id form fields. Companion
+  `Parse::File.cloudfront_signed_param_names` returns the bare
+  `Signature` / `Policy` / `Expires` regexes as an opt-in extension
+  for CloudFront-heavy deployments that have confirmed no app-side
+  collision. (`lib/parse/model/file.rb`)
+
+#### `Parse::Lock` — public TTL-bounded mutual-exclusion primitive
+
+- **NEW**: `Parse::Lock.acquire(key, ttl:, wait:, on_degraded:) { … }`
+  exposes the Redis-backed lock previously hidden inside
+  `first_or_create!` / `create_or_update!` as a first-class
+  primitive. TTL-bounded (1..30s, default 3s), with in-process
+  `Mutex` fallback when the configured cache is process-local
+  (Moneta `Memory` / `Null` / nil), and fails closed —
+  acquisition errors are caught, treated as "not acquired", and
+  surface as `Parse::Lock::TimeoutError` once the `wait:` budget
+  elapses. Block-form only (no token-based `try_acquire`); release
+  is automatic on normal return, exception, `throw`/`break`, or
+  any `ensure`-path exit. Keys are SHA-256-hashed before hitting
+  the store so sensitive identifiers (user IDs, request IDs,
+  webhook idempotency keys) don't appear verbatim in `KEYS *`
+  output (obfuscation, not authentication — see the YARD for the
+  guessable-input-space caveat). Documented use cases: bulk-import
+  dedup, cron-job singletons, external-API idempotency, anywhere
+  two processes might race the same logical operation. Built on
+  `Parse::LockBackend` (see below); namespace prefix
+  `parse-stack:lock:v1:` is distinct from `first_or_create!`'s
+  `parse-stack:foc:v1:`, so the two APIs cannot collide even on
+  literally-equal-named keys. (`lib/parse/lock.rb`)
+- **NEW**: `Parse::Lock::TimeoutError` and
+  `Parse::Lock::UnavailableError` — namespaced under `Parse::Lock`
+  so the peer-not-base relationship to
+  `Parse::CreateLockTimeoutError` / `Parse::CreateLockUnavailableError`
+  is unambiguous in the name itself (a caller seeing
+  `Parse::Lock::TimeoutError` cannot reasonably read it as a base
+  of `Parse::CreateLockTimeoutError`). Both inherit from
+  `Parse::Error`; rescue chains targeting `Parse::Error` continue
+  to catch them. (`lib/parse/lock.rb`)
+- **NEW**: `Parse::LockBackend` — `@api private` module hosting the
+  shared lock primitives (`lock_store`, `degraded_store?`,
+  `handle_degraded`, `try_acquire`, `release`, `poll_interval`,
+  `process_mutex`). Both `Parse::Lock` and `Parse::CreateLock`
+  consume the backend directly instead of one reaching into the
+  other's privates. The extraction eliminates the `.send(:private)`
+  coupling that the v5.1.0 round-2 review called out as fragile —
+  any future refactor of the SETNX semantics, the
+  degraded-detection heuristic, or the in-process-Mutex fallback
+  registry happens in exactly one place. `Parse::CreateLock`
+  retains its own clamp/HMAC-secret helpers (`clamp`,
+  `lock_secret_for`, `configured_secret`, `auto_secret`,
+  `warn_plain_sha_once`) — those are specific to the
+  find-or-create surface and don't belong in the backend.
+  (`lib/parse/lock_backend.rb`, `lib/parse/model/core/create_lock.rb`)
+- **NEW**: `Parse::Lock` and `Parse::LockBackend` are autoloaded —
+  `Parse::Lock.acquire(…)` works without an explicit
+  `require 'parse/lock'`. (`lib/parse/stack.rb`)
+
+#### LiveQuery — ergonomics fixes (autoload, master-key kwarg, error context, signal-safe shutdown)
+
+- **NEW**: `Parse::LiveQuery` is now autoloaded — `Parse::LiveQuery.configure { … }`
+  works without an explicit `require 'parse/live_query'`. The
+  autoload is purely a file-loading convenience and does NOT open
+  any network connection; a WebSocket only opens when
+  `Parse.live_query_enabled = true` AND a
+  `Parse::LiveQuery::Client` is instantiated (typically via
+  `Klass.subscribe { … }`). The opt-in toggle's security shape is
+  preserved. (`lib/parse/stack.rb`)
+- **NEW**: `Query#subscribe` and `Klass.subscribe` accept
+  `use_master_key: true` for per-subscription master-key auth.
+  Parallels the Parse JS client's `useMasterKey` flag. When set
+  and the underlying `Parse::LiveQuery::Client` has a `master_key`
+  configured, the subscribe frame carries `masterKey` so the
+  server skips per-row ACL/CLP enforcement for that subscription.
+  Lets one client service both end-user (session-token-scoped)
+  and administrative (master-key-scoped) subscriptions on the
+  same socket. No-op when the client lacks a master_key — the
+  wire field is suppressed rather than silently downgrading to
+  no auth. Non-`true` values are coerced to `false` to prevent
+  accidental "ENV string evaluated truthy" enablement. The
+  `master_key` itself must be a non-empty `String` to be emitted
+  — empty strings, non-String values (Symbol, Integer, true), and
+  `nil` all suppress the field rather than producing a malformed
+  `masterKey: ""` / `masterKey: 42` frame the server may silently
+  reject (round-3 review tightening).
+  (`lib/parse/model/core/querying.rb`, `lib/parse/query.rb`,
+  `lib/parse/live_query/client.rb`, `lib/parse/live_query/subscription.rb`)
+- **CHANGED**: `Parse::LiveQuery::SubscriptionError` now carries
+  `request_id` and `class_name` as structured attributes, and the
+  `message` is auto-prefixed with `request_id=<n> class=<X>` when
+  the constructor receives either. `Subscription#fail!` promotes
+  String errors from the server (e.g. `"Permission denied (code: 101)"`)
+  to typed instances carrying both the request id and the class
+  the subscription targeted — a single-line log captures enough
+  operational context to debug a permission denial without
+  re-correlating the raw server string against the subscription
+  registry. Backwards compatible — bare `SubscriptionError.new("…")`
+  callers (no context) preserve the verbatim message.
+  (`lib/parse/live_query.rb`, `lib/parse/live_query/subscription.rb`)
+- **NEW**: `Parse::LiveQuery.run_until_signal!(client:, signals:,
+  shutdown_timeout:, poll_interval:) { |client| … }` is a
+  signal-safe shutdown helper for long-running subscribe sessions
+  (rake-task-style consumers, `rake livequery:tail`, etc.). The
+  raw idiom — calling `client.unsubscribe` / `client.close` from
+  inside a `Signal.trap` block — raises `ThreadError: can't be
+  called from trap context` on macOS / MRI on platforms that
+  enforce `:signal_safe?`, because the trap context cannot
+  acquire the client's internal `Monitor`. This helper bundles
+  the safe pattern: install minimal trap handlers that only push
+  a sentinel onto a `Queue`, poll the sentinel from the main
+  thread, and run `client.shutdown(timeout:)` on the main thread
+  in an `ensure` block. Restores prior trap handlers on exit so
+  re-running the helper (in tests, or in a parent process that
+  traps SIGINT itself) does not leak our handler. Defaults to
+  trapping `INT` and `TERM`; configurable via `signals:`.
+  Yields the client to the block before the wait loop starts so
+  subscription setup is not racing the trap installation.
+  (`lib/parse/live_query.rb`)
+
+#### MCP — `structuredContent` outputSchemas for 5 more tools
+
+- **NEW**: `output_schema` declarations on five additional built-in
+  tools so the MCP dispatcher auto-mirrors their result Hash into
+  `structuredContent` per MCP 2025-06-18: `aggregate`,
+  `export_data`, `atlas_text_search`, `atlas_autocomplete`,
+  `atlas_faceted_search`. Each schema is `type: "object"` with
+  every nested `type: "array"` declaring `items:` (so OpenAI's
+  strict tool-list validation and MCP client outputSchema
+  validation both accept them), and uses `additionalProperties: true`
+  on result-row entries to remain honest about the open shape of
+  arbitrary `$project` / `$group` / `$lookup` output. Brings the
+  built-in MCP tool coverage to sixteen of the catalog;
+  `call_method` (structurally polymorphic per application return)
+  and `explain_query` (MongoDB-version-dependent shape) remain
+  text-only by design. End-to-end emission coverage in
+  `test/lib/parse/agent/mcp_dispatcher_test.rb` (five new
+  `test_builtin_<tool>_emits_structuredContent` cases drive each
+  tool's `tools/call` path through the dispatcher); static
+  validity coverage in `test/lib/parse/agent/tools_schema_validity_test.rb`
+  walks the new schemas with the existing JSON-Schema-object-root
+  and array-items-present invariants. Builds on the eleven
+  v5.0.0 tools (`count_objects`, `get_object`, `get_objects`,
+  `get_sample_objects`, `distinct`, `group_by`, `group_by_date`,
+  `list_tools`, `get_all_schemas`, `get_schema`, `query_class`).
+  (`lib/parse/agent/tools.rb`)
+
+#### Caching — tenant-aware namespacing
+
+- **NEW**: `Parse.with_cache_tenant(scope) { … }` sets an ambient
+  cache-tenant scope for the duration of the block;
+  `Parse.current_cache_tenant` reads it. When set, the
+  `Parse::Middleware::Caching` middleware composes the tenant
+  into the cache key as `<base-namespace>:T:<tenant>:…` so a
+  multi-tenant Parse application sharing one Redis (or any
+  Moneta-backed cache) gets per-tenant key isolation without
+  per-tenant `Parse::Client.new` plumbing. A SCAN-delete over
+  `<base-namespace>:T:<tenant>:*` evicts exactly one tenant
+  cleanly; the existing `<base-namespace>:*` SCAN still evicts
+  the whole app. The `T:` discriminator is unambiguously
+  distinguishable from session-token hex prefixes (32-char hex)
+  and `mk:`, so legacy cache entries written before this feature
+  cannot re-hydrate into a tenanted request and vice versa.
+  Fiber-local — composes safely with `async` and concurrent web
+  frameworks; restored on block exit even when the block raises.
+  AS::N payload (`parse.cache.{hit,miss,store,delete,error}`)
+  carries `:cache_tenant` so subscribers can budget cache
+  performance per tenant. Strictly a key-namespacing mechanism —
+  no access-control semantics; tenant isolation at the data
+  layer is the job of `agent_tenant_scope` and ACL/CLP.
+  (`lib/parse/stack.rb`, `lib/parse/client/caching.rb`)
+
+#### Image embedding — `embed_image` DSL + Voyage multimodal-3 (URL-only)
+
+The setup order is **(1) `Parse::Embeddings.allowed_image_hosts = […]` →
+(2) `Parse::Embeddings.trust_provider_url_fetch = "PROVIDER_EGRESS_VERIFIED"`
+→ (3) declare `embed_image` on the model**. Skipping the allowlist or
+the sentinel raises a typed error from the validator at save time;
+each error message tells the operator which prerequisite is missing.
+
+- **NEW**: `Parse::Embeddings::Cohere#embed_image(sources, input_type:, allow_insecure:)`
+  routes image URLs through Cohere's `/v2/embed` multimodal endpoint
+  for the `embed-v4.0` model (1536 native dim, Matryoshka-capable;
+  shares vector space with the text-input path on the same model).
+  Wire shape uses OpenAI-style nested
+  `{ type: "image_url", image_url: { url: ... } }` content rows —
+  different from {Voyage#embed_image}'s flat-String form, identical
+  high-level SDK contract (caller passes `Array<String>` URLs).
+  Refuses v3 models (text-only) with `BadRequestError` before any
+  network call; guards oversized batches (>96 per Cohere docs);
+  validates every URL up-front via
+  `Parse::Embeddings.validate_image_url!`. Internal
+  `Cohere#post_embeddings` grows a `path:` kwarg so the text path
+  continues to use `/v1/embed` while images route to `/v2/embed`.
+  (`lib/parse/embeddings/cohere.rb`)
+- **NEW**: `Parse::Embeddings::Voyage#embed_image(sources, input_type:, allow_insecure:)`
+  routes image URLs through Voyage's `/v1/multimodalembeddings`
+  endpoint for the `voyage-multimodal-3` model (1024-dim, shares
+  vector space with the text-input path that already shipped). The
+  SDK does NOT download image bytes — URL-only is the v5.1 path
+  (bytes-fetch with MIME-sniff + EXIF stripping is the v5.3 path).
+  Calling `embed_image` on a text-only model raises a clear
+  `BadRequestError` before any network call. The provider reports
+  `modalities == %i[text image]` for the multimodal model and
+  `[:text]` for text-only models. (`lib/parse/embeddings/voyage.rb`)
+- **NEW**: `Parse::Embeddings.validate_image_url!(url, allow_insecure:)`
+  is the canonical URL validator used by every `embed_image` path.
+  Layered checks, ordered cheap-first: (1) sentinel-gated
+  `trust_provider_url_fetch` opt-in must be set; (2) URL parses as
+  `https://` (or `http://` with `allow_insecure: true`, for local
+  dev only); (3) no userinfo; (4) host extracted via `uri.hostname`
+  so IPv6 literals are unbracketed and compare uniformly; (5) the
+  host is not an obfuscated IP form (`0x7f.0.0.1`, `127.1`,
+  `2130706433` — all rejected with `:host_blocked` BEFORE reaching
+  the resolver to keep operator logs honest about the failure mode);
+  (6) host matches `Parse::Embeddings.allowed_image_hosts` (string
+  match, no syscall — runs before the resolver hop so non-allowlisted
+  hosts can't amplify DNS traffic); (7) port in
+  `Parse::File.allowed_remote_ports`; (8) host resolves only to
+  addresses outside `Parse::File::BLOCKED_CIDRS` — delegated to
+  `Parse::File.assert_host_allowed!` so the SSRF mechanism is
+  shared, not parallelized. Returns the canonicalized URL String so
+  callers store/forward exactly what was validated. Failures raise
+  `Parse::Embeddings::InvalidImageURL` carrying a `:reason` Symbol
+  (`:scheme`, `:port`, `:userinfo`, `:host_blocked`,
+  `:host_not_allowlisted`, `:parse`); sentinel-off raises
+  `Parse::Embeddings::ConfirmationRequired`.
+  (`lib/parse/embeddings.rb`)
+- **NEW**: `Parse::Embeddings.trust_provider_url_fetch=` sentinel-
+  gated opt-in for forwarding image URLs to embedding providers.
+  Assigning the exact frozen String `"PROVIDER_EGRESS_VERIFIED"`
+  unlocks; any other value (`true`, `"true"`, `1`, a non-matching
+  String) raises `Parse::Embeddings::ConfirmationRequired`. Mirrors
+  the `acl: :off` sentinel pattern — an operator unintentionally
+  flipping the gate via `ENV` interpolation is refused, making
+  accidental enablement impossible. Threat model: image-URL
+  forwarding hands an attacker-controlled URL (chat input, agent
+  tool argument, user-submitted document field) to a third-party
+  provider that will then issue an HTTP request from its own
+  network. Even with the CIDR / port / host allowlist enforced at
+  SDK-validation time, the provider's actual fetch happens later
+  (DNS-rebinding window) and can follow redirects the SDK never
+  saw — operators must consciously acknowledge the residual risk.
+  (`lib/parse/embeddings.rb`)
+- **NEW**: `Parse::Embeddings.allowed_image_hosts=` allowlist
+  defining which CDN hostnames `validate_image_url!` will accept.
+  Entries beginning with `.` match suffixes (`.cloudfront.net`
+  matches `foo.cloudfront.net` and `cloudfront.net`); entries
+  without a leading `.` are exact. **Empty allowlist denies every
+  host** — opposite default from `Parse::File.allowed_remote_hosts`
+  (where empty means "any public host"). The asymmetry is
+  deliberate: image URLs that reach this validator typically
+  originate from attacker-controlled inputs, so opening the
+  surface requires an explicit operator declaration of which
+  CDNs are trusted. Frozen after assignment, case-insensitive
+  matching, reset by `Parse::Embeddings.reset!`.
+  (`lib/parse/embeddings.rb`)
+- **NEW**: `embed_image source_field, into: :vector_property, input_type:
+  :search_document, digest_field: nil, allow_insecure: false` class
+  macro on `Parse::Object` subclasses. Mirrors `embed` but for
+  `:file`-typed sources. The source
+  property must be `:file` (text sources go through `embed`); the
+  target must be a declared `:vector` property with `provider:`
+  metadata. On `before_save`: extracts the file's URL, runs it
+  through `validate_image_url!`, and calls `Provider#embed_image`.
+  **Digest is the SHA-256 of the URL String, not the file bytes** —
+  replacing the `Parse::File` with one pointing at a different URL
+  re-embeds; resaving the same URL is a no-op (zero provider calls).
+  Cloud-stored Parse files have stable URLs unless overwritten, so
+  this matches typical upload behavior. If you mutate bytes at the
+  same URL (PUT-replace on S3 without renaming), null the digest
+  field to force re-embed. Reuses the existing `EmbedManaged` writer
+  guard, before_save registration, and protected-field semantics —
+  direct assignment to the managed vector raises `ProtectedFieldError`
+  as with text `embed`. (`lib/parse/model/core/embed_managed.rb`)
+- **NEW**: `Parse::Core::EmbedManaged::EmbedDirective` gains
+  `modality:` (`nil`/`:text` for `embed`, `:image` for `embed_image`)
+  and `allow_insecure:` fields. `recompute_embedding!` dispatches on
+  modality, calling either `embed_text` or `embed_image`. The
+  source-input builder splits into `build_source_text` (existing,
+  concatenates text fields) and the new image-URL path (extracts
+  `file.url` and returns it raw — validation runs once, inside the
+  provider's `embed_image` call, to avoid double-resolving every
+  URL through DNS). Backwards compatible — every existing `embed`
+  directive continues to use the text path with no behavior change.
+  (`lib/parse/model/core/embed_managed.rb`)
+- **CHANGED**: Base `Parse::Embeddings::Provider#embed_image` signature is
+  now `(sources, input_type:, allow_insecure: false, **opts)`.
+  `allow_insecure:` is documented as a contract kwarg —
+  `EmbedManaged.call_provider` unconditionally forwards it from the
+  directive, so future provider overrides must accept it (explicitly
+  or via `**opts`) or the managed-embedding save path will raise
+  `ArgumentError: unknown keyword`. Existing `Voyage#embed_image`
+  already accepts `allow_insecure:` explicitly. No other built-in
+  provider overrides `embed_image` yet, so this is a forward-compat
+  contract, not a breaking change. (`lib/parse/embeddings/provider.rb`)
+- **NEW**: Voyage `embed_image` refuses oversized batches
+  (`sources.length > @embed_batch_size`, default 128) before any
+  validation or network call, with a clear "split and retry" error.
+  The text path goes through `embed_text_batched` which chunks
+  automatically; the image path has no chunker in v5.1, so a
+  direct-API caller passing 200 URLs gets a typed error instead of
+  a silent 400 from Voyage. (`lib/parse/embeddings/voyage.rb`)
+- **NEW**: Integration coverage for the image-embedding save
+  round-trip — `test/lib/parse/embed_managed_image_integration_test.rb`
+  exercises Parse::File upload to the Docker Parse Server, the
+  before_save → validate → provider → vector-persist path, idempotent
+  no-op on unchanged URL, re-embed on file reassignment with a
+  different URL, the writer guard against a live server, and clean
+  save abort (no half-written record) when the sentinel is unset
+  or the URL is not in the allowlist. Unit coverage in
+  `test/lib/parse/embeddings_image_url_validation_test.rb` (36
+  cases: sentinel gate, allowlist semantics, every validator
+  failure mode including obfuscated-IP forms and the
+  allowlist-before-resolve ordering),
+  `test/lib/parse/embeddings_voyage_image_test.rb` (15 cases:
+  multimodal-model gating, wire envelope, canonicalized-URL
+  forwarding, allow_insecure precedence, batch-size guard),
+  `test/lib/parse/embeddings_cohere_image_test.rb` (16 cases:
+  parallel coverage for Cohere `embed-v4.0` plus the nested
+  `image_url: { url: }` envelope assertion, `/v2/embed` endpoint
+  routing, and an AS::N billed-input-tokens passthrough),
+  `test/lib/parse/embed_managed_image_test.rb` (24 cases:
+  declaration validation including `:file`-only source check,
+  digest semantics, writer guard, security wiring,
+  `embed` + `embed_image` co-declaration on the same record).
+
 #### Client setup fixes — `Parse.setup` and `live_query_url`
 
 - **FIXED**: `Parse.setup` (the module-level helper) silently no-op'd on every
