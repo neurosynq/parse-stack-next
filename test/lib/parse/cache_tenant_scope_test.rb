@@ -100,6 +100,105 @@ class CacheTenantScopeTest < Minitest::Test
     assert_nil Parse.current_session_token
   end
 
+  # TODO #5 — Fiber/Thread isolation. The Fiber-local storage is by
+  # design scoped to the Fiber that set it; other Fibers (and other
+  # Threads, which carry their own root Fiber) MUST NOT observe the
+  # ambient set inside an unrelated context. Without this property,
+  # request-scoped tenant scopes would bleed across concurrent
+  # requests in any Fiber-per-request web server (Falcon, async-rack)
+  # and across threads in any Threaded-per-request server (Puma).
+
+  def test_with_cache_tenant_does_not_leak_across_threads
+    # Queue-gated synchronization rather than sleep-based ordering:
+    # the setter signals "scope established" via `setter_ready`, the
+    # observer reads + signals back via `observer_done`. Without the
+    # explicit gating, a slow CI box could schedule the observer
+    # AFTER the setter's `with_cache_tenant` block exits — the
+    # observer would still see nil (correct outcome) but for the
+    # wrong reason ("observed after restore", not "isolated").
+    setter_ready  = Queue.new
+    observer_done = Queue.new
+    leaked = :uninitialized
+
+    setter = Thread.new do
+      Parse.with_cache_tenant("thread-a") do
+        setter_ready << :scope_set
+        observer_done.pop  # block until observer has read
+      end
+    end
+
+    observer = Thread.new do
+      # Block until the setter has actually established its scope.
+      assert_equal :scope_set, setter_ready.pop(timeout: 5)
+      leaked = Parse.current_cache_tenant
+      observer_done << :read
+    end
+
+    main_observed = Parse.current_cache_tenant  # main thread, never set
+    setter.join
+    observer.join
+
+    assert_nil leaked, "Thread B must NOT see Thread A's cache tenant scope (got #{leaked.inspect})"
+    assert_nil main_observed, "Main thread must NOT see a worker thread's scope"
+    assert_nil Parse.current_cache_tenant, "Scope must be cleared after setter thread finishes"
+  end
+
+  def test_with_cache_tenant_does_not_leak_across_fibers
+    setter_fiber = Fiber.new do
+      Parse.with_cache_tenant("fiber-a") do
+        # Suspend mid-block; main resumes and inspects.
+        Fiber.yield Parse.current_cache_tenant
+        # Resumed — verify ours is still set inside this fiber.
+        Fiber.yield Parse.current_cache_tenant
+      end
+    end
+
+    inside_setter   = setter_fiber.resume
+    observer_fiber  = Fiber.new { Parse.current_cache_tenant }
+    inside_observer = observer_fiber.resume
+    inside_setter_again = setter_fiber.resume
+
+    assert_equal "fiber-a", inside_setter,
+      "Setter fiber must see its own scope"
+    assert_nil inside_observer,
+      "Observer fiber must NOT see the setter fiber's scope"
+    assert_equal "fiber-a", inside_setter_again,
+      "Setter fiber's scope must persist across Fiber.yield round-trips"
+  end
+
+  def test_with_cache_tenant_runs_ensure_even_when_thread_killed
+    # Thread#kill runs `ensure` clauses on its way down. The Fiber-
+    # local restore in `with_cache_tenant`'s ensure block must fire
+    # so a killed worker doesn't leave a stale scope on its root
+    # Fiber (which would matter if the thread is recycled — Puma
+    # recycles threads from a pool).
+    cleanup_observed = nil
+    t = Thread.new do
+      Parse.with_cache_tenant("kill-me") do
+        # Signal that we're inside the block, then sleep waiting
+        # for the kill.
+        Thread.current[:inside] = true
+        sleep 5
+      end
+    rescue StandardError
+      # Thread#kill in some Ruby versions raises here; absorb so the
+      # outer join can capture the ensure-clause result.
+    ensure
+      cleanup_observed = Parse.current_cache_tenant
+    end
+
+    # Wait for the block to actually be inside.
+    sleep 0.01 until t[:inside]
+    t.kill
+    t.join(1.0)
+
+    # The thread's ensure block ran after kill; the Fiber-local
+    # restore inside `with_cache_tenant` set `current_cache_tenant`
+    # back to its prior value (nil — outer scope never set one).
+    assert_nil cleanup_observed,
+      "with_cache_tenant's ensure must restore on Thread#kill — observed: #{cleanup_observed.inspect}"
+  end
+
   # ---- cache-key composition --------------------------------------------
 
   def test_no_tenant_key_matches_legacy_shape

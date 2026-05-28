@@ -437,11 +437,26 @@ module Parse
       # @param client [Parse::LiveQuery::Client] custom LiveQuery client (optional)
       # @param use_master_key [Boolean] per-subscription master-key opt-in.
       #   See {Parse::Query#subscribe} for the full description.
+      # @yield [subscription] runs the block with the freshly-constructed
+      #   {Parse::LiveQuery::Subscription} BEFORE the subscribe frame is
+      #   sent so caller-registered callbacks are wired before any server
+      #   events can arrive. Optional — callers may still capture the
+      #   returned subscription and register callbacks later.
+      # @example block form (ergonomic, no race window)
+      #   Post.subscribe(where: { published: true }) do |sub|
+      #     sub.on(:create) { |obj| puts "new: #{obj.id}" }
+      #     sub.on(:update) { |obj, prev| puts "updated: #{obj.id}" }
+      #   end
+      # @example capture-then-wire form (equivalent, but has a tiny
+      #   window between subscribe-frame send and the first .on call
+      #   where a server event would be dropped if it arrived first)
+      #   sub = Post.subscribe(where: { published: true })
+      #   sub.on(:create) { |obj| … }
       # @return [Parse::LiveQuery::Subscription] the subscription object
       # @see Parse::LiveQuery::Subscription
       # @see Parse::Query#subscribe
       def subscribe(where: {}, fields: nil, session_token: nil, client: nil,
-                    use_master_key: false)
+                    use_master_key: false, &block)
         # Fall through to the ambient set by `Parse.with_session` / `Parse.login`
         # so a caller wrapping a region with `with_session(user) { Klass.subscribe ... }`
         # gets an ACL-aware subscription without re-threading the token.
@@ -454,6 +469,7 @@ module Parse
           session_token: session_token,
           client: client,
           use_master_key: use_master_key,
+          &block
         )
       end
 
