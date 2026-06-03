@@ -41,14 +41,32 @@ module Parse
 
       # @param sources [Array<URI, IO, String>] image sources — URI for
       #   remote, IO for streamed bytes, String for base64. Concrete
-      #   providers document which forms they accept.
+      #   providers document which forms they accept. In v5.1 (URL-only
+      #   path), every source is a raw `String` URL forwarded unchanged
+      #   from the managed path: {Parse::Core::EmbedManaged} deliberately
+      #   does NOT validate before calling the provider (validating there
+      #   would double-resolve every URL). The concrete `embed_image`
+      #   override is therefore responsible for calling
+      #   {Parse::Embeddings.validate_image_url!} (passing `allow_insecure:`
+      #   through) before egress — see the bundled Voyage/Cohere providers,
+      #   which validate internally.
       # @param input_type [Symbol] `:search_query` or `:search_document`,
       #   parallel to {#embed_text}.
+      # @param allow_insecure [Boolean] **contract kwarg** —
+      #   {Parse::Core::EmbedManaged.recompute_embedding!} unconditionally
+      #   forwards this from the directive declaration. Concrete
+      #   `embed_image` overrides MUST either accept `allow_insecure:`
+      #   explicitly (passing it through to
+      #   {Parse::Embeddings.validate_image_url!}) or absorb it via
+      #   `**opts`. Dropping `**opts` from the override signature
+      #   without accepting `allow_insecure:` will raise
+      #   `ArgumentError: unknown keyword: allow_insecure` from the
+      #   managed-embedding save path. Default `false`.
       # @param opts [Hash] provider-specific options (e.g. `dim:` for
       #   Matryoshka-style truncation). Forward-compatible escape hatch.
       # @return [Array<Array<Float>>] vectors aligned 1:1 with `sources`.
       # @raise [NotImplementedError] image embedding is a v5.1+ feature.
-      def embed_image(sources, input_type: :search_document, **opts)
+      def embed_image(sources, input_type: :search_document, allow_insecure: false, **opts)
         raise NotImplementedError, "#{self.class} does not support image embedding"
       end
 

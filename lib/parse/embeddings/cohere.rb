@@ -14,9 +14,13 @@ module Parse
     #
     # * **v4** — `embed-v4.0` (1536 native, Matryoshka {256, 512, 1024,
     #   1536}, 128k-token context). Unified text + image model at the
-    #   network boundary; this provider exposes the text-input path
-    #   only — image inputs will land in v5.1 alongside the
-    #   {Provider#embed_image} hook.
+    #   network boundary. The text path uses Cohere's `/v1/embed`
+    #   endpoint; the image path ({#embed_image}, v5.1+) uses the
+    #   `/v2/embed` multimodal endpoint with OpenAI-style
+    #   `{ type: "image_url", image_url: { url: ... } }` content rows.
+    #   Text vectors stored today share the vector space with the
+    #   eventual image vectors (no re-embed required when adding
+    #   image-side data).
     # * **v3** — `embed-english-v3.0`, `embed-multilingual-v3.0` (both
     #   1024-dim), `embed-english-light-v3.0`,
     #   `embed-multilingual-light-v3.0` (both 384-dim). Text-only.
@@ -93,6 +97,10 @@ module Parse
       # truncation parameter. v4.0 is the only such row today; v3
       # models reject the field with a 400.
       MATRYOSHKA_MODELS = %w[embed-v4.0].freeze
+
+      # Models that accept image inputs via the `/v2/embed` multimodal
+      # endpoint. Currently only `embed-v4.0` — v3 is text-only.
+      MULTIMODAL_MODELS = %w[embed-v4.0].freeze
 
       # Allowed Matryoshka widths per model (Cohere quantizes the
       # available truncations rather than accepting any integer ≤
@@ -246,6 +254,105 @@ module Parse
         end
       end
 
+      # @return [Array<Symbol>] `[:text, :image]` for `embed-v4.0`,
+      #   `[:text]` for v3 models.
+      def modalities
+        MULTIMODAL_MODELS.include?(@model) ? %i[text image] : [:text]
+      end
+
+      # Embed a batch of image URLs through Cohere's `/v2/embed`
+      # multimodal endpoint. v5.1 ships URL-only — the provider
+      # receives a public URL and issues its own fetch. The SDK does
+      # NOT download the image; it validates the URL through
+      # {Parse::Embeddings.validate_image_url!} (sentinel-gated egress
+      # opt-in, CIDR / port / host allowlist) and forwards the
+      # canonicalized URL string in the `{ type: "image_url",
+      # image_url: { url: ... } }` content row.
+      #
+      # **Multimodal model required.** Cohere's v3 models do not accept
+      # image inputs; calling `embed_image` on a v3-configured provider
+      # raises {BadRequestError} before any network call.
+      #
+      # **Wire shape differs from {Voyage#embed_image}.** Voyage uses
+      # `{ type: "image_url", image_url: "<url>" }` (flat String); Cohere
+      # v2 uses `{ type: "image_url", image_url: { url: "<url>" } }`
+      # (nested object), matching the OpenAI chat-completions content
+      # convention. The high-level SDK contract is identical — callers
+      # pass an `Array<String>` of URLs.
+      #
+      # @param sources [Array<String>] image URLs. Each must satisfy
+      #   {Parse::Embeddings.validate_image_url!}; failing entries
+      #   abort the whole batch (no partial forwarding).
+      # @param input_type [Symbol] one of {INPUT_TYPE_WIRE_VALUES}'s
+      #   keys; mapped to Cohere's `input_type` field. Defaults to
+      #   `:search_document`.
+      # @param allow_insecure [Boolean] forwarded to the URL validator;
+      #   permit `http://` for local-dev CDN proxies.
+      # @return [Array<Array<Float>>] vectors aligned 1:1 with `sources`.
+      def embed_image(sources, input_type: :search_document, allow_insecure: false)
+        unless MULTIMODAL_MODELS.include?(@model)
+          raise BadRequestError,
+                "Parse::Embeddings::Cohere#embed_image: model #{@model.inspect} does not " \
+                "accept image inputs. Configure the provider with a multimodal model " \
+                "(supported: #{MULTIMODAL_MODELS.inspect})."
+        end
+        unless sources.is_a?(Array)
+          raise ArgumentError,
+                "Parse::Embeddings::Cohere#embed_image expects Array of image URLs " \
+                "(got #{sources.class})."
+        end
+        return [] if sources.empty?
+
+        wire_input_type = INPUT_TYPE_WIRE_VALUES[input_type]
+        unless wire_input_type
+          raise ArgumentError,
+                "Parse::Embeddings::Cohere#embed_image input_type #{input_type.inspect} not in " \
+                "#{INPUT_TYPE_WIRE_VALUES.keys.inspect}."
+        end
+        # Cohere caps `/v2/embed` at the same 96-input per-call limit
+        # as `/v1/embed`. Guard direct-API callers against a silent
+        # 400 — the DSL passes a single URL per directive.
+        if sources.length > @embed_batch_size
+          raise ArgumentError,
+                "Parse::Embeddings::Cohere#embed_image: batch size #{sources.length} exceeds " \
+                "the configured cap #{@embed_batch_size} (Cohere per-request max: 96). " \
+                "Split the input and call embed_image once per chunk."
+        end
+
+        # Validate every URL up-front so a malformed entry in slot N
+        # does not slip through after slots 0..N-1 are already in the
+        # wire body. Forward the canonicalized URL the validator
+        # returned — not the caller's raw input.
+        canonical_urls = sources.each_with_index.map do |url, i|
+          unless url.is_a?(String)
+            raise ArgumentError,
+                  "Parse::Embeddings::Cohere#embed_image sources[#{i}] is not a String " \
+                  "(#{url.class}). v5.1 ships URL-only — bytes/IO support is v5.3."
+          end
+          Parse::Embeddings.validate_image_url!(url, allow_insecure: allow_insecure)
+        end
+
+        body = {
+          model: @model,
+          input_type: wire_input_type,
+          embedding_types: ["float"],
+          inputs: canonical_urls.map { |u|
+            { content: [{ type: "image_url", image_url: { url: u } }] }
+          },
+        }
+
+        instrument_embed(sources.length, input_type, modality: :image) do |emit_payload|
+          payload = post_embeddings(body, path: v2_embed_path)
+          if payload.is_a?(Hash) && payload["meta"].is_a?(Hash) &&
+             payload["meta"]["billed_units"].is_a?(Hash)
+            tt = payload["meta"]["billed_units"]["input_tokens"]
+            emit_payload[:total_tokens] = tt if tt.is_a?(Integer) && tt >= 0
+          end
+          vectors = extract_vectors!(payload, sources.length)
+          validate_response!(sources.length, vectors)
+        end
+      end
+
       def inspect_attrs
         super.merge(base: safe_base_host, retries: @max_retries)
       end
@@ -272,12 +379,42 @@ module Parse
         conn
       end
 
-      def post_embeddings(body)
+      # @api private
+      # Compute the v2/embed path relative to the configured base_url's
+      # path component. For the default base `https://api.cohere.com/v1`
+      # this produces `/v2/embed`; for a custom-proxy base like
+      # `https://corp-proxy.example.com/cohere/v1` it produces
+      # `/cohere/v2/embed` — so the operator's proxy / egress-logging
+      # / API-key custody layer is NOT silently bypassed by image
+      # embedding calls. The substitution targets the trailing `/v1`
+      # segment specifically; bases without that segment fall back to
+      # appending `/v2/embed` to the host root with a warning so the
+      # caller sees the asymmetry rather than discovering it via a
+      # 404 from a misrouted request.
+      def v2_embed_path
+        uri = URI.parse(@base_url)
+        path = uri.path.to_s
+        if path =~ %r{/v1/?\z}i
+          # Replace `/v1` (with optional trailing slash) with `/v2/embed`.
+          path.sub(%r{/v1/?\z}i, "/v2/embed")
+        else
+          warn "[Parse::Embeddings::Cohere] base_url path #{path.inspect} does not end " \
+               "in `/v1` — embed_image will POST to host-root `/v2/embed`, which may " \
+               "bypass a configured proxy path. Configure base_url to end with `/v1`."
+          "/v2/embed"
+        end
+      end
+
+      # `path:` accepts either a Faraday-relative segment (default
+      # `"embed"`, which resolves under the configured `/v1/` base) or
+      # an absolute path (`"/v2/embed"`) for endpoints outside the
+      # configured base — used by {#embed_image} to reach `/v2/embed`.
+      def post_embeddings(body, path: "embed")
         attempts = 0
         loop do
           attempts += 1
           begin
-            response = @connection.post("embed") do |req|
+            response = @connection.post(path) do |req|
               req.body = body.to_json
             end
           rescue Faraday::TimeoutError, Faraday::ConnectionFailed => e
@@ -312,7 +449,7 @@ module Parse
             next
           end
           raise BadRequestError,
-                "Parse::Embeddings::Cohere: #{status} from POST /embed."
+                "Parse::Embeddings::Cohere: #{status} from POST #{path.start_with?('/') ? path : "/#{path}"}."
         end
       end
 

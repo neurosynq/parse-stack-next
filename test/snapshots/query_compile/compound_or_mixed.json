@@ -1,0 +1,15 @@
+{
+  "where": {
+    "$or": [
+      {
+        "category": "music",
+        "likes": {
+          "$gt": 10
+        }
+      },
+      {
+        "published": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+--template-path docs/yard-template
+--markup markdown
+--markup-provider redcarpet
+--readme README.md
+--title "parse-stack-next API Reference"
+--protected
+--no-private
+--hide-void-return
+lib/**/*.rb
+-
+CHANGELOG.md
+SECURITY.md
+docs/acl_clp_guide.md
+docs/client_sdk_guide.md
+docs/usage_guide.md
+docs/mcp_guide.md
+docs/mongodb_direct_guide.md
+docs/mongodb_index_optimization_guide.md
+docs/atlas_vector_search_guide.md

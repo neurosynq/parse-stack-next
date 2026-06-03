@@ -1,0 +1,10 @@
+{
+  "$search": {
+    "index": "test_index",
+    "range": {
+      "gte": 10,
+      "lt": 100,
+      "path": "likes"
+    }
+  }
+}

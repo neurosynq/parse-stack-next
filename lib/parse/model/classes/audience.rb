@@ -50,6 +50,11 @@ module Parse
   #     .with_alert("Exclusive offer!")
   #     .send!
   #
+  # @note `_Audience` is hardcoded master-key-only at Parse Server's
+  #   REST layer (`SharedRest.js`). CLP changes via
+  #   {Parse::Object.set_clp} have no effect — manage audiences from a
+  #   master-key client or expose them through a Cloud Code function.
+  #
   # @see Parse::Push#to_audience
   # @see Parse::Object
   class Audience < Parse::Object

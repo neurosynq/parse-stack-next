@@ -469,6 +469,35 @@ module Parse
             },
             required: ["class_name", "pipeline"],
           },
+          output_schema: {
+            type: "object",
+            properties: {
+              class_name:      { type: "string" },
+              pipeline_stages: { type: "integer", minimum: 0 },
+              result_count:    { type: "integer", minimum: 0 },
+              # `route` is :mongo_direct or :parse_server but serializes
+              # to a Symbol-shaped String in JSON envelopes; declare it
+              # permissively as string.
+              route:           { type: "string", description: "Routing tag: 'mongo_direct' or 'parse_server'." },
+              # Aggregation result rows are class-shape-dependent and may
+              # be the output of arbitrary $project / $group / $lookup
+              # stages. Object envelopes with open property sets are the
+              # honest representation.
+              results: {
+                type: "array",
+                items: { type: "object", additionalProperties: true },
+              },
+              pointer_classes: {
+                type: "object",
+                additionalProperties: { type: "string" },
+                description: "Optional. Field-name → Parse-class-name map when compact_pointers is on.",
+              },
+              auto_limited: { type: "boolean" },
+              auto_limit:   { type: "integer", minimum: 1 },
+              hint:         { type: "string" },
+            },
+            required: %w[class_name pipeline_stages result_count route results],
+          },
         },
 
         explain_query: {
@@ -753,6 +782,25 @@ module Parse
             },
             required: ["class_name"],
           },
+          output_schema: {
+            type: "object",
+            properties: {
+              class_name: { type: "string" },
+              # `format` is one of csv|markdown|table; same shape as the
+              # input enum.
+              format:  { type: "string", enum: %w[csv markdown table] },
+              headers: { type: "array", items: { type: "string" } },
+              row_count: { type: "integer", minimum: 0 },
+              # The serialized output is the formatted CSV / Markdown /
+              # text-table string itself — clients render it as-is.
+              output:  { type: "string" },
+              truncated:      { type: "boolean" },
+              available_rows: { type: "integer", minimum: 0 },
+              row_cap:        { type: "integer", minimum: 1 },
+              hint:           { type: "string" },
+            },
+            required: %w[class_name format headers row_count output],
+          },
         },
 
         atlas_text_search: {
@@ -799,6 +847,50 @@ module Parse
             },
             required: %w[class_name query],
           },
+          output_schema: {
+            type: "object",
+            properties: {
+              class_name: { type: "string" },
+              count:      { type: "integer", minimum: 0 },
+              # Each row is a Parse object projected through the class's
+              # agent_fields allowlist, with an Atlas-supplied `score`
+              # numeric and an optional `highlights` array when the
+              # caller passes highlight_field:. The row shape is class-
+              # dependent so additionalProperties is open.
+              results: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    score: { type: "number" },
+                    highlights: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          path: { type: "string" },
+                          texts: {
+                            type: "array",
+                            items: {
+                              type: "object",
+                              properties: {
+                                value: { type: "string" },
+                                type:  { type: "string", description: "'hit' or 'text' per Atlas spec." },
+                              },
+                              required: %w[value],
+                            },
+                          },
+                        },
+                        required: %w[path],
+                      },
+                    },
+                  },
+                  additionalProperties: true,
+                },
+              },
+            },
+            required: %w[class_name count results],
+          },
         },
 
         atlas_autocomplete: {
@@ -838,6 +930,25 @@ module Parse
             },
             required: %w[class_name query field],
           },
+          output_schema: {
+            type: "object",
+            properties: {
+              class_name: { type: "string" },
+              field:      { type: "string" },
+              # `suggestions` is the list of distinct field values that
+              # matched the autocomplete query (deduped, ordered by Atlas
+              # ranking). Strings only — autocomplete operates on text.
+              suggestions: { type: "array", items: { type: "string" } },
+              count:       { type: "integer", minimum: 0 },
+              # Full matching Parse objects, projected through the class
+              # agent_fields allowlist.
+              results: {
+                type: "array",
+                items: { type: "object", additionalProperties: true },
+              },
+            },
+            required: %w[class_name field suggestions count results],
+          },
         },
 
         atlas_faceted_search: {
@@ -875,6 +986,40 @@ module Parse
                                                      "WILL include rows the canonical filter normally hides." },
             },
             required: %w[class_name facets],
+          },
+          output_schema: {
+            type: "object",
+            properties: {
+              class_name:  { type: "string" },
+              # $searchMeta lower-bound count. May be approximate for very
+              # large corpora — Atlas documents this; downstream clients
+              # should treat it as informative, not a precise total.
+              total_count: { type: "integer", minimum: 0 },
+              # Facets is a Map<facet_name, { buckets: [{_id, count}] }>.
+              # Bucket _id is heterogeneous (String for string facets,
+              # Number/Date for numeric/date facets), so additionalProperties:true
+              # on the bucket entry keeps the contract honest without
+              # bloating the schema with per-type variants.
+              facets: {
+                type: "object",
+                additionalProperties: {
+                  type: "object",
+                  properties: {
+                    buckets: {
+                      type: "array",
+                      items: { type: "object", additionalProperties: true },
+                    },
+                  },
+                  required: %w[buckets],
+                },
+              },
+              count:   { type: "integer", minimum: 0 },
+              results: {
+                type: "array",
+                items: { type: "object", additionalProperties: true },
+              },
+            },
+            required: %w[class_name total_count facets count results],
           },
         },
       }.freeze
@@ -3474,7 +3619,14 @@ module Parse
             class_name: class_name,
             pipeline_stages: pipeline.size,
             result_count: results.size,
-            route: use_mongo_direct ? :mongo_direct : :parse_server,
+            # Coerce to String here so the value lands in
+            # `structuredContent` as a String (matching the
+            # advertised output_schema `type: "string"`). Without the
+            # `.to_s`, MCP clients validating structuredContent see a
+            # Ruby Symbol pre-serialization and fail the type check;
+            # downstream JSON serialization would convert it but the
+            # client-side validator runs before that.
+            route: (use_mongo_direct ? :mongo_direct : :parse_server).to_s,
             results: results,
           }
           result[:pointer_classes] = pointer_map if pointer_map.any?

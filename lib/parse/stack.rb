@@ -154,6 +154,81 @@ module Parse
     Fiber[SESSION_TOKEN_STATE_KEY]
   end
 
+  # @!visibility private
+  CACHE_TENANT_STATE_KEY = :__parse_cache_tenant__
+
+  # Set an ambient cache-tenant scope for the duration of the block.
+  # When set, the {Parse::Middleware::Caching} middleware composes the
+  # tenant into the cache key as `<base-namespace>:T:<tenant>:…` so a
+  # multi-tenant Parse application can share one Redis (or any Moneta-
+  # backed cache) without per-tenant configuration plumbing through
+  # every `Parse::Client.new` site. Tenants do not see each other's
+  # cached responses; a SCAN-delete over `<base-namespace>:T:<tenant>:*`
+  # evicts exactly one tenant cleanly.
+  #
+  # This is purely a key namespacing mechanism — it does NOT enforce
+  # any access-control semantics. Tenant isolation at the data layer
+  # is the job of `agent_tenant_scope` (per-class scoping) and ACL/CLP.
+  # The tenant cache scope's role is to keep tenant A's session-token-
+  # keyed cache entry from being served on tenant B's request even
+  # when the URL and session token happen to collide.
+  #
+  # Fiber-local — composes safely with `async` and concurrent web
+  # frameworks. The scope is per-fiber, not per-thread, and is
+  # restored on block exit even if the block raises.
+  #
+  # @example wrap an agent invocation under a tenant
+  #   Parse.with_cache_tenant("tenant_abc") do
+  #     agent.run(prompt)   # every Parse request issued inside the
+  #                          # block writes/reads tenant-scoped cache
+  #                          # entries
+  #   end
+  #
+  # @example compose with `with_session`
+  #   Parse.with_cache_tenant(tenant_id) do
+  #     Parse.with_session(user) do
+  #       Post.all
+  #     end
+  #   end
+  #
+  # @param scope [String, Symbol, nil] tenant identifier. `nil` clears
+  #   the ambient scope for the duration of the block (useful to opt
+  #   out within a larger tenant-scoped section). Must be ASCII
+  #   `[A-Za-z0-9_-]+` — colon and other key-segment-delimiter chars
+  #   are refused with `ArgumentError`, since the middleware composes
+  #   the tenant into the cache key as `T:<tenant>:…` and a tenant
+  #   containing `:` would collapse the segmentation (e.g.
+  #   `with_cache_tenant("a:T:b")` would produce keys
+  #   indistinguishable from `with_cache_tenant("a")` nested under
+  #   `with_cache_tenant("b")`, breaking SCAN-delete isolation).
+  # @yield runs the block with the ambient tenant scope in place
+  # @return [Object] the block's return value
+  # @raise [ArgumentError] when `scope` contains characters outside
+  #   `[A-Za-z0-9_-]` or exceeds 256 bytes.
+  CACHE_TENANT_PATTERN = /\A[A-Za-z0-9_\-]{1,256}\z/.freeze
+  def self.with_cache_tenant(scope)
+    resolved = scope.nil? ? nil : scope.to_s
+    resolved = nil if resolved&.empty?
+    if resolved && !CACHE_TENANT_PATTERN.match?(resolved)
+      raise ArgumentError,
+            "Parse.with_cache_tenant scope must match #{CACHE_TENANT_PATTERN.source} " \
+            "(got #{scope.inspect}). Colon and other key-segment-delimiter characters " \
+            "are refused — they would collapse the cache-key namespace boundary."
+    end
+    previous = Fiber[CACHE_TENANT_STATE_KEY]
+    Fiber[CACHE_TENANT_STATE_KEY] = resolved
+    yield
+  ensure
+    Fiber[CACHE_TENANT_STATE_KEY] = previous
+  end
+
+  # The ambient cache-tenant scope set by {.with_cache_tenant} for the
+  # current fiber, or `nil` when not inside such a block.
+  # @return [String, nil]
+  def self.current_cache_tenant
+    Fiber[CACHE_TENANT_STATE_KEY]
+  end
+
   # The {Parse::User} cached alongside the ambient session set by
   # {.login}, or `nil` when no imperative login is active. Block-scoped
   # `{Parse.with_session}` does NOT populate this — only {.login} does.
@@ -336,9 +411,31 @@ module Parse
   # so the network-egress surface (an outbound WebSocket to the LiveQuery
   # server) is opened only when the operator explicitly turns it on, not
   # as a side effect of requiring the file.
+  #
+  # The LiveQuery module is autoloaded — `Parse::LiveQuery.configure { … }`
+  # works without an explicit `require 'parse/live_query'`. The autoload
+  # is purely a file-loading convenience; it does NOT open a network
+  # connection. A connection only opens when `Parse.live_query_enabled = true`
+  # AND a `Parse::LiveQuery::Client` is instantiated (typically via
+  # `Klass.subscribe { … }` or `Parse::Client.new(live_query_url: …)`).
+  #
   # @example Enable LiveQuery
   #   Parse.live_query_enabled = true
-  #   require 'parse/live_query'
+  #   # Parse::LiveQuery is autoloaded — no explicit require needed
+  #   Parse::LiveQuery.configure do |c|
+  #     c.url = "wss://parse.example.com"
+  #   end
+  autoload :LiveQuery, "parse/live_query"
+
+  # Public mutual-exclusion primitive (TTL-bounded, Redis-backed with
+  # in-process Mutex fallback). See {Parse::Lock}.
+  autoload :Lock, "parse/lock"
+
+  # Shared low-level lock primitives consumed by both {Parse::Lock}
+  # and {Parse::CreateLock}. `@api private` — application code should
+  # use {Parse::Lock.acquire}.
+  autoload :LockBackend, "parse/lock_backend"
+
   @live_query_enabled = false
 
   # Configuration for cache write-through on fetch operations.

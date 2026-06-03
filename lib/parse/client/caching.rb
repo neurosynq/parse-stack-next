@@ -143,6 +143,19 @@ module Parse
           @cache_key = "mk:#{@cache_key}" # prefix for master key requests
         end
 
+        # Optional ambient cache-tenant scope from `Parse.with_cache_tenant`.
+        # When present, composes between the configured namespace and the
+        # token/mk prefix as `T:<tenant>:` so a SCAN-delete over
+        # `<namespace>:T:<tenant>:*` evicts exactly one tenant, and
+        # `<namespace>:*` still evicts the whole namespace cleanly. The
+        # `T:` discriminator makes tenant prefixes unambiguously
+        # distinguishable from session-token hex prefixes (32-char hex)
+        # and from `mk:`, so legacy cache entries written before the
+        # tenant feature don't accidentally re-hydrate into a tenanted
+        # request and vice versa.
+        @cache_tenant = Parse.respond_to?(:current_cache_tenant) ? Parse.current_cache_tenant : nil
+        @cache_key = "T:#{@cache_tenant}:#{@cache_key}" if @cache_tenant
+
         # Namespace outermost so a SCAN over `<namespace>:*` evicts a whole
         # tenant/app cleanly without touching another app's entries.
         @cache_key = "#{@namespace}:#{@cache_key}" if @namespace
@@ -277,7 +290,11 @@ module Parse
       # @!visibility private
       def instrument_cache(event, **extra)
         return unless defined?(ActiveSupport::Notifications)
-        payload = { event: event, namespace: @namespace }.merge!(extra)
+        payload = {
+          event: event,
+          namespace: @namespace,
+          cache_tenant: @cache_tenant,
+        }.merge!(extra)
         ActiveSupport::Notifications.instrument("parse.cache.#{event}", payload)
       end
 

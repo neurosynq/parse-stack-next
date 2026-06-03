@@ -1,0 +1,23 @@
+{
+  "$search": {
+    "compound": {
+      "filter": [
+        {
+          "range": {
+            "gte": 10,
+            "path": "likes"
+          }
+        }
+      ],
+      "must": [
+        {
+          "text": {
+            "path": "title",
+            "query": "ruby"
+          }
+        }
+      ]
+    },
+    "index": "test_index"
+  }
+}

@@ -1,11 +1,19 @@
 # Atlas Vector Search Guide
 
-Parse Stack v5.0 ships first-class support for MongoDB Atlas
-`$vectorSearch` against Parse classes. This guide covers the full
-surface: declaring `:vector` properties, registering embedding
-providers, running `find_similar` queries, the `embed` write-side
-macro, Atlas index management, AS::N telemetry, and the constraint and
-logging behavior callers need to know about.
+Parse Stack ships first-class support for MongoDB Atlas `$vectorSearch`
+against Parse classes. This guide covers the full surface: declaring
+`:vector` properties, registering embedding providers, running
+`find_similar` queries, the `embed` and `embed_image` write-side
+macros, Atlas index management, AS::N telemetry, and the constraint
+and logging behavior callers need to know about.
+
+v5.0 introduced the text-embedding path; v5.1 adds image embedding via
+the new `embed_image` macro, `Voyage#embed_image`
+(`voyage-multimodal-3`, 1024-dim), and `Cohere#embed_image`
+(`embed-v4.0`, 1536-dim). Image inputs are URL-only in v5.1 (the SDK
+forwards the file URL to the provider; the SDK does not fetch image
+bytes) and are gated behind an explicit operator opt-in plus a CDN
+allowlist — see §Image embedding below.
 
 For the underlying mongo-direct enforcement model that vector search
 inherits, see [mongodb_direct_guide.md](./mongodb_direct_guide.md).
@@ -95,7 +103,7 @@ traces. The wire payload itself is unchanged.
 
 ## Registering an embedding provider
 
-`Parse::Embeddings` is a pluggable registry. v5.0 ships seven built-in
+`Parse::Embeddings` is a pluggable registry. v5.1 ships seven built-in
 providers:
 
 * `Parse::Embeddings::OpenAI` — text-only. `text-embedding-3-small`
@@ -106,16 +114,18 @@ providers:
   `embed-multilingual-v3.0`, and `-light-v3.0` siblings; 1024 / 384 dim)
   plus `embed-v4.0` (1536 native, 128k token context, Matryoshka-
   truncatable to {256, 512, 1024, 1536} via `dimensions:`). `embed-v4.0`
-  is Cohere's text+image multimodal endpoint at the network boundary;
-  this release wires the **text path only** — `embed_image` lands in
-  v5.1.
+  is Cohere's text+image multimodal endpoint; the text path routes
+  through `/v1/embed` and the v5.1 image path routes through
+  `/v2/embed` with OpenAI-style nested
+  `{ type: "image_url", image_url: { url: ... } }` content rows.
 * `Parse::Embeddings::Voyage` — voyage-4 family (`voyage-4-large` 2048,
   Matryoshka; `voyage-4` 1024; `voyage-4-lite` 512; `voyage-4-nano` 256),
   voyage-3 family, domain models (`voyage-code-3`, `voyage-finance-2`,
   `voyage-law-2`), and `voyage-multimodal-3` (1024-dim, 32k token
   context, routes to `/v1/multimodalembeddings` with the wrapped
-  `{inputs: [{content: [{type: "text", text: ...}]}]}` envelope). Text
-  inputs only in v5.0 — image content rows land in v5.1.
+  `{inputs: [{content: [{type: "text", text: ...}]}]}` envelope for
+  text and `{type: "image_url", image_url: <url>}` content rows for
+  the v5.1 `embed_image` path).
 * `Parse::Embeddings::Jina` — `jina-embeddings-v3` (1024, Matryoshka
   32–1024), `jina-embeddings-v4` (2048, Matryoshka), v5 family
   (`jina-embeddings-v5-text-{small,nano}`,
@@ -339,7 +349,7 @@ Mechanics:
   skipped. If every source is blank, the target and digest are both
   cleared on save.
 
-### Single vector per record (v5.0)
+### Single vector per record
 
 `embed` produces exactly one vector per record. There is no built-in
 chunker. Long source text whose concatenation exceeds the provider's
@@ -347,7 +357,7 @@ per-call token budget will be truncated provider-side, and the
 resulting vector will represent only the leading portion of the
 document.
 
-For long-form content in v5.0, two options:
+For long-form content, two options:
 
 1. **Pre-chunk client-side** and write each chunk as its own
    `Parse::Object` record with its own `embed` declaration.
@@ -357,16 +367,102 @@ For long-form content in v5.0, two options:
    parents as needed.
 
 A built-in chunker plus a `semantic_search` agent tool are scheduled
-for v5.1.
+for a future release.
 
-### Re-embedding existing rows
+---
+
+## Image embedding: `embed_image` macro (v5.1)
+
+`embed_image` is the image-source counterpart to `embed`. The source
+property must be `:file`-typed; the target must be a `:vector` property
+whose declared `provider:` supports multimodal input (currently
+`:voyage` with `voyage-multimodal-3`, or `:cohere` with `embed-v4.0`).
+
+```ruby
+class Post < Parse::Object
+  property :cover_image,            :file
+  property :cover_image_embedding,  :vector,
+           dimensions: 1024,
+           provider:   :voyage,
+           model:      "voyage-multimodal-3"
+
+  embed_image :cover_image, into: :cover_image_embedding
+end
+```
+
+### Operator setup (required before any save)
+
+Image embedding hands an attacker-influenced URL (a user-uploaded
+`Parse::File`, a chat message, an agent tool argument) to a third-party
+provider that will issue an HTTP request from its own network. The
+provider's fetch happens after SDK-side validation, so DNS rebinding
+and redirect-following are residual risks the SDK cannot eliminate.
+
+The setup must happen in this exact order — skipping (1) or (2) raises
+a typed error at save time with a message naming the missing
+prerequisite:
+
+```ruby
+# (1) Declare which CDNs the validator will accept. Empty allowlist
+# denies every host — opposite of Parse::File.allowed_remote_hosts.
+Parse::Embeddings.allowed_image_hosts = [
+  ".cloudfront.net",                # suffix match (leading ".")
+  "files.example.com",              # exact match
+]
+
+# (2) Sentinel-gated opt-in. Only the exact frozen String unlocks;
+# `true`, `"true"`, `1`, or any other value raises
+# Parse::Embeddings::ConfirmationRequired.
+Parse::Embeddings.trust_provider_url_fetch = "PROVIDER_EGRESS_VERIFIED"
+
+# (3) Declare embed_image on the model.
+class Post < Parse::Object
+  embed_image :cover_image, into: :cover_image_embedding
+end
+```
+
+### URL validator (`Parse::Embeddings.validate_image_url!`)
+
+Every `embed_image` save path routes through
+`Parse::Embeddings.validate_image_url!(url, allow_insecure:)`, which
+runs layered cheap-first checks: sentinel set, `https://` (or
+`http://` with `allow_insecure: true`), no userinfo, host not an
+obfuscated-IP form (`0x7f.0.0.1`, `127.1`, `2130706433`), host in the
+allowlist, port in `Parse::File.allowed_remote_ports`, host resolves
+only to public addresses (delegated to
+`Parse::File.assert_host_allowed!` so the SSRF mechanism is shared
+with `Parse::File`, not parallelized). Failures raise
+`Parse::Embeddings::InvalidImageURL` with a `:reason` Symbol
+(`:scheme`, `:port`, `:userinfo`, `:host_blocked`,
+`:host_not_allowlisted`, `:parse`).
+
+### Save-side semantics
+
+* Digest is the **SHA-256 of the URL String**, not the file bytes.
+  Replacing the `Parse::File` with one pointing at a different URL
+  re-embeds; resaving the same URL is a no-op (zero provider calls).
+  Parse-managed file URLs are stable unless overwritten in place — if
+  you PUT-replace bytes at the same URL (S3 without renaming), null
+  the digest field to force re-embed.
+* The same `EmbedManaged` write-guard applies: direct assignment to
+  the managed vector raises `ProtectedFieldError`. The write path is
+  the only way to populate the target vector.
+* `embed` and `embed_image` can co-declare on the same record
+  (different source properties → different `:vector` targets), so a
+  record can have one text-embedding column and one image-embedding
+  column queried by separate Atlas vectorSearch indexes.
+
+---
+
+## Re-embedding existing rows
 
 Changing `model:`, `dimensions:`, or `provider:` on an existing
-`:vector` property is a migration. Workflow:
+`:vector` property is a migration regardless of whether the source is
+text or images. Workflow:
 
 1. Add the new property alongside the old one
-   (`property :body_embedding_v2, :vector, ...`) and an `embed` block
-   targeting it.
+   (`property :body_embedding_v2, :vector, ...`) and an `embed` or
+   `embed_image` block targeting it.
 2. Backfill: iterate existing rows, force a save (or null+save) to
    trigger the new directive. The old field stays valid for reads.
 3. Once backfill completes, deploy a new vectorSearch index covering
@@ -374,7 +470,10 @@ Changing `model:`, `dimensions:`, or `provider:` on an existing
 4. Drop the old property.
 
 Do NOT mutate the model in place — the digest mechanism will see
-unchanged source text and skip recompute, leaving stale vectors.
+unchanged source text / unchanged source URL and skip recompute,
+leaving stale vectors. For `embed_image`, also remember the digest is
+over the URL String: if you replace bytes at the same URL (PUT-replace
+on S3 without renaming), null the digest field to force re-embed.
 
 ---
 
@@ -491,7 +590,8 @@ on every poll) rather than a `until index_ready?; sleep` loop.
 Key files:
 
 * `lib/parse/embeddings.rb` — registry, `Configuration`, `register`,
-  `provider`, `configure`.
+  `provider`, `configure`, `validate_image_url!`,
+  `trust_provider_url_fetch=`, `allowed_image_hosts=`.
 * `lib/parse/embeddings/provider.rb` — abstract base, `validate_response!`,
   `instrument_embed`, AS::N payload contract.
 * `lib/parse/embeddings/openai.rb` — OpenAI provider.
@@ -504,7 +604,8 @@ Key files:
   local-gateway client.
 * `lib/parse/embeddings/fixture.rb` — deterministic test provider.
 * `lib/parse/model/core/vector_searchable.rb` — `find_similar`.
-* `lib/parse/model/core/embed_managed.rb` — `embed` macro.
+* `lib/parse/model/core/embed_managed.rb` — `embed` and `embed_image`
+  macros, `EmbedDirective` (carries `modality:`, `allow_insecure:`).
 * `lib/parse/vector_search.rb` — low-level `Parse::VectorSearch.search`.
 * `lib/parse/atlas_search/index_manager.rb` — `IndexCatalog.create_index`,
   `find_vector_index`, `wait_for_ready`.

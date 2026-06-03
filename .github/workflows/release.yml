@@ -15,7 +15,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # bundler-cache (next step) writes --local path / --local
       # deployment into the tracked `.bundle/config`, which would leave
@@ -25,12 +25,12 @@ jobs:
       # letting Bundler resolve vendor/bundle in the next step.
       - run: git update-index --skip-worktree .bundle/config
 
-      - uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@afeafc3d1ab54a631816aba4c914a0081c12ff2f # v1.310.0
         with:
           ruby-version: "3.4"
           bundler-cache: true
 
-      - uses: rubygems/release-gem@v1
+      - uses: rubygems/release-gem@6317d8d1f7e28c24d28f6eff169ea854948bd9f7 # v1.2.0
 
       # Mirror the same .gem to GitHub Packages. The previous step
       # leaves the built artifact in pkg/parse-stack-next-X.Y.Z.gem

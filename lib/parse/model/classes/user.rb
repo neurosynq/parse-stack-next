@@ -225,6 +225,24 @@ module Parse
     # @return [Array<Parse::Session>] A list of active Parse::Session objects.
     has_many :active_sessions, as: :session
 
+    # @!attribute installations
+    # A `has_many` query-form association resolving to all
+    # {Parse::Installation} records whose `user` pointer is this user.
+    # Useful for targeted push — e.g. sending a notification to every
+    # device the user is signed into. This is a query (no column is
+    # stored on `_User`); each access issues a `find` against
+    # `_Installation` for `where(user: self)`.
+    #
+    # **Requires a master-key client.** Parse Server hardcodes
+    # `_Installation` `find` to master-key-only at the REST layer, so
+    # this association will return an empty array (or fail-closed
+    # depending on agent scope) under a session-token-only / sessionless
+    # client. The `user` pointer is also not a reliable owner identity
+    # — devices outlive sessions and can change users — see
+    # {Parse::Installation} for the full caveat list.
+    # @return [Array<Parse::Installation>]
+    has_many :installations, as: :installation
+
     # CHANGE -- ACLs can be managed
     # before_save do
     #   # You cannot specify user ACLs.
@@ -277,6 +295,192 @@ module Parse
       # {.with_authdata_trust} scope.
       def authdata_trusted?
         Thread.current[AUTHDATA_TRUST_KEY] == true
+      end
+
+      # =========================================================================
+      # Field-visibility DSL for _User
+      # =========================================================================
+      #
+      # `_User` has two field-visibility flavors that vanilla
+      # {Parse::Object.protect_fields} can't express on its own because
+      # Parse Server's `protectedFieldsOwnerExempt` option special-cases
+      # the owning user (the user sees their own row in full unless the
+      # option is disabled). These helpers wrap that pattern.
+      #
+      # ## Prerequisites
+      #
+      # 1. Set `protectedFieldsOwnerExempt: false` in your Parse Server
+      #    startup options. With the historical default `true`, the owning
+      #    user is silently exempted from every `protectedFields` rule on
+      #    `_User`, so {.master_only_fields} would still be visible to the
+      #    user themselves. Parse Server's default for this option is
+      #    changing to `false` in a future version; until your server
+      #    adopts that default you must set it explicitly.
+      # 2. For {.self_visible_fields}: add a self-pointer field on `_User`
+      #    that points to the same user, and maintain it from a
+      #    `beforeSave('_User')` Cloud Code trigger:
+      #
+      #    ```js
+      #    Parse.Cloud.beforeSave(Parse.User, (req) => {
+      #      const u = req.object;
+      #      if (!u.get('self')) u.set('self', u);  // self-pointer
+      #    });
+      #    ```
+      #
+      # The SDK cannot install either of those — they're server-side
+      # configuration — but the helpers below will warn if they detect
+      # they're being mis-applied.
+
+      # Hide one or more fields from query/get responses for **all**
+      # non-master callers, including the owning user themselves.
+      # Useful for admin-only metadata living on `_User`
+      # (e.g. internal scoring, moderation notes).
+      #
+      # Requires Parse Server option `protectedFieldsOwnerExempt: false`.
+      # With the default `true`, the owning user still sees these fields
+      # on their own row.
+      #
+      # @param fields [Array<Symbol,String>] field names. Use snake_case
+      #   Ruby property names; they're auto-converted to camelCase.
+      # @return [Array<Symbol>] full master-only field list after this call.
+      # @example
+      #   class Parse::User
+      #     property :my_opinion_of_them, :string
+      #     master_only_fields :my_opinion_of_them
+      #   end
+      def master_only_fields(*fields)
+        @master_only_fields ||= []
+        @master_only_fields = (@master_only_fields + fields.flatten.map(&:to_sym)).uniq
+        _warn_about_owner_exempt_prereq!
+        _rebuild_user_protected_fields!
+        @master_only_fields.dup
+      end
+
+      # Hide one or more fields from public/role/other-user callers, but
+      # allow the **owning user** to see them. Useful for private profile
+      # data that belongs to the user (e.g. preferences, private notes).
+      #
+      # Requires:
+      # * Parse Server option `protectedFieldsOwnerExempt: false`.
+      # * A self-pointer field on `_User` (named via `via:`, default
+      #   `:self`) that is set to the row's own pointer by a
+      #   `beforeSave('_User')` Cloud Code trigger.
+      #
+      # @param fields [Array<Symbol,String>] field names. snake_case OK.
+      # @param via [Symbol,String] name of the self-pointer field on
+      #   `_User` (default `:self`).
+      # @return [Array<Symbol>]
+      # @example
+      #   class Parse::User
+      #     property :favorite_color, :string
+      #     self_visible_fields :favorite_color, via: :self
+      #   end
+      def self_visible_fields(*fields, via: :self)
+        @self_visible_fields ||= []
+        @self_visible_fields = (@self_visible_fields + fields.flatten.map(&:to_sym)).uniq
+        @self_pointer_field = via.to_sym
+        _warn_about_owner_exempt_prereq!
+        _warn_about_self_pointer_prereq!(via)
+        _rebuild_user_protected_fields!
+        @self_visible_fields.dup
+      end
+
+      # Override {Parse::Object.protect_fields} on `_User` so that ad-hoc
+      # uses (i.e. not through {.master_only_fields} /
+      # {.self_visible_fields}) emit a one-time advisory pointing at the
+      # higher-level helpers and the `protectedFieldsOwnerExempt` flag.
+      # The behavior is otherwise unchanged.
+      def protect_fields(pattern, fields)
+        _warn_about_user_protect_fields! unless @_user_field_dsl_active
+        super
+      end
+
+      # @!visibility private
+      def _rebuild_user_protected_fields!
+        @master_only_fields  ||= []
+        @self_visible_fields ||= []
+        pointer = @self_pointer_field || :self
+        all_hidden = (@master_only_fields + @self_visible_fields).uniq
+
+        @_user_field_dsl_active = true
+        begin
+          protect_fields("*", all_hidden) unless all_hidden.empty?
+          unless @self_visible_fields.empty?
+            protect_fields("userField:#{pointer}", @master_only_fields)
+          end
+        ensure
+          @_user_field_dsl_active = false
+        end
+      end
+
+      # @!visibility private
+      def _warn_about_user_protect_fields!
+        return if @_user_protect_fields_warned
+        @_user_protect_fields_warned = true
+        _emit_user_field_advisory(
+          "[Parse::User] protect_fields was called directly on _User. " \
+          "For master-only and owner-visible field patterns prefer " \
+          "`Parse::User.master_only_fields` and `Parse::User.self_visible_fields`. " \
+          "Either way, ensure Parse Server is started with " \
+          "`protectedFieldsOwnerExempt: false` (the historical default `true` — " \
+          "changing to `false` in a future Parse Server version — exempts the " \
+          "owning user from every protectedFields rule on _User, which silently " \
+          "negates these protections for the user's own row).",
+        )
+      end
+
+      # @!visibility private
+      # Fires once when `master_only_fields` / `self_visible_fields` is first
+      # used. Without `protectedFieldsOwnerExempt: false` in Parse Server's
+      # startup options, neither helper does what its name promises -- the
+      # default `true` silently exempts the owning user from every
+      # protectedFields rule on _User. The SDK can't introspect Parse
+      # Server's startup options, so we surface this as a one-time advisory
+      # at declaration time so it's loud enough to catch before deploy.
+      def _warn_about_owner_exempt_prereq!
+        return if @_owner_exempt_warned
+        @_owner_exempt_warned = true
+        _emit_user_field_advisory(
+          "[Parse::User] master_only_fields / self_visible_fields require " \
+          "Parse Server option `protectedFieldsOwnerExempt: false`. With the " \
+          "historical default `true`, the owning user is silently exempted " \
+          "from every protectedFields rule on _User, so a field declared " \
+          "master-only would still be visible to the user themselves on their " \
+          "own row. Parse Server's default for this option is changing to " \
+          "`false` in a future version (which makes these helpers work " \
+          "without extra config), but until your server adopts that default " \
+          "you must set `protectedFieldsOwnerExempt: false` in your " \
+          "ParseServer options BEFORE deploying. See docs/acl_clp_guide.md §4.2.",
+        )
+      end
+
+      # @!visibility private
+      # Fires once when `self_visible_fields` is first used. The Parse
+      # Server side requires (a) a self-pointer field on _User populated
+      # by a beforeSave('_User') trigger, AND (b) a one-shot backfill on
+      # any pre-existing user rows so the pointer is set before the
+      # `userField:<via>` group matches them.
+      def _warn_about_self_pointer_prereq!(via)
+        return if @_self_pointer_warned
+        @_self_pointer_warned = true
+        _emit_user_field_advisory(
+          "[Parse::User] self_visible_fields(via: :#{via}) requires a " \
+          "self-pointer field named `#{via}` on _User pointing at the same " \
+          "row, populated by a beforeSave('_User') Cloud Code trigger. " \
+          "Existing user rows ALSO need a one-shot backfill (the trigger " \
+          "only fires on save) -- without it, those rows never match the " \
+          "`userField:#{via}` group and the field stays hidden from the " \
+          "user themselves. See docs/acl_clp_guide.md §4.2.",
+        )
+      end
+
+      # @!visibility private
+      def _emit_user_field_advisory(msg)
+        if Parse.respond_to?(:logger) && Parse.logger
+          Parse.logger.warn(msg)
+        else
+          Kernel.warn(msg)
+        end
       end
     end
 

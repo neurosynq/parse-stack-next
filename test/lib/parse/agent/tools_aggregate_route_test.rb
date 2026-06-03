@@ -65,7 +65,8 @@ class ToolsAggregateRouteTest < Minitest::Test
   # When MongoDB isn't enabled, the default mongo_direct: true must NOT
   # raise — it falls back to the Parse Server aggregate route. The agent
   # client's aggregate_pipeline is the discriminator: it should be called
-  # exactly once, and the result envelope should report :parse_server.
+  # exactly once, and the result envelope should report "parse_server"
+  # (String, coerced from Symbol so it matches the MCP output_schema).
   def test_default_falls_back_to_parse_server_when_mongo_not_enabled
     result = Parse::Agent::Tools.aggregate(
       @agent,
@@ -75,7 +76,7 @@ class ToolsAggregateRouteTest < Minitest::Test
     )
 
     assert_equal 1, @client.aggregate_call_count, "expected fallback to call client.aggregate_pipeline"
-    assert_equal :parse_server, result[:route]
+    assert_equal "parse_server", result[:route]
   end
 
   # Explicit mongo_direct: false must use the Parse Server route even if
@@ -91,7 +92,7 @@ class ToolsAggregateRouteTest < Minitest::Test
     )
 
     assert_equal 1, @client.aggregate_call_count
-    assert_equal :parse_server, result[:route]
+    assert_equal "parse_server", result[:route]
   end
 
   # Server-route pipeline must NOT be field-translated — Parse Server
@@ -213,6 +214,6 @@ class ToolsAggregateRouteTest < Minitest::Test
     # Falls through to parse_server route (MongoDB not enabled). The
     # hostile kwargs were swallowed silently — no exception, no
     # routing change.
-    assert_equal :parse_server, result[:route]
+    assert_equal "parse_server", result[:route]
   end
 end

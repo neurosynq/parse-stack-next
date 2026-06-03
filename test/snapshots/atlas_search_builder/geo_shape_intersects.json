@@ -1,0 +1,36 @@
+{
+  "$search": {
+    "geoShape": {
+      "geometry": {
+        "coordinates": [
+          [
+            [
+              -122.0,
+              37.0
+            ],
+            [
+              -122.0,
+              38.0
+            ],
+            [
+              -123.0,
+              38.0
+            ],
+            [
+              -123.0,
+              37.0
+            ],
+            [
+              -122.0,
+              37.0
+            ]
+          ]
+        ],
+        "type": "Polygon"
+      },
+      "path": "location",
+      "relation": "intersects"
+    },
+    "index": "test_index"
+  }
+}

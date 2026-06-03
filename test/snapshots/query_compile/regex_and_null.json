@@ -1,0 +1,8 @@
+{
+  "where": {
+    "archived": null,
+    "title": {
+      "$regex": "(?i-mx:^draft)"
+    }
+  }
+}

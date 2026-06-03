@@ -504,6 +504,13 @@ server-side guidance.
 
 ## 4. ACL — the row-level boundary
 
+> **For the full ACL + CLP reference**, including aggregate-query
+> enforcement asymmetry, Atlas Search, mongo-direct, role hierarchy
+> direction, `protectedFields` semantics including the `_User`
+> owner-exempt trap, and field-guard write protection, see
+> [`acl_clp_guide.md`](./acl_clp_guide.md). The sections below are
+> a client-mode quickstart.
+
 Parse Server enforces ACL on every read and write against a non-master
 caller. The SDK's job is to (a) thread the session token in so the server
 has someone to check against, and (b) compose ACLs correctly on the
@@ -707,13 +714,178 @@ Both `Parse.client.fetch_object` and `Parse::Query#results` strip the
 protected field; the SDK doesn't try to re-synthesize it from any
 cache. If you see it in your client-side result, your CLP is wrong.
 
-### 6.3 ACL still applies under CLP
+Reads are stripped today; the **write** response historically still
+echoed the value back in the create/update reply. Parse Server's
+`protectedFieldsSaveResponseExempt` option closes that — its default
+**will change to `false`** in a future version, which strips
+`protectedFields` from write responses too. Set
+`protectedFieldsSaveResponseExempt: false` in your server config to opt
+in early. The SDK needs no changes: `save` merges the response onto the
+object (it only overwrites fields the reply contains), so a stripped
+protected field keeps its locally-assigned value rather than being
+nulled out.
+
+### 6.3 `_Installation` is special — CLP can't override the hardcoded gates
+
+Parse Server hardcodes the access policy for `_Installation` at the REST
+layer. CLP on this class is a thin overlay on top of behavior that is
+already constrained, so `set_clp` (or a server-side CLP edit via the
+Dashboard) can only tighten the operations Parse Server lets you
+configure — it cannot loosen the ones the server pins to master-only.
+
+| Operation  | What's actually enforced                                                                 |
+|------------|------------------------------------------------------------------------------------------|
+| `find`     | **Master key only. Hardcoded.** CLP changes are ignored by the server.                  |
+| `delete`   | **Master key only. Hardcoded.** CLP changes are ignored by the server.                  |
+| `create`   | Open to anonymous clients — `X-Parse-Installation-Id` is the credential.                |
+| `update`   | Open when the request's `installationId` matches the record; else master key.           |
+| `get`      | CLP applies normally.                                                                   |
+| `count`    | CLP applies normally.                                                                   |
+| `addField` | CLP applies normally.                                                                   |
+
+Safe to tighten:
+
+* `get` → `requiresAuthentication: true` or master-only. SDKs don't
+  normally GET their own installation from the server; they cache
+  `currentInstallation` locally.
+* `count` → master-only. The push flow doesn't need it, and it removes a
+  small enumeration signal.
+* `addField` → master-only. Good hardening default for any class.
+* `protectedFields` → hide `deviceToken`, `GCMSenderId`, `pushType` from
+  non-master reads. These are write-only from the client's perspective
+  in normal SDK flows.
+
+Do NOT tighten:
+
+* `create` requiring authentication — breaks first-launch device
+  registration for users who haven't logged in yet. If your app pushes
+  to anonymous users, this kills it.
+* `update` requiring authentication — breaks silent device-token
+  refresh and channel subscribe/unsubscribe before login.
+* Pointer-based `readUserFields` / `writeUserFields` on `_Installation`
+  — a device has no stable owning user (it can outlive a session and
+  change users), so user-pointer ACLing is unreliable.
+* Anything on `find` / `delete` — the server ignores it.
+
+If your app genuinely requires login before any installation write, put
+the policy in a `beforeSave('_Installation')` Cloud Code trigger rather
+than in CLP:
+
+```js
+Parse.Cloud.beforeSave('_Installation', ({ user, master }) => {
+  if (!master && !user) throw 'login required';
+});
+```
+
+The trigger fires under master-key context and can inspect `request.user`
+directly without disturbing the anonymous registration handshake that
+the client SDKs depend on.
+
+### 6.4 ACL still applies under CLP
 
 CLP says "is this class operation allowed at all?". ACL says "given the
 operation is allowed, which rows does this caller see / touch?". An
 authed user who passed the CLP gate still gets their result set filtered
 by ACL — if Alice writes a row with `acl.apply(alice.id, true, true)`
 only, Bob's query for it (under his own session) returns nothing.
+
+### 6.5 The other system classes — where CLP isn't the whole story
+
+`_Installation` (section 6.3) isn't unique. Several Parse Server system
+classes either ignore CLP entirely or layer it under hardcoded behavior.
+Treat this table as the authoritative answer for "what can I actually
+configure here?":
+
+| Class                                                                                            | Does CLP do anything?                                                                                              |
+|--------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------|
+| `_User`                                                                                          | Yes, but layered under hardcoded protections (password never returned, `authData` stripped from non-master finds, unauth update requires matching session token, email/username lowercasing, owner-exempt `protectedFields`). |
+| `_Role`                                                                                          | Yes, layered under role-name regex, relation validation, and hierarchy integrity checks.                            |
+| `_Installation`                                                                                  | Partial — only `get`, `count`, `addField`, and `protectedFields` are configurable; `find` and `delete` are master-only regardless of CLP. See section 6.3. |
+| `_Session`                                                                                       | Mostly redundant — non-master queries are silently rewritten to `{ user: <current user> }` (`RestQuery.js`), so a caller only ever sees their own sessions. `find` also requires a session token. |
+| `_JobStatus`, `_PushStatus`, `_Hooks`, `_GlobalConfig`, `_GraphQLConfig`, `_JobSchedule`, `_Audience`, `_Idempotency`, `_Join:*` (all relation join tables) | No — master-key-only at the REST layer (`SharedRest.js`). CLP changes are ignored.                                  |
+
+Practical consequences when you're building a client-mode app:
+
+* Don't query `_JobStatus`, `_PushStatus`, `_Audience`, `_JobSchedule`,
+  or any `_Join:*` table from the client — those calls require master
+  key. In the SDK, the corresponding model classes
+  (`Parse::JobStatus`, `Parse::PushStatus`, `Parse::Audience`,
+  `Parse::JobSchedule`) are server-side helpers. Auto-promote to a
+  master-key client or expose them through a Cloud Code function.
+* On `_Session`, you don't need ACLs or CLP to scope queries to the
+  caller — Parse Server already does that. You also can't grant a user
+  visibility into another user's sessions through CLP.
+* On `_User`, never assume CLP alone gates a flow. Password changes,
+  email verification, and session-token rotation have their own paths
+  in `RestWrite.js`; they fire even if your CLP looks restrictive.
+* On `_Role`, the role graph is validated server-side. CLP can gate
+  who can call create/update/delete, but the contents of the `roles`
+  and `users` relations are still checked for cycles and bad names.
+
+### 6.6 `_User` field visibility — master-only vs. self-only
+
+Two patterns come up constantly on `_User`:
+
+* **Master-only fields** — admin-side metadata that the user themselves
+  should not see. Examples: `my_opinion_of_them`, `risk_score`,
+  `moderation_notes`.
+* **Self-visible fields** — private profile data the user should see
+  on their own row, but nobody else. Examples: `favorite_color`,
+  `private_notes`, full `email`.
+
+Vanilla `protectedFields` doesn't express either cleanly on `_User`,
+because Parse Server's `protectedFieldsOwnerExempt` option (historical
+default **true**) silently exempts the owning user from every
+`protectedFields` rule on `_User`. So if you write `protect_fields "*",
+[:risk_score]`, the user still sees their own `risk_score`. (Parse
+Server's default for this option **is changing to `false`** in a future
+version; until your server adopts that default, set it explicitly as in
+step 1.) The fix has two moving parts on the server:
+
+1. Start Parse Server with `protectedFieldsOwnerExempt: false`.
+2. Add a self-pointer field on `_User` and populate it from a Cloud
+   Code trigger so each row points at itself:
+
+   ```js
+   Parse.Cloud.beforeSave(Parse.User, (req) => {
+     const u = req.object;
+     if (!u.get('self')) u.set('self', u);
+   });
+   ```
+
+With those in place, the SDK exposes a small DSL on `Parse::User`:
+
+```ruby
+class Parse::User
+  property :my_opinion_of_them, :string
+  property :favorite_color, :string
+
+  master_only_fields :my_opinion_of_them
+  self_visible_fields :favorite_color, via: :self   # name of the self-pointer
+end
+```
+
+That expands to:
+
+```ruby
+protect_fields "*",                ["myOpinionOfThem", "favoriteColor"]
+protect_fields "userField:self",   ["myOpinionOfThem"]
+```
+
+Resolution (recall: matching groups intersect):
+
+| Caller         | Matching groups            | Hidden (intersection)               | Visible       |
+|----------------|----------------------------|-------------------------------------|---------------|
+| Other user     | `*`                        | `myOpinionOfThem`, `favoriteColor`  | neither       |
+| The user itself| `*` ∩ `userField:self`     | `myOpinionOfThem` only              | `favoriteColor` |
+| Master key     | none (master bypasses)     | nothing                             | both          |
+
+If your code uses raw `protect_fields` on `_User` directly, the SDK
+emits a one-time advisory pointing at these helpers and reminding you
+to set `protectedFieldsOwnerExempt: false`. You can still use the raw
+form — the override calls through — but the warning is there because
+the default Parse Server setting will silently negate a lot of what
+the raw `protect_fields` calls look like they're doing.
 
 ---
 
@@ -966,11 +1138,35 @@ server-side on every event before it goes out the WebSocket — Bob will
 not receive an event for an ACL-private row Alice creates, even if his
 subscription matches the `where` clause.
 
+> **Master-key authorization is per-CONNECTION, not per-subscription.**
+> Parse Server resolves master-key (ACL/CLP-bypass) authorization once,
+> from the connect frame; once set, EVERY subscription on that socket
+> bypasses ACL/CLP. The SDK therefore keeps connections **ACL-scoped by
+> default**: a configured `master_key` does NOT elevate the connection.
+> To build an admin (ACL-bypassing) connection — an event tap that sees
+> every row regardless of ACL — opt in explicitly:
+>
+> ```ruby
+> admin = Parse::LiveQuery::Client.new(
+>   url: "wss://parse.example.com/parse",
+>   application_id: "MY_APP_ID",
+>   master_key: ENV["PARSE_MASTER_KEY"],
+>   use_master_key: true,   # whole connection bypasses ACL/CLP; warns at connect
+> )
+> ```
+>
+> There is no per-subscription master key — `subscribe(use_master_key: true)`
+> on a scoped connection warns and stays ACL-scoped. For a process that
+> needs both scoped and admin streams, use two separate clients. Use
+> `client.admin_connection?` to check whether a connection is elevated.
+
 > **Configuration tip.** `Parse::LiveQuery::Client.new` reads
-> `master_key` from configuration if you omit it. Pass `master_key: nil`
-> **explicitly** in client builds — the SDK preserves a sentinel value
-> internally so it can tell "not provided" apart from "explicitly nil,"
-> and the latter is the only safe choice in a client context.
+> `master_key` from configuration if you omit it. Passing
+> `master_key: nil` **explicitly** in client builds is still good
+> hygiene (the SDK preserves a sentinel so it can tell "not provided"
+> apart from "explicitly nil"), but note that as of v5.1.0 a present
+> master key alone no longer elevates a LiveQuery connection — only
+> `use_master_key: true` does.
 
 ---
 

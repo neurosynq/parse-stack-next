@@ -1,6 +1,7 @@
 require_relative "../../test_helper_integration"
 require "minitest/autorun"
 require "moneta"
+require "redis"
 
 # Integration test for the 5.0.1 fix: Parse::CreateLock must successfully
 # acquire / release cross-process locks against a Parse::Cache::Redis wrapper
@@ -28,6 +29,11 @@ class CreateLockRedisIntegrationTest < Minitest::Test
 
     @probe = Moneta.new(:Redis, url: REDIS_URL, expires: true)
     @probe.clear
+    # Raw probe: CreateLock now acquires/releases through
+    # Parse::Cache::Redis#lock_acquire — plain-string raw-Redis entries,
+    # not Moneta-marshaled — so lock keys are inspected with the raw
+    # client at the same key NAME the SDK computes.
+    @raw = Redis.new(url: REDIS_URL)
 
     @saved_store = Parse.synchronize_create_store
     @saved_secret = Parse.synchronize_create_secret
@@ -55,10 +61,14 @@ class CreateLockRedisIntegrationTest < Minitest::Test
     Parse::CreateLock.reset!
     @wrapper&.close
     @probe&.close
+    @raw&.close
   end
 
   def test_wrapper_is_classified_as_cross_process_store
-    refute Parse::CreateLock.send(:degraded_store?, @wrapper),
+    # degraded_store? was extracted to Parse::LockBackend in the v5.1.0
+    # lock refactor (lib/parse/lock_backend.rb); it is no longer a method
+    # on Parse::CreateLock.
+    refute Parse::LockBackend.degraded_store?(@wrapper),
            "Parse::Cache::Redis wrapper must NOT be classified as degraded — " \
            "otherwise synchronize() falls back to a per-process Mutex and " \
            "cross-process locking is silently disabled."
@@ -77,13 +87,13 @@ class CreateLockRedisIntegrationTest < Minitest::Test
       query_attrs: query_attrs,
       options: { ttl: 5, wait: 2.0 },
     ) do
-      observed_inside = @probe[expected_key]
+      observed_inside = @raw.get(expected_key)
       :acquired
     end
 
     assert_equal :acquired, result, "synchronize must return the block value"
     assert observed_inside, "lock key must be present in Redis while the block is running"
-    assert_nil @probe[expected_key], "lock key must be released after the block exits"
+    assert_nil @raw.get(expected_key), "lock key must be released after the block exits"
   end
 
   def test_contended_acquire_serializes_across_threads

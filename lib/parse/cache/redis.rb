@@ -118,6 +118,59 @@ module Parse
         @pool.increment(key, amount, options)
       end
 
+      # Lua compare-and-delete: delete `key` only if its current value
+      # equals `expected`. Atomic on the Redis server (the GET, the
+      # compare, and the DEL are one script invocation), which closes the
+      # check-then-delete race in a naive GET-then-DEL release where the
+      # lease can expire and be re-acquired by another holder between the
+      # two commands.
+      LOCK_RELEASE_SCRIPT = <<~LUA
+        if redis.call('get', KEYS[1]) == ARGV[1] then
+          return redis.call('del', KEYS[1])
+        else
+          return 0
+        end
+      LUA
+
+      # Atomically acquire a lock: SET key=owner only if absent, with a
+      # native expiry. Used by {Parse::LockBackend} for {Parse::Lock} and
+      # {Parse::CreateLock}. Deliberately bypasses Moneta's `create` —
+      # `Moneta.new(:Redis)` marshals BOTH keys and values, so a raw-Redis
+      # compare-and-delete on the marshaled blob would be fragile and
+      # coupled to Moneta's serializer config. Routing acquire AND release
+      # through plain-string raw Redis here keeps one consistent encoding
+      # across both ends of the lock and makes the keys human-inspectable
+      # in Redis (`parse-stack:lock:v1:<digest>`). Lock keys are
+      # short-lived (TTL ≤ 30s) so there is no migration concern when a
+      # deploy flips between the Moneta-encoded and raw-encoded paths.
+      #
+      # @param key [String] plain-string lock key.
+      # @param owner [String] unique-per-acquisition owner token.
+      # @param ttl [Integer] seconds until the key self-clears.
+      # @return [Boolean] true when the key was set (lock acquired).
+      def lock_acquire(key, owner, ttl)
+        @pool.pool.with do |store|
+          redis = backend_client(store)
+          # redis-rb returns "OK" on success, nil when NX fails.
+          !!redis.set(key, owner, nx: true, ex: ttl)
+        end
+      end
+
+      # Atomically release a lock via compare-and-delete. Only the holder
+      # whose `owner` token still matches the stored value deletes the
+      # key — a holder whose lease already expired and was re-acquired by
+      # someone else is a no-op, never a cross-holder delete.
+      #
+      # @param key [String] plain-string lock key.
+      # @param owner [String] the owner token from {#lock_acquire}.
+      # @return [Boolean] true when this owner's key was deleted.
+      def lock_release(key, owner)
+        @pool.pool.with do |store|
+          redis = backend_client(store)
+          redis.eval(LOCK_RELEASE_SCRIPT, keys: [key], argv: [owner]).to_i == 1
+        end
+      end
+
       # Clear cached entries belonging to this wrapper. Required for
       # `Parse::Client#clear_cache!` compatibility.
       #

@@ -35,10 +35,117 @@ module Parse
   #
   #     has_one :session, ->{ where(installation_id: i.installation_id) }, scope_only: true
   #   end
+  # ## Class-Level Permissions on `_Installation`
+  #
+  # `_Installation` is special-cased inside Parse Server. Some operations are
+  # hardcoded at the REST layer and CANNOT be relaxed via CLP — calling
+  # {Parse::Object.set_clp} for them has no effect on the server's actual
+  # behavior, regardless of what you pass. Other operations work the way
+  # CLP normally does. The matrix:
+  #
+  # | Operation  | Behavior                                                                                  |
+  # |------------|-------------------------------------------------------------------------------------------|
+  # | `find`     | **Master key only. Hardcoded.** `set_clp :find, ...` is effectively ignored by the server. |
+  # | `delete`   | **Master key only. Hardcoded.** `set_clp :delete, ...` is effectively ignored by the server. |
+  # | `create`   | Open to anonymous clients (the `X-Parse-Installation-Id` header is the credential). Locking via CLP breaks first-launch device registration. |
+  # | `update`   | Open to clients whose `installationId` matches the record; else master key. Locking via CLP breaks silent device-token refresh and channel subscribe/unsubscribe before login. |
+  # | `get`      | CLP applies normally. Safe to tighten — SDKs don't usually GET their own installation from the server. |
+  # | `count`    | CLP applies normally. Safe to tighten to master-only (the push flow doesn't need it). |
+  # | `addField` | CLP applies normally. Safe to tighten to master-only as a hardening default. |
+  #
+  # ### What you can safely do with `set_clp` on `_Installation`
+  #
+  # * `set_clp :get, requires_authentication: true` (or `{}` for master-only)
+  # * `set_clp :count` (master-only)
+  # * `set_clp :addField` (master-only)
+  # * {Parse::Object.protect_fields} to hide `device_token`, `gcm_sender_id`,
+  #   `push_type`, etc. from non-master reads — these are write-only from the
+  #   client's perspective in normal SDK flows.
+  #
+  # ### What you should NOT do with `set_clp` on `_Installation`
+  #
+  # * `set_clp :create, requires_authentication: true` — breaks device
+  #   registration for users who haven't logged in yet.
+  # * `set_clp :update, requires_authentication: true` — breaks background
+  #   device-token refresh and pre-login channel subscribe/unsubscribe.
+  # * Pointer-based `set_read_user_fields` / `set_write_user_fields` —
+  #   an installation has no stable owning user (a device can outlive a user
+  #   session and change users), so user-pointer ACLing is unreliable here.
+  # * `set_clp :find, public: true` (or any other `:find` config) —
+  #   has no effect; the server enforces master-only at the REST layer.
+  #
+  # If your app actually does require login before any installation write,
+  # put that policy in a `beforeSave('_Installation')` Cloud Code trigger
+  # rather than in CLP — the trigger fires under master-key context and can
+  # inspect `request.user` directly without breaking the SDK's anonymous
+  # registration handshake.
+  #
   # @see Push
   # @see Parse::Object
   class Installation < Parse::Object
     parse_class Parse::Model::CLASS_INSTALLATION
+
+    class << self
+      # Override {Parse::Object.set_clp} on `_Installation` so that any
+      # attempt to change CLP from the SDK emits a one-time advisory.
+      # Parse Server hardcodes `find` and `delete` on `_Installation` to
+      # master-key-only at the REST layer, and gates `create`/`update`
+      # on the `X-Parse-Installation-Id` header rather than CLP — so
+      # most CLP changes here either do nothing or break the SDK's
+      # device-registration flow. Behavior is otherwise unchanged.
+      def set_clp(operation, **opts)
+        _warn_about_installation_clp!(:set_clp, operation)
+        super
+      end
+
+      # Same advisory for the bulk-config DSL.
+      def set_class_access(**ops_to_access)
+        _warn_about_installation_clp!(:set_class_access, ops_to_access.keys)
+        super
+      end
+
+      # `protect_fields` on `_Installation` is a documented-legitimate use
+      # (e.g. hiding `device_token` / `gcm_sender_id` / `push_type` from
+      # non-master reads), so we deliberately do NOT fire the
+      # find/delete-are-hardcoded advisory here. The advisory exists to
+      # nudge callers away from CLP changes that the server ignores;
+      # protectedFields is one of the four operations on _Installation
+      # that CLP actually controls.
+      def protect_fields(pattern, fields)
+        super
+      end
+
+      # Pointer-permission helpers on `_Installation` are a mistake in
+      # practice (devices have no stable owning user); warn loudly.
+      def set_read_user_fields(*fields)
+        _warn_about_installation_clp!(:set_read_user_fields, fields)
+        super
+      end
+
+      def set_write_user_fields(*fields)
+        _warn_about_installation_clp!(:set_write_user_fields, fields)
+        super
+      end
+
+      # @!visibility private
+      def _warn_about_installation_clp!(method, detail)
+        return if @_installation_clp_warned
+        @_installation_clp_warned = true
+        msg = "[Parse::Installation] #{method}(#{Array(detail).inspect}) on _Installation: " \
+              "Parse Server hardcodes find/delete on _Installation to master-key-only " \
+              "(CLP changes for those operations are ignored), and gates create/update " \
+              "on the X-Parse-Installation-Id header rather than CLP. Only get, count, " \
+              "addField, and protectedFields actually respond to CLP here. " \
+              "If you need login-required writes, use a beforeSave('_Installation') " \
+              "Cloud Code trigger instead. See Parse::Installation docs and " \
+              "docs/client_sdk_guide.md §6.3."
+        if Parse.respond_to?(:logger) && Parse.logger
+          Parse.logger.warn(msg)
+        else
+          Kernel.warn(msg)
+        end
+      end
+    end
     # @!attribute gcm_sender_id
     # This field only has meaning for Android installations that use the GCM
     # push type. It is reserved for directing Parse to send pushes to this
@@ -134,6 +241,21 @@ module Parse
     # @version 1.7.1
     # @return [Parse::Session] The associated {Parse::Session} that might be tied to this installation
     has_one :session, -> { where(installation_id: i.installation_id) }, scope_only: true
+
+    # @!attribute user
+    # The {Parse::User} associated with this installation. Parse Server
+    # populates this pointer when the installation is created or updated
+    # by an authenticated client (the session-token holder on the
+    # request). It is useful for targeted push delivery — finding all
+    # installations belonging to a given user.
+    #
+    # **Caveat — do not use for ACL or CLP scoping.** Devices outlive
+    # sessions and can change users (account switch, sign-out, shared
+    # device), so the `user` pointer on `_Installation` is not a
+    # reliable owner identity. See the "What you should NOT do with
+    # `set_clp`" notes above for the broader context.
+    # @return [Parse::User]
+    belongs_to :user
 
     # =========================================================================
     # Channel Management - Class Methods

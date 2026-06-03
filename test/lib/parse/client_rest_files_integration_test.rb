@@ -109,6 +109,20 @@ class ClientRestFilesIntegrationTest < Minitest::Test
           refute file.url.empty?
           assert_nil Parse::Client.client.master_key,
                      "Parse::File#save must not invent a master key"
+          # The save writer routes the create-response URL through
+          # normalize_and_store_url (the v5.1.0 fix). This test server
+          # uses local/GridFS storage and returns a canonical `tfss-…`
+          # URL — not a presigned S3 URL — so the end-to-end assertions
+          # are: @url is canonical (no signature query string), no
+          # presigned stash is created, and saved? round-trips. (The
+          # signature-stripping branch itself requires an S3FilesAdapter
+          # configured with presignedUrl:true and is covered at the unit
+          # level in file_signed_url_refusal_test.rb.)
+          refute_includes file.url, "X-Amz-Signature",
+                          "a canonical create-response URL must carry no signature"
+          assert_nil file.presigned_url,
+                     "a canonical create-response must not populate the presigned stash"
+          assert file.saved?, "save must round-trip through normalization to saved? == true"
         else
           # save returns false on server-side rejection; that's also fine.
           assert true

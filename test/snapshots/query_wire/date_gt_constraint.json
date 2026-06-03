@@ -1,0 +1,10 @@
+{
+  "where": {
+    "createdAt": {
+      "$gt": {
+        "__type": "Date",
+        "iso": "<<TIMESTAMP>>"
+      }
+    }
+  }
+}

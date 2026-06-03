@@ -983,6 +983,161 @@ class MCPDispatcherTest < Minitest::Test
                "text-envelope structuredContent must carry :output"
   end
 
+  # ---- v5.1 outputSchema coverage for the 5 newly-declared tools ----
+  #
+  # `aggregate`, `export_data`, `atlas_text_search`, `atlas_autocomplete`,
+  # `atlas_faceted_search` all gained `output_schema` in v5.1 — the
+  # dispatcher must auto-mirror their result Hash into `structuredContent`
+  # the same way it does for the v5.0 cohort. One per-tool emission test
+  # locks the dispatcher behaviour and keeps the schema contract honest.
+
+  def test_builtin_aggregate_emits_structuredContent
+    agg_agent = Class.new(StubAgent) do
+      def execute(tool_name, **kwargs)
+        return super unless tool_name == :aggregate
+        { success: true, data: {
+          class_name:      kwargs[:class_name],
+          pipeline_stages: 2,
+          result_count:    1,
+          # Production coerces route to a String (`.to_s`) to satisfy the
+          # aggregate output_schema's `route: { type: "string" }`. Mirror
+          # that here so the stub can't mask a schema/type regression.
+          route:           "mongo_direct",
+          results:         [{ "_id" => "rock", "count" => 5 }],
+        } }
+      end
+    end.new
+
+    body = {
+      "jsonrpc" => "2.0", "id" => 200, "method" => "tools/call",
+      "params"  => { "name" => "aggregate", "arguments" => {
+        "class_name" => "Song",
+        "pipeline"   => [{ "$group" => { "_id" => "$genre", "count" => { "$sum" => 1 } } }],
+      } },
+    }
+    result = D.call(body: body, agent: agg_agent)
+
+    content_result = result[:body]["result"]
+    refute content_result["isError"], "expected non-error tools/call result"
+    structured = content_result["structuredContent"]
+    refute_nil structured,
+               "aggregate must mirror its result Hash as structuredContent"
+    assert_equal "Song", structured[:class_name] || structured["class_name"]
+    assert_equal 1, structured[:result_count] || structured["result_count"]
+    # route must mirror as the String the output_schema declares, not a Symbol.
+    assert_equal "mongo_direct", structured[:route] || structured["route"]
+  end
+
+  def test_builtin_export_data_emits_structuredContent
+    export_agent = Class.new(StubAgent) do
+      def execute(tool_name, **kwargs)
+        return super unless tool_name == :export_data
+        { success: true, data: {
+          class_name: kwargs[:class_name],
+          format:     "csv",
+          headers:    %w[objectId title],
+          row_count:  1,
+          output:     "objectId,title\nabc123,Hello\n",
+        } }
+      end
+    end.new
+
+    body = {
+      "jsonrpc" => "2.0", "id" => 201, "method" => "tools/call",
+      "params"  => { "name" => "export_data", "arguments" => { "class_name" => "Song" } },
+    }
+    result = D.call(body: body, agent: export_agent)
+
+    structured = result[:body]["result"]["structuredContent"]
+    refute_nil structured, "export_data must mirror its result Hash as structuredContent"
+    assert_equal "csv", structured[:format] || structured["format"]
+    assert_equal 1, structured[:row_count] || structured["row_count"]
+  end
+
+  def test_builtin_atlas_text_search_emits_structuredContent
+    atlas_agent = Class.new(StubAgent) do
+      def execute(tool_name, **kwargs)
+        return super unless tool_name == :atlas_text_search
+        { success: true, data: {
+          class_name: kwargs[:class_name],
+          count:      1,
+          results:    [{ "objectId" => "abc", "score" => 2.71 }],
+        } }
+      end
+    end.new
+
+    body = {
+      "jsonrpc" => "2.0", "id" => 202, "method" => "tools/call",
+      "params"  => { "name" => "atlas_text_search",
+                     "arguments" => { "class_name" => "Song", "query" => "hello" } },
+    }
+    result = D.call(body: body, agent: atlas_agent)
+
+    structured = result[:body]["result"]["structuredContent"]
+    refute_nil structured, "atlas_text_search must mirror its result Hash as structuredContent"
+    assert_equal 1, structured[:count] || structured["count"]
+    results = structured[:results] || structured["results"]
+    refute_nil results
+    assert_equal "abc", results.first["objectId"]
+  end
+
+  def test_builtin_atlas_autocomplete_emits_structuredContent
+    auto_agent = Class.new(StubAgent) do
+      def execute(tool_name, **kwargs)
+        return super unless tool_name == :atlas_autocomplete
+        { success: true, data: {
+          class_name:  kwargs[:class_name],
+          field:       "title",
+          suggestions: %w[Hello\ World Hello\ Sunshine],
+          count:       2,
+          results:     [{ "objectId" => "a" }, { "objectId" => "b" }],
+        } }
+      end
+    end.new
+
+    body = {
+      "jsonrpc" => "2.0", "id" => 203, "method" => "tools/call",
+      "params"  => { "name" => "atlas_autocomplete",
+                     "arguments" => { "class_name" => "Song", "query" => "Hel", "field" => "title" } },
+    }
+    result = D.call(body: body, agent: auto_agent)
+
+    structured = result[:body]["result"]["structuredContent"]
+    refute_nil structured, "atlas_autocomplete must mirror its result Hash as structuredContent"
+    assert_equal "title", structured[:field] || structured["field"]
+    assert_equal 2, (structured[:suggestions] || structured["suggestions"]).length
+  end
+
+  def test_builtin_atlas_faceted_search_emits_structuredContent
+    facet_agent = Class.new(StubAgent) do
+      def execute(tool_name, **kwargs)
+        return super unless tool_name == :atlas_faceted_search
+        { success: true, data: {
+          class_name:  kwargs[:class_name],
+          total_count: 100,
+          facets:      { "genre" => { "buckets" => [{ "_id" => "rock", "count" => 50 }] } },
+          count:       1,
+          results:     [{ "objectId" => "abc" }],
+        } }
+      end
+    end.new
+
+    body = {
+      "jsonrpc" => "2.0", "id" => 204, "method" => "tools/call",
+      "params"  => { "name" => "atlas_faceted_search",
+                     "arguments" => { "class_name" => "Song",
+                                      "facets" => { "genre" => { "type" => "string", "path" => "genre" } } } },
+    }
+    result = D.call(body: body, agent: facet_agent)
+
+    structured = result[:body]["result"]["structuredContent"]
+    refute_nil structured, "atlas_faceted_search must mirror its result Hash as structuredContent"
+    assert_equal 100, structured[:total_count] || structured["total_count"]
+    facets = structured[:facets] || structured["facets"]
+    refute_nil facets
+    refute_nil facets["genre"] || facets[:genre]
+  end
+
   def test_builtin_tools_list_advertises_outputSchema
     real_defs_agent = Class.new(StubAgent) do
       def tool_definitions(format: :mcp, category: nil)

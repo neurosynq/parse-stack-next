@@ -6,6 +6,7 @@ require "openssl"
 require "json"
 require "securerandom"
 require "monitor"
+require_relative "../../lock_backend"
 
 module Parse
   # Mutual-exclusion primitive for `first_or_create!` / `create_or_update!` to
@@ -70,25 +71,29 @@ module Parse
           master_key: master_key,
         )
 
-        store = lock_store
-        if degraded_store?(store)
-          handle_degraded(on_degraded, key)
-          return process_mutex(key).synchronize(&block)
+        store = LockBackend.lock_store
+        if LockBackend.degraded_store?(store)
+          LockBackend.handle_degraded(
+            on_degraded, key,
+            source: "Parse::CreateLock",
+            unavailable_error: Parse::CreateLockUnavailableError,
+          )
+          return LockBackend.process_mutex(key).synchronize(&block)
         end
 
         owner = SecureRandom.uuid
         acquired_at = nil
-        start = monotonic_now
+        start = LockBackend.monotonic_now
 
         loop do
-          if try_acquire(store, key, owner, ttl)
-            acquired_at = monotonic_now
+          if LockBackend.try_acquire(store, key, owner, ttl)
+            acquired_at = LockBackend.monotonic_now
             wait_ms = ((acquired_at - start) * 1000).round
             instrument("acquired", key, wait_ms: wait_ms)
             break
           end
 
-          elapsed = monotonic_now - start
+          elapsed = LockBackend.monotonic_now - start
           if elapsed >= wait
             waited_ms = (elapsed * 1000).round
             instrument("timeout", key, waited_ms: waited_ms)
@@ -96,15 +101,15 @@ module Parse
                   "Could not acquire create-lock for #{parse_class} within #{wait}s"
           end
           instrument("contended", key, elapsed_ms: (elapsed * 1000).round) if elapsed > 0
-          sleep(poll_interval)
+          sleep(LockBackend.poll_interval)
         end
 
         begin
           yield
         ensure
           if acquired_at
-            release(store, key, owner)
-            held_ms = ((monotonic_now - acquired_at) * 1000).round
+            LockBackend.release(store, key, owner)
+            held_ms = ((LockBackend.monotonic_now - acquired_at) * 1000).round
             instrument("released", key, held_ms: held_ms)
           end
         end
@@ -123,7 +128,7 @@ module Parse
                 "synchronize key payload exceeds #{MAX_PAYLOAD_BYTES} bytes (got #{payload.bytesize})"
         end
 
-        secret = lock_secret_for(store: lock_store)
+        secret = lock_secret_for(store: LockBackend.lock_store)
         digest = if secret
             OpenSSL::HMAC.hexdigest("SHA256", secret, payload)
           else
@@ -134,22 +139,13 @@ module Parse
 
       # @!visibility private
       def reset!
-        @auto_secret = nil
-        @plain_sha_warned = nil
-        @degraded_warned_at = nil
-        @process_mutex_registry = nil
+        # All resettable state lives on Parse::LockBackend now —
+        # @degraded_warned_at, @process_mutex_registry, @auto_secret,
+        # @plain_sha_warned. v5.1.0 extraction.
+        LockBackend.reset!
       end
 
       private
-
-      def lock_store
-        if Parse.respond_to?(:synchronize_create_store) && Parse.synchronize_create_store
-          return Parse.synchronize_create_store
-        end
-        Parse.cache
-      rescue Parse::Error::ConnectionError
-        nil
-      end
 
       def parse_application_id
         Parse.client.application_id
@@ -253,133 +249,19 @@ module Parse
         end
       end
 
-      def degraded_store?(store)
-        return true if store.nil?
-        # The Parse::Cache::Redis wrapper (and its Pool) are known
-        # cross-process stores even though they don't expose a Moneta
-        # `.adapter` chain to walk. Anything that can't forward `#create`
-        # cannot serve as a lock store, so fall back to the process-local
-        # path rather than spinning until timeout on NoMethodError.
-        return false if defined?(Parse::Cache::Redis) && store.is_a?(Parse::Cache::Redis)
-        return true unless store.respond_to?(:create)
-        bottom = walk_to_adapter(store)
-        return true if bottom.nil?
-        klass_name = bottom.class.name.to_s
-        klass_name.include?("Memory") || klass_name.include?("Null")
-      end
-
-      def walk_to_adapter(store)
-        current = store
-        # Walk transformer chain to find bottom Moneta adapter
-        while current.respond_to?(:adapter) && current.adapter && current.adapter != current
-          current = current.adapter
-        end
-        current
-      end
-
-      def handle_degraded(mode, key)
-        case mode
-        when :raise
-          raise Parse::CreateLockUnavailableError,
-                "synchronize requires a cross-process cache store (Redis); current store is process-local"
-        when :proceed
-          # silent
-        when :warn_throttled
-          now = monotonic_now
-          if @degraded_warned_at.nil? || (now - @degraded_warned_at) >= DEGRADED_WARNING_THROTTLE_SECONDS
-            @degraded_warned_at = now
-            warn "[Parse::CreateLock] Lock store is process-local (Moneta Memory/Null). " \
-                 "Cross-process locking is NOT in effect. Configure a Redis-backed cache to enable distributed locking."
-          end
-        else # :warn (default)
-          warn "[Parse::CreateLock] Lock store is process-local; cross-process locking disabled. " \
-               "key_digest=#{key[KEY_PREFIX.size, 12]}…"
-        end
-      end
-
-      def try_acquire(store, key, owner, ttl)
-        # Trigger lazy TTL sweep on Moneta::Memory before #create (no-op on Redis).
-        # Without this, Memory adapter returns false on #create even after TTL expiry
-        # until a #key? or #[] access flushes the stale entry.
-        store.key?(key)
-        store.create(key, owner, expires: ttl)
-      rescue StandardError => e
-        warn "[Parse::CreateLock] acquire error (#{e.class}): #{e.message}"
-        false
-      end
-
-      def release(store, key, owner)
-        # Best-effort compare-and-delete. Moneta does not expose atomic CAD;
-        # the worst-case race here is bounded by the short TTL (default #{DEFAULT_TTL}s).
-        current = store[key]
-        store.delete(key) if current == owner
-      rescue StandardError => e
-        warn "[Parse::CreateLock] release error (#{e.class}): #{e.message}"
-      end
-
-      def poll_interval
-        DEFAULT_POLL_BASE + (rand * 2 - 1) * DEFAULT_POLL_JITTER
-      end
-
-      def monotonic_now
-        Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      end
+      # All the lock infrastructure — store discovery, degraded
+      # detection, atomic-SETNX, release semantics, poll-interval
+      # jitter, process-mutex registry, AND HMAC secret resolution —
+      # lives on {Parse::LockBackend} now (v5.1.0 extraction). The
+      # only CreateLock-specific helper still here is `clamp` for
+      # the public API's input range.
 
       def clamp(value, lo, hi)
         [lo, value, hi].sort[1]
       end
 
-      def process_mutex(key)
-        @process_mutex_registry_lock ||= Mutex.new
-        @process_mutex_registry_lock.synchronize do
-          @process_mutex_registry ||= {}
-          @process_mutex_registry[key] ||= Mutex.new
-        end
-      end
-
       def lock_secret_for(store:)
-        configured = configured_secret
-        return configured if configured && !configured.empty?
-
-        # No operator-configured secret. Behavior depends on store type:
-        # - Memory/Null adapter: locking is already process-local, so a
-        #   per-process auto-derived HMAC secret is fine and preserves
-        #   privacy in tests / single-process deployments.
-        # - Redis (or any cross-process store): a per-process secret would
-        #   break cross-process key equality, defeating the lock. Fall back
-        #   to plain SHA256 with a one-time warning so operators know to
-        #   harden key material.
-        if degraded_store?(store)
-          auto_secret
-        else
-          warn_plain_sha_once
-          nil
-        end
-      end
-
-      def configured_secret
-        if Parse.respond_to?(:synchronize_create_secret) && Parse.synchronize_create_secret
-          return Parse.synchronize_create_secret.to_s
-        end
-        ENV["PARSE_STACK_LOCK_SECRET"]
-      end
-
-      def auto_secret
-        @auto_secret ||= SecureRandom.hex(32)
-      end
-
-      def warn_plain_sha_once
-        return if @plain_sha_warned
-        @plain_sha_warned = true
-        warn "[Parse::CreateLock:SECURITY] No PARSE_STACK_LOCK_SECRET configured and Redis-backed store detected. " \
-             "Falling back to plain SHA256 for lock-key derivation so cross-process locking actually works. " \
-             "Risks of running without an HMAC secret: (1) lock keys are deterministic and may expose query_attrs " \
-             "content via Redis MONITOR/snapshots; (2) when the response cache and the lock store share a Redis DB, " \
-             "any caller with write access to Parse.cache can plant a `parse-stack:foc:v1:<sha>` key under a guessable " \
-             "digest of (app_id, class, principal, query_attrs) and suppress first_or_create!/create_or_update! for " \
-             "that tuple until TTL expiry — a targeted DoS / create-pinning primitive. " \
-             "Set PARSE_STACK_LOCK_SECRET (or Parse.synchronize_create_secret = '…') to enable HMAC keying, or " \
-             "point Parse.synchronize_create_store at a separate Redis DB from the response cache."
+        LockBackend.lock_secret_for(store: store, source: "Parse::CreateLock")
       end
 
       def instrument(event, key, payload = {})

@@ -70,7 +70,10 @@ module Parse
   #    Parse::JobStatus.failed.where(:created_at.gt => yesterday).all
   #
   # @note This collection is written by Parse Server itself and read access
-  #   typically requires the master key. Parse Server does not garbage-collect
+  #   requires the master key. `_JobStatus` is hardcoded master-key-only at
+  #   Parse Server's REST layer (`SharedRest.js`) — CLP changes via
+  #   {Parse::Object.set_clp} have no effect. Use a master-key client (or a
+  #   Cloud Code function) to read it. Parse Server does not garbage-collect
   #   `_JobStatus` rows — long-running deployments accumulate history and
   #   should implement their own retention policy.
   # @see Parse::JobSchedule for the corresponding scheduled-run configuration.

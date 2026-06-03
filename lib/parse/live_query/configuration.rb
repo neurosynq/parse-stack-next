@@ -26,6 +26,14 @@ module Parse
       # @return [String] Parse master key (optional)
       attr_accessor :master_key
 
+      # @return [Boolean] build admin connections that send the master
+      #   key on the connect frame, bypassing ACL/CLP for ALL
+      #   subscriptions. Defaults to false — connections are ACL-scoped.
+      #   Set true ONLY for dedicated admin/event-tap consumers; never
+      #   for clients that serve end-user, session-scoped streams. See
+      #   {Parse::LiveQuery::Client#use_master_key}.
+      attr_accessor :use_master_key
+
       # @return [Boolean] automatically connect on client creation (default: true)
       attr_accessor :auto_connect
 
@@ -130,6 +138,9 @@ module Parse
         @application_id = nil
         @client_key = nil
         @master_key = nil
+        # ACL-scoped by default; opt into admin (ACL-bypassing)
+        # connections explicitly. See attr doc above.
+        @use_master_key = false
         @auto_connect = true
         @auto_reconnect = true
 
@@ -199,6 +210,7 @@ module Parse
           application_id: @application_id,
           client_key: @client_key.nil? ? nil : "[REDACTED]",
           master_key: @master_key.nil? ? nil : "[REDACTED]",
+          use_master_key: @use_master_key,
           auto_connect: @auto_connect,
           auto_reconnect: @auto_reconnect,
           ping_interval: @ping_interval,

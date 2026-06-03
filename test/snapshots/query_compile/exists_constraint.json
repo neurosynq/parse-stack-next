@@ -1,0 +1,10 @@
+{
+  "where": {
+    "archived": {
+      "$exists": false
+    },
+    "title": {
+      "$exists": true
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "where": {
+    "$or": [
+      {
+        "category": "music"
+      },
+      {
+        "category": "art"
+      }
+    ]
+  }
+}

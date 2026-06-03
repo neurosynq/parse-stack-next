@@ -224,7 +224,23 @@ module Parse
           if respond_to?(:protect_fields) && respond_to?(:class_permissions)
             existing = class_permissions.protected_fields_for("*") rescue []
             merged = (existing + [field_name.to_s]).uniq
-            protect_fields("*", merged)
+            # Suppress Parse::User's "raw protect_fields called" advisory
+            # for this internal auto-install. The advisory exists to nudge
+            # app code toward the new master_only_fields/self_visible_fields
+            # DSL; the parse_reference auto-install is a different concern
+            # and should not trip it at gem boot.
+            prior = nil
+            if is_a?(Class) && self <= Parse::User
+              prior = instance_variable_get(:@_user_field_dsl_active)
+              instance_variable_set(:@_user_field_dsl_active, true)
+            end
+            begin
+              protect_fields("*", merged)
+            ensure
+              if is_a?(Class) && self <= Parse::User
+                instance_variable_set(:@_user_field_dsl_active, prior)
+              end
+            end
           end
 
           # Auto-install write-side protection: once the after_create

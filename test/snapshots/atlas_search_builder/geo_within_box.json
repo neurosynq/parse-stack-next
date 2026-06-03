@@ -1,0 +1,24 @@
+{
+  "$search": {
+    "geoWithin": {
+      "box": {
+        "bottomLeft": {
+          "coordinates": [
+            -123.0,
+            37.0
+          ],
+          "type": "Point"
+        },
+        "topRight": {
+          "coordinates": [
+            -122.0,
+            38.0
+          ],
+          "type": "Point"
+        }
+      },
+      "path": "location"
+    },
+    "index": "test_index"
+  }
+}
