@@ -394,6 +394,27 @@ Song.query(tags: tag).results          # songs containing this tag
 tag.songs.results                      # inverse query, if Tag declares has_many :songs, through: :relation
 ```
 
+### Heads up: Parse Server request-complexity limits
+
+Recent Parse Server versions add `requestComplexity` limits whose
+defaults are changing from "unlimited" (`-1`) to finite values in a
+future release: `includeDepth: 10`, `includeCount: 100`,
+`subqueryDepth: 10`, `queryDepth: 10`, and `batchRequestLimit: 100`.
+These cap how deep an `includes:` chain can nest, how many include
+paths a single query may carry, how deeply `matches_query` /
+`$inQuery` / `$select` subqueries nest, how deeply `$and` / `$or`
+conditions nest, and how many sub-requests a batch may contain.
+
+The SDK's defaults stay within these limits — most relevantly, the
+batch segment size is **50** (`Parse::BatchOperation#submit`), under the
+incoming `batchRequestLimit: 100`. The cases to watch are app-specific:
+very deep `includes: [{a: {b: {c: …}}}]` chains, queries with many
+distinct include paths, or deeply nested subqueries can start returning
+errors once the finite defaults land. If you hit one, restructure the
+query (split it, fetch pointers lazily, flatten the nesting) or raise
+the specific `requestComplexity.*` limit on your server. Set any of them
+to `-1` to opt out of that limit entirely.
+
 ## Atomic Operations
 
 Use atomic ops to avoid read-modify-write races on counters, sets, and

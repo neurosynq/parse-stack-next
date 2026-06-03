@@ -310,10 +310,12 @@ module Parse
       # ## Prerequisites
       #
       # 1. Set `protectedFieldsOwnerExempt: false` in your Parse Server
-      #    startup options. With the default `true`, the owning user is
-      #    silently exempted from every `protectedFields` rule on `_User`,
-      #    so {.master_only_fields} would still be visible to the user
-      #    themselves.
+      #    startup options. With the historical default `true`, the owning
+      #    user is silently exempted from every `protectedFields` rule on
+      #    `_User`, so {.master_only_fields} would still be visible to the
+      #    user themselves. Parse Server's default for this option is
+      #    changing to `false` in a future version; until your server
+      #    adopts that default you must set it explicitly.
       # 2. For {.self_visible_fields}: add a self-pointer field on `_User`
       #    that points to the same user, and maintain it from a
       #    `beforeSave('_User')` Cloud Code trigger:
@@ -420,7 +422,8 @@ module Parse
           "For master-only and owner-visible field patterns prefer " \
           "`Parse::User.master_only_fields` and `Parse::User.self_visible_fields`. " \
           "Either way, ensure Parse Server is started with " \
-          "`protectedFieldsOwnerExempt: false` (the default `true` exempts the " \
+          "`protectedFieldsOwnerExempt: false` (the historical default `true` — " \
+          "changing to `false` in a future Parse Server version — exempts the " \
           "owning user from every protectedFields rule on _User, which silently " \
           "negates these protections for the user's own row).",
         )
@@ -440,11 +443,14 @@ module Parse
         _emit_user_field_advisory(
           "[Parse::User] master_only_fields / self_visible_fields require " \
           "Parse Server option `protectedFieldsOwnerExempt: false`. With the " \
-          "default `true`, the owning user is silently exempted from every " \
-          "protectedFields rule on _User, so a field declared master-only " \
-          "would still be visible to the user themselves on their own row. " \
-          "Set `protectedFieldsOwnerExempt: false` in your ParseServer " \
-          "options BEFORE deploying. See docs/acl_clp_guide.md §4.2.",
+          "historical default `true`, the owning user is silently exempted " \
+          "from every protectedFields rule on _User, so a field declared " \
+          "master-only would still be visible to the user themselves on their " \
+          "own row. Parse Server's default for this option is changing to " \
+          "`false` in a future version (which makes these helpers work " \
+          "without extra config), but until your server adopts that default " \
+          "you must set `protectedFieldsOwnerExempt: false` in your " \
+          "ParseServer options BEFORE deploying. See docs/acl_clp_guide.md §4.2.",
         )
       end
 

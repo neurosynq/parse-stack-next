@@ -172,6 +172,17 @@ Parse.Cloud.beforeSave('_Installation', ({ user, master }) => {
 });
 ```
 
+**Heads up — device-token dedup auth.** When two `_Installation`
+records share the same `deviceToken`, Parse Server deduplicates them.
+Historically that dedup ran with permissions bypassed; the
+`installation.duplicateDeviceTokenActionEnforceAuth` option (default
+**changing to `true`** in a future version) makes the dedup honor the
+caller's auth context — and the resulting ACL/CLP — instead. This is
+server-side behavior the SDK doesn't drive, but it can change which
+record survives a token collision for non-master callers; set the
+option to `true` to opt in now, or `false` to keep the old
+permission-bypassing behavior.
+
 ---
 
 ## 4. `protectedFields` — read-side field stripping
@@ -206,13 +217,54 @@ accepts it in the POST body), but a subsequent GET/find from the
 client omits it. Master-key fetch still sees it, confirming
 persistence.
 
+#### `protectedFieldsSaveResponseExempt` — stripping the write response too
+
+Historically Parse Server stripped `protectedFields` only from
+query/get responses; the create/update response echoed the full saved
+row, so the value briefly came back to the client in the save reply
+even though a later read would hide it. Parse Server added the
+`protectedFieldsSaveResponseExempt` option to close that gap, and its
+default **will change to `false` in a future version**. With it set to
+`false`, `protectedFields` are stripped from write (create/update)
+responses too — consistent with how they are already stripped from
+reads. Set it now to opt in early:
+
+```js
+// parse-server config — strip protected fields from write responses
+protectedFieldsSaveResponseExempt: false
+```
+
+parse-stack-next is compatible with either setting and never loses
+local data: `Parse::Object#save` applies the server's response as a
+merge (it only overwrites fields the response actually contains), so a
+stripped protected field simply keeps the value you assigned locally —
+nothing is clobbered.
+
+This does **not** affect Cloud Code. A `beforeSave` / `afterSave`
+trigger runs server-side before the response is serialized, so it
+still sees, modifies, and persists protected fields normally — the
+stripping happens only on the reply the *client* receives. The single
+practical consequence is for the client's local view: if a `beforeSave`
+trigger rewrites a protected field, that new value is now stripped from
+the save reply just as it is from a read, so the SDK's in-memory object
+won't reflect the server-side change until a master-key re-fetch. The
+value is still persisted correctly.
+
 ### 4.2 `_User` field visibility and `protectedFieldsOwnerExempt`
 
-Parse Server's `protectedFieldsOwnerExempt` option (default **true**)
-silently exempts the owning user from every `protectedFields` rule on
-`_User`. With the default in place, `protect_fields "*", [:risk_score]`
-on `_User` does NOT hide `risk_score` from the user themselves on
-their own row — they always see it.
+Parse Server's `protectedFieldsOwnerExempt` option (historical default
+**true**) silently exempts the owning user from every `protectedFields`
+rule on `_User`. With that default in place, `protect_fields "*",
+[:risk_score]` on `_User` does NOT hide `risk_score` from the user
+themselves on their own row — they always see it.
+
+> **Heads up:** Parse Server's default for `protectedFieldsOwnerExempt`
+> **is changing to `false`** in a future version, which makes
+> `protectedFields` apply consistently to the user's own `_User` row
+> (the same as every other class) without extra config. Until your
+> server adopts that default you must set `protectedFieldsOwnerExempt:
+> false` explicitly for the helpers below to work; once it does, the
+> explicit setting becomes a harmless no-op.
 
 The fix has two server-side moving parts:
 

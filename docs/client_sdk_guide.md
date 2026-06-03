@@ -714,6 +714,17 @@ Both `Parse.client.fetch_object` and `Parse::Query#results` strip the
 protected field; the SDK doesn't try to re-synthesize it from any
 cache. If you see it in your client-side result, your CLP is wrong.
 
+Reads are stripped today; the **write** response historically still
+echoed the value back in the create/update reply. Parse Server's
+`protectedFieldsSaveResponseExempt` option closes that — its default
+**will change to `false`** in a future version, which strips
+`protectedFields` from write responses too. Set
+`protectedFieldsSaveResponseExempt: false` in your server config to opt
+in early. The SDK needs no changes: `save` merges the response onto the
+object (it only overwrites fields the reply contains), so a stripped
+protected field keeps its locally-assigned value rather than being
+nulled out.
+
 ### 6.3 `_Installation` is special — CLP can't override the hardcoded gates
 
 Parse Server hardcodes the access policy for `_Installation` at the REST
@@ -823,11 +834,13 @@ Two patterns come up constantly on `_User`:
   `private_notes`, full `email`.
 
 Vanilla `protectedFields` doesn't express either cleanly on `_User`,
-because Parse Server's `protectedFieldsOwnerExempt` option (default
-**true**) silently exempts the owning user from every `protectedFields`
-rule on `_User`. So if you write `protect_fields "*", [:risk_score]`,
-the user still sees their own `risk_score`. The fix has two moving
-parts on the server:
+because Parse Server's `protectedFieldsOwnerExempt` option (historical
+default **true**) silently exempts the owning user from every
+`protectedFields` rule on `_User`. So if you write `protect_fields "*",
+[:risk_score]`, the user still sees their own `risk_score`. (Parse
+Server's default for this option **is changing to `false`** in a future
+version; until your server adopts that default, set it explicitly as in
+step 1.) The fix has two moving parts on the server:
 
 1. Start Parse Server with `protectedFieldsOwnerExempt: false`.
 2. Add a self-pointer field on `_User` and populate it from a Cloud
