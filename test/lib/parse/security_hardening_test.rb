@@ -467,6 +467,19 @@ class SecurityHardeningTest < Minitest::Test
     has_many :members, through: :relation, as: "Author"
   end
 
+  # Fixtures whose declared association class is a system class, so the
+  # incoming server pointer (storage form `_User`) differs from the declared
+  # name (`User`) by only the leading-underscore prefix.
+  class SHAliasRelation < Parse::Object
+    parse_class "AliasRelation"
+    has_many :owners, through: :relation, as: "User"
+  end
+
+  class SHAliasOwner < Parse::Object
+    parse_class "AliasOwner"
+    belongs_to :owner, as: "User"
+  end
+
   def test_array_parse_objects_ignores_hash_className_when_caller_specifies
     arr = [{ "__type" => "Pointer", "className" => "_Session", "objectId" => "evil" }]
     out, _err = capture_io { arr.parse_objects("Author") }
@@ -508,6 +521,124 @@ class SecurityHardeningTest < Minitest::Test
     obj = Parse::Object.build({ "className" => "_Session", "objectId" => "x" },
                               "_User")
     assert_equal "_User", obj.parse_class
+  end
+
+  # ─── System-class underscore-alias equivalence ─────────────────────────
+  # `User` and `_User` (and `Role`/`_Role`, `Installation`/`_Installation`,
+  # `Session`/`_Session`) denote the same class. The className-mismatch
+  # warnings must treat them as equal so a legitimate `belongs_to :user`
+  # building a server-sent `_User` pointer does not spam logs — while still
+  # warning when a genuinely different class is substituted.
+
+  def test_same_parse_class_treats_system_underscore_alias_as_equal
+    assert Parse::Model.same_parse_class?("User", "_User")
+    assert Parse::Model.same_parse_class?("_User", "User")
+    assert Parse::Model.same_parse_class?("Installation", "_Installation")
+    assert Parse::Model.same_parse_class?("_Role", "Role")
+    assert Parse::Model.same_parse_class?("Session", "_Session")
+    assert Parse::Model.same_parse_class?("Author", "Author")
+  end
+
+  def test_same_parse_class_distinguishes_distinct_classes
+    # The type-confusion guard must survive: distinct classes are not equal.
+    refute Parse::Model.same_parse_class?("User", "_Session")
+    refute Parse::Model.same_parse_class?("User", "_Role")
+    refute Parse::Model.same_parse_class?("_Session", "_User")
+    refute Parse::Model.same_parse_class?(nil, "User")
+    refute Parse::Model.same_parse_class?("User", nil)
+  end
+
+  def test_same_parse_class_matches_only_one_system_prefix_underscore
+    # A malformed double-underscore name must NOT be conflated with the
+    # single-underscore system form, so it still surfaces in logs.
+    refute Parse::Model.same_parse_class?("__User", "_User")
+    refute Parse::Model.same_parse_class?("_User", "__User")
+  end
+
+  def test_same_parse_class_accepts_symbol_inputs
+    assert Parse::Model.same_parse_class?(:User, :_User)
+    refute Parse::Model.same_parse_class?(:User, :_Session)
+  end
+
+  def test_build_silent_on_system_class_underscore_alias
+    # Server sends `_User`; the declared/caller class is `User`. Same class —
+    # no warning.
+    out, err = capture_io do
+      obj = Parse::Object.build({ "className" => "_User", "objectId" => "u1" }, "User")
+      assert_instance_of Parse::User, obj
+    end
+    refute_match(/expected className/, out + (err || ""))
+  end
+
+  def test_belongs_to_user_silent_on_system_class_alias
+    # The original bug report: Parse::Installation#user building a `_User`
+    # pointer warned `expected className="User", ignoring incoming
+    # className="_User"`. Same class — must be silent and still build a User.
+    json = {
+      "className" => "_Installation",
+      "objectId" => "inst1",
+      "user" => { "__type" => "Pointer", "className" => "_User", "objectId" => "u1" },
+    }
+    out, err = capture_io do
+      inst = Parse::Object.build(json, "_Installation")
+      assert_instance_of Parse::User, inst.user
+    end
+    refute_match(/expected className/, out + (err || ""))
+  end
+
+  def test_belongs_to_getter_silent_on_system_class_alias
+    # Object.build applies the embedded pointer through the SETTER; this
+    # pins the GETTER warn path (belongs_to.rb:192), which fires when the
+    # stored ivar is still a raw hash carrying a className.
+    doc = SHAliasOwner.new
+    doc.instance_variable_set(:@owner,
+                              { "__type" => "Pointer", "className" => "_User", "objectId" => "u1" })
+    out, err = capture_io { doc.owner }
+    refute_match(/expected className/, out + (err || ""))
+    assert_equal "_User", doc.owner.parse_class
+  end
+
+  def test_belongs_to_getter_warns_on_distinct_class
+    doc = SHAliasOwner.new
+    doc.instance_variable_set(:@owner,
+                              { "__type" => "Pointer", "className" => "_Session", "objectId" => "s1" })
+    out, err = capture_io { doc.owner }
+    assert_match(/expected className/, out + (err || ""))
+  end
+
+  def test_has_many_relation_silent_on_system_class_alias
+    # The literal bug path (belongs_to/has_many :user). Declared class User,
+    # incoming Relation className "_User" — same class, must be silent.
+    t = SHAliasRelation.new
+    out, err = capture_io do
+      t.send(:owners_set_attribute!,
+             { "__type" => "Relation", "className" => "_User", "objects" => [] },
+             false)
+    end
+    refute_match(/expected className/, out + (err || ""))
+  end
+
+  def test_has_many_relation_warns_on_distinct_class
+    t = SHAliasRelation.new
+    out, err = capture_io do
+      t.send(:owners_set_attribute!,
+             { "__type" => "Relation", "className" => "_Session", "objects" => [] },
+             false)
+    end
+    assert_match(/expected className/, out + (err || ""))
+  end
+
+  def test_array_parse_objects_silent_on_system_class_alias
+    arr = [{ "__type" => "Pointer", "className" => "_User", "objectId" => "u1" }]
+    out, err = capture_io { arr.parse_objects("User") }
+    refute_match(/expected className/, out + (err || ""))
+    assert_equal "_User", arr.parse_objects("User").first.parse_class
+  end
+
+  def test_array_parse_objects_warns_on_distinct_class
+    arr = [{ "__type" => "Pointer", "className" => "_Session", "objectId" => "evil" }]
+    out, err = capture_io { arr.parse_objects("Author") }
+    assert_match(/expected className/, out + (err || ""))
   end
 
   # Builder additional probes

@@ -189,7 +189,7 @@ module Parse
               # prevents type confusion where a pointer to a different class
               # (e.g. _Session or _Role) gets shoved into a typed slot.
               incoming_class = val[Parse::Model::KEY_CLASS_NAME]
-              if incoming_class && incoming_class != klassName
+              if incoming_class && !Parse::Model.same_parse_class?(incoming_class, klassName)
                 warn "[#{self.class}] belongs_to :#{association_key} expected className=#{klassName.inspect}, ignoring incoming className=#{incoming_class.inspect}"
               end
               val = Parse::Object.build val, klassName, fetched_keys: nested_keys
@@ -229,7 +229,7 @@ module Parse
               nested_keys = nested_keys_for(key)
               # Always trust declared klassName over incoming hash className.
               incoming_class = val[Parse::Model::KEY_CLASS_NAME]
-              if incoming_class && incoming_class != klassName
+              if incoming_class && !Parse::Model.same_parse_class?(incoming_class, klassName)
                 warn "[#{self.class}] belongs_to :#{key} expected className=#{klassName.inspect}, ignoring incoming className=#{incoming_class.inspect}"
               end
               val = Parse::Object.build val, klassName, fetched_keys: nested_keys

@@ -1,5 +1,46 @@
 ## parse-stack-next Changelog
 
+### 5.1.1
+
+#### Suppress spurious className-mismatch warnings for system-class underscore aliases
+
+Parse Server stores its built-in classes under leading-underscore names
+(`_User`, `_Role`, `_Session`, `_Installation`) while the SDK and model
+declarations refer to them without the underscore (`User`, `Role`, and so
+on). These are the same class, but five className-mismatch warn sites
+compared the two forms as raw strings, so building a server-sent pointer for
+a `belongs_to :user` association (for example `Parse::Installation#user`,
+added in 5.1.0) logged a pair of harmless-but-noisy warnings such as
+`expected className="User", ignoring incoming className="_User"` on every
+read. Autoload order contributed: when an association is declared,
+`Parse::User` may not yet be registered, so the captured class name falls
+back to `"User"` rather than `"_User"`.
+
+- **FIXED**: Building a pointer whose declared class and incoming class differ
+  only by Parse Server's leading-underscore system prefix (`User`/`_User`,
+  `Role`/`_Role`, `Session`/`_Session`, `Installation`/`_Installation`) no
+  longer emits a className-mismatch warning. `Parse::Object.build`,
+  `Array#parse_objects`, the `belongs_to` getter and setter, and the
+  `has_many` relation builder now treat the two forms as the same class.
+  (`lib/parse/model/object.rb`,
+  `lib/parse/model/associations/belongs_to.rb`,
+  `lib/parse/model/associations/has_many.rb`)
+- **NEW**: `Parse::Model.same_parse_class?(a, b)` returns true when two Parse
+  class-name strings denote the same class — string-equal, related by exactly
+  one Parse Server system-prefix underscore, or both resolving to the same
+  registered `Parse::Object` subclass (covering custom `parse_class` table
+  mappings). This is the canonical equality the warn sites now gate on.
+  (`lib/parse/model/model.rb`)
+- **CHANGED**: The className-mismatch type-confusion guard is preserved. A
+  pointer to a genuinely different class shoved into a typed slot (for example
+  a `_Session` or `_Role` pointer in a `User`-typed association, whether from
+  hostile server JSON or mass assignment) still produces the warning, because
+  distinct classes — `nil`, and malformed names that differ by more than a
+  single system-prefix underscore such as `__User` — continue to compare
+  unequal. The warning is advisory: every call site builds the object from the
+  declared class regardless of the incoming className, so the equality check
+  only governs whether the mismatch is logged.
+
 ### 5.1.0
 
 #### `Parse::File` — URL normalization, presigned-URL stash, leak hardening

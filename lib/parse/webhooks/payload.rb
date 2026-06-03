@@ -253,7 +253,8 @@ module Parse
         expected = parse_class
         return false if expected.nil?
         [@object, @original, @update].any? do |h|
-          h.is_a?(Hash) && h["className"] && h["className"] != expected
+          h.is_a?(Hash) && h["className"] &&
+            !Parse::Model.same_parse_class?(h["className"], expected)
         end
       end
 

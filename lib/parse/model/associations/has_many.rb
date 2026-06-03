@@ -533,7 +533,7 @@ module Parse
             # Prevents type-confusion attacks that would mark this relation
             # proxy as a different parse_class than the model declared.
             if val.is_a?(Hash) && val[Parse::Model::KEY_CLASS_NAME] &&
-               val[Parse::Model::KEY_CLASS_NAME] != klassName &&
+               !Parse::Model.same_parse_class?(val[Parse::Model::KEY_CLASS_NAME], klassName) &&
                %w[Relation].include?(val["__type"])
               warn "[#{self.class}] has_many :#{key} expected className=#{klassName.inspect}, ignoring incoming className=#{val[Parse::Model::KEY_CLASS_NAME].inspect}"
             end

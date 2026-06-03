@@ -204,6 +204,47 @@ module Parse
         result
       end
     end
+
+    # Whether two Parse class-name strings denote the same class. This is the
+    # canonical equality used to suppress spurious className-mismatch warnings.
+    # Two names are the same class when they are string-equal, when one is the
+    # leading-underscore system form of the other (+User+ <-> +_User+, +Role+
+    # <-> +_Role+, +Installation+ <-> +_Installation+, +Session+ <->
+    # +_Session+), or when both resolve to the same registered +Parse::Object+
+    # subclass (covers custom +parse_class+ table mappings).
+    #
+    # The underscore rule is what makes the comparison correct independent of
+    # autoload order — at declaration time {find_class} may not yet have
+    # +Parse::User+ registered (so a +belongs_to :user+ captures +"User"+
+    # rather than +"_User"+), but the server always emits the +_User+ storage
+    # form, and both denote the same class. The rule matches exactly one
+    # system prefix underscore, so a malformed +"__User"+ is not conflated
+    # with +"_User"+.
+    #
+    # These warnings are an ADVISORY type-confusion signal, not the
+    # enforcement mechanism: every call site that consults this method builds
+    # the resulting object from the declared/trusted class regardless of the
+    # incoming className (see +Parse::Object.build+, which always uses the
+    # +table+ argument the caller passes). A false-positive here can therefore
+    # only suppress a log line — it can never route a pointer of the wrong
+    # class into a typed slot. Distinct classes still compare unequal (+User+
+    # vs +_Session+, +User+ vs +_Role+, and +nil+), so a genuinely mismatched
+    # pointer still surfaces in logs.
+    #
+    # @param a [String, Symbol, nil] a Parse class name.
+    # @param b [String, Symbol, nil] a Parse class name.
+    # @return [Boolean] true when both names denote the same Parse class.
+    def self.same_parse_class?(a, b)
+      return true if a == b
+      return false if a.nil? || b.nil?
+      a = a.to_s
+      b = b.to_s
+      return true if a == b
+      return true if (a == "_#{b}" && !b.start_with?("_")) ||
+                     (b == "_#{a}" && !a.start_with?("_"))
+      ka = find_class(a)
+      !ka.nil? && ka == find_class(b)
+    end
   end
 end
 

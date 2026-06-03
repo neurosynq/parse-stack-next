@@ -1749,7 +1749,7 @@ module Parse
         className = parse_class
       end
       className ||= incoming_class
-      if className && incoming_class && incoming_class != className
+      if className && incoming_class && !Parse::Model.same_parse_class?(incoming_class, className)
         warn "[Parse::Object.build] expected className=#{className.inspect}, ignoring incoming className=#{incoming_class.inspect}"
       end
       if json.is_a?(Hash) && json["error"].present? && json["code"].present?
@@ -2094,7 +2094,7 @@ class Array
                      # Caller knows the type; warn on mismatch but always
                      # use the declared className.
                      incoming = m[f] || m[:className]
-                     if incoming && incoming != className
+                     if incoming && !Parse::Model.same_parse_class?(incoming, className)
                        warn "[Parse::Array#parse_objects] expected className=#{className.inspect}, ignoring incoming className=#{incoming.inspect}"
                      end
                      className
