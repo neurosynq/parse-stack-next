@@ -57,7 +57,7 @@ GEM
       faraday (~> 2.5)
       net-http-persistent (>= 4.0.4, < 5)
     fiber-storage (1.0.1)
-    graphql (2.6.2)
+    graphql (2.6.3)
       base64
       fiber-storage
       logger
@@ -104,7 +104,7 @@ GEM
     psych (5.3.1)
       date
       stringio
-    puma (8.0.1)
+    puma (8.0.2)
       nio4r (~> 2.0)
     rack (3.2.6)
     rack-protection (4.2.1)
@@ -147,7 +147,7 @@ GEM
       concurrent-ruby (~> 1.0)
     uri (1.1.1)
     webrick (1.9.2)
-    yard (0.9.43)
+    yard (0.9.44)
 
 PLATFORMS
   aarch64-linux-gnu
