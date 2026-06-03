@@ -248,8 +248,6 @@ module Parse
         end
         target = client || self.client
 
-        yield(target) if block_given?
-
         # Sentinel is a single-element queue rather than an instance
         # variable so the trap handler does only the absolute minimum
         # work (one `push`) — no mutex acquisition, no allocation
@@ -257,6 +255,13 @@ module Parse
         stop_signal = Queue.new
         installed = []
         begin
+          # Yield BEFORE installing traps (so a SIGINT during caller
+          # setup still aborts normally) but INSIDE the begin/ensure so a
+          # raise from the block — including Interrupt — still runs the
+          # shutdown/restore cleanup below rather than leaking the
+          # client's connection and threads.
+          yield(target) if block_given?
+
           signals.each do |sig|
             prior = Signal.trap(sig) { stop_signal << sig }
             installed << [sig, prior]

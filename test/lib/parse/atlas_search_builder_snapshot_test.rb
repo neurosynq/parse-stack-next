@@ -61,11 +61,10 @@ class AtlasSearchBuilderSnapshotTest < Minitest::Test
   end
 
   def test_build_compound_explicit
-    b = builder
-    must = b.text(query: "ruby", path: "title")
-    # Take just the operator hash for `must`; build_compound expects op-shaped
-    # hashes, which is why SearchBuilder exposes operator builders that also
-    # return self. Use a fresh builder for each branch to isolate state.
+    # build_compound expects op-shaped hashes, so pass operator hashes
+    # directly rather than chaining the builder's operator methods (which
+    # return self). Literal hashes keep each branch isolated from builder
+    # state.
     must_op = { "text" => { "query" => "ruby", "path" => "title" } }
     should_op = { "phrase" => { "query" => "open source", "path" => "body" } }
     must_not_op = { "exists" => { "path" => "archived_at" } }

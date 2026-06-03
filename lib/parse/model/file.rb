@@ -500,6 +500,25 @@ module Parse
         end
       end
 
+      # Strip the query string (everything from the first `?`) from a URL.
+      #
+      # Used to drop short-TTL presigned-URL signature parameters before a
+      # `File.basename` comparison. Implemented with `String#index` rather
+      # than a `sub(/\?.*\z/, "")` regex: the regex form is O(n^2) on
+      # adversarial input (a long run of `?`), and these URLs are
+      # externally influenced (S3/CloudFront presign on every read), so the
+      # linear form removes the polynomial-regex slow path.
+      #
+      # @param url [String, nil]
+      # @return [String, nil] the URL up to (but excluding) the first `?`,
+      #   or the input unchanged when there is no query string. `nil` and
+      #   non-strings pass through untouched.
+      def strip_query(url)
+        return url unless url.is_a?(String)
+        i = url.index("?")
+        i ? url[0, i] : url
+      end
+
       # @!visibility private
       # Fetches a remote URL with strict SSRF defenses. Refuses non-HTTP
       # schemes, RFC1918 / loopback / cloud-metadata addresses, oversized
@@ -696,7 +715,7 @@ module Parse
     # @return [Boolean] true if this file has already been saved.
     def saved?
       return false unless @url.present? && @name.present?
-      path_only = @url.sub(/\?.*\z/, "")
+      path_only = Parse::File.strip_query(@url)
       @name == File.basename(path_only)
     end
 
@@ -821,7 +840,7 @@ module Parse
         # `presigned_url` (or, in a later release, `download_url`).
         @presigned_url = value
         @presigned_url_expires_at = Parse::File.parse_presigned_expiry(value)
-        bare = value.sub(/\?.*\z/, "")
+        bare = Parse::File.strip_query(value)
         normalized = Parse::File.sanitize_hydrated_url(bare, fallback: @url, name: @name)
         # If the host check stripped or rejected the URL (`:strip`
         # policy or `:raise` after the signature strip), clear the
@@ -1019,7 +1038,7 @@ class Hash
     name = self[Parse::File::FIELD_NAME]
     return false unless url.present? && name.present?
     return false unless count == 2 || self["__type"] == Parse::File.parse_class
-    path_only = url.sub(/\?.*\z/, "")
+    path_only = Parse::File.strip_query(url)
     name == ::File.basename(path_only)
   end
 end

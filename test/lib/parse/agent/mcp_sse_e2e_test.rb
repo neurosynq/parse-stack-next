@@ -450,13 +450,29 @@ class MCPSseE2eTest < Minitest::Test
   # 6. Client disconnect: worker thread should not run past tool completion
   # ---------------------------------------------------------------------------
 
+  # Count the SSE worker + dispatcher threads the SDK spawns per streaming
+  # request. Each is tagged with a thread-local on creation
+  # (Parse::Agent::MCPRackApp::SSEBody#start_worker). We assert on these
+  # tags rather than Thread.list.size because the total count is polluted by
+  # Puma's own pool/reactor threads — which warm up on the first real request
+  # and persist — plus residue from sibling tests in the same process. The
+  # contract under test is specifically "no SDK streaming thread outlives a
+  # client disconnect," and the tags measure exactly that, deterministically.
+  def sdk_stream_thread_count
+    Parse::Agent::MCPRackApp.active_dispatcher_count +
+      Thread.list.count { |t| t[:parse_mcp_sse_worker] }
+  end
+
   def test_client_disconnect_does_not_leave_persistent_extra_threads
     # Give the tool a very short sleep so the orphaned dispatcher thread exits
-    # naturally before we check Thread.list. Per the SSEBody comments the
-    # dispatcher thread IS orphaned on disconnect but completes on its own.
+    # naturally before we check thread counts. Per the SSEBody comments the
+    # dispatcher thread IS orphaned on disconnect but completes on its own;
+    # the worker thread is killed by SSEBody#close.
     @@dispatch_delay = 0.1
 
-    threads_before = Thread.list.size
+    # Snapshot the tagged baseline rather than assuming 0 — a sibling test
+    # in the same process could leave a dispatcher mid-drain.
+    sdk_threads_before = sdk_stream_thread_count
 
     Net::HTTP.start(@host, @port, read_timeout: 3) do |http|
       req = build_post("/", body_str: tools_call_body, accept: "text/event-stream")
@@ -468,20 +484,24 @@ class MCPSseE2eTest < Minitest::Test
       end
     end
 
-    # Allow orphaned threads to finish — tool delay is 0.1s, give 2x margin
-    deadline = Time.now + 0.5
+    # Allow the killed worker and the orphaned dispatcher to drain — tool
+    # delay is 0.1s, give generous margin for slow CI scheduling.
+    deadline = Time.now + 2.0
     loop do
-      break if Thread.list.size <= threads_before + 1
+      break if sdk_stream_thread_count <= sdk_threads_before
       break if Time.now > deadline
       sleep 0.05
     end
 
-    # After the short tool finishes, thread count must return to near-baseline.
-    # We allow +1 for Puma's own housekeeping threads that may be momentarily
-    # present; the key is no persistent leak beyond one.
-    assert Thread.list.size <= threads_before + 2,
-           "Thread leak after disconnect: before=#{threads_before}, " \
-           "after=#{Thread.list.size}"
+    # Both the worker (killed on close) and the dispatcher (self-terminating
+    # after the tool returns) must be gone — the SDK leaves no streaming
+    # thread alive past the disconnect.
+    assert_equal sdk_threads_before, sdk_stream_thread_count,
+                 "SDK streaming thread leaked past client disconnect: " \
+                 "baseline=#{sdk_threads_before}, " \
+                 "after=#{sdk_stream_thread_count} " \
+                 "(dispatchers=#{Parse::Agent::MCPRackApp.active_dispatcher_count}, " \
+                 "workers=#{Thread.list.count { |t| t[:parse_mcp_sse_worker] }})"
   end
 
   # ---------------------------------------------------------------------------

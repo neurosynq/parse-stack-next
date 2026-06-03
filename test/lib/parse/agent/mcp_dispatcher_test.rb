@@ -999,7 +999,10 @@ class MCPDispatcherTest < Minitest::Test
           class_name:      kwargs[:class_name],
           pipeline_stages: 2,
           result_count:    1,
-          route:           :mongo_direct,
+          # Production coerces route to a String (`.to_s`) to satisfy the
+          # aggregate output_schema's `route: { type: "string" }`. Mirror
+          # that here so the stub can't mask a schema/type regression.
+          route:           "mongo_direct",
           results:         [{ "_id" => "rock", "count" => 5 }],
         } }
       end
@@ -1021,6 +1024,8 @@ class MCPDispatcherTest < Minitest::Test
                "aggregate must mirror its result Hash as structuredContent"
     assert_equal "Song", structured[:class_name] || structured["class_name"]
     assert_equal 1, structured[:result_count] || structured["result_count"]
+    # route must mirror as the String the output_schema declares, not a Symbol.
+    assert_equal "mongo_direct", structured[:route] || structured["route"]
   end
 
   def test_builtin_export_data_emits_structuredContent

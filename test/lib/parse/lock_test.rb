@@ -186,13 +186,12 @@ class ParseLockTest < Minitest::Test
     # degraded by clearing the store entirely. The actual degraded
     # detection is in CreateLock and uses the adapter walk.
     Parse.synchronize_create_store = nil  # nil store → degraded
-    out = capture_io do
+    # Suppress the degraded-fallback warning; capture_io's return value isn't
+    # a reliable channel for the block's result, so assert via a side effect
+    # below instead.
+    capture_io do
       Parse::Lock.acquire("degraded", ttl: 5, wait: 0) { :ok_in_process }
     end
-    result, _stdout, stderr = [out[0], out[0], out[1]]
-    # Either the inner block returns :ok_in_process, or the warn fires.
-    # The block's return value is propagated via capture_io's not-quite-clean
-    # interface — assert via a side effect instead.
     side_effect = nil
     capture_io do
       Parse::Lock.acquire("degraded-2", ttl: 5, wait: 0) { side_effect = :ran }

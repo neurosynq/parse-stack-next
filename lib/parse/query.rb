@@ -2966,12 +2966,19 @@ module Parse
     # @param fields [Array<String>] specific fields to watch for changes (nil = all fields)
     # @param session_token [String] session token for ACL-aware subscriptions
     # @param client [Parse::LiveQuery::Client] custom LiveQuery client (optional)
-    # @param use_master_key [Boolean] per-subscription master-key opt-in.
-    #   When true and the underlying client has a master_key configured,
-    #   the subscribe frame carries `masterKey` so the server skips
-    #   ACL/CLP enforcement for this subscription. Lets one client
-    #   service both end-user (session-token-scoped) and administrative
-    #   (master-key-scoped) subscriptions on the same socket.
+    # @param use_master_key [Boolean] an intent assertion, NOT a
+    #   per-subscription elevation. Parse Server resolves `masterKey`
+    #   once, at connect time, from the LiveQuery connect frame; the
+    #   subscribe frame never carries it. This flag therefore only has
+    #   effect when the underlying client is itself an admin connection
+    #   (`Parse::LiveQuery::Client.new(use_master_key: true)` with a
+    #   master key), in which case the entire socket is already elevated
+    #   and ALL its subscriptions bypass ACL/CLP. On a non-admin
+    #   connection `use_master_key: true` does not elevate the
+    #   subscription and emits a security warning. A single socket cannot
+    #   mix scoped and admin subscriptions — use separate connections for
+    #   end-user (session-token-scoped) versus administrative
+    #   (master-key-scoped) work.
     # @yield [subscription] runs the block with the freshly-constructed
     #   {Parse::LiveQuery::Subscription} BEFORE the subscribe frame is
     #   sent so caller-registered callbacks are wired before any server

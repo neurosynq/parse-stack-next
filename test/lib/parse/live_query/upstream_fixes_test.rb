@@ -342,6 +342,32 @@ class LiveQueryUpstreamFixesTest < Minitest::Test
     assert_equal [recorder], yielded
   end
 
+  def test_run_until_signal_shuts_down_when_block_raises
+    # The setup block runs inside the helper's begin/ensure, so a raise
+    # from it (including Interrupt from a Ctrl-C during subscription
+    # setup) must still shut the client down rather than leaking its
+    # connection/threads. No signal is sent — the block raising is what
+    # ends the call.
+    recorder = ShutdownRecorderClient.new
+    boom = Class.new(StandardError)
+
+    err = assert_raises(boom) do
+      enable_live_query do
+        Parse::LiveQuery.run_until_signal!(
+          client: recorder, signals: [:USR1],
+          shutdown_timeout: 0.1, poll_interval: 0.01,
+        ) do |_c|
+          raise boom, "setup failed"
+        end
+      end
+    end
+
+    assert_equal "setup failed", err.message
+    assert recorder.shutdown_called?,
+           "client.shutdown must run even when the setup block raises"
+    assert_equal Thread.main.object_id, recorder.shutdown_thread_id
+  end
+
   def test_run_until_signal_restores_prior_trap_handlers
     original = Signal.trap(:USR2, "DEFAULT")
     recorder = ShutdownRecorderClient.new

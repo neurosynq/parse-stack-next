@@ -172,11 +172,12 @@ class MCPStreamingTest < Minitest::Test
   # Drain a Rack body object into an array of strings.
   def drain_body(body)
     chunks = []
-    body.each { |c| chunks << c }
-    chunks
-  rescue => e
-    # Surface drain errors in test output without swallowing the test
-    chunks << "DRAIN_ERROR:#{e.class}:#{e.message}"
+    begin
+      body.each { |c| chunks << c }
+    rescue => e
+      # Surface drain errors in test output without swallowing the test
+      chunks << "DRAIN_ERROR:#{e.class}:#{e.message}"
+    end
     chunks
   end
 

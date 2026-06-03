@@ -75,7 +75,7 @@ class TestClientLiveQuerySetup < Minitest::Test
     # ArgumentError. Block form must skip unrecognized options and warn
     # so typos like `ssl_min_versoin:` don't silently leave TLS at the
     # default.
-    out, err = capture_io do
+    _out, err = capture_io do
       Parse::Client.new(@base_options.merge(
         live_query: { url: "wss://x.example.com", nonsense_option: true, ssl_min_versoin: :TLSv1_3 }
       ))
