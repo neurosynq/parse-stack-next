@@ -469,6 +469,92 @@ class TestFileSignedUrlNormalization < Minitest::Test
     refute Parse::File.url_signature_param?("https://x.com/api?policy=accept")
   end
 
+  # ------------------------------------------------------------------
+  # save() routes the create-response URL through normalization (the
+  # third writer — the v5.1.0 fix). Parse Server's S3FilesAdapter can
+  # return a freshly-signed URL in the file-create response; it must NOT
+  # land verbatim in @url or bleed into @name.
+  # ------------------------------------------------------------------
+
+  class FakeCreateResponse
+    def initialize(result)
+      @result = result
+    end
+
+    def error?
+      false
+    end
+
+    attr_reader :result
+  end
+
+  class FakeFileClient
+    def initialize(result)
+      @result = result
+    end
+
+    def create_file(*_args, **_opts)
+      FakeCreateResponse.new(@result)
+    end
+  end
+
+  def stub_save(file, result_hash)
+    fake = FakeFileClient.new(result_hash)
+    file.define_singleton_method(:client) { fake }
+  end
+
+  def test_save_response_with_signed_url_strips_and_stashes
+    signed = "https://bucket.s3.amazonaws.com/tfss-abc-doc.pdf?" \
+             "X-Amz-Date=20260528T120000Z&X-Amz-Expires=900&X-Amz-Signature=abc"
+    file = Parse::File.new("doc.pdf", "bytes", "application/pdf")
+    # No "name" key — exercises the basename-fallback path that the bug
+    # baked the signature into.
+    stub_save(file, { "url" => signed })
+
+    assert file.save, "save should report saved? true"
+    assert_equal "https://bucket.s3.amazonaws.com/tfss-abc-doc.pdf", file.url,
+                 "@url must be the canonical URL, never the signed create-response URL"
+    assert_equal signed, file.presigned_url,
+                 "the signed create-response URL must be stashed, not stored in @url"
+    refute_includes file.name.to_s, "X-Amz",
+                    "the signature query string must NOT bleed into @name"
+    assert_equal "tfss-abc-doc.pdf", file.name,
+                 "@name must be the canonical URL basename"
+  end
+
+  def test_save_response_with_explicit_name_and_signed_url
+    signed = "https://bucket.s3.amazonaws.com/tfss-xyz-img.png?X-Amz-Signature=abc"
+    file = Parse::File.new("img.png", "bytes", "image/png")
+    stub_save(file, { "name" => "tfss-xyz-img.png", "url" => signed })
+
+    assert file.save
+    assert_equal "tfss-xyz-img.png", file.name
+    assert_equal "https://bucket.s3.amazonaws.com/tfss-xyz-img.png", file.url
+    assert_equal signed, file.presigned_url
+  end
+
+  def test_save_response_with_canonical_url_is_unchanged
+    canonical = "https://files.parsetfss.com/app/tfss-abc-doc.pdf"
+    file = Parse::File.new("doc.pdf", "bytes", "application/pdf")
+    stub_save(file, { "name" => "tfss-abc-doc.pdf", "url" => canonical })
+
+    assert file.save
+    assert_equal canonical, file.url
+    assert_nil file.presigned_url, "no stash when the create response is already canonical"
+  end
+
+  def test_save_response_signed_url_raises_under_strict_policy
+    # Operators who flip :raise assert Parse Server isn't issuing signed
+    # URLs — a signed create-response is then a real surprise worth
+    # failing loudly on, on the save writer too (uniform with url=).
+    Parse::File.signed_url_policy = :raise
+    signed = "https://bucket.s3.amazonaws.com/tfss-abc-doc.pdf?X-Amz-Signature=abc"
+    file = Parse::File.new("doc.pdf", "bytes", "application/pdf")
+    stub_save(file, { "url" => signed })
+
+    assert_raises(Parse::File::SignedUrlError) { file.save }
+  end
+
   private
 
   # Minitest's assert_raises requires the exception to fire. Inverse

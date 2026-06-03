@@ -74,16 +74,17 @@ module Parse
       # @param query [Hash] query constraints (where clause)
       # @param fields [Array<String>, nil] specific fields to watch
       # @param session_token [String, nil] session token for authentication
-      # @param use_master_key [Boolean] when true, the subscribe frame
-      #   carries `masterKey` instead of (or in addition to) a session
-      #   token, so the server skips per-row ACL/CLP enforcement for
-      #   this subscription. Requires the parent client to have been
-      #   constructed with a master_key (otherwise the kwarg is a no-op
-      #   and the wire field is suppressed). Per-subscription opt-in
-      #   parallels the Parse JS client's `useMasterKey` flag — useful
-      #   when one client services subscriptions for both end-users
-      #   (session-token-scoped) and administrative tooling (master-
-      #   key-scoped) on the same socket. Defaults to false.
+      # @param use_master_key [Boolean] an intent assertion that this
+      #   subscription needs master-key (ACL-bypassing) scope. It does
+      #   NOT put `masterKey` on the subscribe frame: Parse Server has no
+      #   per-subscription master key — `client.hasMasterKey` is fixed
+      #   per connection at connect time, so one subscription on a scoped
+      #   socket can never be selectively elevated. The flag is honored
+      #   only when the parent client is an admin connection (built with
+      #   `use_master_key: true`), where the whole connection is already
+      #   elevated; on a non-admin connection the client warns and the
+      #   subscription stays ACL-scoped. For mixed scoped + admin needs,
+      #   use two separate clients. Defaults to false.
       def initialize(client:, class_name:, query: {}, fields: nil,
                      session_token: nil, use_master_key: false)
         @monitor = Monitor.new
@@ -107,6 +108,20 @@ module Parse
       # @return [Symbol] :pending, :subscribed, :unsubscribed, or :error
       def state
         @monitor.synchronize { @state }
+      end
+
+      # Redacting inspect — the default `inspect` would expose
+      # `@session_token` (and, via `@client`, the client's master/REST
+      # keys) in any log line, backtrace, error page, or error reporter
+      # that renders the subscription. Reads `@state` directly rather
+      # than through the monitor so a diagnostic inspect never blocks on
+      # the lock.
+      # @return [String]
+      def inspect
+        token = @session_token.nil? || @session_token.empty? ? "nil" : "[REDACTED]"
+        "#<#{self.class.name} request_id=#{@request_id.inspect} " \
+        "class_name=#{@class_name.inspect} state=#{@state.inspect} " \
+        "use_master_key=#{@use_master_key} session_token=#{token}>"
       end
 
       # Register a callback for a specific event type
@@ -226,20 +241,16 @@ module Parse
 
         msg[:query][:fields] = fields if fields&.any?
         msg[:sessionToken] = session_token if session_token
-        # Per-subscription master-key opt-in. Only emit when:
-        # (a) the subscription was constructed with use_master_key: true,
-        # (b) the parent client responds to master_key,
-        # (c) the master_key is a non-empty String. The empty-String
-        #     check is the v5.1.0 round-3 tightening — a misconfigured
-        #     client returning `""` for master_key would have emitted
-        #     `masterKey: ""` on the wire, which the LiveQuery server
-        #     may reject silently. Treat empty as "no master key" so
-        #     the wire frame is well-formed (and the parent client's
-        #     own auth context applies instead).
-        master_key = @client.master_key if @client.respond_to?(:master_key)
-        if @use_master_key && master_key.is_a?(String) && !master_key.empty?
-          msg[:masterKey] = master_key
-        end
+        # The subscribe frame deliberately NEVER carries `masterKey`.
+        # Parse Server's `_handleSubscribe` does not read it — master-key
+        # (ACL-bypass) authorization is resolved once, per connection, in
+        # `_handleConnect` (`client.hasMasterKey`). Emitting it here put a
+        # privileged credential on the wire for ZERO server-side effect.
+        # `use_master_key: true` at the subscription level is an intent
+        # assertion validated by the client (which warns when it cannot
+        # be honored on a non-admin connection); the actual elevation is
+        # the admin connection's connect frame. See
+        # {Parse::LiveQuery::Client#use_master_key}.
 
         msg
       end

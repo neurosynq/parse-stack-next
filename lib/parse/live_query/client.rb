@@ -66,6 +66,39 @@ module Parse
       # @return [String, nil] Parse master key
       attr_reader :master_key
 
+      # @return [Boolean] whether this is an admin connection that sends
+      #   the master key on the connect frame. When true, EVERY
+      #   subscription on this connection bypasses ACL/CLP enforcement
+      #   (Parse Server resolves master-key authorization per-connection
+      #   at connect time, never per-subscription). Defaults to false.
+      attr_reader :use_master_key
+
+      # @return [Boolean] true when this connection will actually send a
+      #   master key on the connect frame: the admin opt-in
+      #   (`use_master_key: true`) is set AND a usable (non-empty String)
+      #   master key is present. The single source of truth for "will
+      #   this socket bypass ACL/CLP for every subscription." A bare
+      #   `use_master_key: true` with no key is NOT an admin connection.
+      def admin_connection?
+        @use_master_key && @master_key.is_a?(String) && !@master_key.empty?
+      end
+
+      # Redacting inspect — the default `inspect` dumps every instance
+      # variable, which would expose `@master_key`, `@client_key`, and
+      # the per-subscription session tokens in any log line, backtrace,
+      # Rails error page, or APM/error-reporter (Sentry / Honeybadger /
+      # Rollbar / Bugsnag) that renders the object. `Configuration#to_h`
+      # already redacts these; this keeps the live Client object
+      # consistent with that contract.
+      # @return [String]
+      def inspect
+        "#<#{self.class.name} url=#{@url.inspect} " \
+        "application_id=#{@application_id.inspect} state=#{@state.inspect} " \
+        "admin_connection=#{admin_connection?} subscriptions=#{@subscriptions.size} " \
+        "client_key=#{redacted_secret(@client_key)} " \
+        "master_key=#{redacted_secret(@master_key)}>"
+      end
+
       # @return [Symbol] connection state (:disconnected, :connecting, :connected, :closed)
       attr_reader :state
 
@@ -106,11 +139,23 @@ module Parse
       #   explicitly to force client-mode (no master key on the
       #   subscription handshake) even when the parent Parse client has
       #   one. Omit the argument to fall back to the LiveQuery config
-      #   or the parent Parse client.
+      #   or the parent Parse client. NOTE: holding a master key does
+      #   NOT by itself elevate the connection — see `use_master_key:`.
+      # @param use_master_key [Boolean] build an ADMIN connection: send
+      #   the master key on the connect frame so the LiveQuery server
+      #   skips ACL/CLP enforcement for ALL subscriptions on this
+      #   socket. Defaults to false — connections are ACL-scoped by
+      #   their per-subscription session tokens unless you explicitly
+      #   opt in. Parse Server resolves master-key authorization
+      #   per-CONNECTION at connect time (`_handleConnect` →
+      #   `client.hasMasterKey`); there is no per-subscription master
+      #   key. For a process that needs both scoped and admin streams,
+      #   build two clients. Requires a master key to be present
+      #   (otherwise the flag is a no-op and a warning is emitted).
       # @param auto_connect [Boolean] connect immediately (default: true)
       # @param auto_reconnect [Boolean] automatically reconnect on disconnect (default: true)
       def initialize(url: nil, application_id: nil, client_key: nil, master_key: NOT_PROVIDED,
-                     auto_connect: nil, auto_reconnect: nil)
+                     use_master_key: NOT_PROVIDED, auto_connect: nil, auto_reconnect: nil)
         cfg = config
 
         # Use provided values or fall back to configuration/environment
@@ -123,6 +168,17 @@ module Parse
             cfg.master_key || parse_client_value(:master_key)
           else
             master_key
+          end
+        # Admin-connection opt-in. Defaults to false (ACL-scoped). Only
+        # an explicit `use_master_key: true` here — or `config.use_master_key
+        # = true` — sends the master key on the connect frame. This is the
+        # v5.1.0 security fix: prior versions sent the master key on the
+        # connect frame whenever one was merely present, silently
+        # elevating every subscription on the socket past ACL/CLP.
+        @use_master_key = if use_master_key.equal?(NOT_PROVIDED)
+            cfg.respond_to?(:use_master_key) ? !!cfg.use_master_key : false
+          else
+            use_master_key == true
           end
 
         @auto_connect = auto_connect.nil? ? cfg.auto_connect : auto_connect
@@ -290,10 +346,16 @@ module Parse
       # @param where [Hash] query constraints
       # @param fields [Array<String>] specific fields to watch
       # @param session_token [String] session token for ACL-aware subscriptions
-      # @param use_master_key [Boolean] per-subscription master-key
-      #   opt-in. See {Subscription#initialize} for the trade-offs.
-      #   Requires this client to have been constructed with a
-      #   `master_key` (otherwise the kwarg is a no-op).
+      # @param use_master_key [Boolean] assert that this subscription
+      #   needs master-key (ACL-bypassing) scope. Parse Server has NO
+      #   per-subscription master key — authorization is fixed per
+      #   connection at connect time — so this flag does NOT elevate a
+      #   single subscription on a scoped socket. It is honored only when
+      #   this client is an admin connection (built with
+      #   `use_master_key: true`), in which case the whole connection is
+      #   already elevated. On a non-admin connection, passing
+      #   `use_master_key: true` emits a warning and the subscription
+      #   stays ACL-scoped. See {Subscription#initialize}.
       # @yield [subscription] runs the block with the freshly-
       #   constructed {Subscription} BEFORE the subscribe frame is
       #   sent to the server, so callbacks registered inside the block
@@ -326,6 +388,8 @@ module Parse
         # SDK enforces one consistent set of refusals on every
         # user-influenced filter path.
         Parse::PipelineSecurity.validate_filter!(where) if where.is_a?(Hash) && !where.empty?
+
+        warn_subscription_scope_mismatch(use_master_key, session_token)
 
         subscription = Subscription.new(
           client: self,
@@ -415,6 +479,13 @@ module Parse
       end
 
       private
+
+      # Render a secret for {#inspect}: "[REDACTED]" when present,
+      # "nil" when absent. Mirrors Configuration#to_h's redaction so a
+      # secret value never reaches inspect output.
+      def redacted_secret(value)
+        value.nil? || (value.respond_to?(:empty?) && value.empty?) ? "nil" : "[REDACTED]"
+      end
 
       # Get configuration object
       # @return [Configuration]
@@ -951,9 +1022,66 @@ module Parse
         }
 
         message[:clientKey] = @client_key if @client_key
-        message[:masterKey] = @master_key if @master_key
+        # Only elevate the connection when the caller explicitly opted
+        # into an admin connection. Parse Server reads `masterKey` ONCE,
+        # from the connect frame, and stores `client.hasMasterKey` for
+        # the lifetime of the socket; once set, every subscription
+        # bypasses ACL/CLP/protectedFields. Sending it unconditionally
+        # (the pre-5.1.0 behavior) silently elevated session-token
+        # subscriptions the caller believed were scoped.
+        if admin_connection?
+          message[:masterKey] = @master_key
+          warn_master_key_connection_once
+        elsif @use_master_key
+          # Opted into admin mode but no usable master key is present —
+          # the flag can't take effect. Warn rather than silently run
+          # ACL-scoped when the caller asked for admin.
+          Logging.warn("LiveQuery use_master_key: true but no master key is " \
+                       "configured — connection will be ACL-scoped, not elevated")
+        end
 
         send_message(message)
+      end
+
+      # One-time loud warning that this connection bypasses ACL/CLP for
+      # every subscription. Master-key LiveQuery is connection-level, so
+      # this is the only place the risk can be surfaced.
+      def warn_master_key_connection_once
+        return if @master_key_warning_emitted
+        @master_key_warning_emitted = true
+        warn "[Parse::LiveQuery:SECURITY] connection established with master key " \
+             "(use_master_key: true) — ALL subscriptions on this connection " \
+             "BYPASS ACL/CLP enforcement and receive every matching object " \
+             "regardless of the object's ACL. Session tokens on subscriptions " \
+             "of this connection do NOT scope results. Use a non-admin client " \
+             "(the default) for end-user, ACL-scoped streams."
+      end
+
+      # Surface the two ways a caller's intended subscription scope can
+      # silently disagree with the connection's actual authorization.
+      # Both are "you think you're scoped (or elevated) but you're not."
+      def warn_subscription_scope_mismatch(use_master_key, session_token)
+        if use_master_key && !admin_connection?
+          return if @per_sub_master_key_warning_emitted
+          @per_sub_master_key_warning_emitted = true
+          warn "[Parse::LiveQuery:SECURITY] subscribe(use_master_key: true) on a " \
+               "non-admin connection has NO effect — Parse Server has no " \
+               "per-subscription master key; ACL-bypass authorization is fixed " \
+               "per connection at connect time. This subscription stays " \
+               "ACL-scoped (by its session token, or public if none). To bypass " \
+               "ACL, build an admin connection: " \
+               "Parse::LiveQuery::Client.new(use_master_key: true). For mixed " \
+               "scoped + admin needs, use two separate clients."
+        elsif admin_connection? && session_token
+          return if @admin_session_token_warning_emitted
+          @admin_session_token_warning_emitted = true
+          warn "[Parse::LiveQuery:SECURITY] subscribe(session_token:) on an admin " \
+               "connection (use_master_key: true) does NOT scope results — the " \
+               "connection bypasses ACL/CLP for every subscription, so this " \
+               "stream returns objects the session-token user cannot normally " \
+               "read. Use a non-admin client for ACL-scoped, session-token " \
+               "streams."
+        end
       end
 
       # Send a message through the WebSocket

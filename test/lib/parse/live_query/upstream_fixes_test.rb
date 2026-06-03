@@ -8,9 +8,13 @@ require "parse/live_query"
 # v5.1.0:
 # * SubscriptionError carries `request_id` + `class_name` context
 #   (auto-prefixed onto `message` for single-line log lines).
-# * `Subscription#to_subscribe_message` emits `masterKey` when the
-#   subscription was constructed with `use_master_key: true` AND the
-#   parent client has a master_key configured.
+# * `Subscription#to_subscribe_message` NEVER carries `masterKey` —
+#   Parse Server resolves master-key (ACL-bypass) authorization
+#   per-CONNECTION at connect time (`_handleConnect` →
+#   `client.hasMasterKey`), so a per-subscription masterKey is a no-op
+#   on the wire. The `use_master_key:` kwarg is an intent assertion only;
+#   connection-level elevation + scope-mismatch warnings are covered in
+#   master_key_scope_test.rb.
 # * `Query#subscribe` and `Klass.subscribe` accept `use_master_key:`
 #   and thread it through.
 # * `Parse::LiveQuery.run_until_signal!` installs Signal.trap handlers,
@@ -61,6 +65,12 @@ class LiveQueryUpstreamFixesTest < Minitest::Test
   end
 
   # ---- use_master_key per-subscription opt-in (item 3) ----------------
+  #
+  # Parse Server has NO per-subscription master key — `client.hasMasterKey`
+  # is resolved per connection at connect time (verified against
+  # ParseLiveQueryServer's `_handleConnect`/`_handleSubscribe`). So the
+  # subscribe frame must NEVER carry `masterKey`; `use_master_key:` is an
+  # intent assertion validated/warned at the Client layer.
 
   def test_subscription_default_does_not_emit_master_key
     sub = build_subscription
@@ -70,70 +80,16 @@ class LiveQueryUpstreamFixesTest < Minitest::Test
     refute sub.use_master_key?
   end
 
-  def test_subscription_with_use_master_key_emits_master_key_when_client_has_one
+  def test_subscription_never_emits_master_key_even_with_use_master_key
+    # Even when the kwarg is set AND the client carries a master key, the
+    # subscribe frame must omit masterKey: Parse Server ignores it there.
     client = stub_client(master_key: "MK-secret")
     sub = Parse::LiveQuery::Subscription.new(
       client: client, class_name: "Post", query: {}, use_master_key: true,
     )
-    msg = sub.to_subscribe_message
-    assert_equal "MK-secret", msg[:masterKey]
-    assert sub.use_master_key?
-  end
-
-  def test_subscription_with_use_master_key_no_op_when_client_lacks_master_key
-    # Per-subscription opt-in is silently suppressed when the client
-    # wasn't constructed with a master_key — the wire field would be
-    # nil/empty and silently downgrade to no auth, which is worse than
-    # the kwarg being a no-op.
-    client = stub_client(master_key: nil)
-    sub = Parse::LiveQuery::Subscription.new(
-      client: client, class_name: "Post", query: {}, use_master_key: true,
-    )
-    msg = sub.to_subscribe_message
-    refute msg.key?(:masterKey),
-      "masterKey must NOT be emitted when client lacks master_key"
-  end
-
-  # Round-3 review tightening: a misconfigured client returning `""`
-  # (or any non-String) for `master_key` previously slipped the truthy
-  # guard and emitted `masterKey: ""` on the wire — a malformed frame
-  # the LiveQuery server may silently reject. The post-fix check
-  # requires `master_key` to be a non-empty String.
-  def test_subscription_with_empty_string_master_key_does_not_emit_master_key
-    client = stub_client(master_key: "")
-    sub = Parse::LiveQuery::Subscription.new(
-      client: client, class_name: "Post", query: {}, use_master_key: true,
-    )
-    msg = sub.to_subscribe_message
-    refute msg.key?(:masterKey),
-      "empty-string master_key must NOT produce masterKey: \"\" on the wire"
-  end
-
-  def test_subscription_with_non_string_master_key_does_not_emit_master_key
-    # Some test mocks / proxies may return a Symbol or Integer for
-    # master_key. The wire contract requires a String; emit nothing
-    # rather than `masterKey: 42` or `masterKey: :secret`.
-    [42, :secret, true, Object.new].each do |bogus|
-      client = stub_client(master_key: bogus)
-      sub = Parse::LiveQuery::Subscription.new(
-        client: client, class_name: "Post", query: {}, use_master_key: true,
-      )
-      refute sub.to_subscribe_message.key?(:masterKey),
-        "non-String master_key #{bogus.inspect} must NOT be emitted on the wire"
-    end
-  end
-
-  def test_subscription_with_whitespace_only_master_key_still_emits
-    # Whitespace-only `master_key` is allowed (it's a non-empty String).
-    # If an operator genuinely configured `master_key = "   "`, that's
-    # their misconfiguration to debug; we don't second-guess String
-    # content beyond emptiness because legitimate master keys can
-    # contain any non-whitespace characters.
-    client = stub_client(master_key: "   ")
-    sub = Parse::LiveQuery::Subscription.new(
-      client: client, class_name: "Post", query: {}, use_master_key: true,
-    )
-    assert_equal "   ", sub.to_subscribe_message[:masterKey]
+    refute sub.to_subscribe_message.key?(:masterKey),
+      "subscribe frame must never carry masterKey — auth is per-connection"
+    assert sub.use_master_key?, "introspection still reflects the kwarg"
   end
 
   def test_subscription_use_master_key_coerces_non_boolean_to_false
@@ -141,23 +97,23 @@ class LiveQueryUpstreamFixesTest < Minitest::Test
     sub = Parse::LiveQuery::Subscription.new(
       client: client, class_name: "Post", query: {}, use_master_key: "yes",
     )
-    # String "yes" must not enable master_key auth — only literal true.
+    # String "yes" must not flip the intent flag — only literal true.
     refute sub.use_master_key?
     refute sub.to_subscribe_message.key?(:masterKey)
   end
 
-  def test_subscription_use_master_key_and_session_token_can_coexist
-    # The Parse JS client documents that both may be present on a
-    # subscribe frame; the server prefers masterKey when set. Our
-    # subscription must forward both without dropping either.
+  def test_subscription_session_token_still_emitted
+    # session_token IS honored per-subscription (unlike masterKey).
+    # Guard against the masterKey-removal accidentally dropping it.
     client = stub_client(master_key: "MK-secret")
     sub = Parse::LiveQuery::Subscription.new(
       client: client, class_name: "Post", query: {},
       session_token: "r:abc", use_master_key: true,
     )
     msg = sub.to_subscribe_message
-    assert_equal "MK-secret", msg[:masterKey]
-    assert_equal "r:abc",     msg[:sessionToken]
+    assert_equal "r:abc", msg[:sessionToken]
+    refute msg.key?(:masterKey),
+      "masterKey must not ride alongside sessionToken on the subscribe frame"
   end
 
   # End-to-end thread-through: Klass.subscribe(...) must propagate
@@ -199,9 +155,9 @@ class LiveQueryUpstreamFixesTest < Minitest::Test
     sub = FakePost.subscribe(use_master_key: true, client: fake)
 
     assert sub.use_master_key?, "Klass.subscribe(use_master_key: true) must reach the Subscription"
-    msg = sub.to_subscribe_message
-    assert_equal "MK-end-to-end", msg[:masterKey],
-      "wire envelope must carry masterKey when the kwarg is set end-to-end"
+    refute sub.to_subscribe_message.key?(:masterKey),
+      "subscribe frame must never carry masterKey — Parse Server resolves " \
+      "master-key auth per connection, not per subscription"
   end
 
   def test_klass_subscribe_default_does_not_carry_master_key

@@ -17,12 +17,25 @@ module Parse
   #
   # == Contract
   #
-  # * **TTL-bounded.** Every acquisition writes a TTL on the Redis key
-  #   (1..30s, default 3s). If the holder crashes or the process is
-  #   terminated mid-block, the lock self-clears after `ttl:` seconds
-  #   — there is no manual recovery step. The block-form API releases
-  #   on normal return, on exception, and on `return`/`break`/`raise`
-  #   exiting the block (via `ensure`).
+  # * **TTL-bounded — mutual exclusion with a DEADLINE, not exactly-once.**
+  #   Every acquisition writes a TTL on the Redis key (1..30s, default
+  #   3s). If the holder crashes or the process is terminated mid-block,
+  #   the lock self-clears after `ttl:` seconds — there is no manual
+  #   recovery step. The block-form API releases on normal return, on
+  #   exception, and on `return`/`break`/`raise` exiting the block (via
+  #   `ensure`). **Critical caveat:** if your critical section runs
+  #   LONGER than `ttl:`, the lease expires WHILE you are still inside
+  #   the block, a second caller can acquire, and two holders then run
+  #   concurrently — the lock provides no signal to the first holder
+  #   that this happened (it logs a `[Parse::Lock]` warning on release if
+  #   it detects its own lease overran). There is no fencing token that
+  #   the protected resource checks, so this primitive does NOT give you
+  #   exactly-once execution. Size `ttl:` comfortably above your
+  #   worst-case section duration, AND make the protected operation
+  #   idempotent so a rare double-execution is harmless. The block
+  #   receives its owner token (`acquire(key) { |token| ... }`) for
+  #   callers who want to build their own fencing against a
+  #   token-checking resource.
   # * **In-process Mutex fallback when Redis unavailable.** If the
   #   configured cache is process-local (Moneta `Memory` / `Null`) or
   #   nil, this falls back to a per-key `Mutex` keyed in this process.
@@ -67,9 +80,14 @@ module Parse
   #     compute_nightly_rollup
   #   end
   #
-  # @example external-API idempotency key
+  # @example external-API idempotency key (idempotent body required)
   #   Parse::Lock.acquire("stripe-webhook:#{evt_id}", ttl: 30, wait: 0.5) do
-  #     # Two webhook deliveries with the same evt_id can't double-charge.
+  #     # Serializes concurrent deliveries of the same evt_id so they
+  #     # don't race. This is NOT exactly-once: if processing outruns
+  #     # `ttl:`, a second delivery can acquire and run in parallel.
+  #     # `process_webhook` must be idempotent (e.g. check an
+  #     # already-processed marker keyed by evt_id) so a double run is a
+  #     # no-op, not a double charge.
   #     process_webhook(evt_id)
   #   end
   module Lock
@@ -164,7 +182,12 @@ module Parse
       #   a single flow needs a different keying than the global
       #   default). `nil` explicitly opts out of HMAC and uses plain
       #   SHA-256 — no warn, since the opt-out is deliberate.
-      # @yield runs the block with the lock held.
+      # @yield [owner] runs the block with the lock held. The block
+      #   receives the unique owner token for this acquisition — usable
+      #   as a fencing token by callers whose protected resource can
+      #   reject stale tokens. Most callers ignore it. (On the degraded
+      #   in-process Mutex path a fresh token is still supplied so the
+      #   block signature is stable.)
       # @return [Object] the block's return value.
       # @raise [ArgumentError] on invalid `key` / `ttl` / `wait` /
       #   `on_degraded` / `secret`.
@@ -210,7 +233,13 @@ module Parse
             source: "Parse::Lock",
             unavailable_error: Parse::Lock::UnavailableError,
           )
-          return Parse::LockBackend.process_mutex(store_key).synchronize(&block)
+          # Supply a token so a `{ |token| ... }` block has a stable
+          # signature across the Redis and degraded paths. There is no
+          # cross-process owner here — the Mutex IS the exclusion — so a
+          # fresh UUID is purely for signature parity / local fencing.
+          return Parse::LockBackend.process_mutex(store_key).synchronize do
+            yield SecureRandom.uuid
+          end
         end
 
         owner       = SecureRandom.uuid
@@ -231,9 +260,25 @@ module Parse
         end
 
         begin
-          yield
+          yield owner
         ensure
           if acquired_at
+            # Detect a lease overrun: if the critical section ran longer
+            # than the TTL, our lock already expired and another caller
+            # may have acquired concurrently. The atomic compare-and-
+            # delete release below is a safe no-op in that case (it won't
+            # delete the new holder's key), but mutual exclusion was NOT
+            # guaranteed for the overrun window — warn loudly so the
+            # operator can raise `ttl:` or confirm the body is idempotent.
+            held = Parse::LockBackend.monotonic_now - acquired_at
+            if held > normalized_ttl
+              warn "[Parse::Lock] critical section for #{key.inspect} ran " \
+                   "#{held.round(2)}s, exceeding ttl: #{normalized_ttl}s — the lease " \
+                   "expired mid-block and another caller may have held the lock " \
+                   "concurrently. Mutual exclusion was NOT guaranteed for the overrun " \
+                   "window. Raise ttl: above your worst-case section duration, or make " \
+                   "the protected operation idempotent."
+            end
             Parse::LockBackend.release(store, store_key, owner)
           end
         end

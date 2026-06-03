@@ -1138,11 +1138,35 @@ server-side on every event before it goes out the WebSocket — Bob will
 not receive an event for an ACL-private row Alice creates, even if his
 subscription matches the `where` clause.
 
+> **Master-key authorization is per-CONNECTION, not per-subscription.**
+> Parse Server resolves master-key (ACL/CLP-bypass) authorization once,
+> from the connect frame; once set, EVERY subscription on that socket
+> bypasses ACL/CLP. The SDK therefore keeps connections **ACL-scoped by
+> default**: a configured `master_key` does NOT elevate the connection.
+> To build an admin (ACL-bypassing) connection — an event tap that sees
+> every row regardless of ACL — opt in explicitly:
+>
+> ```ruby
+> admin = Parse::LiveQuery::Client.new(
+>   url: "wss://parse.example.com/parse",
+>   application_id: "MY_APP_ID",
+>   master_key: ENV["PARSE_MASTER_KEY"],
+>   use_master_key: true,   # whole connection bypasses ACL/CLP; warns at connect
+> )
+> ```
+>
+> There is no per-subscription master key — `subscribe(use_master_key: true)`
+> on a scoped connection warns and stays ACL-scoped. For a process that
+> needs both scoped and admin streams, use two separate clients. Use
+> `client.admin_connection?` to check whether a connection is elevated.
+
 > **Configuration tip.** `Parse::LiveQuery::Client.new` reads
-> `master_key` from configuration if you omit it. Pass `master_key: nil`
-> **explicitly** in client builds — the SDK preserves a sentinel value
-> internally so it can tell "not provided" apart from "explicitly nil,"
-> and the latter is the only safe choice in a client context.
+> `master_key` from configuration if you omit it. Passing
+> `master_key: nil` **explicitly** in client builds is still good
+> hygiene (the SDK preserves a sentinel so it can tell "not provided"
+> apart from "explicitly nil"), but note that as of v5.1.0 a present
+> master key alone no longer elevates a LiveQuery connection — only
+> `use_master_key: true` does.
 
 ---
 

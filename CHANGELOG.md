@@ -101,6 +101,16 @@ one-time shift in fingerprint values. The new format emits
   through file-pointer recognition. Previously the signature bytes
   leaked into the comparison and could cause false negatives.
   (`lib/parse/model/file.rb`)
+- **FIXED**: `Parse::File#save` now routes the file-create response
+  URL through the same normalization point as `url=` / `attributes=`.
+  Parse Server's S3FilesAdapter can return a freshly-signed URL in the
+  create response (not only on read); the save writer previously
+  assigned it verbatim to `@url` — and baked the signature query
+  string into `@name` via `File.basename` when the response omitted a
+  name — bypassing the `@url`-is-always-canonical invariant and the
+  `signed_url_policy = :raise` guard. The save writer now strips and
+  stashes like every other writer, derives any fallback name from the
+  canonical URL, and honors strict mode. (`lib/parse/model/file.rb`)
 - **CHANGED**: `Parse::File#inspect` no longer includes the full
   `@url` string. Inspect output lands in exception messages, Rails
   error pages, log captures, and every error reporter the app uses
@@ -218,12 +228,13 @@ one-time shift in fingerprint values. The new format emits
   key — useful for multi-tenant deployments sharing one Redis
   where tenants must not block each other on coincidentally-equal
   lock names. Real-Redis integration coverage in
-  `test/lib/parse/lock_redis_integration_test.rb` (7 cases, all
-  Queue-gated to eliminate sleep-based race flakes:
-  HMAC-keyed entry shape, plain-SHA opt-out, cross-process
-  contention, fast-fail under `wait: 0`, different-secret
-  isolation, shared-secret-with-CreateLock via env var, namespace
-  separation from `first_or_create!`). Explicit `secret:` kwarg
+  `test/lib/parse/lock_redis_integration_test.rb` (Queue-gated to
+  eliminate sleep-based race flakes: HMAC-keyed entry shape,
+  plain-SHA opt-out, cross-process contention, fast-fail under
+  `wait: 0`, different-secret isolation, shared-secret-with-CreateLock
+  via env var, namespace separation from `first_or_create!`, atomic
+  compare-and-delete under a simulated lease-expiry race, and the
+  TTL-overrun warning). Explicit `secret:` kwarg
   values are length-validated at the boundary —
   `Parse::Lock::SECRET_MIN_BYTES` (= 16) is the floor for any
   caller-supplied HMAC key. A `secret: "a"` misconfiguration is
@@ -241,8 +252,32 @@ one-time shift in fingerprint values. The new format emits
 - **NEW**: `Parse::Lock` and `Parse::LockBackend` are autoloaded —
   `Parse::Lock.acquire(…)` works without an explicit
   `require 'parse/lock'`. (`lib/parse/stack.rb`)
+- **FIXED**: lock release is now an **atomic compare-and-delete**.
+  `Parse::Cache::Redis` gains raw-Redis `lock_acquire` (`SET NX EX`)
+  and `lock_release` (a Lua compare-and-delete), and `Parse::LockBackend`
+  routes both ends through them. The previous release read the owner
+  token and deleted in two separate commands; a holder whose lease
+  expired and was re-acquired by another holder between the two could
+  delete the new holder's live lock. The Lua CAD makes a stale owner's
+  release a guaranteed no-op. The raw path also uses plain-string keys
+  and values (bypassing Moneta's marshal transformers) so acquire and
+  release share one encoding and the keys are human-inspectable in
+  Redis. Non-Redis (raw-Moneta) stores keep the documented best-effort
+  GET-then-DEL bounded by the short TTL.
+  (`lib/parse/cache/redis.rb`, `lib/parse/lock_backend.rb`)
+- **FIXED**: `Parse::Lock.acquire` no longer over-promises exactly-once
+  execution. The contract is now documented as mutual exclusion with a
+  DEADLINE: if the critical section outruns `ttl:`, the lease expires
+  mid-block and a second caller can acquire concurrently. The block now
+  receives its owner token (`acquire(key) { |token| … }`) for callers
+  who want to fence against a token-checking resource, and a
+  `[Parse::Lock]` warning is emitted on release when the section
+  overran its TTL (mutual exclusion was not guaranteed for the overrun
+  window). The misleading "two webhook deliveries can't double-charge"
+  example is replaced with an idempotency-required example.
+  (`lib/parse/lock.rb`)
 
-#### LiveQuery — ergonomics fixes (autoload, master-key kwarg, error context, signal-safe shutdown)
+#### LiveQuery — BREAKING: ACL-scoped by default; plus ergonomics (autoload, error context, signal-safe shutdown)
 
 - **NEW**: `Parse::LiveQuery` is now autoloaded — `Parse::LiveQuery.configure { … }`
   works without an explicit `require 'parse/live_query'`. The
@@ -252,25 +287,58 @@ one-time shift in fingerprint values. The new format emits
   `Parse::LiveQuery::Client` is instantiated (typically via
   `Klass.subscribe { … }`). The opt-in toggle's security shape is
   preserved. (`lib/parse/stack.rb`)
-- **NEW**: `Query#subscribe` and `Klass.subscribe` accept
-  `use_master_key: true` for per-subscription master-key auth.
-  Parallels the Parse JS client's `useMasterKey` flag. When set
-  and the underlying `Parse::LiveQuery::Client` has a `master_key`
-  configured, the subscribe frame carries `masterKey` so the
-  server skips per-row ACL/CLP enforcement for that subscription.
-  Lets one client service both end-user (session-token-scoped)
-  and administrative (master-key-scoped) subscriptions on the
-  same socket. No-op when the client lacks a master_key — the
-  wire field is suppressed rather than silently downgrading to
-  no auth. Non-`true` values are coerced to `false` to prevent
-  accidental "ENV string evaluated truthy" enablement. The
-  `master_key` itself must be a non-empty `String` to be emitted
-  — empty strings, non-String values (Symbol, Integer, true), and
-  `nil` all suppress the field rather than producing a malformed
-  `masterKey: ""` / `masterKey: 42` frame the server may silently
-  reject (round-3 review tightening).
+- **BREAKING**: LiveQuery connections are now **ACL-scoped by
+  default** — the connect frame no longer carries the master key
+  merely because one is configured. Parse Server resolves
+  master-key (ACL/CLP-bypass) authorization once, per CONNECTION,
+  from the connect frame (`_handleConnect` → `client.hasMasterKey`);
+  once set, EVERY subscription on that socket bypasses ACL/CLP and
+  returns every matching object regardless of its ACL. Prior
+  versions sent the master key on the connect frame whenever one was
+  present, so a `Parse.setup(master_key: …)` process silently
+  elevated session-token subscriptions the caller believed were
+  ACL-scoped. To get the old admin/event-tap behavior, build an
+  explicit admin connection:
+  `Parse::LiveQuery::Client.new(use_master_key: true)` or
+  `Parse::LiveQuery.configure { |c| c.use_master_key = true }`.
+  Admin connections emit a one-time `[Parse::LiveQuery:SECURITY]`
+  warning at connect. For a process that needs both scoped and
+  admin streams, use two separate clients.
+  (`lib/parse/live_query/client.rb`,
+  `lib/parse/live_query/configuration.rb`)
+- **NEW**: `Parse::LiveQuery::Client.new(use_master_key: true)`,
+  the `config.use_master_key` toggle, and the
+  `Client#use_master_key` / `Client#admin_connection?` predicates
+  make the admin (ACL-bypassing) posture explicit and inspectable.
+  `admin_connection?` is the single source of truth for "will this
+  socket bypass ACL/CLP" — true only when the opt-in is set AND a
+  usable master key is present.
+  (`lib/parse/live_query/client.rb`,
+  `lib/parse/live_query/configuration.rb`)
+- **CHANGED**: `Query#subscribe` / `Klass.subscribe` / `Client#subscribe`
+  still accept `use_master_key:`, but it is now an **intent assertion**,
+  not a per-subscription wire credential. Parse Server has no
+  per-subscription master key, so the subscribe frame NEVER carries
+  `masterKey` (sending it was a no-op that put a privileged credential
+  on the wire for zero effect). The flag is satisfied only on an admin
+  connection (where the whole socket is already elevated); on a
+  non-admin connection, `use_master_key: true` emits a one-time
+  `[Parse::LiveQuery:SECURITY]` warning and the subscription stays
+  ACL-scoped. Passing a `session_token:` on an admin connection
+  likewise warns — those results are NOT scoped to that token.
   (`lib/parse/model/core/querying.rb`, `lib/parse/query.rb`,
   `lib/parse/live_query/client.rb`, `lib/parse/live_query/subscription.rb`)
+- **FIXED**: `Parse::LiveQuery::Client#inspect` and
+  `Subscription#inspect` now redact credentials. The default `inspect`
+  dumped every instance variable, exposing `@master_key`, `@client_key`,
+  and per-subscription `@session_token` in plaintext anywhere an object
+  was rendered — a log line, a backtrace, a Rails error page, or an
+  APM/error reporter (Sentry / Honeybadger / Rollbar / Bugsnag). The
+  custom `inspect` emits only non-secret diagnostics (url, state,
+  `admin_connection`, subscription count, request id, class name) and
+  `[REDACTED]` for any secret, matching the redaction
+  `Configuration#to_h` already applied. (`lib/parse/live_query/client.rb`,
+  `lib/parse/live_query/subscription.rb`)
 - **NEW**: `Klass.subscribe`, `Query#subscribe`, and
   `Parse::LiveQuery::Client#subscribe` all accept an optional `&block`
   yielded the freshly-constructed `Subscription` **before** the

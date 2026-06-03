@@ -4,6 +4,7 @@
 require_relative "../../test_helper_integration"
 require "minitest/autorun"
 require "moneta"
+require "redis"
 require "parse/lock"
 require "openssl"
 require "digest"
@@ -33,6 +34,11 @@ class LockRedisIntegrationTest < Minitest::Test
 
     @probe = Moneta.new(:Redis, url: REDIS_URL, expires: true)
     @probe.clear
+    # Raw redis-rb probe. Parse::Lock now writes lock entries through
+    # Parse::Cache::Redis#lock_acquire — plain-string raw-Redis keys and
+    # values (NOT Moneta-marshaled) — so the lock key/value are inspected
+    # with the raw client, at the same key NAME the SDK computes.
+    @raw = Redis.new(url: REDIS_URL)
 
     @saved_store = Parse.synchronize_create_store
     @saved_secret = Parse.synchronize_create_secret
@@ -58,6 +64,7 @@ class LockRedisIntegrationTest < Minitest::Test
     @probe&.clear
     @wrapper&.close
     @probe&.close
+    @raw&.close
   end
 
   # ---- HMAC-keyed store entries against real Redis ----------------------
@@ -69,12 +76,12 @@ class LockRedisIntegrationTest < Minitest::Test
 
     observed_inside = nil
     Parse::Lock.acquire(raw_key, ttl: 5, wait: 2.0) do
-      observed_inside = @probe[expected_store_key]
+      observed_inside = @raw.get(expected_store_key)
     end
 
     refute_nil observed_inside,
       "lock key must be present in Redis while the block is running"
-    assert_nil @probe[expected_store_key],
+    assert_nil @raw.get(expected_store_key),
       "lock key must be released (CAD) after the block exits"
   end
 
@@ -85,7 +92,7 @@ class LockRedisIntegrationTest < Minitest::Test
 
     observed = nil
     Parse::Lock.acquire(raw_key, ttl: 5, secret: nil) do
-      observed = @probe[expected_store_key]
+      observed = @raw.get(expected_store_key)
     end
 
     refute_nil observed,
@@ -233,13 +240,93 @@ class LockRedisIntegrationTest < Minitest::Test
 
     keys_during_hold = []
     Parse::Lock.acquire(raw_key, ttl: 5) do
-      keys_during_hold = @probe.each_key.to_a
+      keys_during_hold = @raw.keys("*")
     end
 
     assert keys_during_hold.any? { |k| k.start_with?(Parse::Lock::KEY_PREFIX) },
       "Parse::Lock key must use the parse-stack:lock:v1: prefix: #{keys_during_hold.inspect}"
     refute keys_during_hold.any? { |k| k.start_with?("parse-stack:foc:v1:") },
       "Parse::Lock must NOT write into the first_or_create! namespace"
+  end
+
+  # ---- atomic compare-and-delete release (v5.1.0 fix) ------------------
+
+  def test_lock_acquire_is_setnx_on_real_redis
+    key = "#{Parse::Lock::KEY_PREFIX}setnx-#{SecureRandom.hex(4)}"
+    assert @wrapper.lock_acquire(key, "owner-A", 30), "first acquire must succeed"
+    refute @wrapper.lock_acquire(key, "owner-B", 30),
+      "second acquire on a held key must fail (SET NX)"
+    assert_equal "owner-A", @raw.get(key),
+      "the held value must be the first owner's plain-string token"
+  end
+
+  def test_lock_release_is_compare_and_delete_no_cross_holder_delete
+    # The race the fix closes: holder A's lease expires, holder B
+    # acquires, then A's (late) release must NOT delete B's live lock.
+    # Driven deterministically at the wrapper level — the exact unit the
+    # atomic Lua CAD protects.
+    key = "#{Parse::Lock::KEY_PREFIX}cad-#{SecureRandom.hex(4)}"
+
+    assert @wrapper.lock_acquire(key, "owner-A", 30)
+    # Simulate A's lease expiring (TTL) and B re-acquiring the same key.
+    @raw.del(key)
+    assert @wrapper.lock_acquire(key, "owner-B", 30)
+
+    # A wakes up and releases with its STALE owner token. With a naive
+    # GET-then-DEL this could delete B's live lock; the Lua CAD makes it
+    # a no-op.
+    refute @wrapper.lock_release(key, "owner-A"),
+      "a stale owner's release must be a no-op (compare-and-delete)"
+    assert_equal "owner-B", @raw.get(key),
+      "B's live lock must survive A's stale release"
+
+    # B releases its own lock cleanly.
+    assert @wrapper.lock_release(key, "owner-B")
+    assert_nil @raw.get(key)
+  end
+
+  def test_release_via_lock_backend_routes_to_atomic_cad
+    # End-to-end through LockBackend (the shared path for Parse::Lock and
+    # Parse::CreateLock): the wrapper's atomic primitive is used, and a
+    # stale owner cannot clobber a re-acquired key.
+    key = "#{Parse::Lock::KEY_PREFIX}backend-cad-#{SecureRandom.hex(4)}"
+    assert Parse::LockBackend.try_acquire(@wrapper, key, "A", 30)
+    @raw.del(key)
+    assert Parse::LockBackend.try_acquire(@wrapper, key, "B", 30)
+    Parse::LockBackend.release(@wrapper, key, "A") # stale — no-op
+    assert_equal "B", @raw.get(key), "LockBackend.release must not cross-delete"
+    Parse::LockBackend.release(@wrapper, key, "B")
+    assert_nil @raw.get(key)
+  end
+
+  # ---- TTL-overrun warning (v5.1.0 honesty fix) ------------------------
+
+  def test_overrun_warns_when_section_exceeds_ttl
+    key = "ttl-overrun-#{SecureRandom.hex(4)}"
+    _out, err = capture_io do
+      Parse::Lock.acquire(key, ttl: 1, wait: 0) do
+        sleep 1.2 # outruns the 1s lease
+      end
+    end
+    assert_match(/exceeding ttl/, err)
+    assert_match(/Mutual exclusion was NOT guaranteed/, err)
+  end
+
+  def test_no_overrun_warning_when_section_within_ttl
+    key = "ttl-ok-#{SecureRandom.hex(4)}"
+    _out, err = capture_io do
+      Parse::Lock.acquire(key, ttl: 5, wait: 0) { :fast }
+    end
+    refute_match(/exceeding ttl/, err)
+  end
+
+  def test_block_receives_owner_fencing_token
+    key = "fence-#{SecureRandom.hex(4)}"
+    received = :unset
+    Parse::Lock.acquire(key, ttl: 5) { |token| received = token }
+    assert_kind_of String, received,
+      "the block must receive its owner token for fencing"
+    refute_empty received
   end
 
   private

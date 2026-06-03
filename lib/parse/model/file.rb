@@ -946,8 +946,27 @@ module Parse
         response = client.create_file(@name, @contents, @mime_type, **opts)
         unless response.error?
           result = response.result
-          @name = result[FIELD_NAME] || File.basename(result[FIELD_URL])
-          @url = result[FIELD_URL]
+          # Route the create-response URL through the SAME normalization
+          # point as `url=` / `attributes=`. Parse Server's S3FilesAdapter
+          # can return a freshly-signed URL in the file-create response
+          # (not only on read), and a direct `@url = result[url]` would
+          # leave that signed URL verbatim in `@url` — and bake the
+          # signature query string into `@name` via `File.basename` when
+          # the response omits `name`. Normalizing here keeps the `@url`
+          # invariant (canonical, never a short-TTL signed URL) on the
+          # save writer too, stashes any signature in `@presigned_url`,
+          # and honors `signed_url_policy = :raise`.
+          #
+          # Set `@name` to the server's authoritative name (or nil)
+          # BEFORE normalizing so `sanitize_hydrated_url`'s `tfss-` host
+          # check reads the response URL's own basename rather than a
+          # stale pre-upload name. As before, `@name` is always taken
+          # from the response — but the fallback now derives from the
+          # CANONICAL `@url`, never the signed URL.
+          result_name = result[FIELD_NAME]
+          @name = result_name
+          normalize_and_store_url(result[FIELD_URL])
+          @name = result_name || (@url.present? ? File.basename(@url) : nil)
         end
       end
       saved?

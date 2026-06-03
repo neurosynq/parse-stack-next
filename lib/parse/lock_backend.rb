@@ -133,6 +133,13 @@ module Parse
       #   clears (crash-recovery floor).
       # @return [Boolean]
       def try_acquire(store, key, owner, ttl)
+        # Prefer the store's native atomic lock primitive when it exposes
+        # one (Parse::Cache::Redis). That path uses raw-Redis
+        # `SET key owner NX EX ttl` with plain-string encoding so it pairs
+        # with the atomic compare-and-delete in {.release}. Falls back to
+        # Moneta `:create` (also an atomic SETNX) for raw-Moneta stores.
+        return store.lock_acquire(key, owner, ttl) if store.respond_to?(:lock_acquire)
+
         # Trigger lazy TTL sweep on Moneta::Memory before `:create`
         # (no-op on Redis). Without this, the Memory adapter returns
         # false on `:create` even after TTL expiry until a `:key?`
@@ -144,14 +151,21 @@ module Parse
         false
       end
 
-      # Best-effort compare-and-delete release. Moneta does not
-      # expose atomic CAD; the worst-case race is bounded by the
-      # short TTL (callers clamp `ttl:` to ≤ 30s).
+      # Compare-and-delete release. When the store exposes an atomic
+      # primitive (Parse::Cache::Redis → server-side Lua CAD), use it so
+      # a holder whose lease expired and was re-acquired by someone else
+      # can never delete the new holder's key. Falls back to a
+      # best-effort GET-then-DEL for raw-Moneta stores, where the
+      # worst-case cross-holder-delete race is bounded by the short TTL
+      # (callers clamp `ttl:` to ≤ 30s) — documented residual risk for
+      # the non-Redis path.
       #
       # @param store [Object] Moneta-shaped store.
       # @param key [String] cache key.
       # @param owner [String] the owner token from {.try_acquire}.
       def release(store, key, owner)
+        return store.lock_release(key, owner) if store.respond_to?(:lock_release)
+
         current = store[key]
         store.delete(key) if current == owner
       rescue StandardError => e
