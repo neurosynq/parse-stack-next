@@ -6,7 +6,7 @@ require "parse/stack/version"
 Gem::Specification.new do |spec|
   spec.name = "parse-stack-next"
   spec.version = Parse::Stack::VERSION
-  spec.authors = ["Anthony Persaud", "Henry Spindell", "Adrian Curtin"]
+  spec.authors =  ["Adrian Curtin", "Anthony Persaud", "Henry Spindell"]
   spec.email = ["adrian+parse-stack@neurosynq.net"]
 
   spec.summary = %q{Parse Server SDK for Ruby — ORM, queries, auth, and MongoDB-direct access}

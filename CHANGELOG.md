@@ -1,5 +1,54 @@
 ## parse-stack-next Changelog
 
+### 5.1.2
+
+#### Fix wrong pointer/relation `targetClass` for built-in system-class associations
+
+A built-in association to a Parse Server system class could freeze the wrong
+`targetClass` into the generated schema. `Parse::Installation`'s
+`belongs_to :user` (and, by the same mechanism, `Parse::Session#user` and
+`Parse::Role#users`) resolved its target through `:user.to_parse_class`,
+which depends on `Parse::User` already being registered. Because the gem
+loads the built-in classes before `user.rb`, the lookup fell back to the
+camelized literal `"User"` instead of the Parse storage name `"_User"` and
+stored it in the association `references` / `relations` map. That literal was
+then emitted as the pointer column's `targetClass`, so a fresh schema push
+created `_Installation.user` with `targetClass: "User"` — and Parse Server
+rejected every `_User` pointer save against it (`expected Pointer<User> but
+got Pointer<_User>`). This is the root cause underlying the spurious
+className-mismatch warnings addressed cosmetically in 5.1.1.
+
+- **FIXED**: `belongs_to` / `has_many` / `has_one` associations to a Parse
+  Server system class (`User`, `Role`, `Session`, `Installation`, and the
+  other built-ins) now resolve to the correct leading-underscore storage name
+  regardless of class load order. `Parse::Installation.references[:user]`,
+  `Parse::Session.references[:user]`, and `Parse::Role.relations[:users]` now
+  hold `"_User"`, so the emitted schema pointer/relation `targetClass` is
+  `"_User"` and `_User` pointer saves are accepted.
+  (`lib/parse/model/model.rb`)
+- **FIXED**: `String#to_parse_class` / `Symbol#to_parse_class` now resolve a
+  built-in system class by name even when its Ruby class is not yet
+  registered, restoring the documented contract
+  (`"users".to_parse_class(singularize: true) # => "_User"`). A registered
+  class with a custom `parse_class` table mapping still takes precedence, so
+  application classes are never rewritten. (`lib/parse/model/model.rb`)
+- **NEW**: `Parse::Model::SYSTEM_CLASS_MAP` maps each built-in's camelized
+  bare name to its storage name; it is consulted by `to_parse_class` only as
+  a fallback when class resolution would otherwise fail. (`lib/parse/model/model.rb`)
+- **CHANGED**: The one-time `_Installation` CLP advisory is now
+  operation-aware. `set_clp` and `set_class_access` warn only for the
+  operations Parse Server ignores on `_Installation` (`find`, `create`,
+  `update`, `delete`); configuring the operations it honors (`get`, `count`,
+  `addField`) no longer emits a warning. The pointer-permission helpers
+  `set_read_user_fields` / `set_write_user_fields` still warn, since they have
+  no reliable owner identity to bind to on `_Installation`.
+  (`lib/parse/model/classes/installation.rb`)
+
+This corrects schema generation going forward. An environment whose schema was
+already pushed with the wrong `targetClass` must have that schema re-pushed
+(for example by re-running the schema upgrade) after upgrading; an existing
+pointer column's `targetClass` cannot be altered in place and must be replaced.
+
 ### 5.1.1
 
 #### Suppress spurious className-mismatch warnings for system-class underscore aliases
