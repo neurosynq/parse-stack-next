@@ -831,7 +831,13 @@ class SecurityHardeningTest < Minitest::Test
     Parse::PipelineSecurity.validate_filter!(pipeline)
   end
 
-  # ─── Webhook payload PROTECTED_MASS_ASSIGNMENT_KEYS scrub ──────────────
+  # ─── Webhook payload credential scrub (trusted callbacks get full object) ──
+  #
+  # Webhook trigger payloads are server-authoritative and authenticated by the
+  # webhook key, so a handler receives the FULL object. Only genuine credential
+  # material (live session tokens, password hashes) is stripped. The
+  # forged-privileged-field defense moved to the WRITE path: the
+  # *_do_not_persist_* test below proves a save never transmits them.
 
   def test_webhook_payload_strips_session_token_from_user
     payload = Parse::Webhooks::Payload.new(
@@ -845,40 +851,45 @@ class SecurityHardeningTest < Minitest::Test
     refute_equal "r:forged", payload.user.session_token
   end
 
-  def test_webhook_payload_strips_authData_from_user
-    payload = Parse::Webhooks::Payload.new(
-      "user" => {
-        "objectId" => "userAttacker",
-        "authData" => { "facebook" => { "id" => "victim_fb", "access_token" => "x" } }
-      },
-      "triggerName" => "beforeSave"
+  def test_webhook_credentials_scrub_preserves_authdata_strips_credentials
+    # authData / timestamps / ACL are server-authoritative and must reach the
+    # handler unchanged; only live credentials are removed.
+    scrubbed = Parse::Webhooks::Payload.scrub_credentials(
+      "objectId" => "u1",
+      "authData" => { "facebook" => { "id" => "fb1" } },
+      "createdAt" => "2026-06-04T12:00:00.000Z",
+      "ACL" => { "u1" => { "read" => true, "write" => true } },
+      "sessionToken" => "r:live",
+      "_hashed_password" => "$2b$x"
     )
-    # Confirm the scrubbed hash that fed the constructor does not contain
-    # authData. Inspecting payload.user.auth_data would trigger autofetch
-    # on the unsaved record; the scrub happens at construction time so we
-    # verify the raw hash post-scrub directly.
-    scrubbed = Parse::Webhooks::Payload.scrub_protected_keys(
-      "objectId" => "userAttacker",
-      "authData" => { "facebook" => { "id" => "victim_fb" } }
-    )
-    refute scrubbed.key?("authData")
-    refute scrubbed.key?("auth_data")
+    assert scrubbed.key?("authData"), "authData is preserved for trusted callbacks"
+    assert scrubbed.key?("createdAt"), "server timestamps are preserved"
+    assert scrubbed.key?("ACL"), "ACL is preserved"
+    refute scrubbed.key?("sessionToken"), "live session token is stripped"
+    refute scrubbed.key?("_hashed_password"), "password hash is stripped"
   end
 
-  def test_webhook_payload_strips_acl_perms_from_object
+  def test_webhook_object_preserves_full_server_object_for_trusted_callback
     payload = Parse::Webhooks::Payload.new(
       "object" => {
         "className" => "Account",
         "objectId" => "abc",
         "_rperm" => ["*"],
         "_wperm" => ["userAttacker"],
+        "createdAt" => "2026-06-04T12:00:00.000Z",
+        "updatedAt" => "2026-06-04T12:00:00.000Z",
         "balance" => 100,
       },
-      "triggerName" => "beforeSave"
+      "triggerName" => "afterSave"
     )
     obj_hash = payload.instance_variable_get(:@object)
-    refute obj_hash.key?("_rperm")
-    refute obj_hash.key?("_wperm")
+    # Trusted, server-authoritative payload: the full object survives so the
+    # handler can read it (createdAt/updatedAt protection is write-side, not
+    # read-side). _rperm/_wperm are Mongo-internal with no property accessor and
+    # cannot be persisted via a handler save (see the write-side test below).
+    assert obj_hash.key?("_rperm"), "server _rperm survives for the handler to read"
+    assert obj_hash.key?("_wperm"), "server _wperm survives for the handler to read"
+    assert obj_hash.key?("createdAt"), "createdAt survives (read protection only)"
     assert obj_hash.key?("balance")
   end
 
@@ -895,6 +906,29 @@ class SecurityHardeningTest < Minitest::Test
     # object's raw attribute map.
     attrs = payload.user.instance_variable_get(:@attributes_map) || {}
     refute attrs.key?("_hashed_password")
+  end
+
+  def test_webhook_user_forged_privileged_fields_never_reach_save_body
+    # Write-side guarantee for the trigger _User object: even though the inbound
+    # payload is no longer broadly scrubbed, a beforeSave handler that returns
+    # the built user must never transmit forged authData / roles / row-perms.
+    payload = Parse::Webhooks::Payload.new(
+      "triggerName" => "beforeSave",
+      "object" => {
+        "className" => "_User",
+        "objectId" => "userAttacker",
+        "username" => "x",
+        "authData" => { "facebook" => { "id" => "victim", "access_token" => "t" } },
+        "roles" => ["Admin"],
+        "_rperm" => ["*"],
+        "_wperm" => ["userAttacker"],
+      }
+    )
+    body = payload.parse_object.changes_payload
+    %w[authData auth_data roles _rperm _wperm].each do |forbidden|
+      refute body.key?(forbidden),
+             "forged #{forbidden} on a trigger _User must never reach the save body"
+    end
   end
 
   # ─── Role hierarchy direction documentation ────────────────────────────

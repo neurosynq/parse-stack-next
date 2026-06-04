@@ -1,5 +1,90 @@
 ## parse-stack-next Changelog
 
+### 5.2.1
+
+#### Webhook trigger handlers now receive the full Parse object
+
+Webhook trigger payloads (`beforeSave`/`afterSave`/`beforeDelete`/`afterDelete`)
+are delivered by Parse Server and authenticated by the webhook key, so they are
+trusted, server-authoritative state. Previously the payload was filtered through
+the wide mass-assignment denylist, which stripped server-issued
+`createdAt`/`updatedAt` (and other non-credential fields) before the handler
+could see them. That broke `Parse::Object#existed?` and `#new?` inside
+`afterSave` handlers — `existed?` always returned `false` and `new?` always
+returned `true`, regardless of whether the object was created or updated — and
+hid the object's timestamps and ACL from handler code.
+
+- **FIXED**: `afterSave`/`beforeSave` handlers now receive the full object as
+  Parse Server sends it (`createdAt`, `updatedAt`, `ACL`, internal fields).
+  `Parse::Object#existed?` and `#new?` are now reliable inside `afterSave`
+  handlers. (Genuine credentials — session tokens and password hashes — are
+  still stripped, and `Parse::User` continues to protect `authData` on
+  `payload.user`.)
+- **NEW**: `afterSave` handlers on an updated object now carry dirty tracking
+  relative to the prior state, so `title_changed?`, `changed`, and `changes`
+  work inside `afterSave` the same way they already did inside `beforeSave`.
+- **CHANGED**: Inbound webhook trigger payloads are now scrubbed of genuine
+  credential material only (`sessionToken`, `_hashed_password`,
+  `_password_history`) rather than the full mass-assignment denylist. Protection
+  against persisting forged privileged fields remains on the write path: a save
+  emits only declared, dirty-tracked properties, and an after-trigger response
+  is `true`/`false`, so forged `_rperm`/`_wperm`/`authData` cannot be persisted
+  through a handler. This applies only to the inbound webhook trigger payload;
+  client login/signup responses are unaffected and still return session tokens.
+- **CHANGED**: In an `afterSave` handler, `new?` now correctly returns `false`
+  (the object is already persisted) where the previous timestamp-stripping bug
+  made it return `true`. Use `existed?` to distinguish create from update inside
+  `afterSave` (`existed? == false` for a create, `true` for an update); `new?`
+  is intended for `beforeSave`.
+- **CHANGED**: Dirty-gated `after_save` side effects now fire on client/REST-
+  initiated saves where they previously silently no-op'd. With timestamps and
+  dirty tracking restored, a callback such as `after_save { notify if
+  title_changed? }` will now activate for objects created or updated via REST /
+  JS cloud code, not only for Ruby-model saves.
+
+```ruby
+Parse::Webhooks.route :after_save, "Post" do
+  post = parse_object
+
+  if post.existed?            # now reliable: false on create, true on update
+    NotificationService.changed(post) if post.title_changed?
+  else
+    post.create_default_associations!
+  end
+  true
+end
+```
+
+#### Lifecycle callbacks run in ActiveModel order for client-initiated saves
+
+Parse Server exposes no separate `beforeCreate`/`afterCreate` triggers — only
+`beforeSave` and `afterSave`. The webhook layer now runs the model lifecycle
+callbacks for a client-initiated create in the canonical ActiveModel order:
+`before_save` → `before_create` (in the `beforeSave` webhook) then
+`after_create` → `after_save` (in the `afterSave` webhook).
+
+- **FIXED**: `before_create` callbacks now run for client/REST/JS/Auth0-created
+  objects. The `beforeSave` webhook runs `before_create` after `before_save` for
+  new objects (an object with no `original`); previously `before_create` never
+  fired for non-Ruby creates, so create-time setup written as `before_create`
+  was silently skipped.
+- **FIXED**: `after_save` no longer double-fires on client-initiated saves. The
+  `beforeSave` webhook entry point previously ran the full save callback chain,
+  firing `after_save` during `beforeSave` in addition to the `afterSave`
+  webhook. It now runs the before phase only.
+- **NEW**: `Parse::Object#run_before_save_callbacks` and
+  `#run_before_create_callbacks` — the before-phase counterparts to the existing
+  `run_after_save_callbacks` / `run_after_create_callbacks`.
+- **CHANGED**: `Parse::Object#prepare_save!` is retained as a back-compat alias
+  for `run_before_save_callbacks` and now runs the before phase only (it no
+  longer also fires `after_save`). The before-phase runners honor `:if`/`:unless`
+  callback conditions and the callback terminator.
+- **NOTE**: the webhook layer runs `before_save`/`before_create` and
+  `after_create`/`after_save`, but not `before_update`/`after_update` — those
+  `:update`-specific callbacks fire only on Ruby-model saves, not for
+  client-initiated (REST/JS/Auth0) saves. Use `before_save`/`after_save` (which
+  run for every save) and branch on `existed?` if you need update-only logic.
+
 ### 5.2.0
 
 #### Retrieval layer — `Parse::Retrieval` (`Parse::RAG`)

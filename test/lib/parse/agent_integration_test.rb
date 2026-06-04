@@ -126,7 +126,7 @@ class AgentIntegrationTest < Minitest::Test
         result = agent.execute(:get_schema, class_name: "NonExistentClass")
 
         refute result[:success], "Should fail for nonexistent class"
-        assert_match(/failed/i, result[:error])
+        assert_match(/could not fetch schema/i, result[:error])
       end
     end
   end

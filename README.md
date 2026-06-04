@@ -6,6 +6,7 @@ A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [
 
 ### What's new in 5.2
 
+- **5.2.1 — Webhook triggers receive the full Parse object** — trigger handlers (`beforeSave`/`afterSave`/…) now get the complete server object (`createdAt`/`updatedAt`, `ACL`, internal fields); only live credentials (session tokens, password hashes) are stripped. `Parse::Object#existed?` / `#new?` are reliable in `afterSave`, `afterSave` updates carry dirty tracking, and the model lifecycle runs in ActiveModel order — `before_save → before_create` then `after_create → after_save` — so `before_create` now fires for REST/JS/Auth0 creates (and `after_save` no longer double-fires). See [Cloud Code Triggers](#cloud-code-triggers)
 - **Retrieval layer — `Parse::Retrieval` (`Parse::RAG`)** — `Parse::Retrieval.retrieve(query:, klass:, k:, filter:, tenant_scope:, …)` embeds a natural-language query, runs Atlas `$vectorSearch` through the existing ACL-enforcing `find_similar`, and splits each retrieved document's text field into scored `Parse::Retrieval::Chunk`s. Chunking is presentation-only (embedding stays one-vector-per-record), via `Parse::Retrieval::Chunker::FixedSizeOverlap(size:, overlap:, by:, max_chunks_per_document:)` (subclass `Chunker::Base` for custom strategies). ACL is mongo-direct (no REST two-stage); tenant scope folds into the Atlas pre-filter
 - **`semantic_search` agent tool + `agent_searchable`** — declare `agent_searchable field:, filter_fields:` on a model to expose it to the readonly, client-safe `semantic_search` tool. The handler enforces the full agent envelope: searchable-class allowlist, recursive underscore-key refusal + filter-field allowlist on input, `field_allowlist` projection plus tenant-scope re-assertion on output, and score quantization in non-admin contexts
 - **MCP elicitation — human-in-the-loop approval** — opt in with `Parse::Agent.require_approval_for = [:write, :admin]` to require spec-native `elicitation/create` approval before destructive tool calls. A pluggable `agent.approval_gate` (reachable on the non-MCP path too) shows the dry-run diff and blocks on the client's reply; `call_method` resolves the *effective* tier from the target `agent_method`. Fails closed (no capability / no listening stream / non-streaming transport / timeout → refuse); replies are session-bound
@@ -397,6 +398,7 @@ The 1.x line is the original [`modernistik/parse-stack`](https://github.com/mode
 - [Cloud Code Webhooks](#cloud-code-webhooks)
   - [Cloud Code Functions](#cloud-code-functions)
   - [Cloud Code Triggers](#cloud-code-triggers)
+    - [Trigger object state](#trigger-object-state)
   - [Mounting Webhooks Application](#mounting-webhooks-application)
   - [Register Webhooks](#register-webhooks)
 - [Parse REST API Client](#parse-rest-api-client)
@@ -4825,7 +4827,9 @@ end
 ```
 
 ### Cloud Code Triggers
-You can register webhooks to handle the different object triggers: `:before_save`, `:after_save`, `:before_delete` and `:after_delete`. The `payload` object, which is an instance of `Parse::Webhooks::Payload`, contains several properties that represent the payload. One of the most important ones is `parse_object`, which will provide you with the instance of your specific Parse object. In `:before_save` triggers, this object already contains dirty tracking information of what has been changed.
+You can register webhooks to handle the different object triggers: `:before_save`, `:after_save`, `:before_delete` and `:after_delete`. The `payload` object, which is an instance of `Parse::Webhooks::Payload`, contains several properties that represent the payload. One of the most important ones is `parse_object`, which will provide you with the instance of your specific Parse object.
+
+The `parse_object` handed to your handler is the **full object as Parse Server sent it** — `createdAt`/`updatedAt`, `ACL`, and internal fields all survive (only live credentials — session tokens and password hashes — are stripped; `Parse::User` additionally protects `authData` on `payload.user`). Both `:before_save` and `:after_save` objects carry **dirty tracking** of what changed (`name_changed?`, `changes`), and `Parse::Object#existed?` / `#new?` are reliable inside `:after_save`. See [Trigger object state](#trigger-object-state) below.
 
 ```ruby
   # recommended way
@@ -4861,6 +4865,60 @@ For any `after_*` hook, return values are not needed since Parse does not utiliz
 > REST response, so the webhook skips them to avoid double-firing side effects;
 > for saves from other clients (JS / iOS / REST), the webhook runs them, since
 > the SDK never had the chance.
+
+#### Trigger object state
+
+Because the trigger payload is server-authoritative, the `parse_object` your
+handler receives is the complete object, and the usual `Parse::Object`
+introspection works inside the trigger:
+
+| What you want to know | In `:before_save` | In `:after_save` |
+|---|---|---|
+| Is this a create or an update? | `parse_object.new?` (`true` = create) | `parse_object.existed?` (`false` = create) or `payload.original.nil?` |
+| What changed? | `name_changed?`, `changes`, `changed` | `name_changed?`, `changes`, `changed` (relative to the prior state) |
+| Server timestamps | not yet assigned (`new?` create) | `created_at` / `updated_at` populated |
+| The prior stored values | `payload.original_parse_object` | `payload.original_parse_object` |
+
+Use `new?` in `:before_save` and `existed?` in `:after_save`. In `:after_save`
+the object is already persisted, so `new?` is `false` for both creates and
+updates — `existed?` (`created_at != updated_at`) is the create/update signal,
+equivalently `payload.original.nil?`.
+
+```ruby
+Parse::Webhooks.route :after_save, :Post do
+  post = parse_object
+  if post.existed?
+    Search.reindex(post) if post.title_changed?   # update
+  else
+    post.create_default_associations!             # first save
+  end
+  true
+end
+```
+
+**Lifecycle callback order.** Parse Server has no separate `beforeCreate` /
+`afterCreate` triggers — only `beforeSave` and `afterSave`. The SDK runs your
+model's ActiveModel callbacks in canonical order across the two webhooks:
+
+```
+beforeSave webhook :  before_save  →  before_create   (before_create only for new objects)
+   [Parse Server persists]
+afterSave  webhook :  after_create →  after_save      (after_create only for new objects)
+```
+
+So a model `before_create` / `after_create` callback runs for objects created by
+**any** client (REST / JS cloud code / Auth0 / iOS), not just Ruby-model saves —
+provided the corresponding trigger is registered with Parse Server (see
+[Register Webhooks](#register-webhooks)). These callbacks fire **once** per save;
+Ruby-SDK-initiated saves run them locally and the webhook skips them to avoid
+double-firing. `:if`/`:unless` conditions on these callbacks are honored.
+
+> **`before_update` / `after_update` do not run from webhooks.** The webhook
+> layer runs `before_save` / `before_create` / `after_create` / `after_save`
+> only. The `:update`-specific callbacks fire on Ruby-model saves but **not**
+> for client-initiated (REST / JS / Auth0) saves, because Parse Server has no
+> `beforeUpdate` / `afterUpdate` trigger. For update-time logic that must run
+> for all clients, use `before_save` / `after_save` and branch on `existed?`.
 
 > **Keep `after_save` handlers fast.** Parse Server **waits** for the `after_save`
 > webhook response before returning to the saving client (only LiveQuery events

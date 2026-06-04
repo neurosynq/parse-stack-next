@@ -78,11 +78,15 @@ class WebhookCallbacksTest < Minitest::Test
     puts "\n=== Testing Before Save Callback Handling ==="
 
     # Track callback invocations
-    prepare_save_called = false
+    before_save_called = false
+    before_create_called = false
 
-    # Mock Parse::Object with prepare_save! method
+    # Mock Parse::Object with the before-phase callback runners the dispatcher
+    # invokes (run_before_save_callbacks always; run_before_create_callbacks for
+    # new objects -- original.nil?).
     test_object = Object.new
-    test_object.define_singleton_method(:prepare_save!) { prepare_save_called = true }
+    test_object.define_singleton_method(:run_before_save_callbacks) { before_save_called = true }
+    test_object.define_singleton_method(:run_before_create_callbacks) { before_create_called = true }
     test_object.define_singleton_method(:changes_payload) { { "name" => "test" } }
     test_object.define_singleton_method(:is_a?) { |klass| klass == Parse::Object }
 
@@ -91,7 +95,7 @@ class WebhookCallbacksTest < Minitest::Test
       test_object
     end
 
-    # Test Ruby-initiated before_save (should skip prepare_save!).
+    # Test Ruby-initiated before_save (should skip the before callbacks).
     # A "trusted" Ruby-initiated request requires both the _RB_ header AND
     # master:true. The header alone is client-controllable; honoring it
     # without master would let a non-master client spoof the bypass.
@@ -105,14 +109,18 @@ class WebhookCallbacksTest < Minitest::Test
     ruby_payload = Parse::Webhooks::Payload.new(ruby_payload_data)
     result = Parse::Webhooks.call_route(:before_save, "TestObject", ruby_payload)
 
-    refute prepare_save_called, "prepare_save! should not be called for Ruby-initiated requests"
+    refute before_save_called, "before_save callbacks should not run for Ruby-initiated requests"
+    refute before_create_called, "before_create callbacks should not run for Ruby-initiated requests"
     assert_equal({ "name" => "test" }, result, "Should return changes payload")
-    puts "✅ Ruby-initiated before_save skips prepare_save!"
+    puts "✅ Ruby-initiated before_save skips before callbacks"
 
     # Reset tracking
-    prepare_save_called = false
+    before_save_called = false
+    before_create_called = false
 
-    # Test client-initiated before_save (should call prepare_save!)
+    # Test client-initiated before_save on a NEW object (no original): both
+    # before_save AND before_create run, since Parse Server has no separate
+    # beforeCreate trigger.
     client_payload_data = {
       "triggerName" => "beforeSave",
       "object" => { "className" => "TestObject", "objectId" => "def456" },
@@ -122,9 +130,29 @@ class WebhookCallbacksTest < Minitest::Test
     client_payload = Parse::Webhooks::Payload.new(client_payload_data)
     result = Parse::Webhooks.call_route(:before_save, "TestObject", client_payload)
 
-    assert prepare_save_called, "prepare_save! should be called for client-initiated requests"
+    assert before_save_called, "before_save callbacks should run for client-initiated requests"
+    assert before_create_called, "before_create callbacks should run for a client-initiated create"
     assert_equal({ "name" => "test" }, result, "Should return changes payload")
-    puts "✅ Client-initiated before_save calls prepare_save!"
+    puts "✅ Client-initiated before_save runs before_save + before_create"
+
+    # Reset tracking
+    before_save_called = false
+    before_create_called = false
+
+    # Client-initiated before_save on an UPDATE (original present): before_save
+    # runs, before_create does NOT (not a create).
+    update_payload_data = {
+      "triggerName" => "beforeSave",
+      "object" => { "className" => "TestObject", "objectId" => "def456", "name" => "new" },
+      "original" => { "className" => "TestObject", "objectId" => "def456", "name" => "old" },
+      "headers" => { "x-parse-request-id" => "client_update_id" },
+    }
+    update_payload = Parse::Webhooks::Payload.new(update_payload_data)
+    Parse::Webhooks.call_route(:before_save, "TestObject", update_payload)
+
+    assert before_save_called, "before_save callbacks should run on a client update"
+    refute before_create_called, "before_create callbacks must NOT run on an update"
+    puts "✅ Client-initiated before_save on update skips before_create"
   end
 
   def test_after_save_callback_handling

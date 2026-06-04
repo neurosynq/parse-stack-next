@@ -1196,16 +1196,14 @@ module Parse
         success
       end
 
-      # Runs all the registered `before_save` related callbacks.
+      # Back-compat alias for {Parse::Object#run_before_save_callbacks}. The
+      # canonical name spells out exactly what runs (the before_save callbacks,
+      # before phase only) and is symmetric with run_after_save_callbacks /
+      # run_before_create_callbacks / run_after_create_callbacks. Retained so
+      # existing callers of `prepare_save!` keep working.
+      # @return [Boolean] false if a before_save callback halted the chain, else true.
       def prepare_save!
-        # With terminator configured, run_callbacks will return false if any callback returns false
-        # We track if the block executes to know if callbacks were halted
-        callback_success = false
-        run_callbacks(:save) do
-          callback_success = true
-          true
-        end
-        callback_success
+        run_before_save_callbacks
       end
 
       # @return [Hash] a hash of the list of changes made to this instance.

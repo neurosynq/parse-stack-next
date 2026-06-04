@@ -233,10 +233,22 @@ module Parse
             # ran ActiveModel before_save callbacks locally. A client-spoofed
             # `_RB_` without master falls through and runs them here.
             unless trusted_ruby_initiated
-              prepare_result = result.prepare_save!
-              # If prepare_save! returns false (callback chain was halted), throw an error
-              if prepare_result == false
+              before_save_result = result.run_before_save_callbacks
+              # If a before_save callback halted the chain (returned false), reject the save.
+              if before_save_result == false
                 raise Parse::Webhooks::ResponseError, "Save halted by before_save callback"
+              end
+              # Parse Server exposes no separate beforeCreate trigger, so the
+              # beforeSave hook is the single point at which before_create must
+              # run for a client-initiated create. Run it AFTER before_save, for
+              # new objects only -- matching ActiveModel order (before_save wraps
+              # before_create) and mirroring the afterSave hook, which runs
+              # after_create then after_save. `original.nil?` marks a create.
+              if payload && payload.original.nil?
+                create_result = result.run_before_create_callbacks
+                if create_result == false
+                  raise Parse::Webhooks::ResponseError, "Save halted by before_create callback"
+                end
               end
             end
             # For before_save, return the changes payload (what Parse Server expects)

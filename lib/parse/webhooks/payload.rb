@@ -78,24 +78,35 @@ module Parse
         hash = Hash[hash.map { |k, v| [k.to_s.underscore.to_sym, v] }]
         @raw = hash
         @master = hash[:master]
-        # Strip protected mass-assignment keys (sessionToken, _rperm, _wperm,
-        # _hashed_password, authData, roles, etc.) BEFORE constructing the
-        # user object. Without this, an attacker reaching the webhook
-        # endpoint with a valid key (or with the optional unauthenticated
-        # mode enabled) can forge any of these fields on +payload.user+
-        # via the +objectId+-present hydration branch that bypasses the
-        # +Parse::Object#apply_attributes!+ protected-key filter.
+        # Webhook trigger payloads (beforeSave/afterSave/etc.) are delivered by
+        # Parse Server and, when a webhook key is configured (the default; see
+        # Parse::Webhooks.allow_unauthenticated for the opt-out used in tests /
+        # local dev), authenticated by it -- so they are treated as trusted,
+        # server-authoritative state. A handler is meant to receive the full
+        # object -- createdAt/updatedAt, ACL, internal fields and all. The only
+        # thing stripped here is genuine credential material a handler never
+        # legitimately needs to read (live session tokens, offline-crackable
+        # password hashes); see WEBHOOK_TRIGGER_CREDENTIAL_KEYS. Protection
+        # against *persisting* forged privileged fields lives on the write path
+        # (changes_payload emits only declared, dirty-tracked properties), not on
+        # this read path.
         if hash[:user].present?
-          @user = Parse::User.new(self.class.scrub_protected_keys(hash[:user]))
+          # Trusted hydration via .build (not .new) so server-sent timestamps and
+          # data fields remain readable; credentials are removed first. Note
+          # Parse::User applies its own protections, so `payload.user.auth_data`
+          # is not exposed here. The built object is pristine, so a handler that
+          # saves payload.user transmits nothing (no dirty changes) and cannot
+          # persist forgeries.
+          @user = Parse::User.build(self.class.scrub_credentials(hash[:user]))
         end
         @installation_id = hash[:installation_id]
         @params = hash[:params]
         @params = @params.with_indifferent_access if @params.is_a?(Hash)
         @function_name = hash[:function_name]
-        @object = self.class.scrub_protected_keys(hash[:object])
+        @object = self.class.scrub_credentials(hash[:object])
         @trigger_name = hash[:trigger_name]
-        @original = self.class.scrub_protected_keys(hash[:original])
-        @update = self.class.scrub_protected_keys(hash[:update]) || {}
+        @original = self.class.scrub_credentials(hash[:original])
+        @update = self.class.scrub_credentials(hash[:update]) || {}
         # Added for beforeFind and afterFind triggers
         @query = hash[:query]
         @objects = hash[:objects] || []
@@ -103,25 +114,32 @@ module Parse
       end
 
       # @!visibility private
-      # Routing metadata that must be preserved on payload hashes even
-      # though the general mass-assignment denylist forbids it. Stripping
-      # +className+ here breaks +parse_class+/+parse_object+ resolution and
-      # silently disables +payload_class_mismatch?+. The denylist still
-      # protects +Parse::Object#apply_attributes!+ at hydration time.
-      PAYLOAD_PRESERVED_KEYS = %w[className __type].freeze
+      # Genuine credential material that is stripped from every webhook trigger
+      # payload before a handler can see it, even though the rest of the
+      # (trusted, server-authoritative) payload passes through untouched. A
+      # session token is a live bearer credential; a password hash is
+      # offline-crackable. A handler has no legitimate reason to read either,
+      # and removing them keeps them out of logs and out of any object a handler
+      # might persist. Everything else Parse Server sends -- createdAt/updatedAt,
+      # ACL, authData, roles, _rperm/_wperm, internal fields -- is preserved so
+      # the handler observes the full object. Write-side protection
+      # (changes_payload emits only declared, dirty-tracked properties) is what
+      # prevents persisting forged privileged fields.
+      WEBHOOK_TRIGGER_CREDENTIAL_KEYS = %w[
+        sessionToken session_token
+        _hashed_password _password_history
+      ].freeze
 
       # @!visibility private
-      # Returns a copy of +obj+ with the +PROTECTED_MASS_ASSIGNMENT_KEYS+
-      # removed, except for routing metadata in +PAYLOAD_PRESERVED_KEYS+.
-      # Operates on string and symbol keys (Parse Server uses camelCase
+      # Returns a copy of +obj+ with only +WEBHOOK_TRIGGER_CREDENTIAL_KEYS+
+      # removed. Operates on string and symbol keys (Parse Server uses camelCase
       # strings on the wire; downstream code may have already symbolized).
       # Pass-through for non-Hash input.
-      def self.scrub_protected_keys(obj)
+      def self.scrub_credentials(obj)
         return obj unless obj.is_a?(Hash)
-        denied = Parse::Properties::PROTECTED_MASS_ASSIGNMENT_KEYS
+        denied = WEBHOOK_TRIGGER_CREDENTIAL_KEYS
         obj.reject do |k, _|
           name = k.to_s
-          next false if PAYLOAD_PRESERVED_KEYS.include?(name)
           denied.include?(name) || denied.include?(name.underscore)
         end
       end
@@ -278,24 +296,34 @@ module Parse
           if @original.present? && @original.is_a?(Hash)
             o = Parse::Object.build @original, parse_class
             o.apply_attributes! @object, dirty_track: true
-
-            if o.is_a?(Parse::User) && @update.present? && @update["authData"].present?
-              o.auth_data = @update["authData"]
-            end
             return o
           else #else the object must be new
             klass = Parse::Object.find_class parse_class
             # if we have a class, return that with updated changes, otherwise
             # default to regular object
-            if klass.present?
-              o = klass.new(@object || {})
-              if o.is_a?(Parse::User) && @update.present? && @update["authData"].present?
-                o.auth_data = @update["authData"]
-              end
-              return o
-            end # if klass.present?
+            return klass.new(@object || {}) if klass.present?
           end # if we have original
         end # if before_trigger?
+
+        # afterSave on an UPDATE: build the prior state, then overlay the final
+        # state with dirty tracking so `*_changed?` / `changes` work inside
+        # afterSave handlers (symmetric with the beforeSave path above). The
+        # filter uses the timestamp-preserving INITIALIZE key set rather than the
+        # wide mass-assignment set: the wide set would strip the incoming
+        # `updatedAt` from the overlay, leaving the prior `updatedAt` and breaking
+        # `existed?`. The diff still excludes credentials / _rperm / _wperm /
+        # authData / roles, and an after-trigger response is only true/false, so
+        # there is no path for a forged privileged field to be persisted.
+        if after_save? && @original.present? && @original.is_a?(Hash)
+          o = Parse::Object.build @original, parse_class
+          o.apply_attributes! @object, dirty_track: true,
+                                       protected_set: Parse::Properties::PROTECTED_INITIALIZE_KEYS
+          return o
+        end
+
+        # afterSave on a CREATE (and every other trigger): the full object as the
+        # server sent it. createdAt/updatedAt survive (only credentials are
+        # scrubbed), so `new?` / `existed?` read correctly.
         Parse::Object.build(@object, parse_class)
       end
 

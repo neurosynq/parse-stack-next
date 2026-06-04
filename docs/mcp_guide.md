@@ -515,10 +515,14 @@ Parse Server version and its `masterKeyIps` configuration.)
 - **Subscriptions do not survive a listening-stream reconnect.** Closing the
   `GET` stream tears down the session's LiveQuery subscriptions; a client that
   reconnects must re-issue its `resources/subscribe` calls.
-- **Session id is a bearer capability.** The listening stream authenticates via
-  the agent factory and keys delivery off the server-issued `Mcp-Session-Id`,
-  which the client must keep secret — possession of a valid session id (plus a
-  valid agent) is sufficient to attach. This matches the cancellation model.
+- **Listening streams are owner-bound (not a bare bearer capability).** The
+  stream authenticates via the agent factory *and* the server-issued
+  `Mcp-Session-Id` is bound to the principal that established it, so another
+  authenticated caller who knows or guesses the id is refused with `403`. The
+  `Mcp-Session-Id` is still secret-bearing and should be kept confidential, but
+  possession alone is no longer sufficient — see **Listening-stream ownership**
+  below for the binding model, its limits, and the `principal_resolver:` knob
+  master-key deployments need to make it effective.
 - **Per-session and global caps.** A client that subscribes but never opens (or
   later drops) its listening stream leaves LiveQuery subscriptions running until
   the session is torn down. A per-session ceiling (default 100,
@@ -537,6 +541,73 @@ Parse Server version and its `masterKeyIps` configuration.)
   it unset (the default `nil`) leaves both surfaces uncapped; the app logs a
   one-time warning at construction when a streaming or subscription/notification
   surface is enabled without a cap.
+
+### Listening-stream ownership
+
+The GET listening stream is the single server→client bus shared by resource
+subscriptions, [server-initiated notifications](#server-initiated-notifications-general-purpose),
+and [approval elicitation](#approval-workflows-mcp-elicitation). Whoever holds
+that stream receives everything pushed to its `Mcp-Session-Id` — another
+session's `notifications/resources/updated`, `elicitation/create` approval
+prompts, and arbitrary `notify` payloads. So the stream is **owner-bound**: a
+session is tied to the principal that established it, and only the same
+principal may later open (or re-open) its stream.
+
+How the binding is established and checked:
+
+- **Initialize-bound.** A session created through an `initialize` POST is bound
+  authoritatively to that caller's principal. A later `GET` carrying the same
+  `Mcp-Session-Id` from a *different* principal is refused with HTTP `403`
+  (`-32600`, "Mcp-Session-Id is owned by another principal"). A re-`initialize`
+  by the same caller refreshes the binding.
+- **Trust-on-first-use (TOFU) for the decoupled bus.** A session id that
+  `initialize` never saw — the `notifications: true` bus, where application code
+  pushes to ids it chose itself — is claimed by the first principal to attach a
+  listener; a different principal attaching afterward is refused. TOFU closes
+  the prior model's eviction-after-claim hole (a second caller could overwrite
+  or shadow an existing listener), but a first-mover attacker can still claim an
+  *unused* id, so **notification-bus session ids must be high-entropy**.
+- **Stream close keeps the claim.** The binding is dropped only on an explicit
+  `DELETE` termination, not on mere stream close — a reconnecting owner keeps
+  its claim, and an attacker cannot grab the id during a brief disconnect.
+
+The principal fingerprint is derived, in order, from: an operator-supplied
+`principal_resolver:`, then the agent's `session_token` (hashed), then
+`acl_user`, then `acl_role`. With none of these the agent falls back to a shared
+`"mk"` (master-key) principal:
+
+- **A master-key-everywhere factory makes owner-binding a no-op.** If every
+  request builds a bare master-key agent (no `session_token:` / `acl_user:` /
+  `acl_role:`), all agents share the `"mk"` fingerprint and are
+  indistinguishable, so the `403` never fires among them. Deployments that
+  authenticate users upstream and run master-key agents should supply a
+  `principal_resolver:` to restore a real per-user identity:
+
+  ```ruby
+  app = Parse::Agent::MCPRackApp.new(
+    streaming: true,
+    notifications: true,                 # or resource_subscriptions: true
+    principal_resolver: ->(agent, env) {
+      # Return a stable per-user id (String). nil/empty falls through to the
+      # agent's own scope, then to the shared "mk" principal.
+      env["myapp.authenticated_user_id"]
+    },
+    agent_factory: ->(env) { ... },
+  )
+  ```
+
+  The resolver must respond to `#call`; an invalid one raises `ArgumentError` at
+  construction. Per-user impersonation (binding a real `session_token` per
+  request) achieves the same effect without a resolver.
+
+**Limits (same scope as the cancellation registry):** the owner registry is
+per-`MCPRackApp` instance and **single-process** — it does not span Puma workers
+or survive a restart. In a clustered deployment the `initialize` POST and the
+`GET` stream may land on different workers, so the initialize-binding degrades
+to TOFU there. The registry is LRU-bounded (default 10,000 sessions) so a stream
+of `initialize`-without-`DELETE` sessions cannot grow it without limit; evicting
+an active owner just downgrades that id to TOFU on its next attach. Blank
+session ids or blank fingerprints fail closed.
 
 ---
 

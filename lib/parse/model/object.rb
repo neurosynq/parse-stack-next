@@ -1645,6 +1645,25 @@ module Parse
       run_callbacks_from_list(self.class._destroy_callbacks, :after)
     end
 
+    # Run before_save callbacks for this object (BEFORE phase only). Used by the
+    # beforeSave webhook. Honors :if/:unless conditions and the callback
+    # terminator: returns false if a callback halts the chain. The after_*
+    # callbacks are NOT run here -- they belong to the afterSave webhook.
+    # @return [Boolean] false if a before_save callback halted the chain, else true.
+    def run_before_save_callbacks
+      run_before_phase_callbacks(:save)
+    end
+
+    # Run before_create callbacks for this object (BEFORE phase only). Parse
+    # Server exposes no separate beforeCreate trigger, so the beforeSave webhook
+    # runs these for new objects right after before_save -- matching ActiveModel
+    # order, where before_save wraps before_create. Honors :if/:unless and the
+    # terminator.
+    # @return [Boolean] false if a before_create callback halted the chain, else true.
+    def run_before_create_callbacks
+      run_before_phase_callbacks(:create)
+    end
+
     # Returns a hash of all the changes that have been made to the object. By default
     # changes to the Parse::Properties::BASE_KEYS are ignored unless you pass true as
     # an argument.
@@ -2053,6 +2072,28 @@ module Parse
         end
       end
       true
+    end
+
+    # Runs ONLY the before-phase callbacks of an ActiveModel callback chain
+    # (`:save` or `:create`), fully honoring `:if`/`:unless` conditions and the
+    # model's terminator, WITHOUT running the after-phase callbacks. ActiveModel
+    # `run_callbacks(kind) { block }` runs before -> block -> after; we throw out
+    # of the block so the after callbacks never run, while the before callbacks
+    # get complete condition/terminator handling. If a before callback halts the
+    # chain (returns false), the block never executes, so `completed` stays false
+    # and we report the halt. Used by the webhook before-phase so it does not
+    # double-fire after_* (those belong to the afterSave webhook).
+    # @return [Boolean] false if the chain was halted by a before callback.
+    def run_before_phase_callbacks(kind)
+      tag = :"__parse_before_phase_#{kind}"
+      completed = false
+      catch(tag) do
+        run_callbacks(kind) do
+          completed = true
+          throw tag
+        end
+      end
+      completed
     end
   end
 end
