@@ -1019,12 +1019,21 @@ module Parse
       # @return [Hash] empty result, or an `:error` hash when unsupported.
       def self.handle_resources_subscribe(params, agent, manager)
         return subscriptions_unsupported_error unless manager.respond_to?(:supported?) && manager.supported?
-        manager.subscribe(
+        ok = manager.subscribe(
           session_id: agent_session_id(agent),
           uri:        params["uri"].to_s,
           agent:      agent,
         )
-        {}
+        return {} if ok
+        # subscribe returned false: the session's listening stream was torn down
+        # (detach_listener) while the network subscribe was in flight, so no
+        # subscription exists and no notifications/resources/updated will arrive.
+        # Surface an error rather than a false empty-success ack (per the MCP
+        # contract an empty result == subscribed) so the client reopens its GET
+        # stream and retries instead of waiting forever for updates.
+        { error: { "code" => -32602,
+                   "message" => "resources/subscribe: the session no longer has an open " \
+                                "listening stream; reopen the GET stream and retry" } }
       end
       private_class_method :handle_resources_subscribe
 

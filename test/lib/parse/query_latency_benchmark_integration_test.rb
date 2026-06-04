@@ -94,7 +94,7 @@ class QueryLatencyBenchmarkIntegrationTest < Minitest::Test
         # Configure MongoDB direct
         require "mongo"
         require_relative "../../../lib/parse/mongodb"
-        Parse::MongoDB.configure(uri: "mongodb://admin:password@localhost:27019/parse?authSource=admin", enabled: true)
+        Parse::MongoDB.configure(uri: (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"), enabled: true)
 
         puts "\n" + "-" * 70
         puts "Test 1: Simple equality query (genre = 'Rock')"
@@ -205,7 +205,7 @@ class QueryLatencyBenchmarkIntegrationTest < Minitest::Test
         # Configure MongoDB direct
         require "mongo"
         require_relative "../../../lib/parse/mongodb"
-        Parse::MongoDB.configure(uri: "mongodb://admin:password@localhost:27019/parse?authSource=admin", enabled: true)
+        Parse::MongoDB.configure(uri: (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"), enabled: true)
 
         puts "\n" + "-" * 70
         puts "Test 1: empty_or_nil (songs with no tags)"
@@ -317,7 +317,7 @@ class QueryLatencyBenchmarkIntegrationTest < Minitest::Test
         # Configure MongoDB direct
         require "mongo"
         require_relative "../../../lib/parse/mongodb"
-        Parse::MongoDB.configure(uri: "mongodb://admin:password@localhost:27019/parse?authSource=admin", enabled: true)
+        Parse::MongoDB.configure(uri: (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"), enabled: true)
 
         puts "\n" + "-" * 70
         puts "Test 1: Query WITHOUT includes"
@@ -419,7 +419,7 @@ class QueryLatencyBenchmarkIntegrationTest < Minitest::Test
         # Configure MongoDB direct
         require "mongo"
         require_relative "../../../lib/parse/mongodb"
-        Parse::MongoDB.configure(uri: "mongodb://admin:password@localhost:27019/parse?authSource=admin", enabled: true)
+        Parse::MongoDB.configure(uri: (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"), enabled: true)
 
         puts "\n" + "-" * 70
         puts "Test 1: Simple count"
@@ -526,7 +526,7 @@ class QueryLatencyBenchmarkIntegrationTest < Minitest::Test
         # Configure MongoDB direct
         require "mongo"
         require_relative "../../../lib/parse/mongodb"
-        Parse::MongoDB.configure(uri: "mongodb://admin:password@localhost:27019/parse?authSource=admin", enabled: true)
+        Parse::MongoDB.configure(uri: (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"), enabled: true)
 
         results = []
 

@@ -54,7 +54,7 @@ class MongoDBOperatorsIntegrationTest < Minitest::Test
         begin
           require "mongo"
           require_relative "../../../lib/parse/mongodb"
-          Parse::MongoDB.configure(uri: "mongodb://admin:password@localhost:27019/parse?authSource=admin", enabled: true)
+          Parse::MongoDB.configure(uri: (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"), enabled: true)
           puts "MongoDB direct enabled: #{Parse::MongoDB.enabled?}"
         rescue LoadError => e
           skip "MongoDB gem not available: #{e.message}"
@@ -216,7 +216,7 @@ class MongoDBOperatorsIntegrationTest < Minitest::Test
         begin
           require "mongo"
           require_relative "../../../lib/parse/mongodb"
-          Parse::MongoDB.configure(uri: "mongodb://admin:password@localhost:27019/parse?authSource=admin", enabled: true)
+          Parse::MongoDB.configure(uri: (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"), enabled: true)
         rescue LoadError => e
           skip "MongoDB gem not available: #{e.message}"
         end
@@ -322,7 +322,7 @@ class MongoDBOperatorsIntegrationTest < Minitest::Test
         begin
           require "mongo"
           require_relative "../../../lib/parse/mongodb"
-          Parse::MongoDB.configure(uri: "mongodb://admin:password@localhost:27019/parse?authSource=admin", enabled: true)
+          Parse::MongoDB.configure(uri: (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"), enabled: true)
         rescue LoadError => e
           skip "MongoDB gem not available: #{e.message}"
         end

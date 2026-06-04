@@ -7,13 +7,13 @@ require_relative "../../../support/test_server"
 # Tests for Parse::Client#connected?, Parse::Client#reachable?,
 # Parse.connected?, and Parse.reachable? (FIX 1 — connectivity smoke-test).
 #
-# Integration tests probe the live Parse Server at localhost:2337.
+# Integration tests probe the live Parse Server at localhost:29337.
 # Unit tests stub the #request method to verify error-handling contracts
 # without a live server.
 class ConnectivityTest < Minitest::Test
 
   # ---------------------------------------------------------------------------
-  # Integration tests — require a live server at localhost:2337
+  # Integration tests — require a live server at localhost:29337
   # ---------------------------------------------------------------------------
 
   def setup
@@ -22,13 +22,13 @@ class ConnectivityTest < Minitest::Test
     @server_up = Parse::Test::ServerHelper.setup
   end
 
-  # The live-server probes below talk to localhost:2337. They must SKIP (not
+  # The live-server probes below talk to localhost:29337. They must SKIP (not
   # FAIL) when no server is running. Gate on ACTUAL reachability, not on
   # PARSE_TEST_USE_DOCKER: the rake test task sets that flag unconditionally
   # even when no container is up, so an env-flag-only guard would turn these
   # into failures whenever the suite runs without the container.
   def require_live_server!
-    skip "Live Parse Server not reachable at localhost:2337 (start the test container)" unless @server_up
+    skip "Live Parse Server not reachable at localhost:29337 (start the test container)" unless @server_up
   end
 
   def test_client_reachable_returns_true_against_live_server
@@ -173,7 +173,7 @@ class ConnectivityTest < Minitest::Test
     require_live_server!
 
     bad = Parse::Client.new(
-      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:2337/parse",
+      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse",
       app_id: "wrong-app-id",
       api_key: "wrong-rest-key",
       master_key: nil,

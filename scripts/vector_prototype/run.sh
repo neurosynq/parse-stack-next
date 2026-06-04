@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Orchestrate the vector-search / RAG test fixture setup.
 # Assumes the Atlas Local container from docker-compose.atlas.yml is up
-# (i.e. localhost:27020 is reachable).
+# (i.e. localhost:29020 is reachable).
 #
 # Usage:  ./scripts/vector_prototype/run.sh
 #
@@ -13,9 +13,9 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-echo "[1/3] verifying Atlas Local on localhost:27020"
+echo "[1/3] verifying Atlas Local on localhost:29020"
 if ! mongosh --quiet --eval "db.runCommand({ ping: 1 })" \
-     "mongodb://localhost:27020/?directConnection=true" >/dev/null; then
+     "mongodb://localhost:29020/?directConnection=true" >/dev/null; then
   echo "  ERROR: Atlas Local not reachable. Start it with:"
   echo "    docker-compose -f scripts/docker/docker-compose.atlas.yml up -d"
   exit 1
@@ -26,7 +26,7 @@ echo "[2/3] downloading + loading embeddings"
 python3 "$HERE/fetch_embeddings.py"
 
 echo "[3/3] creating vectorSearch index"
-mongosh --quiet "mongodb://localhost:27020/vector_prototype?directConnection=true" \
+mongosh --quiet "mongodb://localhost:29020/vector_prototype?directConnection=true" \
   "$HERE/create_vector_index.js"
 
 echo

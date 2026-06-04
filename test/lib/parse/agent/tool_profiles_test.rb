@@ -7,7 +7,7 @@ require_relative "../../../test_helper"
 # token-economy: a lean readonly surface costs ~1/3 the tools/list tokens.
 class ToolProfilesTest < Minitest::Test
   def setup
-    Parse.setup(server_url: "http://localhost:2337/parse",
+    Parse.setup(server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse",
                 app_id: "x", api_key: "y", master_key: "z")
     Parse::Agent.suppress_master_key_warning = true
   end

@@ -74,9 +74,9 @@ class DockerIntegrationTest < Minitest::Test
 
     # Check individual services
     status = Parse::Test::DockerHelper.status
-    assert status.include?("parse-stack-test-mongo"), "MongoDB container should be running"
-    assert status.include?("parse-stack-test-server"), "Parse Server container should be running"
-    assert status.include?("parse-stack-test-dashboard"), "Parse Dashboard container should be running"
+    assert status.include?("#{ENV["PSNEXT_PREFIX"] || "psnext-it"}-mongo"), "MongoDB container should be running"
+    assert status.include?("#{ENV["PSNEXT_PREFIX"] || "psnext-it"}-server"), "Parse Server container should be running"
+    assert status.include?("#{ENV["PSNEXT_PREFIX"] || "psnext-it"}-dashboard"), "Parse Dashboard container should be running"
   end
 
   def test_parse_server_connection
@@ -85,9 +85,9 @@ class DockerIntegrationTest < Minitest::Test
 
     # Verify client configuration
     client = Parse::Client.client
-    assert client.server_url.start_with?("http://localhost:2337/parse"), "Server URL should point to localhost Parse server"
-    assert_equal "myAppId", client.app_id
-    assert_equal "myMasterKey", client.master_key
+    assert client.server_url.start_with?(ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse"), "Server URL should point to localhost Parse server"
+    assert_equal(ENV["PARSE_TEST_APP_ID"] || "psnextItAppId", client.app_id)
+    assert_equal(ENV["PARSE_TEST_MASTER_KEY"] || "psnextItMasterKey", client.master_key)
   end
 
   def test_mongodb_backend_working

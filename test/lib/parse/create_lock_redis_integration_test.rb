@@ -21,7 +21,7 @@ require "redis"
 #    fallback is NOT taken when the wrapper is configured)
 
 class CreateLockRedisIntegrationTest < Minitest::Test
-  REDIS_URL = ENV["PARSE_TEST_REDIS_URL"] || "redis://localhost:6399/0"
+  REDIS_URL = ENV["PARSE_TEST_REDIS_URL"] || "redis://localhost:29379/0"
 
   def setup
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"

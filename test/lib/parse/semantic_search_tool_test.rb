@@ -119,6 +119,35 @@ class SemanticSearchToolTest < Minitest::Test
     Parse::Agent.suppress_master_key_warning = false
   end
 
+  def test_source_projector_conversion_failure_drops_internal_storage_keys
+    # When convert_documents_to_parse raises, convert_to_parse_form's rescue
+    # must NOT surface the raw storage-form hit: its underscore-prefixed keys
+    # (_acl, _rperm/_wperm, _p_* pointers, _id) leak internal metadata that the
+    # success path strips. For a class with no agent_fields allowlist this
+    # fallback is the only gate, so every "_"-prefixed key must be dropped.
+    unless Parse::Client.client?
+      Parse.setup(server_url: "http://localhost:1337/parse",
+                  application_id: "t", api_key: "t")
+    end
+    agent = Parse::Agent.new(permissions: :readonly)
+    raw = {
+      "_id" => "z", "title" => "t",
+      "_acl" => { "userX" => { "r" => true } },
+      "_rperm" => ["userX"], "_wperm" => ["userX"],
+      "_p_author" => "_User$userX",
+    }
+    Parse::MongoDB.stub(:convert_documents_to_parse, ->(_docs, _c) { raise "boom" }) do
+      projector = Parse::Retrieval::AgentTool.source_projector(agent, "SemanticSearchDoc", nil)
+      out = projector.call(raw)
+      assert_equal "t", out["title"], "non-internal field is preserved"
+      %w[_id _acl _rperm _wperm _p_author].each do |k|
+        refute out.key?(k), "internal storage key #{k} must be dropped in the conversion-failure fallback"
+      end
+    end
+  ensure
+    Parse::Agent.suppress_master_key_warning = false
+  end
+
   # --- B4: total-token budget ---
 
   def test_token_budget_trims_and_signals

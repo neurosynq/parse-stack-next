@@ -13,7 +13,7 @@ class MongoDBMaxTimeMsIntegrationTest < Minitest::Test
   include ParseStackIntegrationTest
 
   # MongoDB URI for the Docker test containers (same as other direct integration tests)
-  MONGODB_URI = "mongodb://admin:password@localhost:27019/parse?authSource=admin"
+  MONGODB_URI = (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin")
 
   def setup
     super

@@ -209,10 +209,19 @@ module Parse
       def convert_to_parse_form(raw_doc, cname)
         Parse::MongoDB.convert_documents_to_parse([raw_doc], cname).first || raw_doc
       rescue StandardError
-        # If conversion is unavailable for any reason, fall back to the
-        # raw hit; project_object_to_allowlist still strips to the
-        # allowlist (fail-closed: unknown keys are dropped, not surfaced).
-        raw_doc
+        # Conversion failed for this hit. Do NOT surface the raw storage-form
+        # Mongo document: it carries internal metadata (_acl, _rperm/_wperm,
+        # storage-form _p_* pointers, _id, _created_at/_updated_at) that the
+        # success path strips. For a searchable class with NO agent_fields
+        # allowlist, project_object_to_allowlist downstream is a pass-through, so
+        # this fallback is the only thing standing between those keys and the
+        # LLM. Drop every storage-internal (underscore-prefixed) key. NOTE:
+        # reusing Parse::PipelineSecurity.strip_internal_fields is NOT enough —
+        # its denylist EXCLUDES _acl, which is exactly the field that discloses
+        # other principals' object ids and roles. The chunk's object_id is read
+        # from the raw doc before this transform runs, so dropping _id is
+        # harmless.
+        raw_doc.is_a?(Hash) ? raw_doc.reject { |k, _| k.to_s.start_with?("_") } : {}
       end
 
       # @!visibility private

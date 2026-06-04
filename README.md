@@ -5620,46 +5620,71 @@ The integration tests use Docker Compose to spin up a Parse Server instance with
 
 #### Docker Configuration
 
-The tests use the following Docker setup:
+The integration stack is defined in `scripts/docker/docker-compose.test.yml`
+(Parse Server, MongoDB, Redis, and the Parse Dashboard); the Atlas Search stack
+is in `scripts/docker/docker-compose.atlas.yml`. It is deliberately isolated
+from any other Parse test system on the same host — a dedicated Compose project,
+a private port block, and a dedicated database name — so two Parse stacks can
+run side by side without colliding.
 
-```yaml
-# docker-compose.test.yml
-version: '3.8'
-services:
-  mongo:
-    image: mongo:4.4
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: root
-      MONGO_INITDB_ROOT_PASSWORD: password
-  
-  redis:
-    image: redis:6-alpine
-  
-  parse-server:
-    image: parseplatform/parse-server:latest
-    environment:
-      PARSE_SERVER_APPLICATION_ID: testAppId
-      PARSE_SERVER_MASTER_KEY: testMasterKey
-      PARSE_SERVER_DATABASE_URI: mongodb://root:password@mongo:27017/parse?authSource=admin
-      PARSE_SERVER_REDIS_URL: redis://redis:6379
+Default host ports (each overridable via the env var shown):
+
+| Service              | Host port | Override env var      |
+|----------------------|-----------|-----------------------|
+| Parse Server         | 29337     | `PARSE_HOST_PORT`     |
+| MongoDB (test)       | 29017     | `MONGO_HOST_PORT`     |
+| Redis                | 29379     | `REDIS_HOST_PORT`     |
+| Parse Dashboard      | 29040     | `DASHBOARD_HOST_PORT` |
+| MongoDB Atlas Local  | 29020     | `ATLAS_HOST_PORT`     |
+
+Identity and naming:
+
+- Containers, network, and volumes are namespaced by the Compose project
+  `psnext-it`. Override the prefix with `PSNEXT_PREFIX` (e.g.
+  `PSNEXT_PREFIX=psnext-ci`) to run a second, fully separate copy of the stack.
+- Parse database name: `parse_stack_next_it`. Atlas database: `parse_atlas_test`.
+- Default credentials: app id `psnextItAppId`, master key `psnextItMasterKey`,
+  REST key `psnext-it-rest-key` (override with `PARSE_APP_ID`,
+  `PARSE_MASTER_KEY`, `PARSE_API_KEY`).
+
+Bring the stack up and verify:
+
+```bash
+docker compose -f scripts/docker/docker-compose.test.yml up -d
+curl -s http://localhost:29337/parse/health   # -> {"status":"ok"}
 ```
 
 #### Environment Variables
 
-Configure the following environment variables for testing:
+The defaults above are baked into the Compose file and the test helpers, so the
+suite is isolated out of the box. To re-point anything, export the variables in
+your shell before running (nothing auto-loads `.env.test` — it is a committed
+reference of the full set; `set -a; source .env.test; set +a` loads them all at
+once). There are two sides — the containers and the Ruby client — and when you
+move a port you set both so they agree:
 
 ```bash
-# Required for Docker tests
+# Required to route the suite at the Docker stack
 export PARSE_TEST_USE_DOCKER=true
 
-# Optional: Custom Parse Server configuration
-export PARSE_SERVER_URL=http://localhost:2337/parse
-export PARSE_APP_ID=testAppId
-export PARSE_MASTER_KEY=testMasterKey
-export PARSE_API_KEY=testRestKey
+# Compose side — what the containers publish / use
+export PSNEXT_PREFIX=psnext-it
+export PARSE_HOST_PORT=29337
+export MONGO_HOST_PORT=29017
+export REDIS_HOST_PORT=29379
+export PARSE_APP_ID=psnextItAppId
+export PARSE_MASTER_KEY=psnextItMasterKey
+export PARSE_API_KEY=psnext-it-rest-key
 
-# Optional: Redis configuration for cache tests
-export REDIS_URL=redis://localhost:6379
+# Client side — what the Ruby test suite connects to
+export PARSE_TEST_SERVER_URL=http://localhost:29337/parse
+export PARSE_TEST_APP_ID=psnextItAppId
+export PARSE_TEST_API_KEY=psnext-it-rest-key
+export PARSE_TEST_MASTER_KEY=psnextItMasterKey
+export PARSE_TEST_MONGO_URI="mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"
+export PARSE_TEST_REDIS_URL=redis://localhost:29379/0
+export PARSE_TEST_LIVE_QUERY_URL=ws://localhost:29337
+export ATLAS_URI="mongodb://localhost:29020/parse_atlas_test?directConnection=true"
 ```
 
 #### Troubleshooting
@@ -5672,9 +5697,13 @@ export REDIS_URL=redis://localhost:6379
    docker-compose --version
    ```
 
-2. **Port conflicts**: Stop other services using ports 1337, 27017, or 6379
+2. **Port conflicts**: The stack uses a dedicated `29xxx` block (29337 / 29017 /
+   29379 / 29040 / 29020) specifically to avoid colliding with a default Parse
+   setup (1337 / 27017 / 6379 / 4040). If something still holds one of those
+   ports, override it (for example `PARSE_HOST_PORT=29338`) or stop the
+   conflicting stack:
    ```bash
-   docker-compose -f docker-compose.test.yml down
+   docker compose -f scripts/docker/docker-compose.test.yml down
    ```
 
 3. **Permission errors**: Ensure Docker has proper permissions

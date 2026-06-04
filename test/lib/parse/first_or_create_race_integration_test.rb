@@ -328,11 +328,11 @@ class FirstOrCreateRaceTest < Minitest::Test
   def test_unique_index_on_dsl_provisions_floor_and_dedupes_race
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
     # Self-configure the Mongo reader + writer (mongo gem + reachable
-    # localhost:27019) so this floor test RUNS rather than skipping. Unlike the
+    # localhost:29017) so this floor test RUNS rather than skipping. Unlike the
     # two raw-driver 137 tests above — which gate on ambient `mongodb_writable?`
     # config and skip when none is present — the DSL apply path is the point of
     # this test, so it must be continuously verified, not silently skipped.
-    skip "Mongo unavailable for DSL apply path (need mongo gem + localhost:27019)" unless setup_dsl_floor_mongo!
+    skip "Mongo unavailable for DSL apply path (need mongo gem + localhost:29017)" unless setup_dsl_floor_mongo!
 
     with_parse_server do
       with_timeout(45, "unique_index_on DSL floor race") do
@@ -388,7 +388,7 @@ class FirstOrCreateRaceTest < Minitest::Test
   # engages. The writer URI is string-distinct (distinct appName) to satisfy
   # configure_writer's operator-safety check; verify_role: false because the
   # docker test user holds admin (production must run verify_role: true).
-  DSL_MONGO_URI  = "mongodb://admin:password@localhost:27019/parse?authSource=admin"
+  DSL_MONGO_URI  = (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin")
   DSL_WRITER_URI = DSL_MONGO_URI + "&appName=parse-stack-foc-dsl-writer"
 
   # Self-contained reader+writer config + mutation triple-gate (mirrors

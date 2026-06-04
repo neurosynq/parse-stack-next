@@ -15,7 +15,7 @@ end
 class LiveQueryIntegrationTest < Minitest::Test
   include ParseStackIntegrationTest
 
-  LIVE_QUERY_URL = "ws://localhost:2337"
+  LIVE_QUERY_URL = ENV["PARSE_TEST_LIVE_QUERY_URL"] || "ws://localhost:29337"
 
   def setup
     # Setup Parse client connection first (this is normally done by the module)
@@ -27,8 +27,8 @@ class LiveQueryIntegrationTest < Minitest::Test
     # Configure LiveQuery
     Parse::LiveQuery.configure do |config|
       config.url = LIVE_QUERY_URL
-      config.application_id = "myAppId"
-      config.client_key = "test-rest-key"
+      config.application_id = ENV["PARSE_TEST_APP_ID"] || "psnextItAppId"
+      config.client_key = ENV["PARSE_TEST_API_KEY"] || "psnext-it-rest-key"
     end
 
     # Clean up any existing test data

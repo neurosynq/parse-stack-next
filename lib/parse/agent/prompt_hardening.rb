@@ -79,6 +79,21 @@ module Parse
           end
         end
 
+        # agent_methods entries are surfaced to the LLM by format_schema exactly
+        # like field descriptions, and their :description / per-parameter
+        # description strings come from the same developer-authored DSL — so they
+        # get the same marker-neutralization / control-char strip / length cap.
+        # (format_methods emits symbol-keyed hashes; tolerate both forms.)
+        methods = out["agent_methods"] || out[:agent_methods]
+        if methods.is_a?(Array)
+          methods.each do |m|
+            next unless m.is_a?(Hash)
+            m["description"] = sanitize_description(m["description"]) if m["description"].is_a?(String)
+            m[:description]  = sanitize_description(m[:description])  if m[:description].is_a?(String)
+            sanitize_nested_descriptions!(m["parameters"] || m[:parameters])
+          end
+        end
+
         out
       end
 
@@ -148,6 +163,25 @@ module Parse
       end
 
       private
+
+      # Recursively run every `description` string nested in an agent method's
+      # JSON-Schema `parameters` through {#sanitize_description}, so per-parameter
+      # descriptions get the same hardening as field descriptions. Mutates in
+      # place; tolerates string- and symbol-keyed hashes and arbitrary nesting.
+      def sanitize_nested_descriptions!(node)
+        case node
+        when Hash
+          node.each do |k, v|
+            if (k == "description" || k == :description) && v.is_a?(String)
+              node[k] = sanitize_description(v)
+            else
+              sanitize_nested_descriptions!(v)
+            end
+          end
+        when Array
+          node.each { |e| sanitize_nested_descriptions!(e) }
+        end
+      end
 
       # The literal strings scrub_marker_injection neutralizes. The MCP
       # wrapper marker is resolved lazily to avoid a load-order dependency.

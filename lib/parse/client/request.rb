@@ -54,8 +54,14 @@ module Parse
       #     `X-Parse-Request-Id` header becomes safe for {Parse::Client} to
       #     transparently RETRY on an ambiguous failure (500/503/dropped
       #     connection) even when it is a POST or an atomic-op write — Parse
-      #     Server deduplicates the replay server-side, so the second delivery
-      #     is a no-op that returns the original result.
+      #     Server deduplicates the replay server-side, so the write applies AT
+      #     MOST ONCE.
+      #
+      #     The replay does NOT transparently return the original response,
+      #     though: Parse Server rejects the duplicate with error 159, which the
+      #     SDK raises as {Parse::Error::DuplicateRequestError}. A caller relying
+      #     on this retry must rescue that error (the original write already
+      #     landed) and re-fetch by its own key if it needs the result.
       #
       #     Default false. Sending the `X-Parse-Request-Id` header is harmless
       #     on its own, but ASSUMING the server deduplicates when it does not

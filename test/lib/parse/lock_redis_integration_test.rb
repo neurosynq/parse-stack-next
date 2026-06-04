@@ -26,7 +26,7 @@ require "digest"
 #  - Two Parse::Lock instances with DIFFERENT secrets but the same
 #    raw key do NOT serialize (HMAC keying isolates tenants).
 class LockRedisIntegrationTest < Minitest::Test
-  REDIS_URL = ENV["PARSE_TEST_REDIS_URL"] || "redis://localhost:6399/0"
+  REDIS_URL = ENV["PARSE_TEST_REDIS_URL"] || "redis://localhost:29379/0"
 
   def setup
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"

@@ -24,7 +24,7 @@ unless File.exist?(MANIFEST_PATH)
 end
 MANIFEST = JSON.parse(File.read(MANIFEST_PATH))
 
-MONGO_URI = ENV.fetch("ATLAS_URI", "mongodb://localhost:27020/#{MANIFEST['db']}?directConnection=true")
+MONGO_URI = ENV.fetch("ATLAS_URI", "mongodb://localhost:29020/#{MANIFEST['db']}?directConnection=true")
 INDEX_NAME = ENV.fetch("VECTOR_INDEX", MANIFEST["index_name"])
 COLL_NAME = MANIFEST["collection"].to_sym
 

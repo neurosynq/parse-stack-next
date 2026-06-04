@@ -27,7 +27,7 @@ class IdempotentRetryIntegrationTest < Minitest::Test
 
   def setup
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
-    skip "Parse Server not reachable at localhost:2337" unless Parse::Test::ServerHelper.setup
+    skip "Parse Server not reachable at localhost:29337" unless Parse::Test::ServerHelper.setup
     @prev_assume = Parse::Request.assume_server_idempotency
     Parse::Request.assume_server_idempotency = true
     @created = []

@@ -18,7 +18,7 @@
 #                       binding to a non-loopback host
 #
 # Why no fallback values: previously this script accepted
-# `ENV["PARSE_APP_ID"] || "myAppId"` and the equivalent for the master
+# `ENV["PARSE_APP_ID"] || "psnextItAppId"` and the equivalent for the master
 # key. A deployment that forgot to set the env var (typo'd name, missing
 # secret manager binding, container startup race) would silently boot
 # with the placeholder credentials documented in the README — credentials

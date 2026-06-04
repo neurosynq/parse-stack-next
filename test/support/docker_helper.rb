@@ -7,7 +7,7 @@ module Parse
   module Test
     class DockerHelper
       COMPOSE_FILE = "scripts/docker/docker-compose.test.yml"
-      CONTAINER_NAME = "parse-stack-test-server"
+      CONTAINER_NAME = "#{ENV["PSNEXT_PREFIX"] || "psnext-it"}-server"
       STARTUP_TIMEOUT = 30
 
       class << self
@@ -117,7 +117,7 @@ module Parse
         end
 
         def server_ready?
-          uri = URI("http://localhost:2337/parse/health")
+          uri = URI("#{ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse"}/health")
           response = Net::HTTP.get_response(uri)
           response.code == "200"
         rescue StandardError

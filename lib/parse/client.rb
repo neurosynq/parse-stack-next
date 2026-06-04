@@ -1146,10 +1146,12 @@ module Parse
     # idempotency is configured ({Parse::Request.assume_server_idempotency})
     # AND this request carries a stable `X-Parse-Request-Id` header, the
     # server deduplicates a replay, so even a POST or an atomic-op write is
-    # safe to retry — the second delivery is a no-op that returns the original
-    # result. The SDK sends the same request id on every retry (the header is
-    # set once and preserved across the `retry`), which is what makes the
-    # server-side dedup match.
+    # safe to retry — the write applies at most once. The replay is NOT a
+    # transparent success, though: Parse Server rejects the duplicate with
+    # error 159, surfaced as a raised {Parse::Error::DuplicateRequestError}
+    # the caller must rescue (the original write already landed). The SDK sends
+    # the same request id on every retry (the header is set once and preserved
+    # across the `retry`), which is what makes the server-side dedup match.
     #
     # Otherwise the conservative method/body heuristic applies: GET and DELETE
     # are idempotent; a full-object PUT update is idempotent ONLY when it

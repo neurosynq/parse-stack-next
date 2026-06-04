@@ -1833,11 +1833,26 @@ module Parse
         field     = scope[:field].to_s
         value     = scope[:value]
         # Parse Server returns camelCase field names on the wire (e.g. orgId for
-        # the Ruby field org_id). Check both forms so the gate works regardless
-        # of whether the record came from a real server or a test fake.
+        # the Ruby field org_id). A mongo-direct hit (semantic_search's raw
+        # $vectorSearch path) instead carries the field under its STORAGE column
+        # — which is the class's explicit `field_map` alias when one is declared,
+        # NOT the camelized form. Check all three forms (snake, naive-camel, and
+        # the field_map alias) so this gate resolves the scope column the SAME way
+        # the pre-search filter (Parse::Retrieval.wire_name) did. Otherwise a
+        # field_map'd scope field reads as nil here and fails closed on records
+        # that legitimately belong to the tenant. field_map values may be symbols,
+        # so stringify; an unregistered/system class (find_class -> nil) falls
+        # back to the snake/camel pair.
         camel_field = field.gsub(/_([a-z])/) { Regexp.last_match(1).upcase }
+        # Assign unconditionally (the modifier-if is the RHS, yielding nil when
+        # false) so neither local is ever read before initialization.
+        klass       = (Parse::Model.find_class(class_name) if defined?(Parse::Model))
+        mapped      = (klass.field_map[field.to_sym].to_s if klass.respond_to?(:field_map))
         rec_value   = if record.is_a?(Hash)
-            record.key?(field) ? record[field] : record[camel_field]
+            keys = [field, camel_field]
+            keys << mapped if mapped && !mapped.empty?
+            found = keys.find { |k| record.key?(k) }
+            record[found] if found
           end
         unless rec_value == value
           raise Parse::Agent::AccessDenied.new(

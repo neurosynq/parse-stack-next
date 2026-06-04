@@ -326,6 +326,25 @@ class MCPSubscriptionsManagerTest < Minitest::Test
     assert mgr.subscribe(session_id: "sess-2", uri: "parse://Post/count", agent: SubAgentStub.new)
   end
 
+  def test_global_session_cap
+    # Bound the number of DISTINCT sessions so an authenticated client opening
+    # many sessions (subscribe-without-stream, never DELETE) can't grow
+    # @sessions without limit.
+    @lq = FakeLQClient.new
+    mgr = M::Manager.new(supported: true, live_query_client: @lq,
+                         debounce_interval: 0, max_sessions: 2)
+    assert mgr.subscribe(session_id: "sess-1", uri: "parse://Post/count", agent: SubAgentStub.new)
+    assert mgr.subscribe(session_id: "sess-2", uri: "parse://Post/count", agent: SubAgentStub.new)
+    err = assert_raises(Parse::Agent::ValidationError) do
+      mgr.subscribe(session_id: "sess-3", uri: "parse://Post/count", agent: SubAgentStub.new)
+    end
+    assert_match(/Global subscription session limit/, err.message)
+    assert_equal 2, @lq.subscriptions.size, "no socket opens for the rejected new session"
+    # An EXISTING session can still add another distinct-URI subscription —
+    # the global cap only blocks NEW sessions.
+    assert mgr.subscribe(session_id: "sess-1", uri: "parse://Post/samples", agent: SubAgentStub.new)
+  end
+
   def test_subscribe_refuses_acl_user_agent_without_opening_socket
     mgr = build_manager
     agent = SubAgentStub.new(acl_user_scope: Object.new, acl_scope: Object.new)
@@ -493,6 +512,21 @@ class MCPSubscriptionsDispatcherTest < Minitest::Test
     assert_equal 0, @manager.subscription_count
   end
 
+  def test_resources_subscribe_session_gone_returns_error
+    # Manager#subscribe returns false when the listening stream was torn down
+    # mid-subscribe (session_gone). The dispatcher must surface a JSON-RPC error
+    # rather than a false empty-success ack — otherwise the client believes it is
+    # subscribed and waits forever for updates that will never arrive.
+    gone_mgr = Object.new
+    gone_mgr.define_singleton_method(:supported?) { true }
+    gone_mgr.define_singleton_method(:subscribe) { |**_| false }
+    res = call_method("resources/subscribe", { "uri" => "parse://Post/count" }, manager: gone_mgr)
+    assert_equal 200, res[:status]
+    refute res[:body].key?("result"), "must not return an empty success result on session_gone"
+    assert_equal(-32_602, res[:body]["error"]["code"])
+    assert_match(/listening stream/, res[:body]["error"]["message"])
+  end
+
   def test_resources_subscribe_bad_uri_is_invalid_params
     res = call_method("resources/subscribe", { "uri" => "parse://Post/schema" })
     assert_equal(-32_602, res[:body]["error"]["code"])
@@ -598,7 +632,27 @@ class MCPListeningStreamRackTest < Minitest::Test
     assert_equal 405, status
   end
 
+  def test_listening_stream_soft_cap_returns_503
+    # Listening streams are bounded separately from request SSE, reusing
+    # max_concurrent_dispatchers. With the cap at 1 and one stream already
+    # "open", a new GET listening stream is refused with 503.
+    app = Parse::Agent::MCPRackApp.new(subscription_manager: @manager,
+                                       max_concurrent_dispatchers: 1) { |_env| SubAgentStub.new }
+    Parse::Agent::MCPRackApp.adjust_listening_stream_count(1) # simulate one open stream
+    begin
+      status, = app.call(get_env(session_id: "sess-cap"))
+      assert_equal 503, status
+    ensure
+      Parse::Agent::MCPRackApp.adjust_listening_stream_count(-1)
+    end
+    # Below the cap again, the stream is admitted.
+    status, _h, body = app.call(get_env(session_id: "sess-cap"))
+    assert_equal 200, status
+    body.close
+  end
+
   def test_listening_body_delivers_published_update_then_tears_down_on_close
+    before = Parse::Agent::MCPRackApp.active_listening_stream_count
     body   = Body.new(@manager, "sess-1", 0, nil)
     chunks = Queue.new
     worker = Thread.new { body.each { |c| chunks << c } }
@@ -619,5 +673,9 @@ class MCPListeningStreamRackTest < Minitest::Test
     worker.join(2)
     assert sub.unsubscribed?, "close must tear down the session's LiveQuery subscription"
     assert_equal 0, @manager.subscription_count
+    # A real #each -> #close cycle must leave the concurrent-stream counter
+    # exactly balanced; drift here would silently break the soft cap (stuck high
+    # => locks out all streams; stuck low => stops protecting).
+    assert_equal before, Parse::Agent::MCPRackApp.active_listening_stream_count
   end
 end

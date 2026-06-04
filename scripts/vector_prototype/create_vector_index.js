@@ -10,7 +10,7 @@
 // fetch_embeddings.py.
 //
 // Run:
-//   mongosh "mongodb://localhost:27020/vector_prototype?directConnection=true" \
+//   mongosh "mongodb://localhost:29020/vector_prototype?directConnection=true" \
 //     scripts/vector_prototype/create_vector_index.js
 //
 // To switch to 1024-dim (voyage-multimodal-3 compat), set DIMS=1024

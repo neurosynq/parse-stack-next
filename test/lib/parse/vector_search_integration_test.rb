@@ -14,7 +14,7 @@ require "parse/vector_search"
 #   ./scripts/vector_prototype/run.sh
 #
 # Run:
-#   ATLAS_URI="mongodb://localhost:27020/vector_prototype?directConnection=true" \
+#   ATLAS_URI="mongodb://localhost:29020/vector_prototype?directConnection=true" \
 #     ruby -Ilib:test test/lib/parse/vector_search_integration_test.rb
 #
 # The fixture's manifest (`scripts/vector_prototype/fixture_manifest.json`)
@@ -24,7 +24,7 @@ class VectorSearchIntegrationTest < Minitest::Test
   MANIFEST_PATH = File.expand_path(
     "../../../../scripts/vector_prototype/fixture_manifest.json", __FILE__
   )
-  DEFAULT_URI = "mongodb://localhost:27020/vector_prototype?directConnection=true"
+  DEFAULT_URI = "mongodb://localhost:29020/vector_prototype?directConnection=true"
   ATLAS_URI = ENV["ATLAS_URI"] || DEFAULT_URI
 
   def self.manifest

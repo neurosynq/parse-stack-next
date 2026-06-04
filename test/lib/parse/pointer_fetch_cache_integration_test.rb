@@ -25,10 +25,10 @@ class PointerFetchCacheIntegrationTest < Minitest::Test
 
     # Setup Parse client
     Parse::Client.setup(
-      server_url: "http://localhost:2337/parse",
-      app_id: "myAppId",
-      api_key: "test-rest-key",
-      master_key: "myMasterKey",
+      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse",
+      app_id: ENV["PARSE_TEST_APP_ID"] || "psnextItAppId",
+      api_key: ENV["PARSE_TEST_API_KEY"] || "psnext-it-rest-key",
+      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "psnextItMasterKey",
     )
 
     # Store original caching settings
@@ -41,7 +41,7 @@ class PointerFetchCacheIntegrationTest < Minitest::Test
 
     # Check server availability
     begin
-      uri = URI("http://localhost:2337/parse/health")
+      uri = URI("#{ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse"}/health")
       response = Net::HTTP.get_response(uri)
       skip "Parse Server not available" unless response.code == "200"
     rescue StandardError => e

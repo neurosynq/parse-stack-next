@@ -519,10 +519,24 @@ Parse Server version and its `masterKeyIps` configuration.)
   the agent factory and keys delivery off the server-issued `Mcp-Session-Id`,
   which the client must keep secret — possession of a valid session id (plus a
   valid agent) is sufficient to attach. This matches the cancellation model.
-- **Per-session cap.** A client that subscribes but never opens (or later
-  drops) its listening stream leaves LiveQuery subscriptions running until the
-  session is torn down. A per-session ceiling (default 100, configurable on the
-  manager) bounds that footprint.
+- **Per-session and global caps.** A client that subscribes but never opens (or
+  later drops) its listening stream leaves LiveQuery subscriptions running until
+  the session is torn down. A per-session ceiling (default 100,
+  `max_subscriptions_per_session:` on the manager) bounds one session's
+  footprint, and a global ceiling on the number of distinct subscribing sessions
+  (default 10,000, `max_sessions:`) bounds total growth. The global cap is a
+  rejection cap (new sessions are refused with a JSON-RPC error once it is
+  reached) and fails closed.
+- **Concurrent listening streams are bounded separately from request SSE.**
+  `max_concurrent_dispatchers:` does **not**, by itself, bound the GET listening
+  streams used for resource subscriptions and notifications — those get their own
+  soft cap *equal to* `max_concurrent_dispatchers`. So the effective steady-state
+  ceiling across both surfaces is up to **2× `max_concurrent_dispatchers`** (up
+  to N request-scoped SSE dispatchers plus N listening streams). Size the value
+  with that 2× factor in mind (e.g. relative to your Puma `max_threads`). Leaving
+  it unset (the default `nil`) leaves both surfaces uncapped; the app logs a
+  one-time warning at construction when a streaming or subscription/notification
+  surface is enabled without a cap.
 
 ---
 

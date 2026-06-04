@@ -14,7 +14,7 @@ require "rake/testtask"
 # @return [Array(String, String, String, String)]
 #   server_url, application_id, api_key, master_key
 def mcp_credentials_or_abort!
-  server_url   = ENV["PARSE_SERVER_URL"] || "http://localhost:2337/parse"
+  server_url   = ENV["PARSE_SERVER_URL"] || "http://localhost:29337/parse"
   app_id       = ENV["PARSE_APP_ID"]
   rest_api_key = ENV["PARSE_API_KEY"]
   master_key   = ENV["PARSE_MASTER_KEY"]
@@ -23,9 +23,9 @@ def mcp_credentials_or_abort!
 
   if app_id.to_s.empty? || master_key.to_s.empty?
     if is_local
-      app_id       = (app_id.to_s.empty? ? "myAppId" : app_id)
+      app_id       = (app_id.to_s.empty? ? "psnextItAppId" : app_id)
       rest_api_key = (rest_api_key.to_s.empty? ? "myApiKey" : rest_api_key)
-      master_key   = (master_key.to_s.empty? ? "myMasterKey" : master_key)
+      master_key   = (master_key.to_s.empty? ? "psnextItMasterKey" : master_key)
     else
       abort "[Rakefile] PARSE_SERVER_URL=#{server_url} is not local; refusing to fall back to " \
             "placeholder credentials. Set PARSE_APP_ID and PARSE_MASTER_KEY explicitly."
@@ -121,7 +121,7 @@ namespace :test do
         system("PARSE_TEST_USE_DOCKER=true ruby -Ilib:test #{file}") || begin
           # A disruptive test may have left the server down on failure; bring
           # it back so a follow-up run / other tasks start from a clean state.
-          system("docker start parse-stack-test-server", out: IO::NULL, err: IO::NULL)
+          system("docker start #{ENV["PSNEXT_PREFIX"] || "psnext-it"}-server", out: IO::NULL, err: IO::NULL)
           exit(1)
         end
       end

@@ -104,6 +104,12 @@ module Parse
         "X-Accel-Buffering" => "no",
       }.freeze
 
+      # Process-wide live-listening-stream counter (see
+      # {.active_listening_stream_count}). Class-instance state shared across all
+      # MCPRackApp instances in the process.
+      @listening_stream_count = 0
+      @listening_stream_mutex = Mutex.new
+
       # Drop env keys that would have come from underscore-form HTTP header
       # names. The Rack-spec-compliant interpretation of HTTP headers maps
       # `X-MCP-API-Key` and `X_MCP_API_KEY` to the same env key
@@ -313,15 +319,19 @@ module Parse
             Parse::Agent::MCPSubscriptions::Manager.new(logger: @logger, supported: false)
           end
 
-        # Warn operators who enable streaming without a concurrency cap.
-        # An unbounded SSE endpoint with orphaned dispatcher threads is
-        # a practical DoS surface — a slow or hostile client opening
-        # connections faster than tools complete can exhaust the host's
-        # thread pool and downstream Parse connection pool. Leaving the
-        # default as `nil` (unlimited) preserves backward compatibility,
-        # but we tell the operator once at construction.
-        if streaming && @max_concurrent_dispatchers.nil?
-          line = "[Parse::Agent::MCPRackApp] streaming: true with max_concurrent_dispatchers: nil (unlimited). " \
+        # Warn operators who enable a streaming surface without a concurrency
+        # cap. Both request-scoped SSE (streaming:) and the long-lived GET
+        # listening stream (resource_subscriptions:/notifications:, which set
+        # @subscription_manager) spawn per-connection threads; an unbounded
+        # endpoint is a practical DoS surface — a slow or hostile client opening
+        # connections faster than they close can exhaust the host thread pool and
+        # downstream Parse connection pool. The cap bounds each surface
+        # SEPARATELY, so the effective ceiling is up to 2x max_concurrent_dispatchers
+        # across both. Leaving the default `nil` (unlimited) preserves backward
+        # compatibility, but we tell the operator once at construction.
+        if (streaming || @subscription_manager) && @max_concurrent_dispatchers.nil?
+          surface = streaming ? "streaming: true" : "resource_subscriptions/notifications"
+          line = "[Parse::Agent::MCPRackApp] #{surface} with max_concurrent_dispatchers: nil (unlimited). " \
                  "Set a finite cap (e.g. 100, or 2x your Puma max_threads) to bound the orphan-thread DoS surface. " \
                  "See docs/mcp_guide.md for sizing guidance."
           if @logger
@@ -378,6 +388,25 @@ module Parse
       # the `max_concurrent_dispatchers:` constructor option for that).
       def self.active_dispatcher_count
         Thread.list.count { |t| t[:parse_mcp_dispatcher] }
+      end
+
+      # Process-wide count of currently-open GET listening streams across all
+      # MCPRackApp instances. A listening stream is long-lived (the server→client
+      # notification channel) — each pins a server worker thread in #each plus a
+      # heartbeat thread — so it is bounded SEPARATELY from request-scoped SSE
+      # dispatchers (which #each, dispatch once, then close). Used as the soft
+      # cap in {#serve_listening_stream}. Maintained by {ListeningStreamBody}
+      # via {.adjust_listening_stream_count}; unlike a Thread.list scan this is
+      # an explicit counter because the heartbeat thread is intentionally not
+      # tagged as a dispatcher.
+      def self.active_listening_stream_count
+        @listening_stream_mutex.synchronize { @listening_stream_count }
+      end
+
+      # @api private — bump the live listening-stream counter by `delta`
+      #   (+1 when a stream begins iterating, -1 when it closes).
+      def self.adjust_listening_stream_count(delta)
+        @listening_stream_mutex.synchronize { @listening_stream_count += delta }
       end
 
       # Rack interface.
@@ -915,6 +944,19 @@ module Parse
           return [403, json_headers, [json_rpc_error(-32_600, "Mcp-Session-Id is owned by another principal")]]
         end
 
+        # Soft cap on concurrent listening streams, mirroring serve_sse's
+        # dispatcher cap. Listening streams are bounded SEPARATELY from
+        # request-scoped SSE dispatchers and reuse the same configured ceiling,
+        # so total streaming thread exposure can reach 2x max_concurrent_dispatchers
+        # (up to N request SSE + N listening streams), not N. Like serve_sse the
+        # check is best-effort (not lock-protected against the per-stream
+        # increment in #each), so a burst can briefly overshoot — acceptable for
+        # a soft cap.
+        if @max_concurrent_dispatchers &&
+           MCPRackApp.active_listening_stream_count >= @max_concurrent_dispatchers
+          return [503, json_headers, [json_rpc_error(-32_000, "server busy")]]
+        end
+
         body = ListeningStreamBody.new(@subscription_manager, session_id, @heartbeat_interval, @logger)
         [200, sse_headers, body]
       end
@@ -1434,6 +1476,7 @@ module Parse
           @queue              = Queue.new
           @heartbeat          = nil
           @closed             = false
+          @counted            = false
           @close_mutex        = Mutex.new
         end
 
@@ -1441,6 +1484,13 @@ module Parse
         # @yield [String] SSE-formatted event / comment strings.
         def each
           queue = @queue
+          # Count this stream against the concurrent-listening-stream soft cap.
+          # Incrementing here (in #each, not the constructor) means a body the
+          # Rack server never iterates — or a client that disconnects before
+          # iteration — never inflates the counter; the matching decrement is in
+          # #close, which #each's `ensure` always runs.
+          MCPRackApp.adjust_listening_stream_count(1)
+          @counted = true
           @manager.attach_listener(@session_id) do |notification|
             queue << format_event(notification)
           end
@@ -1463,6 +1513,9 @@ module Parse
             return if @closed
             @closed = true
           end
+          # Balance the #each increment exactly once (close is idempotent via
+          # @closed, and only #each sets @counted).
+          MCPRackApp.adjust_listening_stream_count(-1) if @counted
           @heartbeat&.kill
           @heartbeat = nil
           begin

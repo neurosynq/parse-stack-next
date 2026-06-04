@@ -79,6 +79,14 @@ module Parse
       # of the transport (`max_concurrent_dispatchers`, the pre-auth limiter).
       DEFAULT_MAX_SUBSCRIPTIONS_PER_SESSION = 100
 
+      # Default ceiling on the number of DISTINCT sessions holding subscriptions.
+      # The per-session cap above bounds one session's footprint, but nothing
+      # bounded how many sessions accumulate — an authenticated client that
+      # subscribes (which can happen before the GET stream opens) and never sends
+      # DELETE leaves the session in `@sessions` for the process lifetime. This
+      # caps that growth, mirroring SessionOwnerRegistry::DEFAULT_MAX_ENTRIES.
+      DEFAULT_MAX_SESSIONS = 10_000
+
       # Parse a resource URI into `[class_name, kind]`, enforcing that the kind
       # is LiveQuery-backed.
       #
@@ -306,11 +314,16 @@ module Parse
         #   subscriptions for one session. {#subscribe} raises
         #   {Parse::Agent::ValidationError} past this. See
         #   {DEFAULT_MAX_SUBSCRIPTIONS_PER_SESSION}.
+        # @param max_sessions [Integer] global ceiling on the number of distinct
+        #   sessions holding subscriptions. {#subscribe} raises
+        #   {Parse::Agent::ValidationError} when a NEW session would exceed it.
+        #   See {DEFAULT_MAX_SESSIONS}.
         def initialize(logger: nil, debounce_interval: DEFAULT_DEBOUNCE_INTERVAL,
                        notifier: nil, live_query_client: nil, supported: nil,
                        timer: nil,
                        live_query_admin_client: nil, live_query_scoped_client: nil,
-                       max_subscriptions_per_session: DEFAULT_MAX_SUBSCRIPTIONS_PER_SESSION)
+                       max_subscriptions_per_session: DEFAULT_MAX_SUBSCRIPTIONS_PER_SESSION,
+                       max_sessions: DEFAULT_MAX_SESSIONS)
           @logger             = logger
           @debounce_interval  = debounce_interval
           @notifier           = notifier || LocalNotifier.new
@@ -320,6 +333,7 @@ module Parse
           @supported_override = supported
           @timer              = timer
           @max_per_session    = max_subscriptions_per_session
+          @max_sessions       = max_sessions
           @client_mutex       = Mutex.new
           # session_id => { uri => { sub:, debouncer: } }
           @sessions           = Hash.new { |h, k| h[k] = {} }
@@ -427,6 +441,19 @@ module Parse
           # cap in the same critical section so a burst of distinct-URI
           # subscribes can't race past it.
           @mutex.synchronize do
+            # Global cap: bound the number of DISTINCT sessions so an
+            # authenticated client opening many sessions (subscribe-without-GET-
+            # stream, never DELETE) can't grow `@sessions` without limit. Checked
+            # BEFORE indexing `@sessions[session_id]`, which would auto-vivify the
+            # entry (`Hash.new { {} }`) and defeat the size check. This is a
+            # rejection cap (fails closed); the tradeoff is that a flood of orphan
+            # sessions could lock out NEW sessions until they are torn down or the
+            # process restarts — acceptable because every session requires a valid
+            # authenticated agent and the per-session cap still bounds each one.
+            if @max_sessions && !@sessions.key?(session_id) && @sessions.size >= @max_sessions
+              raise Parse::Agent::ValidationError,
+                    "Global subscription session limit reached (#{@max_sessions}). Try again later."
+            end
             subs = @sessions[session_id]
             return true if subs.key?(uri)
             if @max_per_session && subs.size >= @max_per_session
