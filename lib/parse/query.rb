@@ -99,7 +99,7 @@ module Parse
 
         begin
           response = Parse.client.schemas
-          schema_classes = response.success? ? response.result.dig("results")&.map { |cls| cls["className"] } || [] : []
+          schema_classes = response.success? ? response.results.map { |cls| cls["className"] } : []
           @known_parse_classes = (BUILT_IN_PARSE_CLASSES + schema_classes).uniq.freeze
         rescue Parse::Error, Faraday::Error => e
           # Don't cache the fallback — let the next call retry the fetch once

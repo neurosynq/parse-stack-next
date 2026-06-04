@@ -1,6 +1,87 @@
 ## parse-stack-next Changelog
 
-### 5.1.2
+### 5.2.0
+
+#### Retrieval layer — `Parse::Retrieval` (`Parse::RAG`)
+
+A safe-by-default retrieval-augmented-generation path on top of the existing
+vector-search stack. `Parse::Retrieval.retrieve` embeds a natural-language
+query, runs Atlas `$vectorSearch` through the existing ACL/CLP-enforcing
+`find_similar`, and splits each retrieved document's text field into scored,
+citable chunks. Chunking is a presentation step applied after retrieval —
+embedding remains one-vector-per-record, so every chunk inherits its parent
+document's single score.
+
+- **NEW**: `Parse::Retrieval::Chunker::FixedSizeOverlap(size:, overlap:, by:, max_chunks_per_document:)`
+  — a fixed-size sliding-window chunker with overlap, `by: :chars` (default) or
+  `by: :tokens`. Subclass `Parse::Retrieval::Chunker::Base` for custom
+  strategies. The `max_chunks_per_document` cap (default 200) truncates with a
+  signal rather than raising, bounding the one-document-to-many-chunks
+  amplification surface. (`lib/parse/retrieval/chunker.rb`)
+- **NEW**: `Parse::Retrieval.retrieve(query:, klass:, field:, k:, filter:, vector_filter:, chunker:, tenant_scope:, score_quantize:, **scope_opts)`
+  returns `Array<Parse::Retrieval::Chunk>` (`{ id, score, content, source, metadata }`).
+  ACL is enforced mongo-direct inside `find_similar`; scope kwargs
+  (`session_token:` / `acl_user:` / `acl_role:` / `master:`) pass through. A
+  tenant scope is merged into the Atlas pre-filter, closing the cross-tenant
+  existence side channel. (`lib/parse/retrieval/retriever.rb`)
+- **NEW**: `agent_searchable field:, filter_fields:` model macro opts a class in
+  to the agent retrieval tool and declares which fields an agent may filter on.
+  (`lib/parse/agent/metadata_dsl.rb`)
+- **NEW**: `semantic_search` agent tool (`permission: :readonly`,
+  `client_safe: true`) routing through `Parse::Retrieval.retrieve` with the full
+  agent security envelope: searchable-class allowlist, recursive underscore-key
+  refusal and filter-field allowlist on caller input, `field_allowlist`
+  projection plus tenant-scope re-assertion on every returned record, and score
+  quantization in non-admin contexts. (`lib/parse/retrieval/agent_tool.rb`)
+- **NEW**: `Parse::RAG` is a discoverability alias for `Parse::Retrieval`.
+- **NEW**: `rerank:` and `hybrid:` are reserved on `retrieve` and raise
+  `NotImplementedError` if supplied, locking the API shape for later releases.
+
+#### MCP elicitation — human-in-the-loop approval for destructive operations
+
+`:write` / `:admin` tier tool calls can now require human approval before they
+run, using the MCP 2025-06-18 spec-native `elicitation/create` channel. The
+server sends the proposed dry-run diff to the client over the listening stream
+and blocks until the approver accepts or rejects.
+
+- **NEW**: `Parse::Agent.require_approval_for = [:write, :admin]` opts tiers into
+  approval. Off by default, so existing clients are unaffected.
+- **NEW**: A pluggable approval gate (`Parse::Agent#approval_gate`) consulted by
+  `Parse::Agent#execute`, reachable on the non-MCP path and unit-testable with a
+  fake approver. `Parse::Agent::MCPElicitationGate` is the spec-native
+  implementation; `Parse::Agent::NullGate` (the default) approves.
+  (`lib/parse/agent/approval_gate.rb`)
+- **NEW**: `call_method` resolves the *effective* tier from the target
+  `agent_method`'s declared permission, so write/admin methods invoked through
+  the readonly `call_method` tool are gated correctly. The approval diff reuses
+  the existing dry-run preview.
+- **NEW**: MCPRackApp captures the client's `elicitation` capability at
+  `initialize`, routes the client's reply (a method-less JSON-RPC response) into
+  a session-bound pending registry, and accepts an `approval_timeout:`.
+  (`lib/parse/agent/mcp_rack_app.rb`, `lib/parse/agent/mcp_dispatcher.rb`,
+  `lib/parse/agent/mcp_subscriptions.rb`)
+- **SECURITY**: fails closed — when approval is required but the client did not
+  advertise the capability, no listening stream is open, the transport is
+  non-streaming, or the approver times out, the destructive operation is
+  refused, never silently executed. Replies are session-bound so one session
+  cannot answer another's prompt.
+
+#### Expanded integration test coverage
+
+- **IMPROVED**: Added end-to-end coverage for cloud-function error scenarios —
+  a bare cloud throw, a typed `Parse.Error`, and an application-defined error
+  code all surface as `Parse::Error::CloudCodeError` with the wire code,
+  message, and HTTP status preserved, and a `beforeSave` validation rejection
+  propagates to the object save path.
+  (`test/lib/parse/cloud_function_errors_integration_test.rb`)
+- **IMPROVED**: Added "disruptive" integration tests that exercise a real Parse
+  Server outage and restart against a live container: connectivity predicates
+  flip to false and recover, in-flight requests raise a connection-class error,
+  and a registered webhook survives a server restart with idempotent
+  re-registration. Run via `rake test:integration:disruptive` so they never
+  interleave with the rest of the suite.
+  (`test/lib/parse/network_failure_disruptive_test.rb`,
+  `test/lib/parse/webhook_restart_disruptive_test.rb`)
 
 #### `unique_index_on` — declarative correctness floor for `first_or_create!`
 
@@ -74,10 +155,12 @@ actually deliver.
   master-key authority. Because the admin LiveQuery client backfills the
   process-global master key, an unprivileged / client-mode agent (no master key
   on its own client) in a no-scope posture is now refused rather than allowed to
-  borrow the global key for an ACL-bypassing admin socket; the subscribe and
-  cap checks are also re-validated under the lock after the network subscribe so
-  a torn-down session can't be resurrected into a leaked socket.
-  (`lib/parse/agent/mcp_subscriptions.rb`)
+  borrow the global key for an ACL-bypassing admin socket. Symmetrically, a
+  session-token subscription is refused if the shared scoped LiveQuery client is
+  itself an admin connection (`config.use_master_key = true`), so it can never
+  ride an ACL-bypassing socket. The subscribe and cap checks are also
+  re-validated under the lock after the network subscribe so a torn-down session
+  can't be resurrected into a leaked socket. (`lib/parse/agent/mcp_subscriptions.rb`)
 - **NEW**: only `count` and `samples` resources are subscribable; `schema` is
   rejected because schema changes are not LiveQuery events. A per-session
   subscription cap (default 100) bounds the footprint of a client that

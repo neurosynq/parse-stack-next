@@ -4,7 +4,7 @@
 require_relative "../../test_helper"
 require_relative "../../support/test_server"
 
-# Live integration coverage for the migration wire-name fix (5.1.2).
+# Live integration coverage for the migration wire-name fix (5.2.0).
 #
 # Regression target: the migrator previously derived every wire column with
 # `camelize(:lower)`, which ignored custom `field:` mappings — so a model with

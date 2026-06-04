@@ -355,6 +355,19 @@ module Parse
           @notifier.respond_to?(:listener?) ? @notifier.listener?(session_id) : false
         end
 
+        # Push an arbitrary JSON-RPC message (notification OR a
+        # server-initiated request carrying an `id`, e.g.
+        # `elicitation/create`) onto the session's listening stream.
+        # Returns false when no stream is attached.
+        #
+        # @param session_id [String]
+        # @param message_hash [Hash]
+        # @return [Boolean]
+        def publish(session_id, message_hash)
+          return false unless @notifier.respond_to?(:publish)
+          @notifier.publish(session_id, message_hash)
+        end
+
         # Tear down a session: unregister its listener and stop every LiveQuery
         # subscription it opened. Called when the listening stream closes or the
         # session is terminated (DELETE).

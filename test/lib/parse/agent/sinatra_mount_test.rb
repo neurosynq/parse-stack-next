@@ -43,7 +43,7 @@ module SinatraMountDispatcherStub
       @original = Parse::Agent::MCPDispatcher.method(:call)
       @installed = true
 
-      Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil, subscription_manager: nil|
+      Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil, subscription_manager: nil, **_extra|
         {
           status: 200,
           body: {

@@ -3,7 +3,7 @@
 
 require_relative "../../../test_helper"
 
-# Regression coverage for Parse::Client#request retry behavior (5.1.2).
+# Regression coverage for Parse::Client#request retry behavior (5.2.0).
 #
 # Two properties are pinned here:
 #

@@ -44,6 +44,11 @@ module Parse
       @tenant_scope_bypasses = {}
       @tenant_scope_bypass_mutex = Mutex.new
 
+      # Thread-safe storage for `agent_searchable` opt-ins.
+      # Maps parse_class_name => { field: Symbol, filter_fields: Array<Symbol> }
+      @searchable_classes = {}
+      @searchable_mutex = Mutex.new
+
       # Register a class as visible to agents.
       # @param klass [Class] the model class
       def register_visible_class(klass)
@@ -579,6 +584,89 @@ module Parse
         @tenant_scope_bypass_mutex.synchronize do
           @tenant_scope_bypasses[class_name.to_s] = bypass_proc
         end
+      end
+
+      # ============================================================
+      # Searchable Registry (semantic_search opt-in)
+      # ============================================================
+
+      # Register a class as searchable via the `semantic_search` tool.
+      #
+      # @param class_name [String] the Parse class name
+      # @param field [Symbol] the :vector property to search
+      # @param filter_fields [Array<Symbol>] fields the agent may filter on
+      def register_searchable(class_name, field:, filter_fields: [])
+        @searchable_mutex.synchronize do
+          @searchable_classes[class_name.to_s] = {
+            field: field.to_sym,
+            filter_fields: Array(filter_fields).map(&:to_sym),
+          }
+        end
+      end
+
+      # @param class_name [String]
+      # @return [Hash, nil] { field:, filter_fields: } or nil if not opted in.
+      def searchable_rule(class_name)
+        @searchable_mutex.synchronize { @searchable_classes[class_name.to_s] }
+      end
+
+      # @param class_name [String]
+      # @return [Symbol, nil] the searchable vector field, or nil.
+      def searchable_field(class_name)
+        searchable_rule(class_name)&.fetch(:field, nil)
+      end
+
+      # @param class_name [String]
+      # @return [Array<Symbol>] the declared filter-field allowlist.
+      def searchable_filter_fields(class_name)
+        searchable_rule(class_name)&.fetch(:filter_fields, []) || []
+      end
+
+      # @return [Boolean] true if any class declares agent_tenant_scope.
+      def any_tenant_scope?
+        @tenant_scope_mutex.synchronize { !@tenant_scope_rules.empty? }
+      end
+
+      # Resolve a class name to its model class for `semantic_search`,
+      # enforcing the three opt-in / safety gates. Called at dispatch
+      # time (all classes loaded), which is why the tenant-scope cross-
+      # check is order-independent.
+      #
+      # @param class_name [String]
+      # @return [Class] the resolved Parse::Object subclass.
+      # @raise [Parse::Agent::ValidationError] when the class did not opt
+      #   in via `agent_searchable` (a caller/LLM mistake).
+      # @raise [Parse::Agent::AccessDenied] when the class is
+      #   `agent_hidden` (kind: :hidden_class).
+      # @raise [Parse::Agent::MissingTenantScope] when a tenant-aware
+      #   deployment has a searchable class without its own tenant scope.
+      def resolve_searchable!(class_name)
+        name = class_name.to_s
+        rule = searchable_rule(name)
+        if rule.nil?
+          raise Parse::Agent::ValidationError,
+                "Class '#{name}' is not registered for semantic search. " \
+                "Declare `agent_searchable field: :<vector_field>` on the model."
+        end
+        if hidden?(name)
+          raise Parse::Agent::AccessDenied.new(
+            name, "Class '#{name}' is not accessible to this agent.",
+            kind: :hidden_class,
+          )
+        end
+        if any_tenant_scope? && tenant_scope_rule(name).nil?
+          raise Parse::Agent::MissingTenantScope,
+                "Class '#{name}' is searchable but declares no agent_tenant_scope " \
+                "while other classes do. Refusing to expose an un-scoped searchable " \
+                "surface in a tenant-aware deployment; add agent_tenant_scope to '#{name}'."
+        end
+        klass = find_model_class(name)
+        unless klass.is_a?(Class) && klass.respond_to?(:find_similar)
+          raise Parse::Agent::ValidationError,
+                "Class '#{name}' is registered searchable but no Parse::Object model " \
+                "with a :vector property could be resolved."
+        end
+        klass
       end
 
       # Return the tenant scope rule for a class name, or nil if none declared.

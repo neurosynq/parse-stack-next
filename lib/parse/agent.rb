@@ -20,6 +20,7 @@ require_relative "agent/result_formatter"
 require_relative "agent/pipeline_validator"
 require_relative "agent/rate_limiter"
 require_relative "agent/cancellation_token"
+require_relative "agent/approval_gate"
 require_relative "agent/describe"
 
 # Only load MCP server when explicitly enabled
@@ -179,6 +180,26 @@ module Parse
       #   Individual model classes may opt out via `agent_allow_collscan true`.
       #   @return [Boolean] true if COLLSCAN refusal is active (default: false)
       attr_accessor :refuse_collscan
+
+      # The effective tiers (`:write` / `:admin`) that require human
+      # approval before a destructive tool runs. Default `[]` (off, so
+      # existing clients are unaffected). Has teeth only when a real
+      # approval gate is installed on the agent — the MCP transport
+      # installs an {Parse::Agent::MCPElicitationGate} per session; an
+      # embedder on the non-MCP path installs their own gate. With the
+      # default {Parse::Agent::NullGate}, the gate approves everything.
+      #
+      #   Parse::Agent.require_approval_for = [:write, :admin]
+      #
+      # @return [Array<Symbol>]
+      def require_approval_for
+        @require_approval_for ||= []
+      end
+
+      # @param tiers [Array<Symbol>, Symbol, nil]
+      def require_approval_for=(tiers)
+        @require_approval_for = Array(tiers).map(&:to_sym)
+      end
 
       # @!attribute [rw] expose_explain
       #   When false (default), COLLSCAN refusal responses omit the winning_plan
@@ -717,6 +738,18 @@ module Parse
     #   observe cancellation via {#cancelled?}, not by reading this
     #   accessor.
     attr_accessor :cancellation_token
+
+    # @return [Parse::Agent::ApprovalGate] the installed approval gate.
+    #   Defaults to a shared {NullGate} (approves everything). The MCP
+    #   dispatcher installs an {MCPElicitationGate} per `tools/call` and
+    #   restores the prior gate in an ensure block, mirroring how
+    #   `progress_callback` / `cancellation_token` are threaded. An
+    #   embedder on the non-MCP path may assign any object responding to
+    #   `#review`.
+    def approval_gate
+      @approval_gate ||= Parse::Agent::NullGate.new
+    end
+    attr_writer :approval_gate
 
     # @return [Boolean] true if the active cancellation token has been
     #   tripped; false otherwise. Returns false when no token is
@@ -1943,6 +1976,31 @@ module Parse
                  "process is a better fit than agent access.",
                  error_code: :access_denied,
                )
+      end
+
+      # Human-in-the-loop approval gate. Runs after the env-gates (so a
+      # tier that isn't enabled never reaches a human) and before
+      # before_tool_call / the instrument block (a denied approval never
+      # fires parse.agent.tool_call, matching the other pre-run refusals).
+      # Cheap no-op unless an opt-in tier is configured.
+      approval_tiers = Parse::Agent.require_approval_for
+      unless approval_tiers.empty?
+        eff_perm = effective_permission_for(tool_name, kwargs)
+        if approval_tiers.include?(eff_perm)
+          preview  = build_approval_preview(tool_name, kwargs)
+          decision = approval_gate.review(
+            tool_name: tool_name,
+            effective_permission: eff_perm,
+            preview: preview,
+            agent: self,
+          )
+          unless decision.approved?
+            return error_response(
+              decision.reason || "Operation '#{tool_name}' requires approval and was not approved.",
+              error_code: :approval_denied,
+            )
+          end
+        end
       end
 
       # Trigger before_tool_call callbacks
@@ -3388,6 +3446,53 @@ module Parse
       @operation_log.shift if @operation_log.size > @max_log_size
     end
 
+    # Resolve the *effective* permission tier of a tool call. For
+    # `call_method` (which is itself `:readonly`) this is the declared
+    # tier of the TARGET agent_method — without this, write/admin methods
+    # invoked through call_method would bypass the approval gate.
+    #
+    # @return [Symbol] :readonly / :write / :admin (/ :unknown)
+    def effective_permission_for(tool_name, kwargs)
+      if tool_name.to_sym == :call_method
+        class_name  = kwargs[:class_name] || kwargs["class_name"]
+        method_name = kwargs[:method_name] || kwargs["method_name"]
+        if class_name && method_name
+          klass = (Parse::Model.find_class(class_name.to_s) rescue nil)
+          if klass.respond_to?(:agent_method_info)
+            info = klass.agent_method_info(method_name.to_sym)
+            return (info && info[:permission]) || :readonly
+          end
+        end
+        return :readonly
+      end
+      Parse::Agent::Tools.permission_for(tool_name)
+    end
+
+    # Build the dry-run diff shown to the approver. For call_method this
+    # reuses the existing dry-run preview (the method author's when it
+    # declares supports_dry_run, otherwise the universal `would_call`
+    # envelope) by invoking with dry_run: true — no side effects. For any
+    # other tool it falls back to a sanitized intent hash.
+    def build_approval_preview(tool_name, kwargs)
+      if tool_name.to_sym == :call_method
+        # The dry-run flag lives inside call_method's `arguments:` hash
+        # (not a top-level kwarg). Injecting it produces the method
+        # author's preview (supports_dry_run) or the universal
+        # `would_call` envelope (which never invokes the body).
+        existing_args = (kwargs[:arguments] || kwargs["arguments"] || {})
+        preview_kwargs = kwargs.merge(arguments: existing_args.merge("dry_run" => true))
+        begin
+          Parse::Agent::Tools.invoke(self, :call_method, **preview_kwargs)
+        rescue StandardError => e
+          { tool: "call_method", preview_error: e.message,
+            args: kwargs.reject { |k, _| SENSITIVE_LOG_KEYS.include?(k) } }
+        end
+      else
+        { tool: tool_name.to_s,
+          args: kwargs.reject { |k, _| SENSITIVE_LOG_KEYS.include?(k) } }
+      end
+    end
+
     def error_response(message, error_code: nil, retry_after: nil, details: nil)
       entry = {
         error: message,
@@ -3444,3 +3549,9 @@ Parse::Product.agent_hidden if defined?(Parse::Product)
 Parse::Session.agent_hidden if defined?(Parse::Session)
 Parse::JobStatus.agent_hidden if defined?(Parse::JobStatus)
 Parse::JobSchedule.agent_hidden if defined?(Parse::JobSchedule)
+
+# Register the `semantic_search` agent tool. Loaded last so that
+# Parse::Agent::Tools (TOOL_DEFINITIONS collision check), Parse::Retrieval
+# (loaded with the model layer), and Parse::Object + MetadataDSL are all
+# present before the registration runs.
+require_relative "retrieval/agent_tool"

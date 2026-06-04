@@ -82,6 +82,12 @@ module Parse
       # Default heartbeat interval in seconds when streaming is enabled.
       DEFAULT_HEARTBEAT_INTERVAL = 2
 
+      # Seconds to wait for a human's elicitation reply before failing
+      # closed (refusing the destructive op). Generous by default — a
+      # human-in-the-loop approver needs time the tool timeout doesn't
+      # allow. Tune via `approval_timeout:`.
+      DEFAULT_APPROVAL_TIMEOUT = 300
+
       # Standard Content-Type for all JSON responses. Frozen template — call
       # {#json_headers} to obtain a per-response mutable copy that composes
       # with Rack middleware that decorates response headers (e.g. Sinatra's
@@ -231,6 +237,7 @@ module Parse
                      require_custom_header: nil,
                      resource_subscriptions: false,
                      subscription_manager: nil,
+                     approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
                      health_path: nil, &block)
         if agent_factory && block
           raise ArgumentError, "Provide agent_factory: OR a block, not both"
@@ -259,6 +266,17 @@ module Parse
         # registry does not span multiple MCPRackApp mount points within
         # a process, nor multiple processes in a clustered deployment.
         @cancellation_registry      = CancellationRegistry.new
+
+        # Elicitation (human-in-the-loop approval) state, shared across
+        # this app's requests and its GET listening streams. The
+        # capability registry records (per session) whether the client
+        # advertised `elicitation` at initialize; the pending registry
+        # holds server→client requests awaiting a reply. Both are cheap
+        # and always present; they only do work when
+        # Parse::Agent.require_approval_for opts a tier in.
+        @elicitation_capabilities   = Parse::Agent::ClientCapabilityRegistry.new
+        @pending_elicitations       = Parse::Agent::PendingElicitationRegistry.new
+        @approval_timeout           = approval_timeout
 
         # Resource-subscription coordinator. An injected manager wins; else a
         # default in-process manager when the operator opted in. nil disables
@@ -367,6 +385,11 @@ module Parse
             return [400, json_headers, [json_rpc_error(-32_600, "Invalid Mcp-Session-Id")]]
           end
           @cancellation_registry.cancel_all_for(clean_sid, reason: :session_terminated)
+          # Wake any tool thread blocked on an elicitation reply for this
+          # session (it returns `unavailable` → fail closed) and drop the
+          # session's cached elicitation capability.
+          @pending_elicitations.abort_all_for(clean_sid, :session_terminated)
+          @elicitation_capabilities.forget(clean_sid)
           # Tear down any resource subscriptions and the listening stream
           # bound to this session so a terminated session leaves no LiveQuery
           # sockets behind.
@@ -449,7 +472,12 @@ module Parse
         #     amplifies into a Parse Server load problem. Empty-object
         #     and missing-method requests cannot possibly be valid
         #     JSON-RPC, so we shortcut to -32600 (Invalid Request).
-        unless body.is_a?(Hash) && body["method"].is_a?(String) && !body["method"].empty?
+        #     A method-less JSON-RPC RESPONSE ({jsonrpc,id,result|error}) is
+        #     NOT malformed: it is the client's reply to a server-issued
+        #     elicitation/create request. Let it through here; it is routed
+        #     (session-bound) after the agent_factory resolves the session.
+        unless (body.is_a?(Hash) && body["method"].is_a?(String) && !body["method"].empty?) ||
+               elicitation_reply?(body)
           return [400, json_headers, [json_rpc_error(-32_600, "Invalid Request")]]
         end
 
@@ -468,7 +496,8 @@ module Parse
         #     initialize against this transport instance (e.g. a
         #     reconnecting client cancelling a pre-disconnect request).
         unless body["method"] == "initialize" ||
-               body["method"] == "notifications/cancelled"
+               body["method"] == "notifications/cancelled" ||
+               elicitation_reply?(body)
           requested = env["HTTP_MCP_PROTOCOL_VERSION"]
           if requested.is_a?(String) && !requested.empty? &&
              !Parse::Agent::MCPDispatcher::SUPPORTED_PROTOCOL_VERSIONS.include?(requested)
@@ -525,6 +554,28 @@ module Parse
           agent.correlation_id = SecureRandom.uuid
         end
 
+        # 5b-ii. Capture the client's elicitation capability at initialize.
+        #     The server reads (does not advertise) the client's
+        #     `capabilities.elicitation`; the approval gate consults this
+        #     per session before attempting a server→client prompt.
+        if body.is_a?(Hash) && body["method"] == "initialize" &&
+           agent.respond_to?(:correlation_id) && agent.correlation_id
+          supported = !!(body.dig("params", "capabilities", "elicitation"))
+          @elicitation_capabilities.set(agent.correlation_id, supported)
+        end
+
+        # 5b-iii. Elicitation reply ingress. A method-less JSON-RPC
+        #     RESPONSE is the client's answer to a server-issued
+        #     elicitation/create. Route it into the pending registry,
+        #     session-bound by the same `correlation_id` the cancellation
+        #     path uses, so one session can never answer another's prompt.
+        #     Failures (no correlation_id, no match) are silent 202 no-ops
+        #     to avoid a probe oracle — exactly like notifications/cancelled.
+        if elicitation_reply?(body)
+          route_elicitation_reply(agent, body)
+          return [202, json_headers, [""]]
+        end
+
         # 5c. notifications/cancelled — special-cased BEFORE the dispatcher.
         #     A JSON-RPC notification has no `id`, expects no response
         #     body, and must trip the in-flight request whose
@@ -569,10 +620,69 @@ module Parse
       # @param body  [Hash] parsed JSON-RPC request body.
       # @param agent [Parse::Agent] authenticated agent.
       # @return [Array] Rack triple with Array<String> body.
+      # True when `body` is a JSON-RPC RESPONSE (no "method"; carries an
+      # "id" plus "result" or "error") — the client's reply to a
+      # server-issued elicitation/create request.
+      def elicitation_reply?(body)
+        body.is_a?(Hash) && !body.key?("method") && body.key?("id") &&
+          (body.key?("result") || body.key?("error"))
+      end
+
+      # Route an elicitation reply into the pending registry, bound to the
+      # answering session's correlation id. Silent no-op on any miss.
+      def route_elicitation_reply(agent, body)
+        correlation_id = agent.respond_to?(:correlation_id) ? agent.correlation_id : nil
+        elic_id = body["id"]
+        return if correlation_id.nil? || elic_id.nil?
+        @pending_elicitations.deliver(correlation_id, elic_id, map_elicitation_action(body))
+      end
+
+      # Map an elicitation reply envelope to an approval action symbol.
+      # An `error` reply, an unknown/declined action, or an `accept` whose
+      # `content.approve` is explicitly false all map toward refusal.
+      def map_elicitation_action(body)
+        return :cancel if body.key?("error")
+        result = body["result"]
+        return :cancel unless result.is_a?(Hash)
+        case result["action"]
+        when "accept"
+          content = result["content"]
+          if content.is_a?(Hash) && content.key?("approve") && content["approve"] == false
+            :decline
+          else
+            :accept
+          end
+        when "decline"
+          :decline
+        else
+          :cancel
+        end
+      end
+
+      # Build the per-request MCP elicitation approval gate, or nil when no
+      # tier opts in (the common path). The gate self-fails-closed: with no
+      # subscription manager (no GET stream / non-streaming transport) its
+      # listener check returns false, so a required approval is REFUSED
+      # rather than silently executed.
+      def build_approval_gate(agent)
+        return nil if Parse::Agent.require_approval_for.empty?
+        return nil unless agent.respond_to?(:correlation_id)
+        mgr = @subscription_manager
+        Parse::Agent::MCPElicitationGate.new(
+          correlation_id:   agent.correlation_id,
+          pending:          @pending_elicitations,
+          publish:          ->(cid, req) { mgr ? !!mgr.publish(cid, req) : false },
+          capability_check: ->(cid) { @elicitation_capabilities.get(cid) },
+          listener_check:   ->(cid) { mgr ? mgr.listener?(cid) : false },
+          timeout:          @approval_timeout,
+        )
+      end
+
       def serve_json(body, agent)
         result = Parse::Agent::MCPDispatcher.call(
           body: body, agent: agent, logger: @logger,
           subscription_manager: @subscription_manager,
+          approval_gate: build_approval_gate(agent),
         )
         headers = json_headers
         merge_session_header!(headers, body, agent)
@@ -656,6 +766,7 @@ module Parse
             progress_callback:    progress_callback,
             cancellation_token:   cancellation_token,
             subscription_manager: @subscription_manager,
+            approval_gate:        build_approval_gate(agent),
           )
         end
 

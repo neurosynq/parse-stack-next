@@ -594,6 +594,55 @@ module Parse
           Parse::Agent::MetadataRegistry.register_tenant_scope_bypass(parse_class_name, block)
         end
 
+        # Opt a class in to the `semantic_search` agent tool.
+        #
+        # Declares which `:vector` property the tool searches and which
+        # fields an LLM may constrain via the tool's `filter:` /
+        # `vector_filter:` inputs. Per-field opt-in is required:
+        # multimodal classes can carry several vector fields, and
+        # `agent_searchable` opens exactly the one named.
+        #
+        # @example
+        #   class KnowledgeArticle < Parse::Object
+        #     property :body, :string
+        #     property :embedding, :vector, dimensions: 1536, provider: :openai
+        #     embed :title, :body, into: :embedding
+        #     agent_searchable field: :embedding, filter_fields: %i[published category]
+        #   end
+        #
+        # @param field [Symbol] the `:vector` property the tool searches.
+        # @param filter_fields [Array<Symbol>] fields the agent may pass
+        #   in `filter:` / `vector_filter:`. Anything not listed is
+        #   refused at the tool boundary. Defaults to none (the agent may
+        #   only run an unfiltered query plus the enforced tenant scope).
+        # @raise [ArgumentError] when `field` is not a declared `:vector`
+        #   property on the class.
+        def agent_searchable(field:, filter_fields: [])
+          parse_class_name = respond_to?(:parse_class) ? parse_class : name
+          field_sym = field.to_sym
+          if respond_to?(:vector_properties) && !vector_properties.key?(field_sym)
+            raise ArgumentError,
+                  "agent_searchable field: :#{field_sym} is not a declared :vector property " \
+                  "on #{parse_class_name} (declared: #{vector_properties.keys.inspect})."
+          end
+          filters = Array(filter_fields).map(&:to_sym)
+          @agent_searchable_field = field_sym
+          @agent_searchable_filter_fields = filters
+          Parse::Agent::MetadataRegistry.register_searchable(
+            parse_class_name, field: field_sym, filter_fields: filters,
+          )
+        end
+
+        # @return [Symbol, nil] the vector field declared via {#agent_searchable}.
+        def agent_searchable_field
+          @agent_searchable_field
+        end
+
+        # @return [Array<Symbol>] filter fields declared via {#agent_searchable}.
+        def agent_searchable_filter_fields
+          @agent_searchable_filter_fields || []
+        end
+
         # Check if this model has any agent metadata defined.
         #
         # @return [Boolean] true if any metadata is present

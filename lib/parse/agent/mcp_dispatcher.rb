@@ -141,7 +141,7 @@ module Parse
       #   the WEBrick MCPServer) leaves the capability unadvertised and those
       #   methods returning a "not supported" error.
       def self.call(body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil,
-                    subscription_manager: nil)
+                    subscription_manager: nil, approval_gate: nil)
         # Snapshot any prior callback/token already on the agent (e.g. a
         # token a parent dispatcher installed before a tool handler
         # invoked us recursively, or values pre-set by the application).
@@ -152,6 +152,7 @@ module Parse
         # token.
         prev_progress_callback   = agent.progress_callback   if agent.respond_to?(:progress_callback)
         prev_cancellation_token  = agent.cancellation_token  if agent.respond_to?(:cancellation_token)
+        prev_approval_gate       = agent.approval_gate        if agent.respond_to?(:approval_gate)
 
         # Install the progress callback and cancellation token on the
         # agent for the duration of the dispatch. Cleared in the ensure
@@ -165,6 +166,10 @@ module Parse
         # is documented to return a fresh agent per request.
         agent.progress_callback   = progress_callback   if progress_callback   && agent.respond_to?(:progress_callback=)
         agent.cancellation_token  = cancellation_token  if cancellation_token  && agent.respond_to?(:cancellation_token=)
+        # Install the per-session approval gate (MCP elicitation) so
+        # agent.execute can request human approval for destructive tools.
+        # Restored in the ensure block like the other per-request state.
+        agent.approval_gate       = approval_gate        if approval_gate       && agent.respond_to?(:approval_gate=)
 
         # Guard: body must be a Hash with a "method" key.
         unless body.is_a?(Hash) && body.key?("method")
@@ -205,6 +210,9 @@ module Parse
         end
         if agent.respond_to?(:cancellation_token=)
           agent.cancellation_token = prev_cancellation_token
+        end
+        if agent.respond_to?(:approval_gate=)
+          agent.approval_gate = prev_approval_gate
         end
       end
 

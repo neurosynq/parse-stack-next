@@ -53,7 +53,7 @@ module ConcurrentRateLimiterDispatcherStub
       @original  = Parse::Agent::MCPDispatcher.method(:call)
       @installed = true
 
-      Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil, subscription_manager: nil|
+      Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil, subscription_manager: nil, **_extra|
         # Delegate to the (already-stubbed) agent so the rate limiter fires.
         result = agent.execute(:ping)
         if result[:success]

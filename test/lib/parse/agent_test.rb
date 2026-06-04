@@ -30,6 +30,7 @@ class AgentTest < Minitest::Test
       get_object get_objects get_sample_objects aggregate explain_query
       call_method export_data group_by group_by_date distinct list_tools
       atlas_text_search atlas_autocomplete atlas_faceted_search
+      semantic_search
     ]
     assert_equal expected_tools.sort, @agent.allowed_tools.sort
   end

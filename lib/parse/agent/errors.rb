@@ -129,5 +129,15 @@ module Parse
     # agent-callable" (a Parse::Error) or "the tier doesn't allow it"
     # (a +:permission_denied+).
     class MethodFiltered < AgentError; end
+
+    # Raised at semantic-search dispatch time when at least one class in
+    # the model registry declares +agent_tenant_scope+ but the class
+    # being searched does not. In a tenant-aware deployment an
+    # un-scoped searchable surface would let an agent retrieve across
+    # tenant boundaries, so the gate is a hard refusal, not a warning.
+    # Enforced at dispatch (when all classes are loaded) rather than at
+    # +agent_searchable+ declaration time so class-load order can't
+    # produce a false negative.
+    class MissingTenantScope < AgentError; end
   end
 end
