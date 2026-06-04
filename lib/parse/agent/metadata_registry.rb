@@ -49,6 +49,10 @@ module Parse
       @searchable_classes = {}
       @searchable_mutex = Mutex.new
 
+      # Once-per-class memo for the agent-visible-but-unscoped lint warning
+      # (guarded by @tenant_scope_mutex). Maps parse_class_name => true.
+      @tenant_scope_lint_warned = {}
+
       # Register a class as visible to agents.
       # @param klass [Class] the model class
       def register_visible_class(klass)
@@ -713,7 +717,23 @@ module Parse
       # @raise [Parse::Agent::AccessDenied]
       def resolve_tenant_scope(class_name, agent)
         rule = tenant_scope_rule(class_name)
-        return nil unless rule
+        unless rule
+          # Lint: in a tenant-aware deployment, an agent-visible class with no
+          # agent_tenant_scope is the silent cross-tenant case (resolve_searchable!
+          # raises for the search path, but the general query path passes through
+          # for back-compat). Warn once per class so it isn't discovered only by
+          # leaked rows; do not raise — a genuinely global class is legitimate.
+          #
+          # Gated to classes EXPLICITLY opted into the agent surface (via
+          # `agent_fields` → visible, or `agent_searchable`). resolve_tenant_scope
+          # runs for every class a tool touches, so without this gate the warning
+          # also fires for _User / _Role / _Session and incidental tables — noise
+          # that trains operators to ignore the signal.
+          if any_tenant_scope? && agent_visible_for_lint?(class_name)
+            warn_unscoped_agent_class!(class_name)
+          end
+          return nil
+        end
 
         return nil if tenant_scope_bypassed?(class_name, agent)
 
@@ -726,6 +746,38 @@ module Parse
         end
 
         { field: rule[:field], value: value }
+      end
+
+      # @!visibility private
+      # Whether a class is EXPLICITLY exposed to agents — declared `agent_fields`
+      # (registered visible) or `agent_searchable`. Used to scope the unscoped-
+      # class lint so it doesn't fire for system/incidental classes the agent
+      # merely happens to touch.
+      def agent_visible_for_lint?(class_name)
+        name = class_name.to_s
+        visible_class_names.include?(name) || !searchable_rule(name).nil?
+      end
+
+      # @!visibility private
+      # Emit a one-time (per class, per process) warning that an agent-visible
+      # class is unscoped in a tenant-aware deployment. See {resolve_tenant_scope}.
+      def warn_unscoped_agent_class!(class_name)
+        name = class_name.to_s
+        emit = @tenant_scope_mutex.synchronize do
+          next false if @tenant_scope_lint_warned[name]
+          @tenant_scope_lint_warned[name] = true
+        end
+        return unless emit
+        warn "[Parse::Agent:SECURITY] class '#{name}' is agent-visible but declares no " \
+             "agent_tenant_scope while other classes do — queries against it are NOT " \
+             "tenant-scoped and may return cross-tenant rows. Add agent_tenant_scope to " \
+             "'#{name}', or confirm it is intentionally global."
+      end
+
+      # @!visibility private
+      # Test-only: re-arm the per-class unscoped-class lint warnings.
+      def reset_tenant_scope_lint!
+        @tenant_scope_mutex.synchronize { @tenant_scope_lint_warned.clear }
       end
 
       private

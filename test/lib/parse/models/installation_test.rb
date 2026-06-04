@@ -98,17 +98,25 @@ class TestInstallation < Minitest::Test
   # Capture the one-time CLP advisory while isolating the mutation: reset the
   # one-shot warned flag, snapshot/restore class_permissions (set_clp mutates
   # it), and capture Parse.logger output.
+  #
+  # The snapshot is a DEEP copy: `set_clp` mutates the `Parse::CLP` object in
+  # place, so stashing the bare reference and restoring it would hand back the
+  # already-mutated instance and leak state into later tests. A Marshal
+  # round-trip clones the whole object (its `@permissions` / `@default_permission`
+  # ivars are plain hashes/strings), so the restore reverts to the true
+  # pre-yield state.
   def capture_installation_clp
     io = StringIO.new
     prev_logger = Parse.logger
     prev_clp = Parse::Installation.instance_variable_get(:@class_permissions)
+    snapshot_clp = prev_clp ? Marshal.load(Marshal.dump(prev_clp)) : nil
     Parse.logger = Logger.new(io)
     Parse::Installation.instance_variable_set(:@_installation_clp_warned, false)
     yield
     io.string
   ensure
     Parse.logger = prev_logger
-    Parse::Installation.instance_variable_set(:@class_permissions, prev_clp)
+    Parse::Installation.instance_variable_set(:@class_permissions, snapshot_clp)
     Parse::Installation.instance_variable_set(:@_installation_clp_warned, false)
   end
 end

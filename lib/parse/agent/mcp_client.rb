@@ -528,7 +528,16 @@ module Parse
       # @api private
       def wrap_tool_content_for_llm(content)
         s = content.to_s
+        # Idempotency first: our own already-wrapped output (marker at the
+        # head) passes through untouched, so re-wrapping across turns does
+        # not grow or mangle the marker.
         return s if s.start_with?(UNTRUSTED_TOOL_RESULT_MARKER)
+        # Fresh content: neutralize any embedded wrapper/marker strings
+        # (e.g. a stored `</schema_description>` or a forged marker) BEFORE
+        # prepending the real marker, so a stored value can't impersonate or
+        # close the wrapper. The prefix we add afterward is therefore never
+        # seen as embedded by the scrub.
+        s = Parse::Agent::PromptHardening.scrub_marker_injection(s)
         "#{UNTRUSTED_TOOL_RESULT_MARKER}\n#{s}"
       end
 

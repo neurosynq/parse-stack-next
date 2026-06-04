@@ -4,6 +4,19 @@
 
 A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [parse-stack-next](https://github.com/neurosynq/parse-stack-next) is a Ruby client SDK, REST client, and Active Model ORM for [Parse Server](http://parseplatform.org/), combining a low-level API client, a query engine, an object-relational mapper (ORM), and a Cloud Code Webhooks rack application in a single gem.
 
+### What's new in 5.2
+
+- **Retrieval layer — `Parse::Retrieval` (`Parse::RAG`)** — `Parse::Retrieval.retrieve(query:, klass:, k:, filter:, tenant_scope:, …)` embeds a natural-language query, runs Atlas `$vectorSearch` through the existing ACL-enforcing `find_similar`, and splits each retrieved document's text field into scored `Parse::Retrieval::Chunk`s. Chunking is presentation-only (embedding stays one-vector-per-record), via `Parse::Retrieval::Chunker::FixedSizeOverlap(size:, overlap:, by:, max_chunks_per_document:)` (subclass `Chunker::Base` for custom strategies). ACL is mongo-direct (no REST two-stage); tenant scope folds into the Atlas pre-filter
+- **`semantic_search` agent tool + `agent_searchable`** — declare `agent_searchable field:, filter_fields:` on a model to expose it to the readonly, client-safe `semantic_search` tool. The handler enforces the full agent envelope: searchable-class allowlist, recursive underscore-key refusal + filter-field allowlist on input, `field_allowlist` projection plus tenant-scope re-assertion on output, and score quantization in non-admin contexts
+- **MCP elicitation — human-in-the-loop approval** — opt in with `Parse::Agent.require_approval_for = [:write, :admin]` to require spec-native `elicitation/create` approval before destructive tool calls. A pluggable `agent.approval_gate` (reachable on the non-MCP path too) shows the dry-run diff and blocks on the client's reply; `call_method` resolves the *effective* tier from the target `agent_method`. Fails closed (no capability / no listening stream / non-streaming transport / timeout → refuse); replies are session-bound
+- **Agent impersonation** — `Parse::Agent.new(impersonate_user:, impersonate_mint:, impersonation_label:)` / `agent.impersonate(user)` resolve a real session token for a `_User` (reuse an active `_Session`, or mint a restricted one) and bind it as if `session_token:` had been passed. Master-key-required, fail-closed, with an audit label on `parse.agent.tool_call`
+- **`Parse::Agent::PromptHardening`** — schema-string sanitization (drops non-identifier field names, strips control/zero-width chars, marker-wraps descriptions) on `get_schema`/`get_all_schemas`; embedded-marker scrubbing of untrusted tool content (`prompt_marker_strict` to refuse); operator canary phrases (`prompt_injection_canaries` + `parse.agent.prompt_injection_detected`, `canary_action = :refuse`); `Parse::Agent::PROMPT_VERSION` via `agent.describe[:prompt][:version]`; and a one-time warning when `allowed_llm_endpoints` is unrestricted
+- **Agent telemetry + provenance** — embedding cost on `parse.agent.tool_call` (`embed_calls` / `embed_tokens` / `embed_cost_usd` via `Parse::Agent.embed_cost_per_million_tokens`); optional per-row `_source` citations (`{ class, tool, object_id }`) on read-tool results via `Parse::Agent.include_source_provenance`
+- **General-purpose server-initiated notifications** — `Parse::Agent::MCPRackApp.new(notifications: true)` opens the GET listening-stream bus without LiveQuery resource subscriptions; `MCPRackApp#notify(session_id, method:, params:)` pushes arbitrary `notifications/*` to a session
+- **Token economy** — `Parse::Agent.new(tools: :lean)` narrows the readonly surface to six core tools (~7.9K → ~2.6K `tools/list` tokens); read tools strip the raw `ACL` map and `get_objects`/Atlas tools share `query_class`'s compact normalization; `semantic_search` hoists each chunk's parent into a `documents` map (sent once, not per chunk) and enforces a `max_total_tokens:` budget (default 20K) with a `budget_truncated` signal; a failing `tools/call` forwards `error_code` / `retry_after` / `details` under MCP `_meta`; `get_schema` suggests near-match class names on a typo; `Parse::Agent.measure_embeddings { … }` scopes ingestion embedding cost. See [`docs/mcp_guide.md`](./docs/mcp_guide.md#token-economy)
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full 5.2 entry.
+
 ### What's new in 5.1
 
 - **`Parse::File` URL normalization + presigned-URL stash** — `Parse::File#url=` and `attributes=` now strip signed-URL query parameters (`X-Amz-Signature`, `AWSAccessKeyId`, `Key-Pair-Id`, etc.) before storage; the bare canonical URL lands in `@url`, and the original signed URL is stashed in `file.presigned_url` with a data-driven expiry in `file.presigned_url_expires_at`. New `file.presigned_url_valid?(buffer: 60)` predicate, configurable `Parse::File.signed_url_policy = :strip | :raise`, and `Parse::File.log_filter` / `log_filter_strict` regexes for `lograge` / Sentry / Honeybadger scrubbers. `Parse::File#inspect` no longer emits the URL — see CHANGELOG for the error-reporter payload migration callout
@@ -4557,7 +4570,16 @@ export PARSE_MCP_ENABLED=true
 ```
 
 ```ruby
-# Step 2: Enable in code and start server
+# Step 2: Connect to your Parse Server FIRST — the agent's tools query it,
+# so without an active client every tool call raises a connection error.
+Parse.setup(
+  server_url:     ENV["PARSE_SERVER_URL"],   # e.g. "https://api.example.com/parse"
+  application_id: ENV["PARSE_APP_ID"],
+  api_key:        ENV["PARSE_REST_API_KEY"],
+  master_key:     ENV["PARSE_MASTER_KEY"],    # master-key agent (full read access)
+)
+
+# Then enable and start the MCP server.
 Parse.mcp_server_enabled = true
 Parse::Agent.enable_mcp!(port: 3001)
 Parse::Agent::MCPServer.run(api_key: ENV["MCP_API_KEY"])
@@ -4828,6 +4850,27 @@ You can register webhooks to handle the different object triggers: `:before_save
 ```
 
 For any `after_*` hook, return values are not needed since Parse does not utilize them. You may also register as many `after_save` or `after_delete` handlers as you prefer, all of them will be called.
+
+> **Your model's `after_save` callbacks run here too.** When an `after_save` /
+> `after_create` trigger fires, the webhook rebuilds the `Parse::Object` from the
+> payload and runs that model's ActiveModel `after_save` / `after_create`
+> callbacks — so a `webhook :after_save` block and a model `after_save :method`
+> callback are part of the same flow. They fire **exactly once** per save: for
+> saves initiated by this Ruby SDK (recognized by the `_RB_` request-id prefix
+> together with the master key), Parse Stack already ran them locally after the
+> REST response, so the webhook skips them to avoid double-firing side effects;
+> for saves from other clients (JS / iOS / REST), the webhook runs them, since
+> the SDK never had the chance.
+
+> **Keep `after_save` handlers fast.** Parse Server **waits** for the `after_save`
+> webhook response before returning to the saving client (only LiveQuery events
+> are truly fire-and-forget), so a slow handler adds latency to that client's
+> save. And because Parse Server swallows afterSave errors and never retries the
+> trigger, blocking on slow work buys you no durability. Do trivial work inline
+> and hand anything slow, external, or must-not-be-lost (notifications,
+> downstream writes) to a background job/worker, returning quickly. This matters
+> most for client-initiated saves, where the callback runs inside the webhook —
+> Ruby-SDK saves run it in-process after their own REST response instead.
 
 `before_save` and `before_delete` hooks have special functionality and multiple ways to halt operations:
 

@@ -3,6 +3,7 @@
 
 require "json"
 require "securerandom"
+require "digest"
 require_relative "errors"
 require_relative "mcp_dispatcher"
 require_relative "mcp_subscriptions"
@@ -237,7 +238,9 @@ module Parse
                      require_custom_header: nil,
                      resource_subscriptions: false,
                      subscription_manager: nil,
+                     notifications: false,
                      approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
+                     principal_resolver: nil,
                      health_path: nil, &block)
         if agent_factory && block
           raise ArgumentError, "Provide agent_factory: OR a block, not both"
@@ -278,14 +281,36 @@ module Parse
         @pending_elicitations       = Parse::Agent::PendingElicitationRegistry.new
         @approval_timeout           = approval_timeout
 
-        # Resource-subscription coordinator. An injected manager wins; else a
-        # default in-process manager when the operator opted in. nil disables
-        # the GET listening stream and leaves resources.subscribe unadvertised.
+        # Binds each MCP session id to the principal that established it so a
+        # listening stream can't be hijacked by another authenticated caller.
+        # Same per-instance / single-process scope as @cancellation_registry.
+        @session_owners             = SessionOwnerRegistry.new
+        if principal_resolver && !principal_resolver.respond_to?(:call)
+          raise ArgumentError, "principal_resolver must respond to #call"
+        end
+        @principal_resolver         = principal_resolver
+
+        # Listening-stream coordinator (the server→client broadcast bus
+        # backing resource subscriptions, MCP elicitation, and
+        # general-purpose server-initiated notifications). An injected
+        # manager wins. Otherwise:
+        #   - `resource_subscriptions: true` builds a LiveQuery-backed
+        #     manager whose `supported?` resolves live (advertises
+        #     `resources.subscribe` and serves subscribe POSTs).
+        #   - `notifications: true` (without resource subscriptions) builds
+        #     a manager in `supported: false` posture: the GET listening
+        #     stream + `#notify` bus work, but `resources.subscribe` stays
+        #     unadvertised and subscribe POSTs fail closed. This is the
+        #     decoupling lever — a server can push arbitrary notifications
+        #     without enabling LiveQuery resource subscriptions.
+        # nil disables the GET listening stream entirely.
         @subscription_manager =
           if subscription_manager
             subscription_manager
           elsif resource_subscriptions
             Parse::Agent::MCPSubscriptions::Manager.new(logger: @logger)
+          elsif notifications
+            Parse::Agent::MCPSubscriptions::Manager.new(logger: @logger, supported: false)
           end
 
         # Warn operators who enable streaming without a concurrency cap.
@@ -305,6 +330,44 @@ module Parse
             warn line
           end
         end
+      end
+
+      # The listening-stream coordinator backing this app's server→client
+      # bus, or nil when neither resource subscriptions nor notifications
+      # are enabled. Exposed so a clustered/Redis notifier adapter or an
+      # out-of-band publisher can reach the bus directly. Direct
+      # `#publish` accepts arbitrary messages (notifications OR id-bearing
+      # requests); prefer {#notify} for the validated notification path.
+      # @return [Parse::Agent::MCPSubscriptions::Manager, nil]
+      attr_reader :subscription_manager
+
+      # Push a server-initiated JSON-RPC NOTIFICATION to a session's open
+      # listening stream. This is the public front door for application
+      # code to deliver unsolicited `notifications/*` events (the GET
+      # stream must be open for the session — open it client-side with a
+      # `GET` carrying `Accept: text/event-stream` + `Mcp-Session-Id`).
+      #
+      # The envelope is built server-side as a notification — it never
+      # carries an `id`, which is what distinguishes it from the
+      # server-initiated *request* path (e.g. elicitation/create). A
+      # caller wanting an id-bearing request uses the internal
+      # `subscription_manager.publish` seam, not this method.
+      #
+      # @param session_id [String] the target session (Mcp-Session-Id).
+      # @param method [String] a non-empty JSON-RPC method, e.g.
+      #   `"notifications/custom"`.
+      # @param params [Hash, nil] optional params object.
+      # @return [Boolean] true if a listening stream received it; false
+      #   when notifications are disabled or no stream is attached.
+      # @raise [ArgumentError] when `method` is blank or not a String.
+      def notify(session_id, method:, params: nil)
+        unless method.is_a?(String) && !method.empty?
+          raise ArgumentError, "notify: method must be a non-empty String"
+        end
+        return false unless @subscription_manager
+        envelope = { "jsonrpc" => "2.0", "method" => method }
+        envelope["params"] = params unless params.nil?
+        !!@subscription_manager.publish(session_id, envelope)
       end
 
       # Returns the number of currently live dispatcher threads spawned by any
@@ -394,6 +457,10 @@ module Parse
           # bound to this session so a terminated session leaves no LiveQuery
           # sockets behind.
           @subscription_manager&.detach_listener(clean_sid)
+          # Drop the owner binding so the id can be reclaimed after explicit
+          # termination (only here — not on mere stream close, so a reconnect
+          # keeps its claim).
+          @session_owners.forget(clean_sid)
           return [204, json_headers, [""]]
         end
 
@@ -523,6 +590,16 @@ module Parse
           return [500, json_headers, [json_rpc_error(-32_603, "Internal error")]]
         end
 
+        # 5a-i. Surface the silent-ungated-writes footgun. A write/admin agent
+        #     served over MCP with no approval tier configured runs every
+        #     destructive tool without a human gate; warn once per process so
+        #     the operator notices (mirrors the unrestricted-endpoints warning).
+        if agent.respond_to?(:permissions) &&
+           %i[write admin].include?(agent.permissions) &&
+           Parse::Agent.require_approval_for.empty?
+          Parse::Agent.warn_mcp_writes_unguarded!
+        end
+
         # 5b. Thread the conversation correlation id through. Source
         #     header: the MCP 2025-06-18 Streamable HTTP spec-canonical
         #     `Mcp-Session-Id` (Rack env key `HTTP_MCP_SESSION_ID`).
@@ -562,6 +639,10 @@ module Parse
            agent.respond_to?(:correlation_id) && agent.correlation_id
           supported = !!(body.dig("params", "capabilities", "elicitation"))
           @elicitation_capabilities.set(agent.correlation_id, supported)
+          # Authoritatively bind this session to the initializing principal so
+          # only the same principal can later attach a listening stream for it
+          # (owner-binding; see SessionOwnerRegistry).
+          @session_owners.bind(agent.correlation_id, principal_fingerprint(agent, env))
         end
 
         # 5b-iii. Elicitation reply ingress. A method-less JSON-RPC
@@ -793,7 +874,7 @@ module Parse
       # @return [Array] Rack triple with a {ListeningStreamBody}, or an error.
       def serve_listening_stream(env)
         begin
-          @agent_factory.call(env)
+          agent = @agent_factory.call(env)
         rescue Parse::Agent::Unauthorized
           @logger&.warn("[Parse::Agent::MCPRackApp] Unauthorized listening stream")
           return [401, json_headers, [unauthorized_body]]
@@ -817,8 +898,69 @@ module Parse
           end
         end
 
+        # Owner-binding: only the principal that established this session (or,
+        # for an id that never went through initialize, the first principal to
+        # attach) may open its listening stream. A different authenticated
+        # caller who knows/guesses the id is refused, closing the
+        # cross-session subscribe/evict hijack.
+        #
+        # We return a distinguishable 403 on mismatch (vs 200 when the id is
+        # unclaimed). That is a deliberate, narrow existence oracle —
+        # acceptable because server-assigned ids are SecureRandom.uuid and so
+        # infeasible to enumerate. (Contrast the cancellation/elicitation
+        # paths, which return a uniform 202 because their ids are
+        # client-chosen and guessable.)
+        unless @session_owners.authorize_attach(session_id, principal_fingerprint(agent, env))
+          @logger&.warn("[Parse::Agent::MCPRackApp] Listening stream denied: session owned by another principal")
+          return [403, json_headers, [json_rpc_error(-32_600, "Mcp-Session-Id is owned by another principal")]]
+        end
+
         body = ListeningStreamBody.new(@subscription_manager, session_id, @heartbeat_interval, @logger)
         [200, sse_headers, body]
+      end
+
+      # Derive a stable, privacy-preserving principal fingerprint for the
+      # authenticated agent, used to owner-bind MCP sessions.
+      #
+      # An operator `principal_resolver:` callable wins (it lets a
+      # master-key-everywhere deployment that authenticates users upstream
+      # supply a real per-user identity). Otherwise the agent's own scope is
+      # used: a hashed session_token, then acl_user, then acl_role. A bare
+      # master-key agent with no scope falls back to the shared "mk"
+      # fingerprint — owner-binding is then a no-op (documented), since all
+      # such agents are indistinguishable admins.
+      #
+      # @param agent [Parse::Agent]
+      # @param env [Hash] the Rack env (passed to the resolver).
+      # @return [String]
+      def principal_fingerprint(agent, env)
+        if @principal_resolver
+          resolved = @principal_resolver.call(agent, env)
+          return "op:#{Digest::SHA256.hexdigest(resolved.to_s)[0, 32]}" unless resolved.nil? || resolved.to_s.empty?
+        end
+        if agent.respond_to?(:session_token) && !agent.session_token.to_s.empty?
+          return "st:#{Digest::SHA256.hexdigest(agent.session_token.to_s)[0, 32]}"
+        end
+        # acl_user / acl_role scopes are the RAW constructor input, which may be
+        # a Parse::User / Parse::Pointer / Parse::Role object whose bare #to_s
+        # is a per-instance `#<...:0x...>` string — using that directly would
+        # give the initialize and GET agents different fingerprints and
+        # false-reject the legitimate owner. Derive a stable id the same way
+        # #auth_context does: objectId for user/pointer scopes, role name for
+        # role scopes. (These are unverified constructor assertions, so the
+        # fingerprint is only as trustworthy as the factory's identity
+        # assignment — same caveat as the "mk" case; session_token is verified.)
+        if agent.respond_to?(:acl_user_scope) && agent.acl_user_scope
+          s = agent.acl_user_scope
+          id = s.respond_to?(:id) ? s.id : s.to_s
+          return "au:#{id}" unless id.nil? || id.to_s.empty?
+        end
+        if agent.respond_to?(:acl_role_scope) && agent.acl_role_scope
+          s = agent.acl_role_scope
+          name = s.respond_to?(:name) ? s.name : s.to_s.sub(/\Arole:/, "")
+          return "ar:#{name}" unless name.nil? || name.to_s.empty?
+        end
+        "mk"
       end
 
       # ---------------------------------------------------------------------------
@@ -1385,6 +1527,104 @@ module Parse
       # in a clustered deployment.
       #
       # @api private
+      # Binds an MCP session id to the principal that established it, so a
+      # listening stream (the server→client notification channel) can only be
+      # attached by the same principal — closing the cross-session hijack where
+      # any authenticated caller who knows/guesses another session's id could
+      # subscribe to its notifications or evict its listener via overwrite.
+      #
+      # Trust model and limitations (mirrored in the docs):
+      #
+      # - **Initialize-bound vs TOFU.** A session established through an
+      #   `initialize` POST is bound to that caller's principal authoritatively.
+      #   A session id that was never seen by `initialize` (the decoupled
+      #   `notifications:` bus, where app code pushes to arbitrary ids) is
+      #   claimed trust-on-first-use by whoever attaches a listener first;
+      #   subsequent attaches by a different principal are refused. TOFU is
+      #   strictly better than the prior bearer model (eviction-after-claim is
+      #   closed) but a first-mover attacker can still claim an unused id — so
+      #   notification-bus ids should be high-entropy.
+      # - **Per-instance / single-process**, exactly like CancellationRegistry:
+      #   it does not span Puma workers or survive restart. In a cluster the
+      #   GET stream and the initialize POST may land on different workers, so
+      #   the initialize-binding degrades to TOFU there.
+      # - **Principal fidelity depends on the factory.** The fingerprint is
+      #   derived from the agent the factory builds (session_token → acl_user →
+      #   acl_role), or an operator-supplied `principal_resolver`. A
+      #   master-key-everywhere factory yields one shared "mk" principal, so
+      #   owner-binding is a no-op unless a `principal_resolver` (or
+      #   per-user impersonation) supplies a real identity.
+      #
+      # LRU-bounded so an initialize-without-DELETE stream of sessions can't
+      # grow it without limit; evicting an active owner just downgrades it to
+      # TOFU on the next attach.
+      class SessionOwnerRegistry
+        DEFAULT_MAX_ENTRIES = 10_000
+
+        def initialize(max_entries: DEFAULT_MAX_ENTRIES)
+          @owners = {} # session_id => principal fingerprint (insertion-ordered for LRU)
+          @max    = max_entries
+          @mutex  = Mutex.new
+        end
+
+        # Authoritatively bind a session to a principal (initialize). A
+        # re-initialize by the same caller refreshes the binding.
+        def bind(session_id, fingerprint)
+          return if blank?(session_id) || blank?(fingerprint)
+          @mutex.synchronize do
+            @owners.delete(session_id)
+            @owners[session_id] = fingerprint
+            evict_lru!
+          end
+        end
+
+        # Authorize a listening-stream attach. Returns true when the session is
+        # unclaimed (claims it TOFU for this principal) or already owned by this
+        # principal (refreshing its LRU position); false on a principal
+        # mismatch. Blank inputs fail closed.
+        def authorize_attach(session_id, fingerprint)
+          return false if blank?(session_id) || blank?(fingerprint)
+          @mutex.synchronize do
+            owner = @owners[session_id]
+            if owner.nil?
+              @owners[session_id] = fingerprint
+              evict_lru!
+              true
+            elsif owner == fingerprint
+              @owners.delete(session_id)
+              @owners[session_id] = owner
+              true
+            else
+              false
+            end
+          end
+        end
+
+        # Drop a session's owner binding (explicit DELETE termination). Not
+        # called on mere stream close, so a reconnecting owner keeps its claim
+        # and an attacker can't grab the id during a brief disconnect.
+        def forget(session_id)
+          return if blank?(session_id)
+          @mutex.synchronize { @owners.delete(session_id) }
+        end
+
+        # @return [Integer] current number of bound sessions (tests/metrics).
+        def size
+          @mutex.synchronize { @owners.size }
+        end
+
+        private
+
+        # Hash preserves insertion order; #shift drops the oldest (LRU) entry.
+        def evict_lru!
+          @owners.shift while @owners.size > @max
+        end
+
+        def blank?(value)
+          value.nil? || value.to_s.empty?
+        end
+      end
+
       class CancellationRegistry
         def initialize
           @entries = {}

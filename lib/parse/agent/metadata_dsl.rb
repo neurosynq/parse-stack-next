@@ -604,17 +604,26 @@ module Parse
         #
         # @example
         #   class KnowledgeArticle < Parse::Object
+        #     property :title, :string
         #     property :body, :string
         #     property :embedding, :vector, dimensions: 1536, provider: :openai
         #     embed :title, :body, into: :embedding
         #     agent_searchable field: :embedding, filter_fields: %i[published category]
         #   end
         #
+        #   # Two embed text sources, so semantic_search needs text_field: to
+        #   # choose which one to chunk and return as content:
+        #   #   semantic_search(class_name: "KnowledgeArticle", query: "...",
+        #   #                   text_field: "body")
+        #
         # @param field [Symbol] the `:vector` property the tool searches.
         # @param filter_fields [Array<Symbol>] fields the agent may pass
         #   in `filter:` / `vector_filter:`. Anything not listed is
-        #   refused at the tool boundary. Defaults to none (the agent may
-        #   only run an unfiltered query plus the enforced tenant scope).
+        #   refused at the tool boundary. Defaults to `[]` — an empty
+        #   allowlist, which is fail-closed by design: until you enumerate
+        #   fields here the agent can run only an unfiltered query plus the
+        #   enforced tenant scope. This is intentional (no field is
+        #   filterable until explicitly opted in), not a silent off-switch.
         # @raise [ArgumentError] when `field` is not a declared `:vector`
         #   property on the class.
         def agent_searchable(field:, filter_fields: [])

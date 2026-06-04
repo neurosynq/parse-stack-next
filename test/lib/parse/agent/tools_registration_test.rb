@@ -608,4 +608,28 @@ class ToolsRegistrationTest < Minitest::Test
       assert_kind_of Hash, result
     end
   end
+
+  # -------------------------------------------------------------------------
+  # permissions: alias for permission: (consistency with Agent.new)
+  # -------------------------------------------------------------------------
+
+  def test_register_accepts_permissions_alias
+    T.register(
+      name: :alias_tool, description: "x",
+      parameters: { "type" => "object" }, permissions: :write,
+      handler: ->(_a, **) { {} },
+    )
+    assert_equal :write, T.permission_for(:alias_tool)
+  end
+
+  def test_register_without_permission_or_alias_raises
+    err = assert_raises(ArgumentError) do
+      T.register(
+        name: :no_perm_tool, description: "x",
+        parameters: { "type" => "object" },
+        handler: ->(_a, **) { {} },
+      )
+    end
+    assert_match(/permission/, err.message)
+  end
 end

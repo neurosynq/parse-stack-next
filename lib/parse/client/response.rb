@@ -19,6 +19,10 @@ module Parse
     ERROR_TIMEOUT = 124
     # Code when the requests per second limit as been exceeded.
     ERROR_EXCEEDED_BURST_LIMIT = 155
+    # Code when a request carrying a previously-seen `X-Parse-Request-Id` is
+    # rejected by Parse Server's idempotency layer (the request was already
+    # applied). Surfaced as {Parse::Error::DuplicateRequestError}.
+    ERROR_DUPLICATE_REQUEST = 159
     # Code when a requested record is not found.
     ERROR_OBJECT_NOT_FOUND = 101
     # Code when the username is missing in request.

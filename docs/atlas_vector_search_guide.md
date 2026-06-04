@@ -351,23 +351,124 @@ Mechanics:
 
 ### Single vector per record
 
-`embed` produces exactly one vector per record. There is no built-in
-chunker. Long source text whose concatenation exceeds the provider's
-per-call token budget will be truncated provider-side, and the
-resulting vector will represent only the leading portion of the
-document.
+`embed` produces exactly one vector per record. Long source text whose
+concatenation exceeds the provider's per-call token budget is truncated
+provider-side, and the stored vector represents only the leading portion
+of the document. **Chunking happens at retrieval time, not embed time**
+(see [Retrieval (RAG)](#retrieval-rag) below): the embedding stays
+one-vector-per-record by design.
 
-For long-form content, two options:
+If you instead want each passage to have its OWN embedding (true
+embed-time chunking), use one of these patterns:
 
 1. **Pre-chunk client-side** and write each chunk as its own
    `Parse::Object` record with its own `embed` declaration.
-2. **Dedicated `Chunk` subclass** that `belongs_to` the parent, with
+2. **Dedicated chunk subclass** that `belongs_to` the parent, with
    `embed :content, into: :embedding` on the chunk class itself. Run
    similarity search against the chunk collection, then hydrate
    parents as needed.
 
-A built-in chunker plus a `semantic_search` agent tool are scheduled
-for a future release.
+---
+
+## Retrieval (RAG)
+
+`Parse::Retrieval` (`Parse::RAG` is an alias) sits on top of
+`find_similar`. `Parse::Retrieval.retrieve` embeds a natural-language
+query, runs Atlas `$vectorSearch` through `find_similar` (so ACL/CLP are
+enforced mongo-direct — there is no REST two-stage re-query), and splits
+each retrieved document's text field into scored, citable chunks.
+Chunking here is **presentation-only**: every chunk inherits its parent
+document's single `$vectorSearch` score.
+
+```ruby
+chunks = Parse::Retrieval.retrieve(
+  query:         "how do I reset my password?",
+  klass:         KnowledgeArticle,   # or "KnowledgeArticle"
+  field:         :embedding,         # optional; auto-resolves a single :vector field
+  k:             5,
+  filter:        { published: true }, # post-$vectorSearch $match
+  vector_filter: nil,                 # Atlas-native pre-filter (fields must be type:"filter")
+  tenant_scope:  nil,                 # { field:, value: } merged into vector_filter
+  score_quantize: false,
+  session_token: user.session_token,  # ACL scope kwargs pass through to find_similar
+)
+# => Array<Parse::Retrieval::Chunk> — { id, score, content, source, metadata }
+```
+
+`rerank:` and `hybrid:` are reserved on the signature and raise
+`NotImplementedError` if supplied.
+
+### Chunkers
+
+The default is a fixed-size sliding window with overlap. Subclass
+`Parse::Retrieval::Chunker::Base` (implement `#chunk(text) -> Array<String>`)
+for semantic / sentence-aware strategies.
+
+```ruby
+Parse::Retrieval::Chunker::FixedSizeOverlap.new(
+  size: 800,                    # window width
+  overlap: 100,                 # units shared between consecutive windows (must be < size)
+  by: :chars,                   # :chars (default) or :tokens (whitespace tokens)
+  max_chunks_per_document: 200, # amplification cap — TRUNCATES with a signal, never raises
+)
+```
+
+### `agent_searchable` + the `semantic_search` agent tool
+
+Opt a model in to agentic retrieval, declaring the vector field and the
+fields an agent may filter on:
+
+```ruby
+class KnowledgeArticle < Parse::Object
+  property :title, :string
+  property :body, :string
+  property :embedding, :vector, dimensions: 1536, provider: :openai
+  embed :title, :body, into: :embedding
+  agent_searchable field: :embedding, filter_fields: %i[published category]
+end
+```
+
+Every property referenced by `embed` must be declared — omitting
+`property :title` here raises `InvalidEmbedDeclaration` at class load.
+
+Because this model embeds **two** text sources (`:title` and `:body`),
+`semantic_search` cannot guess which one to chunk and return as the
+result `content`. Pass `text_field:` to choose (it must name one of the
+embedded sources); a single-source model infers it automatically and the
+parameter is optional:
+
+```ruby
+# via the agent tool (LLM-facing parameter)
+semantic_search(class_name: "KnowledgeArticle", query: "vector indexes",
+                text_field: "body")
+
+# or directly
+Parse::Retrieval.retrieve(query: "vector indexes", klass: KnowledgeArticle,
+                          text_field: :body)
+```
+
+The readonly, `client_safe` `semantic_search` tool then routes through
+`Parse::Retrieval.retrieve` with the full agent security envelope:
+searchable-class allowlist (`MetadataRegistry.resolve_searchable!`),
+recursive underscore-key refusal + filter-field allowlist on caller
+input, tenant scope folded into the Atlas pre-filter AND re-asserted on
+every returned record, `field_allowlist` projection of each source, and
+score quantization in non-admin contexts. In a tenant-aware deployment
+(any class declares `agent_tenant_scope`), a searchable class without its
+own tenant scope is refused at dispatch. See the
+[MCP guide](./mcp_guide.md) for the agent-side wiring.
+
+**Result shape (token-economy).** The tool returns
+`{ chunks:, documents:, count: }`. Each chunk's parent record is hoisted
+**once** into `documents` (keyed by `objectId`) rather than duplicated on
+every chunk — map a chunk to its source via `metadata.object_id`. A
+`max_total_tokens:` budget (default 20,000; estimated chars/4) trims the
+lowest-ranked chunks so a few long documents can't silently blow the
+context window, adding `budget_truncated: true` / `budget_dropped: <n>`
+when it trims (pass `0` to disable). The library-level
+`Parse::Retrieval.retrieve` still returns the flat `Array<Chunk>` with
+`source` on each chunk — the dedup and budget live in the agent tool's
+envelope. See the [MCP guide's Token Economy section](./mcp_guide.md#token-economy).
 
 ---
 

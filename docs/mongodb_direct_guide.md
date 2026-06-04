@@ -757,6 +757,15 @@ non-master scope so this enforcement always runs. See the
 [Atlas Vector Search Guide](./atlas_vector_search_guide.md) for the
 full API surface.
 
+`Parse::Retrieval.retrieve` and the `semantic_search` agent tool (v5.2)
+build directly on `find_similar`, so they inherit this exact Layer 1-5
+mongo-direct enforcement. The earlier RAG plan's "two-stage" REST
+re-query was intentionally NOT adopted — there is no REST vector path,
+and `acl_user:` / `acl_role:` scopes have no REST equivalent, so the
+post-`$vectorSearch` `_rperm` `$match` is the single enforcement
+boundary. The retrieval layer adds a tenant-scope fold into the Atlas
+pre-filter on top of this, never a substitute for it.
+
 ### Timeouts
 
 ```ruby

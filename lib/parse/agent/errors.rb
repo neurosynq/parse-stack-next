@@ -139,5 +139,11 @@ module Parse
     # +agent_searchable+ declaration time so class-load order can't
     # produce a false negative.
     class MissingTenantScope < AgentError; end
+
+    # Raised when a tool result contains an operator-registered
+    # prompt-injection canary phrase AND `Parse::Agent.canary_action` is
+    # `:refuse`. A SecurityError subclass so it routes through execute's
+    # security rescue and is never swallowed.
+    class PromptInjectionDetected < SecurityError; end
   end
 end

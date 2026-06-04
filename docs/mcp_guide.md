@@ -360,6 +360,62 @@ Common uses for the direct dispatcher:
 
 ---
 
+## Connecting Claude Desktop (stdio bridge)
+
+Parse Stack speaks MCP over **HTTP** (the standalone server and the
+Rack adapter both expose a JSON-RPC-over-HTTP endpoint). Claude Desktop,
+however, launches MCP servers as local **stdio** subprocesses — it does
+not dial an HTTP URL directly. Bridge the two with
+[`mcp-remote`](https://www.npmjs.com/package/mcp-remote), a small stdio↔HTTP
+proxy that Claude Desktop runs as the subprocess and which forwards to your
+HTTP endpoint.
+
+1. Start the Parse Stack MCP endpoint over HTTP (standalone or Rack — see
+   Deployment Modes above) and note its URL and the bearer token your
+   `agent_factory` expects, e.g. `http://localhost:3001/` with
+   `Authorization: Bearer <token>`.
+
+2. Add the bridge to `claude_desktop_config.json` (macOS:
+   `~/Library/Application Support/Claude/claude_desktop_config.json`;
+   Windows: `%APPDATA%\Claude\claude_desktop_config.json`):
+
+   ```json
+   {
+     "mcpServers": {
+       "parse-stack": {
+         "command": "npx",
+         "args": [
+           "-y",
+           "mcp-remote",
+           "http://localhost:3001/",
+           "--header",
+           "Authorization: Bearer ${PARSE_MCP_TOKEN}"
+         ],
+         "env": {
+           "PARSE_MCP_TOKEN": "your-mcp-token"
+         }
+       }
+     }
+   }
+   ```
+
+3. Restart Claude Desktop. The Parse Stack tools (`query_class`,
+   `get_schema`, `semantic_search`, …) appear in the client.
+
+Notes:
+
+- `mcp-remote` requires Node.js on the machine running Claude Desktop.
+- For a public endpoint, terminate TLS in front of the HTTP server and use
+  an `https://` URL; the bearer token rides the `Authorization` header.
+- The same bridge works for any stdio-only MCP client (e.g. some IDE
+  integrations). Clients that support remote MCP connectors natively can
+  point at the HTTP URL without the bridge.
+- Approval workflows (elicitation) need the streaming/listening-stream
+  prerequisites described under Approval Workflows — confirm the bridge and
+  client forward the SSE channel before relying on human-in-the-loop gating.
+
+---
+
 ## Resource Subscriptions (LiveQuery bridge)
 
 MCP lets a client `resources/subscribe` to a resource URI and then receive
@@ -467,6 +523,253 @@ Parse Server version and its `masterKeyIps` configuration.)
   drops) its listening stream leaves LiveQuery subscriptions running until the
   session is torn down. A per-session ceiling (default 100, configurable on the
   manager) bounds that footprint.
+
+---
+
+## Approval Workflows (MCP elicitation)
+
+`:write` / `:admin` tier tool calls can require human approval before they run,
+using the MCP 2025-06-18 spec-native `elicitation/create` channel. Off by
+default, so existing clients are unaffected.
+
+```ruby
+# Opt tiers in (process-wide). Has teeth only when an approval gate is installed
+# (the MCP transport installs one per session; see below).
+Parse::Agent.require_approval_for = [:write, :admin]
+```
+
+The approval gate is a pluggable `agent.approval_gate` consulted inside
+`Parse::Agent#execute` — so it is reachable on the non-MCP path and
+unit-testable with a fake approver. `Parse::Agent::MCPElicitationGate` is the
+spec-native implementation; `Parse::Agent::NullGate` (the default) approves.
+
+Round-trip over the streaming transport:
+
+1. A `tools/call` for a gated tier pauses before execution. The server builds an
+   `elicitation/create` request whose payload carries the **approval preview**
+   (for `call_method` the *effective* tier is resolved from the target
+   `agent_method`'s declared permission, so write/admin methods invoked through
+   the readonly `call_method` tool are gated correctly). The preview is a real
+   before/after only for methods that declare `supports_dry_run`; for the
+   built-in `update_object` / `delete_object` it is the proposed `{ tool, args }`
+   call, **not** a fetched before/after of the target row.
+2. The request is pushed to the client over the open **GET listening stream**
+   (the same bus as resource subscriptions).
+3. The client replies with a JSON-RPC response (`{ result: { action: "accept" |
+   "decline" | "cancel" } }`) as a separate POST. The server routes it,
+   session-bound, into a pending registry that wakes the blocked tool thread.
+4. `accept` → the tool runs. Anything else → a structured refusal; the tool
+   never executes.
+
+Client capability + transport requirements (the server READS, does not
+advertise, the client's `elicitation` capability at `initialize`):
+
+```ruby
+Parse::Agent::MCPRackApp.new(
+  streaming: true,
+  resource_subscriptions: true,   # or notifications: true — either opens the GET bus
+  approval_timeout: 300,          # seconds to wait for a human; default 300
+  agent_factory: ->(env) { ... },
+)
+```
+
+**Three prerequisites — miss any one and every gated write fails closed,
+which looks like a bug rather than a config gap:**
+
+1. **`streaming: true`** on the `MCPRackApp` (it defaults to `false`). Approval
+   needs a server→client request, which only the streaming transport can send.
+2. **An open GET bus** — `notifications: true` *or* `resource_subscriptions:
+   true`. `notifications: true` is the lighter choice if you don't need
+   LiveQuery resource subscriptions. Without a bus there is no channel to
+   deliver `elicitation/create`.
+3. **A concurrent server (Puma), not the bundled `MCPServer`.** The bundled
+   server runs on WEBrick and is non-streaming, so approval can never round-trip
+   there — mount {Parse::Agent.rack_app} under Puma for any deployment that uses
+   approval.
+
+Operator aid: a write/admin agent served over MCP with `require_approval_for`
+empty emits a one-time `[Parse::Agent:SECURITY]` warning (writes run ungated).
+Approval round-trips also emit a `parse.agent.approval` `ActiveSupport::Notifications`
+event carrying `outcome`, `reason`, and the measured wait — subscribe to it to
+spot a non-answering client holding a dispatcher thread for the full
+`approval_timeout` (default 300s).
+
+**Fails closed.** When approval is required but the client did not advertise the
+`elicitation` capability, no listening stream is open, the transport is
+non-streaming (WEBrick), or the approver times out, the destructive operation is
+**refused** — never blocked forever, never silently executed. Replies are bound
+to the answering session's `Mcp-Session-Id`, so one session cannot answer (or
+guess the id of) another's prompt.
+
+---
+
+## Server-initiated Notifications (general purpose)
+
+The GET listening-stream bus also backs arbitrary server→client notifications,
+without requiring LiveQuery resource subscriptions:
+
+```ruby
+app = Parse::Agent::MCPRackApp.new(streaming: true, notifications: true,
+                                   agent_factory: ->(env) { ... })
+
+# From application code that holds the app reference:
+app.notify("the-session-id", method: "notifications/custom", params: { foo: 1 })
+```
+
+`notifications: true` builds the listening-stream manager in a `supported:
+false` posture: the GET stream and `#notify` work, but `resources.subscribe`
+stays unadvertised and `resources/subscribe` POSTs fail closed. `#notify` builds
+a JSON-RPC **notification** (never an `id` — that distinguishes it from the
+server-initiated *request* used by elicitation) and returns `false` when no
+stream is attached for the session. `app.subscription_manager` is exposed for an
+out-of-band / clustered publisher that needs the lower-level `publish` seam.
+
+---
+
+## Built-in Agent Hardening & Telemetry
+
+5.2 adds several agent-side controls, all configured on `Parse::Agent`:
+
+- **Impersonation** — `Parse::Agent.new(impersonate_user: <id|Pointer|User>,
+  impersonate_mint: false, impersonation_label:)` (or `agent.impersonate(user)`
+  / `agent.stop_impersonating!`) resolves a real session token for a `_User`
+  (reusing an active `_Session`, or minting a restricted one with
+  `impersonate_mint: true`) and binds it as if `session_token:` had been passed.
+  Master-key client required; fails closed if no session resolves. An
+  `impersonation_label:` (also usable with `acl_role:`) is emitted on the
+  `parse.agent.tool_call` payload alongside `impersonated_user_id`.
+- **Prompt hardening** (`Parse::Agent::PromptHardening`) — schema descriptions
+  surfaced by `get_schema` / `get_all_schemas` are sanitized (non-identifier
+  field names dropped with a `[Parse::Agent:PROMPT]` warning, control/zero-width
+  chars stripped, capped, marker-wrapped); untrusted tool content has embedded
+  wrapper markers neutralized (`Parse::Agent.prompt_marker_strict = true` to
+  refuse instead). Operator canary phrases via
+  `Parse::Agent.prompt_injection_canaries = ["IGNORE PREVIOUS", /system:/i]`
+  emit `parse.agent.prompt_injection_detected`; set
+  `Parse::Agent.canary_action = :refuse` to raise on a hit.
+  `Parse::Agent::PROMPT_VERSION` is surfaced via
+  `agent.describe[:prompt][:version]`. A one-time warning fires when
+  `allowed_llm_endpoints` is left unrestricted (nil).
+- **Embedding-cost telemetry** — embedding calls made inside a tool span add
+  `embed_calls`, `embed_tokens`, and (when
+  `Parse::Agent.embed_cost_per_million_tokens` is set) `embed_cost_usd` to the
+  `parse.agent.tool_call` payload. The per-tool span does **not** cover
+  corpus/ingestion embeds fired at `Model.save` time (typically the dominant
+  spend) — wrap those in `Parse::Agent.measure_embeddings { … }`, which returns
+  `{ calls:, tokens:, cost_usd: }` for the work done on the calling thread:
+
+  ```ruby
+  stats = Parse::Agent.measure_embeddings do
+    KnowledgeArticle.save_all(batch)   # embed-on-save
+  end
+  stats # => { calls: 1200, tokens: 4_300_000, cost_usd: 0.43 }
+  ```
+
+  Thread-local: embeds fanned out to other threads/fibers are not captured —
+  measure inside each worker. `Parse::Agent.embed_cost_usd(tokens)` converts a
+  token count to USD using the configured rate (nil when unset).
+- **Provenance** — `Parse::Agent.include_source_provenance = true` (default
+  false) stamps each read-tool row with `_source = { class, tool, object_id }`,
+  applied after field-allowlist projection and redaction.
+- **`semantic_search` tool** — registered readonly + `client_safe`; opt a model
+  in with `agent_searchable field:, filter_fields:`. See the
+  [Atlas Vector Search Guide](./atlas_vector_search_guide.md#retrieval-rag).
+
+### Runtime denial gates
+
+Beyond the permission-tier and env-gate checks, several gates refuse a tool
+call at runtime based on its arguments. They fail closed; a caller sees a
+structured error (the built-in tools return `{ success: false, error:,
+error_code: }`, which surfaces as `isError: true` over MCP). Knowing them up
+front avoids discovering each only on impact:
+
+| Gate | When it fires | Surfaced as |
+|------|---------------|-------------|
+| Missing tenant scope | A searchable class has no `agent_tenant_scope` while other classes do (tenant-aware deployment) | `Parse::Agent::MissingTenantScope` (search path); a one-time `[Parse::Agent:SECURITY]` lint warning on the general query path |
+| No tenant binding | A scoped class is queried by an agent whose tenant value resolves to `nil` | `Parse::Agent::AccessDenied` (`kind: :tenant`) |
+| Hidden class | A tool targets an `agent_hidden` class (or one outside a per-instance `classes:` allowlist) | `Parse::Agent::AccessDenied` (`kind: :hidden_class`) / off-allowlist refusal |
+| Reserved underscore key | A `filter:` / `vector_filter:` / `where:` contains an underscore-prefixed key (`_rperm`, `_p_*`, …) at any depth | `ArgumentError` / `ValidationError` (recursive refusal) |
+| Filter-field allowlist | A `filter:` / `vector_filter:` names a field not in the class's `agent_searchable filter_fields:` | `ValidationError` naming the offending field(s) |
+| `text_field` not embedded | `semantic_search` `text_field:` names a field that isn't a declared `embed` source | `ValidationError` listing the allowed sources |
+| Tool filtered | A tool/method removed by a per-instance `tools:` / `methods:` filter is invoked | `error_code: :tool_filtered` |
+| Approval denied/unavailable | A gated write/admin op is rejected or the approver is unreachable | `error_code: :approval_denied` |
+
+---
+
+## Token Economy
+
+The MCP surface is paid for in LLM context tokens — the tool schemas sent every
+session, and the data every tool returns. 5.2 adds controls to keep that cost
+down.
+
+### Lean tool profile
+
+A full `:readonly` `tools/list` payload is roughly **7.9K context tokens** every
+session. For small-context models or token-sensitive deployments, the `:lean`
+profile narrows the surface to the six core read tools (`get_all_schemas`,
+`get_schema`, `query_class`, `count_objects`, `get_object`, `aggregate`) —
+about **2.6K tokens, a ~67% reduction**:
+
+```ruby
+Parse::Agent.new(permissions: :readonly, tools: :lean)
+```
+
+A profile is an allowlist: it composes with the permission tier and can only
+narrow, never elevate. Profiles are Symbol-only (`Parse::Agent::TOOL_PROFILES`);
+for finer control still pass an explicit Array or `{ only:, except: }`. An
+unknown profile raises rather than silently exposing the full surface.
+
+### Leaner tool responses
+
+Read tools return rows in an LLM-friendly form (Pointers as `{_type, class,
+id}`, Dates as bare ISO strings) and now **strip the raw `ACL` map** — it is
+operationally useless to a model (effective authority is enforced server-side
+regardless) and is pure token overhead plus a minor role/user-id disclosure.
+`get_objects` and the Atlas Search tools now go through the same normalization
+`query_class` always used, instead of shipping raw wire-form.
+
+Defaults that bound response size: `query_class` `limit:` defaults to 100 (cap
+1000) with the rendered array capped at 50 (`truncated_note`); `aggregate`
+auto-injects a terminal `$limit: 200`. Pass a smaller `limit:` / project fewer
+fields via `keys:` when you want a tighter result.
+
+### `semantic_search` — deduped sources and a token budget
+
+The `semantic_search` result hoists each chunk's parent record **once** into a
+`documents` map keyed by `objectId`, instead of duplicating the full source on
+every chunk — map a chunk back to its source via `metadata.object_id`:
+
+```jsonc
+{
+  "chunks": [
+    { "id": "a#0", "score": 0.82, "content": "…", "metadata": { "object_id": "a", "chunk_index": 0 } },
+    { "id": "a#1", "score": 0.82, "content": "…", "metadata": { "object_id": "a", "chunk_index": 1 } }
+  ],
+  "documents": { "a": { "objectId": "a", "title": "…" } },
+  "count": 2
+}
+```
+
+A `max_total_tokens` budget (default 20,000; estimated as chars/4) trims the
+lowest-ranked chunks so a few long documents can't silently blow the context
+window — the count caps (`k * max_chunks_per_document`) bound the chunk *count*
+but not their total size. When the budget trims, the result adds
+`budget_truncated: true` and `budget_dropped: <n>` so the truncation is never
+silent. Pass `max_total_tokens: 0` to disable.
+
+### Structured error metadata on the wire
+
+A failing `tools/call` already carries `error_code` and a structured `details:`
+hash (e.g. `allowed_fields`, `suggested_rewrite`) and `retry_after` — these are
+now forwarded on the MCP error envelope under `_meta` (`parse.error_code`,
+`parse.retry_after`, `parse.details`) so a client can branch deterministically
+and honor `retry_after` instead of re-parsing the prose message. The
+human-readable `content` text is unchanged.
+
+`get_schema` on a mistyped class name now raises a `ValidationError` carrying a
+"Did you mean: …?" hint (near matches from the locally-known classes), so the
+model self-corrects in one retry instead of falling back to a full
+`get_all_schemas` sweep.
 
 ---
 
@@ -849,6 +1152,10 @@ agent = Parse::Agent.new(tools: { only: [:query_class, :get_schema, :aggregate],
 
 # Denylist only
 agent = Parse::Agent.new(tools: { except: [:emit_artifact] })
+
+# Named profile (Symbol) — :lean narrows to the six core read tools
+# (~67% smaller tools/list). See "Token Economy" above.
+agent = Parse::Agent.new(tools: :lean)
 ```
 
 **Resolution order** is strict: env-gates ▷ permission tier ▷ per-instance filter. The filter cannot elevate — `tools: { only: [:delete_object] }` on a `:readonly` agent still excludes `delete_object` because `delete_object` is not in the readonly tier's permitted set in the first place.
@@ -1776,6 +2083,8 @@ Known `details[:kind]` subcodes for `:access_denied`:
 `details[:allowed_fields]` is capped at the first 20 entries for wire compactness. When the class has more, the prose `error:` message includes a `+N more` suffix; the structured array is preview-only.
 
 The top-level `error_code` stays at `:access_denied` for back-compat with consumers that only branch on it. The new subcode is purely additive — clients that ignore `details:` see no change in behavior.
+
+**On the wire (5.2+):** `error_code`, `retry_after`, and `details` are forwarded on the MCP tool-error envelope under `_meta` — `parse.error_code`, `parse.retry_after`, `parse.details` — so a spec-compliant client can branch deterministically (and honor `retry_after`) without parsing the prose `content` text. The `content` text and `isError: true` are unchanged.
 
 ---
 

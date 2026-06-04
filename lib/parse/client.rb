@@ -62,6 +62,17 @@ module Parse
     # An error when the session token provided in the request is invalid.
     class InvalidSessionTokenError < Error; end
 
+    # Raised when Parse Server's request-id idempotency layer rejects a request
+    # carrying a previously-seen `X-Parse-Request-Id` (Parse error code
+    # {Parse::Response::ERROR_DUPLICATE_REQUEST}, 159). The duplicate was NOT
+    # applied a second time — the original request already succeeded. The SDK
+    # reuses the same request id across transparent retries, so a retried write
+    # that lands but loses its response will surface THIS error on the replay:
+    # treat it as "the write already applied" (re-fetch by your own key if you
+    # need the resulting object — Parse Server does not echo the original
+    # response on a duplicate).
+    class DuplicateRequestError < Error; end
+
     # An error raised when a cloud function or job returns an error response
     # (e.g. when the cloud code calls error!()). Carries the function name,
     # Parse error code, HTTP status, and the underlying Response for debugging.
@@ -902,6 +913,9 @@ module Parse
     #   - This usually means you have exceeded the burst limit on requests, which will mean you will be throttled for the
     #     next 60 seconds.
     # @raise Parse::Error::InvalidSessionTokenError when the Parse response code is 209.
+    # @raise Parse::Error::DuplicateRequestError when the Parse response code is
+    #   {Parse::Response::ERROR_DUPLICATE_REQUEST} (159) — request-id idempotency
+    #   rejected a duplicate; the original write already applied.
     #   - This means the session token that was sent in the request seems to be invalid.
     # @return [Parse::Response] the response for this request.
     # @see Parse::Middleware::BodyBuilder
@@ -1063,6 +1077,13 @@ module Parse
         elsif response.code == 209 # Error 209: invalid session token
           Parse::Client._safe_warn("InvalidSessionTokenError", response)
           raise Parse::Error::InvalidSessionTokenError, response
+        elsif response.code == Parse::Response::ERROR_DUPLICATE_REQUEST # 159
+          # Request-id idempotency rejected a duplicate — the original write
+          # already applied (NOT a second time). Surface a typed, catchable
+          # signal rather than a generic error; this is what a transparently-
+          # retried write that landed-but-lost-its-response sees on the replay.
+          Parse::Client._safe_warn("DuplicateRequestError", response)
+          raise Parse::Error::DuplicateRequestError, response
         end
       end
 
@@ -1072,17 +1093,18 @@ module Parse
       # re-sending is safe for any method. 500/503 (ServiceUnavailable) is
       # ambiguous — a write may have applied before the error — so only
       # re-send when the request is idempotent (see #idempotent_retry?).
-      retryable = e.is_a?(Parse::Error::RequestLimitExceededError) || idempotent_retry?(method, body)
+      retryable = e.is_a?(Parse::Error::RequestLimitExceededError) || idempotent_retry?(method, body, headers)
       if _retry_count > 0 && retryable
         warn "[Parse:Retry] Retries remaining #{_retry_count} : #{response.request}"
         _retry_count -= 1
-        # Use Retry-After header if available, otherwise use exponential backoff
+        # Use Retry-After header if available, otherwise use linear backoff
         retry_after = response.retry_after if response.respond_to?(:retry_after)
         if retry_after && retry_after > 0
           _retry_delay = retry_after
           warn "[Parse:Retry] Using Retry-After header: #{_retry_delay}s"
         else
-          # Deterministic exponential backoff with +/-25% jitter. Never zero —
+          # Linear backoff (RETRY_DELAY × attempt number) with +/-25% jitter.
+          # Never zero —
           # zero-wait retries amplify DoS against upstream and stampede on 429.
           backoff_delay = RETRY_DELAY * (_retry_max - _retry_count)
           _retry_delay = backoff_delay * (0.75 + rand * 0.5)
@@ -1091,10 +1113,21 @@ module Parse
         retry
       end
       raise
-    rescue Faraday::ClientError, Net::OpenTimeout => e
-      # Connection dropped or timed out mid-flight: the outcome is unknown, so
-      # only re-send idempotent requests to avoid double-applying a write.
-      if _retry_count > 0 && idempotent_retry?(method, body)
+    rescue Faraday::ClientError, Faraday::TimeoutError, Net::OpenTimeout => e
+      # Request timed out mid-flight: the outcome is unknown (the server may
+      # have received and applied the write but never answered), so only
+      # re-send idempotent requests to avoid double-applying.
+      #
+      # Faraday 2.x raises `Faraday::TimeoutError` for a read timeout
+      # (`Timeout::Error` / `Errno::ETIMEDOUT`); it subclasses `Faraday::Error`,
+      # not `ClientError`, so it must be listed explicitly to be caught. We
+      # deliberately do NOT catch `Faraday::ConnectionFailed` (connection
+      # refused/reset, plus the wrapped connect-timeout): refused is a
+      # non-transient "server down / misconfigured" failure, and auto-retrying
+      # it only adds backoff latency before the inevitable error. Broadening to
+      # reset connections safely (retry reset, fail fast on refused) is tracked
+      # as a follow-up.
+      if _retry_count > 0 && idempotent_retry?(method, body, headers)
         warn "[Parse:Retry] Retries remaining #{_retry_count} : #{_request}"
         _retry_count -= 1
         backoff_delay = RETRY_DELAY * (_retry_max - _retry_count)
@@ -1107,21 +1140,50 @@ module Parse
     end
 
     # Whether a request whose outcome is UNKNOWN (a 500/503 or a dropped
-    # connection) is safe to transparently re-send. GET and DELETE are
-    # idempotent. A full-object PUT update is idempotent ONLY when it carries
-    # no atomic `__op` mutation — an Increment/Add/AddUnique/Remove/Relation op
-    # would double-apply on replay. POST (object create / batch) is never
+    # connection) is safe to transparently re-send.
+    #
+    # Server-dedup fast path: when the operator has asserted Parse Server
+    # idempotency is configured ({Parse::Request.assume_server_idempotency})
+    # AND this request carries a stable `X-Parse-Request-Id` header, the
+    # server deduplicates a replay, so even a POST or an atomic-op write is
+    # safe to retry — the second delivery is a no-op that returns the original
+    # result. The SDK sends the same request id on every retry (the header is
+    # set once and preserved across the `retry`), which is what makes the
+    # server-side dedup match.
+    #
+    # Otherwise the conservative method/body heuristic applies: GET and DELETE
+    # are idempotent; a full-object PUT update is idempotent ONLY when it
+    # carries no atomic `__op` mutation (Increment/Add/AddUnique/Remove/Relation
+    # would double-apply on replay); POST (object create / batch) is never
     # auto-retried. 429 throttles are handled at the call site, since the
     # server provably discarded the request and those re-send regardless.
     # @param method [Symbol] the (downcased) HTTP method of the request.
     # @param body [Hash, Object, nil] the request body.
+    # @param headers [Hash, nil] the outgoing request headers (consulted for
+    #   the request-id header on the server-dedup fast path).
     # @return [Boolean]
-    def idempotent_retry?(method, body)
+    def idempotent_retry?(method, body, headers = nil)
+      return true if server_deduped_request?(headers)
       case method
       when :get, :delete then true
       when :put then !body_carries_atomic_op?(body)
       else false
       end
+    end
+
+    # Whether this request is covered by Parse Server's server-side request-id
+    # deduplication, making a replay a no-op. True only when the operator has
+    # opted in via {Parse::Request.assume_server_idempotency} AND the request
+    # actually carries a non-blank request-id header (writes to inherently
+    # non-idempotent paths — sessions, logout, functions, push, jobs — never
+    # get a request id, so they correctly fail this check).
+    # @param headers [Hash, nil] the outgoing request headers.
+    # @return [Boolean]
+    def server_deduped_request?(headers)
+      return false unless Parse::Request.assume_server_idempotency
+      return false unless headers.is_a?(Hash)
+      rid = headers[Parse::Request.request_id_header]
+      rid.is_a?(String) && !rid.strip.empty?
     end
 
     # Whether a request body carries a Parse atomic operation, i.e. any field

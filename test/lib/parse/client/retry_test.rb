@@ -22,10 +22,35 @@ require_relative "../../../test_helper"
 #      exception — the server provably discarded the request, so it re-sends
 #      regardless of method.
 class ClientRetryTest < Minitest::Test
+  # Server-side request-id dedup is an explicit opt-in (`assume_server_idempotency`).
+  # Keep it OFF for every test by default so the conservative behavior is the
+  # baseline; the dedup tests flip it on and this restores it.
+  def teardown
+    Parse::Request.assume_server_idempotency = false
+  end
+
   # Build a client whose connection always returns the given HTTP status and
-  # counts how many HTTP attempts were made. `sleep` is stubbed (and the
-  # requested delays recorded in @sleeps) so the test is instant.
-  def stub_client(http_status:, retry_limit:)
+  # counts how many HTTP attempts were made. `sleep` is stubbed (delays recorded
+  # in @sleeps) and the per-attempt `X-Parse-Request-Id` header is recorded in
+  # @req_ids, so a test can assert the same id is replayed across retries.
+  def stub_client(http_status:, retry_limit:, code: 1, error: "service unavailable")
+    resp = Parse::Response.new
+    resp.http_status = http_status
+    resp.code = code
+    resp.error = error
+    env = Struct.new(:body).new(resp)
+    build_stub(retry_limit: retry_limit) { env }
+  end
+
+  # Like stub_client, but the connection RAISES `error` on every attempt (for
+  # the dropped-connection / timeout retry branch).
+  def stub_client_raising(error, retry_limit:)
+    build_stub(retry_limit: retry_limit) { raise error }
+  end
+
+  # Shared stub builder. The no-arg block decides what each @conn verb does on
+  # each call (return the canned env, or raise).
+  def build_stub(retry_limit:, &on_call)
     client = Parse::Client.allocate
     client.instance_variable_set(:@retry_limit, retry_limit)
 
@@ -36,15 +61,17 @@ class ClientRetryTest < Minitest::Test
     @attempts = 0
     bump = -> { @attempts += 1 } # closes over the test instance's @attempts
 
-    resp = Parse::Response.new
-    resp.http_status = http_status
-    resp.code = 1
-    resp.error = "service unavailable"
-    env = Struct.new(:body).new(resp)
+    @req_ids = []
+    req_ids = @req_ids
 
     conn = Object.new
     [:get, :post, :put, :delete].each do |verb|
-      conn.define_singleton_method(verb) { |*_args| bump.call; env }
+      conn.define_singleton_method(verb) do |*args|
+        hdrs = args[2] # @conn.send(method, uri, params, headers)
+        req_ids << (hdrs.is_a?(Hash) ? hdrs["X-Parse-Request-Id"] : nil)
+        bump.call
+        on_call.call
+      end
     end
     client.instance_variable_set(:@conn, conn)
     client
@@ -165,5 +192,142 @@ class ClientRetryTest < Minitest::Test
     end
     assert_equal 2, @attempts,
       "a 429 throttles before processing, so even an atomic-op PUT is safe to retry"
+  end
+
+  # ---------------------------------------------------------------------------
+  # Server-side request-id dedup: writes become retry-safe ONLY when the
+  # operator asserts Parse Server idempotency is configured AND the request
+  # carries a stable X-Parse-Request-Id header (sent on every attempt).
+  # ---------------------------------------------------------------------------
+
+  def test_post_not_retried_when_server_dedup_not_asserted
+    # Default posture: the POST carries an X-Parse-Request-Id (on by default),
+    # but `assume_server_idempotency` is false, so it is still NOT retried —
+    # the client cannot assume the server deduplicates the replay.
+    refute Parse::Request.assume_server_idempotency
+    client = stub_client(http_status: 503, retry_limit: 3)
+    assert_raises(Parse::Error::ServiceUnavailableError) do
+      client.request(:post, "classes/Post", body: { title: "hi" })
+    end
+    assert_equal 1, @attempts
+    refute_nil @req_ids.compact.first, "sanity: a POST carries a request-id header by default"
+  end
+
+  def test_post_retried_with_stable_request_id_when_server_dedup_asserted
+    Parse::Request.assume_server_idempotency = true
+    client = stub_client(http_status: 503, retry_limit: 2)
+    assert_raises(Parse::Error::ServiceUnavailableError) do
+      client.request(:post, "classes/Post", body: { title: "hi" })
+    end
+    assert_equal 3, @attempts, "a POST is retry-safe under asserted server dedup"
+    ids = @req_ids.compact
+    assert_equal 3, ids.size, "every attempt must carry a request-id header"
+    assert_equal 1, ids.uniq.size,
+      "every retry must send the SAME X-Parse-Request-Id so the server dedups: #{@req_ids.inspect}"
+    assert ids.first.start_with?("_RB_"), "request id should be the Ruby-Parse-Stack format"
+  end
+
+  def test_atomic_op_put_retried_when_server_dedup_asserted
+    # An atomic-op PUT is normally NOT retried (would double-apply); under
+    # asserted server dedup the replay is a server-side no-op, so it IS retried.
+    Parse::Request.assume_server_idempotency = true
+    client = stub_client(http_status: 500, retry_limit: 2)
+    assert_raises(Parse::Error::ServiceUnavailableError) do
+      client.request(:put, "classes/Post/abc",
+                     body: { "likes" => { "__op" => "Increment", "amount" => 1 } })
+    end
+    assert_equal 3, @attempts, "an atomic-op PUT is retry-safe under server dedup"
+    assert_equal 1, @req_ids.compact.uniq.size, "stable request id across retries"
+  end
+
+  def test_post_without_request_id_not_retried_even_when_server_dedup_asserted
+    # A write with idempotency suppressed (no request-id header) must NOT be
+    # retried even when server dedup is asserted — there is no dedup key for
+    # the server to match the replay against.
+    Parse::Request.assume_server_idempotency = true
+    client = stub_client(http_status: 503, retry_limit: 2)
+    assert_raises(Parse::Error::ServiceUnavailableError) do
+      client.request(:post, "classes/Post", body: { title: "hi" }, opts: { idempotent: false })
+    end
+    assert_equal 1, @attempts, "no request-id header => not retried even when dedup is asserted"
+    assert_empty @req_ids.compact, "the request must carry no X-Parse-Request-Id"
+  end
+
+  def test_post_retried_on_timeout_when_server_dedup_asserted
+    # Faraday 2.x raises Faraday::TimeoutError for a real read timeout (the
+    # ambiguous "sent but no answer" case). The timeout rescue branch honors the
+    # same server-dedup fast path: a POST timeout is retried with a stable id.
+    Parse::Request.assume_server_idempotency = true
+    client = stub_client_raising(Faraday::TimeoutError.new("timed out"), retry_limit: 2)
+    assert_raises(Parse::Error::ConnectionError) do
+      client.request(:post, "classes/Post", body: { title: "hi" })
+    end
+    assert_equal 3, @attempts, "a POST retries on a read timeout under asserted server dedup"
+    assert_equal 1, @req_ids.compact.uniq.size, "stable request id across timeout retries"
+  end
+
+  def test_post_not_retried_on_timeout_without_server_dedup
+    client = stub_client_raising(Faraday::TimeoutError.new("timed out"), retry_limit: 2)
+    assert_raises(Parse::Error::ConnectionError) do
+      client.request(:post, "classes/Post", body: { title: "hi" })
+    end
+    assert_equal 1, @attempts, "default: a POST is not retried on a read timeout"
+  end
+
+  def test_connection_refused_is_not_caught_and_fails_fast
+    # Connection refused (Faraday::ConnectionFailed) is intentionally NOT in the
+    # rescue list — it is a non-transient failure that must propagate raw and
+    # fast (no retry latency, no [Parse:Retry] noise on a down/misconfigured
+    # server). Guards the deliberate scope of the timeout-only retry fix.
+    client = stub_client_raising(Faraday::ConnectionFailed.new("refused"), retry_limit: 3)
+    assert_raises(Faraday::ConnectionFailed) do
+      client.request(:get, "classes/Post", query: { limit: 0 })
+    end
+    assert_equal 1, @attempts, "connection-refused must not be retried"
+  end
+
+  # ---------------------------------------------------------------------------
+  # Code 159 — request-id idempotency duplicate → typed DuplicateRequestError.
+  # ---------------------------------------------------------------------------
+
+  def test_code_159_raises_duplicate_request_error
+    # A replay rejected by server idempotency (HTTP 400, Parse code 159) is
+    # surfaced as a typed, catchable error rather than a generic failure.
+    client = stub_client(http_status: 400, code: 159, retry_limit: 0, error: "Duplicate request")
+    assert_raises(Parse::Error::DuplicateRequestError) do
+      client.request(:post, "classes/Post", body: { title: "hi" })
+    end
+  end
+
+  def test_retry_into_duplicate_request_surfaces_duplicate_request_error
+    # The headline ambiguous-success path: attempt 1 lands but returns 503; the
+    # SDK retries (server dedup asserted) and replays the same request id; the
+    # server answers 159. The caller gets DuplicateRequestError ("already
+    # applied"), NOT an infinite loop or a generic ServiceUnavailableError.
+    Parse::Request.assume_server_idempotency = true
+
+    client = Parse::Client.allocate
+    client.instance_variable_set(:@retry_limit, 3)
+    client.define_singleton_method(:sleep) { |_s = 0| 0 }
+    seq = [[503, 1, "unavailable"], [400, 159, "Duplicate request"]]
+    i = -1
+    conn = Object.new
+    [:get, :post, :put, :delete].each do |verb|
+      conn.define_singleton_method(verb) do |*_args|
+        i += 1
+        st, code, err = seq[[i, seq.size - 1].min]
+        r = Parse::Response.new
+        r.http_status = st
+        r.code = code
+        r.error = err
+        Struct.new(:body).new(r)
+      end
+    end
+    client.instance_variable_set(:@conn, conn)
+
+    assert_raises(Parse::Error::DuplicateRequestError) do
+      client.request(:post, "classes/Post", body: { title: "hi" })
+    end
+    assert_equal 2, i + 1, "exactly two attempts: the 503, then the 159 replay"
   end
 end

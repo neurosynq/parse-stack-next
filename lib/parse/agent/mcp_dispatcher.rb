@@ -489,12 +489,24 @@ module Parse
             envelope
           end
         else
-          {
+          # Forward the structured error metadata the agent already computed
+          # (error_code, retry_after, details such as suggested_rewrite /
+          # allowed_fields) so a client can branch deterministically and
+          # honor retry_after — instead of re-parsing the prose message. Goes
+          # in `_meta` (spec-allowed arbitrary metadata) under a `parse.`
+          # prefix; the human-readable text content is unchanged.
+          envelope = {
             "content" => [
               { "type" => "text", "text" => result[:error].to_s },
             ],
             "isError" => true,
           }
+          meta = {}
+          meta["parse.error_code"]  = result[:error_code].to_s if result[:error_code]
+          meta["parse.retry_after"] = result[:retry_after]     if result[:retry_after]
+          meta["parse.details"]     = result[:details]         if result[:details].is_a?(Hash) && result[:details].any?
+          envelope["_meta"] = meta unless meta.empty?
+          envelope
         end
       end
       private_class_method :handle_tools_call

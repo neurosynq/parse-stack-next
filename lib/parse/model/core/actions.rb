@@ -409,6 +409,13 @@ module Parse
               winner = _recover_from_duplicate_value(e, query_attrs, session: session, master_key: master_key)
               raise unless winner
               winner
+            rescue Parse::Error::DuplicateRequestError
+              # A transparently-retried create landed but lost its response;
+              # server idempotency rejected the replay. Re-find the row the
+              # original attempt created and return it.
+              winner = _recover_from_duplicate_request(query_attrs, session: session, master_key: master_key)
+              raise unless winner
+              winner
             end
           end
         end
@@ -471,6 +478,12 @@ module Parse
                 winner = _recover_from_duplicate_value(e, query_attrs, session: session, master_key: master_key)
                 raise unless winner
                 obj = winner
+              rescue Parse::Error::DuplicateRequestError
+                # See #first_or_create! — recover the row a retried create
+                # already landed (it already carries resource_attrs).
+                winner = _recover_from_duplicate_request(query_attrs, session: session, master_key: master_key)
+                raise unless winner
+                obj = winner
               end
             end
 
@@ -480,7 +493,15 @@ module Parse
               end
               if has_changes
                 obj.apply_attributes!(resource_attrs, dirty_track: true)
-                session ? obj.save!(session: session) : obj.save!
+                begin
+                  session ? obj.save!(session: session) : obj.save!
+                rescue Parse::Error::DuplicateRequestError
+                  # A retried update (PUT) landed but lost its response; re-find
+                  # the now-updated row and return it.
+                  winner = _recover_from_duplicate_request(query_attrs, session: session, master_key: master_key)
+                  raise unless winner
+                  obj = winner
+                end
               end
             end
 
@@ -618,6 +639,21 @@ module Parse
         end
 
         # @!visibility private
+        # Recovery for a request-id idempotency duplicate
+        # ({Parse::Error::DuplicateRequestError}, Parse code 159): the create's
+        # POST was rejected as a duplicate, which means a prior — transparently
+        # retried — attempt already created the row but lost its response. Re-find
+        # the row by the identifying `query_attrs` and return it (the row was
+        # created with `query_attrs.merge(resource_attrs)`, so it already carries
+        # the resource attributes). Returns nil if it cannot be located, in which
+        # case the caller re-raises the original error. Relies on `query_attrs`
+        # actually identifying the row — the same assumption the duplicate-value
+        # recovery and `first_or_create!`'s own find already make.
+        def _recover_from_duplicate_request(query_attrs, session: nil, master_key: nil)
+          _scoped_first(query_attrs, session: session, master_key: master_key)
+        end
+
+        # @!visibility private
         # The pre-synchronize behavior of `first_or_create!`, factored out so
         # the synchronize wrapper can short-circuit when disabled. Preserves
         # the legacy contract: query → build → save! if new.
@@ -627,7 +663,13 @@ module Parse
             obj = self.new query_attrs.merge(resource_attrs)
           end
           if obj.new?
-            session ? obj.save!(session: session) : obj.save!
+            begin
+              session ? obj.save!(session: session) : obj.save!
+            rescue Parse::Error::DuplicateRequestError
+              winner = _recover_from_duplicate_request(query_attrs, session: session, master_key: master_key)
+              raise unless winner
+              obj = winner
+            end
           end
           obj
         end
@@ -637,14 +679,26 @@ module Parse
           obj = _scoped_first(query_attrs, session: session, master_key: master_key)
           if obj.nil?
             obj = self.new query_attrs.merge(resource_attrs)
-            session ? obj.save!(session: session) : obj.save!
+            begin
+              session ? obj.save!(session: session) : obj.save!
+            rescue Parse::Error::DuplicateRequestError
+              winner = _recover_from_duplicate_request(query_attrs, session: session, master_key: master_key)
+              raise unless winner
+              obj = winner
+            end
           elsif !resource_attrs.empty?
             has_changes = resource_attrs.any? do |key, value|
               obj.respond_to?(key) && obj.send(key) != value
             end
             if has_changes
               obj.apply_attributes!(resource_attrs, dirty_track: true)
-              session ? obj.save!(session: session) : obj.save!
+              begin
+                session ? obj.save!(session: session) : obj.save!
+              rescue Parse::Error::DuplicateRequestError
+                winner = _recover_from_duplicate_request(query_attrs, session: session, master_key: master_key)
+                raise unless winner
+                obj = winner
+              end
             end
           end
           obj
