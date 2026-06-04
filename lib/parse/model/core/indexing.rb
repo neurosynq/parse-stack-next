@@ -56,6 +56,15 @@ module Parse
         _perishable_token _password_history authData _auth_data
       ].freeze
 
+      # Guards the check-then-append in the index registration helpers. Index
+      # declarations happen at class-load time, but an app server that eager-
+      # loads models across multiple threads can otherwise have two threads
+      # both pass the idempotency check on the same (still-empty) array and
+      # append duplicate declarations — producing duplicate `createIndex`
+      # calls at migration time. A single shared mutex is sufficient: this is
+      # not a hot path, so coarse locking trades nothing for correctness.
+      INDEX_REGISTRY_MUTEX = Mutex.new
+
       # Storage for declared indexes. Each entry is a frozen Hash with
       # the keys `:keys`, `:options`, `:declared_for` (the source-of-truth
       # symbol list from the `mongo_index` call, for diagnostics).
@@ -304,13 +313,10 @@ module Parse
           collection:    nil, # nil sentinel means "use the model's parse_class"
         }.freeze
 
-        if mongo_index_declarations.any? { |d| d[:keys] == declaration[:keys] && d[:options] == declaration[:options] && d[:collection] == declaration[:collection] }
-          # Idempotent redeclaration — same class re-opened or sub-class
-          # inherited; don't accumulate duplicates.
-          return declaration
-        end
-        mongo_index_declarations << declaration
-        declaration
+        # Idempotent redeclaration (same class re-opened or sub-class
+        # inherited) is dropped inside the locked append so a duplicate can't
+        # slip through under concurrent class loading.
+        append_index_declaration(declaration)
       end
 
       # Register one direction of a relation index. The declaration
@@ -324,11 +330,7 @@ module Parse
           declared_for: [source].freeze,
           collection:   collection,
         }.freeze
-        if mongo_index_declarations.any? { |d| d[:keys] == decl[:keys] && d[:collection] == collection }
-          return decl
-        end
-        mongo_index_declarations << decl
-        decl
+        append_index_declaration(decl)
       end
 
       # Register the compound `{owningId: 1, relatedId: 1}` unique index
@@ -346,11 +348,29 @@ module Parse
           declared_for: [source].freeze,
           collection:   collection,
         }.freeze
-        if mongo_index_declarations.any? { |d| d[:keys] == decl[:keys] && d[:options] == decl[:options] && d[:collection] == collection }
-          return decl
+        append_index_declaration(decl)
+      end
+
+      # Append an index declaration, dropping an exact-duplicate redeclaration,
+      # under {INDEX_REGISTRY_MUTEX} so concurrent class loading can't race a
+      # duplicate past the idempotency check. Two declarations are duplicates
+      # when their `:keys`, `:options`, and `:collection` all match (relation
+      # declarations carry a frozen `{}` options hash, so this is equivalent to
+      # the prior keys+collection check for those paths).
+      # @return [Hash] the declaration passed in (whether newly stored or a
+      #   dropped duplicate), preserving the previous return contract.
+      def append_index_declaration(declaration)
+        Parse::Core::Indexing::INDEX_REGISTRY_MUTEX.synchronize do
+          decls = (@mongo_index_declarations ||= [])
+          unless decls.any? { |d|
+            d[:keys] == declaration[:keys] &&
+              d[:options] == declaration[:options] &&
+              d[:collection] == declaration[:collection]
+          }
+            decls << declaration
+          end
         end
-        mongo_index_declarations << decl
-        decl
+        declaration
       end
 
       # Translate a property symbol to the wire-format column name a

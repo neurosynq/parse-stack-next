@@ -63,6 +63,21 @@ actually deliver.
   per-subscription master key), master- and session-scoped subscriptions are
   routed to separate connections; the bridge fails closed rather than open a
   mis-scoped channel. (`lib/parse/agent/mcp_subscriptions.rb`)
+- **SECURITY**: `resources/subscribe` enforces the same class-authorization gate
+  as the read path before opening any socket — `agent_hidden` declarations and
+  the per-agent `classes:` allowlist are checked via
+  `Tools.assert_class_accessible!`, so a hidden or out-of-allowlist class (e.g.
+  `parse://_Session/count`) can no longer become a change/timing oracle through
+  a subscription that bypasses the tool surface. A denial opens no socket.
+  (`lib/parse/agent/mcp_subscriptions.rb`, `lib/parse/agent/mcp_dispatcher.rb`)
+- **SECURITY**: the master-key subscription branch is bound to the agent's own
+  master-key authority. Because the admin LiveQuery client backfills the
+  process-global master key, an unprivileged / client-mode agent (no master key
+  on its own client) in a no-scope posture is now refused rather than allowed to
+  borrow the global key for an ACL-bypassing admin socket; the subscribe and
+  cap checks are also re-validated under the lock after the network subscribe so
+  a torn-down session can't be resurrected into a leaked socket.
+  (`lib/parse/agent/mcp_subscriptions.rb`)
 - **NEW**: only `count` and `samples` resources are subscribable; `schema` is
   rejected because schema changes are not LiveQuery events. A per-session
   subscription cap (default 100) bounds the footprint of a client that
@@ -196,12 +211,19 @@ honored.
 - **NEW**: `Parse.reachable?` / `Parse::Client#reachable?` — a no-credentials
   liveness probe that hits the server health endpoint; passes whenever the
   server is up, even if the configured `application_id` / REST key is wrong.
-- **NEW**: `Parse.connected?` / `Parse::Client#connected?` — an authenticated
-  probe (a limit-0 find) that returns `true` only when the server is up **and**
-  the credentials are accepted. Invalid credentials, connection failures,
-  timeouts, and API errors all return `false` rather than raising, so it is a
-  safe boolean smoke-test after `Parse.setup`; genuine programming errors still
-  propagate. (`lib/parse/client.rb`)
+- **NEW**: `Parse.connected?` / `Parse::Client#connected?` — a connectivity
+  probe that by default hits the health endpoint, so it returns `true` whenever
+  the server is up, regardless of Class-Level-Permission configuration. (A
+  `_User` find is unreliable as the default probe: locking `_User` finds to the
+  master key via CLP is standard production hardening and would make the probe
+  report "not connected" on a perfectly healthy, correctly-configured server.)
+  Pass an endpoint — `connected?("classes/_User")`, or
+  `Parse.connected?(:default, "classes/_User")` — to additionally validate
+  credentials against a class the configured key can read; the probe runs
+  `limit: 0` (never pulls rows) and routes through the auth stack, so a wrong
+  `application_id` / REST key returns `false`. Connection failures, timeouts,
+  and API errors all return `false` rather than raising; genuine programming
+  errors still propagate. (`lib/parse/client.rb`)
 
 #### `request_password_reset` — documented failure mode
 
@@ -211,18 +233,31 @@ honored.
   callers branching on the documented Boolean return know to rescue it.
   (`lib/parse/model/classes/user.rb`)
 
-#### `Parse::Client#request` — fix infinite retry loop on 500/503/429
+#### `Parse::Client#request` — bounded, idempotency-aware retries on 500/503/429
 
 - **FIXED**: a request that received a persistent `500`/`503`
   (`ServiceUnavailableError`) or `429` (`RequestLimitExceededError`) retried
   **forever** instead of giving up after `retry_limit` attempts. The retry path
   uses Ruby's `retry` keyword, which re-runs the method body; because the retry
   counter was initialized inside that re-run, every attempt reset it back to
-  `retry_limit` (and the exponential backoff computed to `0`, so it spun with no
-  delay between attempts). The counter is now initialized once, above the
-  retried block, so the countdown is preserved — a persistent failure makes
-  exactly `retry_limit + 1` attempts and then raises. An explicit `opts[:retry]`
-  count is likewise honored and bounded. (`lib/parse/client.rb`)
+  `retry_limit`. The counter is now initialized once, above the retried block,
+  so the countdown is preserved — a persistent failure makes exactly
+  `retry_limit + 1` attempts and then raises. An explicit `opts[:retry]` count
+  is likewise honored and bounded. (`lib/parse/client.rb`)
+- **FIXED**: the exponential backoff delay collapsed to zero (or negative, so no
+  sleep at all) whenever a caller passed `opts: { retry: N }` with `N` above the
+  client's `retry_limit`, because the backoff multiplier was derived from
+  `retry_limit` rather than the effective starting budget. The multiplier now
+  uses the actual starting count, so every retry backs off by a strictly
+  positive, growing delay. (`lib/parse/client.rb`)
+- **CHANGED**: retries are now idempotency-aware, so a transient server error
+  can't double-apply a write. A `429` re-sends regardless of method (the server
+  provably discarded the request). For an ambiguous failure — a `500`/`503` or a
+  dropped connection, where the write may already have applied — only idempotent
+  requests are re-sent: `GET` and `DELETE` always, a `PUT` update only when its
+  body carries no atomic operation (`Increment` / `Add` / `AddUnique` /
+  `Remove` / relation ops), and `POST` (object create / batch) never.
+  (`lib/parse/client.rb`)
 
 ### 5.1.1
 

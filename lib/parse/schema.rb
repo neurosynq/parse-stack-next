@@ -269,15 +269,25 @@ module Parse
       end
 
       # Fields with type mismatches.
-      # @return [Hash] field name => { local: type, server: type }
+      #
+      # Iterates `field_map` (canonical name => wire column) rather than
+      # deriving the server key with `camelize(:lower)`, so a property with a
+      # custom `field:` wire column (e.g. `property :post_id, field:
+      # "postIdentifier"`) resolves to its real server column instead of a
+      # camelized guess. This both dedupes multi-word fields (which appear
+      # under two keys in `fields`) and matches the `missing_on_server`
+      # resolution path, so type drift on custom-mapped columns is no longer
+      # silently skipped.
+      # @return [Hash] canonical field name => { local: type, server: type }
       def type_mismatches
         return {} unless server_exists?
 
         mismatches = {}
-        local_fields.each do |name, local_type|
+        @model_class.field_map.each do |name, wire|
           next if core_field?(name)
-          name_str = name.to_s.camelize(:lower)
-          server_type = @server_schema.field_type(name_str)
+          local_type = @model_class.fields[name]
+          next if local_type.nil?
+          server_type = @server_schema.field_type(wire.to_s)
           next unless server_type
 
           # Normalize types for comparison

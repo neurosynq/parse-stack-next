@@ -69,19 +69,46 @@ module Parse
     include Parse::Client::Connectable
     include Enumerable
 
-    # Known Parse classes for fast validation - dynamically loaded from schema
+    # Built-in Parse classes always considered known, independent of the
+    # server schema. Used both as the seed for the dynamic list and as the
+    # transient fallback when the schema fetch fails.
+    BUILT_IN_PARSE_CLASSES = %w[
+      _User _Role _Session _Installation _Audience
+      User Role Session Installation Audience
+    ].freeze
+
+    # Mutex guarding lazy memoization of {known_parse_classes} so concurrent
+    # first-callers don't each fire a `schemas` request and clobber the cache.
+    @known_parse_classes_mutex = Mutex.new
+
+    # Known Parse classes for fast validation - dynamically loaded from schema.
+    #
+    # The successful result is memoized; a failed schema fetch is NOT cached —
+    # it returns the built-in fallback for this call only, so a transient
+    # server outage during boot doesn't permanently strip every application-
+    # defined class from the known set (which would make class-accessibility
+    # checks reject custom classes for the process lifetime). The narrowed
+    # rescue logs the failure instead of swallowing it silently.
     def self.known_parse_classes
-      @known_parse_classes ||= begin
-          # Get all classes from Parse schema
+      cached = @known_parse_classes
+      return cached if cached
+
+      @known_parse_classes_mutex.synchronize do
+        # Re-check under the lock: a racing caller may have populated it.
+        return @known_parse_classes if @known_parse_classes
+
+        begin
           response = Parse.client.schemas
           schema_classes = response.success? ? response.result.dig("results")&.map { |cls| cls["className"] } || [] : []
-          # Add built-in Parse classes
-          built_in_classes = %w[_User _Role _Session _Installation _Audience User Role Session Installation Audience]
-          (built_in_classes + schema_classes).uniq.freeze
-        rescue
-          # Fallback to built-in classes if schema query fails (e.g., during testing without server)
-          %w[_User _Role _Session _Installation _Audience User Role Session Installation Audience].freeze
+          @known_parse_classes = (BUILT_IN_PARSE_CLASSES + schema_classes).uniq.freeze
+        rescue Parse::Error, Faraday::Error => e
+          # Don't cache the fallback — let the next call retry the fetch once
+          # the server is reachable again.
+          warn "[Parse::Query] schema fetch failed (#{e.class}: #{e.message}); " \
+               "falling back to built-in classes for this check only."
+          BUILT_IN_PARSE_CLASSES
         end
+      end
     end
 
     # Allow resetting the cached known classes (useful for testing)

@@ -17,27 +17,42 @@ class ConnectivityTest < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def setup
-    Parse::Test::ServerHelper.setup
+    # ServerHelper.setup returns true only when the server is actually
+    # reachable (it probes /health), false otherwise — it does NOT skip.
+    @server_up = Parse::Test::ServerHelper.setup
+  end
+
+  # The live-server probes below talk to localhost:2337. They must SKIP (not
+  # FAIL) when no server is running. Gate on ACTUAL reachability, not on
+  # PARSE_TEST_USE_DOCKER: the rake test task sets that flag unconditionally
+  # even when no container is up, so an env-flag-only guard would turn these
+  # into failures whenever the suite runs without the container.
+  def require_live_server!
+    skip "Live Parse Server not reachable at localhost:2337 (start the test container)" unless @server_up
   end
 
   def test_client_reachable_returns_true_against_live_server
+    require_live_server!
     assert Parse::Client.client.reachable?,
            "expected reachable? to return true when Parse Server is up"
   end
 
   def test_client_connected_returns_true_against_live_server
+    require_live_server!
     assert Parse::Client.client.connected?,
-           "expected connected? to return true when server is up and credentials are valid"
+           "expected connected? to return true (health endpoint) when the server is up"
   end
 
   def test_module_reachable_returns_true_against_live_server
+    require_live_server!
     assert Parse.reachable?,
            "expected Parse.reachable? to return true when Parse Server is up"
   end
 
   def test_module_connected_returns_true_against_live_server
+    require_live_server!
     assert Parse.connected?,
-           "expected Parse.connected? to return true when server is up and credentials are valid"
+           "expected Parse.connected? to return true (health endpoint) when the server is up"
   end
 
   # ---------------------------------------------------------------------------
@@ -60,11 +75,11 @@ class ConnectivityTest < Minitest::Test
   end
 
   def test_connected_returns_false_on_authentication_error
-    # connected? is the credentials-validating probe: a bad REST key surfaces
-    # as an AuthenticationError, which it must rescue to false (not raise) so
-    # the `?` predicate stays a safe boolean smoke-test.
+    # When probing a data class (override endpoint), a bad REST key surfaces as
+    # an AuthenticationError, which connected? must rescue to false (not raise)
+    # so the `?` predicate stays a safe boolean smoke-test.
     client = stubbed_client { |*| raise Parse::Error::AuthenticationError, "bad key" }
-    refute client.connected?,
+    refute client.connected?("classes/_User"),
            "connected? must return false (not re-raise) on a bad-credentials AuthenticationError"
   end
 
@@ -99,26 +114,53 @@ class ConnectivityTest < Minitest::Test
            "connected? must return false (not re-raise) on Faraday::Error"
   end
 
+  def test_connected_probes_health_by_default_and_given_endpoint_with_limit_zero
+    # Proves the endpoint parameter actually routes (no server needed): the
+    # default probes "health", and a passed endpoint is probed instead — both
+    # with query limit:0 so a class probe never pulls rows.
+    ok = Object.new
+    def ok.success?; true; end
+    calls = []
+    client = stubbed_client do |method, path, query: nil, **_opts|
+      calls << [method, path, query]
+      ok
+    end
+
+    assert client.connected?
+    assert client.connected?("classes/_User")
+
+    assert_equal :get, calls[0][0]
+    assert_equal Parse::API::Server::SERVER_HEALTH_PATH, calls[0][1]
+    assert_equal({ limit: 0 }, calls[0][2])
+    assert_equal "classes/_User", calls[1][1],
+                 "connected?(endpoint) must probe the given path, not the health endpoint"
+    assert_equal({ limit: 0 }, calls[1][2])
+  end
+
   def test_module_connected_returns_false_on_standard_error
-    # Parse.connected? rescues StandardError at the module boundary, so even
-    # an AuthenticationError becomes false at this level.
+    # The instance method only rescues Parse::Error / Faraday::Error, so to
+    # exercise the module boundary's broader `rescue StandardError` we raise a
+    # plain RuntimeError that the instance method lets propagate. Parse.connected?
+    # must still convert it to false rather than re-raise.
+    original_clients = nil
     original_clients = Parse::Client.clients.dup
-    bad_client = stubbed_client { |*| raise Parse::Error::AuthenticationError, "bad key" }
+    bad_client = stubbed_client { |*| raise RuntimeError, "unexpected boom" }
     Parse::Client.clients[:default] = bad_client
     refute Parse.connected?,
-           "Parse.connected? must return false (not re-raise) on StandardError"
+           "Parse.connected? must return false (not re-raise) on a non-Parse StandardError"
   ensure
-    Parse::Client.clients[:default] = original_clients[:default]
+    Parse::Client.clients[:default] = original_clients[:default] if original_clients
   end
 
   def test_module_reachable_returns_false_on_standard_error
+    original_clients = nil
     original_clients = Parse::Client.clients.dup
     bad_client = stubbed_client { |*| raise Parse::Error::ConnectionError, "refused" }
     Parse::Client.clients[:default] = bad_client
     refute Parse.reachable?,
            "Parse.reachable? must return false (not re-raise) on StandardError"
   ensure
-    Parse::Client.clients[:default] = original_clients[:default]
+    Parse::Client.clients[:default] = original_clients[:default] if original_clients
   end
 
   # ---------------------------------------------------------------------------
@@ -128,7 +170,7 @@ class ConnectivityTest < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_bad_credentials_are_reachable_but_not_connected
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    require_live_server!
 
     bad = Parse::Client.new(
       server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:2337/parse",
@@ -138,7 +180,14 @@ class ConnectivityTest < Minitest::Test
     )
     assert bad.reachable?,
            "a wrong app_id/key must still be reachable? (health needs no credentials)"
-    refute bad.connected?,
-           "a wrong app_id/key must NOT be connected? (credentials are invalid) — and must not raise"
+    # Default connected? probes the health endpoint, which (like reachable?)
+    # needs no credentials — so it is true even with a wrong key.
+    assert bad.connected?,
+           "default connected? hits the health endpoint, so bad credentials are still 'connected'"
+    # Passing an endpoint routes the probe through the auth stack against a
+    # data class, so a wrong app_id/key now correctly reports not-connected
+    # (and must not raise).
+    refute bad.connected?("classes/_User"),
+           "connected?(endpoint) must validate credentials — a wrong app_id/key is NOT connected"
   end
 end

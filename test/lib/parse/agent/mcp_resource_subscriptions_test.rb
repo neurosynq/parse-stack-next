@@ -83,18 +83,36 @@ class ManualTimer
 end
 
 # Agent stub exposing the credential/scope and session surface the bridge and
-# dispatcher read. Defaults to a master-key posture.
+# dispatcher read. Defaults to a master-key posture WITH a real master key on
+# its own client — master-key posture requires master-key authority, otherwise
+# the bridge refuses to open an admin (ACL-bypassing) LiveQuery socket.
 class SubAgentStub
   attr_accessor :progress_callback, :cancellation_token, :correlation_id
-  attr_reader :session_token, :acl_user_scope, :acl_role_scope, :acl_scope
+  attr_reader :session_token, :acl_user_scope, :acl_role_scope, :acl_scope, :client
 
+  # @param master_key [String, nil] the master key on the agent's OWN client.
+  #   Defaults present, so the default no-scope posture is a genuine master-key
+  #   agent. Pass nil to model an unprivileged / client-mode agent that must
+  #   NOT be able to open an admin LiveQuery socket.
+  # @param permitted [Boolean] result of the per-agent `classes:` allowlist
+  #   gate (Tools.assert_class_accessible! → class_filter_permits?). Pass false
+  #   to model a class outside the agent's allowlist.
   def initialize(correlation_id: "sess-1", session_token: nil,
-                 acl_user_scope: nil, acl_role_scope: nil, acl_scope: nil)
+                 acl_user_scope: nil, acl_role_scope: nil, acl_scope: nil,
+                 master_key: "test-master-key", permitted: true)
     @correlation_id = correlation_id
     @session_token  = session_token
     @acl_user_scope = acl_user_scope
     @acl_role_scope = acl_role_scope
     @acl_scope      = acl_scope
+    @client         = Struct.new(:master_key).new(master_key)
+    @permitted      = permitted
+  end
+
+  # Mirrors Parse::Agent#class_filter_permits? — the per-agent `classes:`
+  # allowlist gate consulted by Tools.assert_class_accessible!.
+  def class_filter_permits?(_class_name)
+    @permitted
   end
 
   def cancelled?
@@ -129,6 +147,23 @@ class MCPSubscriptionsHelpersTest < Minitest::Test
   def test_credentials_for_master_key_agent
     agent = SubAgentStub.new
     assert_equal({ use_master_key: true }, M.live_query_credentials_for(agent))
+  end
+
+  def test_credentials_master_key_posture_without_master_key_fails_closed
+    # No session token, no acl_user/acl_role, no acl_scope — a master-key
+    # POSTURE — but the agent's own client carries no master key (client mode /
+    # unprivileged). Returning use_master_key: true here would let the bridge
+    # open an admin socket using the PROCESS-GLOBAL master key the agent has no
+    # authority over. Must fail closed instead of escalating.
+    agent = SubAgentStub.new(master_key: nil)
+    assert_raises(Parse::Agent::SecurityError) { M.live_query_credentials_for(agent) }
+  end
+
+  def test_credentials_master_key_posture_with_blank_master_key_fails_closed
+    # A blank/whitespace key is not a usable master key (matches
+    # Parse::LiveQuery::Client#admin_connection?), so it must also fail closed.
+    agent = SubAgentStub.new(master_key: "   ")
+    assert_raises(Parse::Agent::SecurityError) { M.live_query_credentials_for(agent) }
   end
 
   def test_credentials_for_session_token_agent
@@ -230,6 +265,36 @@ class MCPSubscriptionsManagerTest < Minitest::Test
     assert_equal({ session_token: "r:tok" }, scoped.last.creds)
   end
 
+  def test_subscribe_derives_clp_op_from_uri_verb
+    # The subscribe gate mirrors the read path's CLP op: a `count` resource
+    # gates on :count, a `samples` resource on :find — so a subscribe is never
+    # stricter than the equivalent read. Stub the gate to capture the op.
+    captured = []
+    fake = ->(class_name, agent:, op:) { captured << [class_name, op] }
+    Parse::Agent::Tools.stub(:assert_class_accessible!, fake) do
+      mgr = build_manager
+      mgr.subscribe(session_id: "s1", uri: "parse://Post/count",   agent: SubAgentStub.new)
+      mgr.subscribe(session_id: "s1", uri: "parse://Post/samples", agent: SubAgentStub.new)
+    end
+    assert_equal [["Post", :count], ["Post", :find]], captured
+  end
+
+  def test_scoped_subscription_refused_when_scoped_client_is_admin_connection
+    # A global `config.use_master_key = true` makes Parse::LiveQuery.client an
+    # admin (ACL-bypassing) socket. A session-token subscription must NOT ride
+    # it — the bridge fails closed rather than leak rows the user can't read.
+    admin_scoped = Object.new
+    def admin_scoped.admin_connection?; true; end
+    def admin_scoped.subscribe(*)
+      raise "must not open a subscription on an admin scoped client"
+    end
+    mgr = M::Manager.new(supported: true, debounce_interval: 0, live_query_scoped_client: admin_scoped)
+    agent = SubAgentStub.new(session_token: "r:tok")
+    assert_raises(Parse::Agent::SecurityError) do
+      mgr.subscribe(session_id: "s1", uri: "parse://Post/count", agent: agent)
+    end
+  end
+
   def test_subscribe_is_idempotent_per_uri
     mgr = build_manager(interval: 0)
     mgr.attach_listener("sess-1") {}
@@ -268,6 +333,19 @@ class MCPSubscriptionsManagerTest < Minitest::Test
       mgr.subscribe(session_id: "sess-1", uri: "parse://Post/count", agent: agent)
     end
     assert_equal 0, @lq.subscriptions.size, "no LiveQuery socket should open on a refused subscribe"
+  end
+
+  def test_subscribe_enforces_class_allowlist_before_opening_socket
+    # Authorization parity with the read path: a class outside the agent's
+    # `classes:` allowlist must be refused at subscribe BEFORE any socket
+    # opens, so a hidden/forbidden class can't become a change/timing oracle.
+    mgr = build_manager
+    agent = SubAgentStub.new(permitted: false)
+    assert_raises(Parse::Agent::AccessDenied) do
+      mgr.subscribe(session_id: "sess-1", uri: "parse://Post/count", agent: agent)
+    end
+    assert_equal 0, @lq.subscriptions.size, "no LiveQuery socket should open for a disallowed class"
+    assert_equal 0, mgr.subscription_count
   end
 
   def test_unsubscribe_tears_down_live_query_socket
@@ -425,6 +503,18 @@ class MCPSubscriptionsDispatcherTest < Minitest::Test
     res = call_method("resources/subscribe", { "uri" => "parse://Post/count" })
     assert_equal(-32_602, res[:body]["error"]["code"])
     assert_equal 0, @manager.subscription_count
+  end
+
+  def test_resources_subscribe_disallowed_class_is_invalid_params
+    # A class outside the agent's `classes:` allowlist must be refused through
+    # the REAL dispatcher with JSON-RPC -32602 (AccessDenied → -32602), opening
+    # no socket. Locks the dispatcher's AccessDenied rescue mapping — the
+    # Manager-level test asserts the raise, this asserts the wire error code.
+    @agent = SubAgentStub.new(correlation_id: "sess-1", permitted: false)
+    res = call_method("resources/subscribe", { "uri" => "parse://Post/count" })
+    assert_equal(-32_602, res[:body]["error"]["code"])
+    assert_equal 0, @manager.subscription_count
+    assert_equal 0, @lq.subscriptions.size
   end
 
   def test_resources_subscribe_without_manager_is_method_not_found

@@ -123,9 +123,31 @@ module Parse
                 "would be mis-scoped. Subscribe with a session-token or master-key agent instead."
         end
 
-        # nil acl_scope == master-key posture (see Parse::Agent#acl_scope).
+        # Master-key posture: no session token and no acl_user/acl_role (both
+        # handled above), so `acl_scope` is nil. But "no scope" is NOT by
+        # itself authority to open an ADMIN, ACL-bypassing LiveQuery socket.
+        # `client_for` builds that socket via
+        # `Parse::LiveQuery::Client.new(use_master_key: true)` with no explicit
+        # key, and the constructor backfills the PROCESS-GLOBAL master key
+        # (`cfg.master_key || parse_client_value(:master_key)`) — a different
+        # authority source than this agent. An unprivileged / client-mode agent
+        # whose own client has no master key would otherwise borrow the global
+        # one and silently elevate every row on the socket past ACL/CLP. Bind
+        # the master-key branch to the agent's ACTUAL authority: its own client
+        # must carry a usable (non-blank String) master key — at least as strict
+        # as `Parse::LiveQuery::Client#admin_connection?` (which requires a
+        # non-empty String). Fail closed otherwise.
         acl_scope = agent.respond_to?(:acl_scope) ? agent.acl_scope : nil
-        return { use_master_key: true } if acl_scope.nil?
+        if acl_scope.nil?
+          mk = agent.respond_to?(:client) ? agent.client&.master_key : nil
+          return { use_master_key: true } if mk.is_a?(String) && !mk.strip.empty?
+
+          raise Parse::Agent::SecurityError,
+                "master-key posture but no master key on the agent's own client; refusing to " \
+                "open an admin (ACL-bypassing) LiveQuery socket for an unprivileged agent — it " \
+                "would otherwise borrow the process-global master key. Subscribe with a " \
+                "session-token agent, or give this agent a master-key client."
+        end
 
         # A scoped posture we don't have a LiveQuery mapping for — fail closed.
         raise Parse::Agent::SecurityError,
@@ -362,8 +384,30 @@ module Parse
                   "resources/subscribe requires an established session (Mcp-Session-Id). " \
                   "Complete initialize first, then open the GET listening stream."
           end
-          class_name, = MCPSubscriptions.parse_subscribable_uri(uri)
-          creds       = MCPSubscriptions.live_query_credentials_for(agent)
+          class_name, resource = MCPSubscriptions.parse_subscribable_uri(uri)
+
+          # Authorization parity with the read path (resources/read →
+          # agent.execute → assert_class_accessible!). Enforce agent_hidden, the
+          # per-agent `classes:` allowlist, AND CLP BEFORE deriving credentials
+          # or opening any socket. Parse Server LiveQuery enforces row ACL/CLP
+          # for session-token subscriptions, but agent_hidden / classes: are
+          # SDK-only constructs it knows nothing about — and a master-key socket
+          # bypasses ACL/CLP entirely. Without this gate,
+          # `resources/subscribe parse://_Session/count` (or any operator-hidden
+          # PII class) becomes a change/timing oracle on a class the tool
+          # surface refuses to even list. The CLP op mirrors the read path
+          # exactly — `count` resources gate on `:count`, `samples` on `:find` —
+          # so a subscribe is never stricter than the equivalent read. Raises
+          # AccessDenied / ValidationError, which the dispatcher maps to
+          # JSON-RPC -32602. Called unconditionally (not behind a
+          # `defined?(Tools)` guard) so the gate fails CLOSED — if `Tools` were
+          # somehow unloaded the call raises rather than silently skipping
+          # authorization. `Parse::Agent::Tools` is a hard dependency of the
+          # agent stack that mounts this bridge.
+          op = resource == "count" ? :count : :find
+          Parse::Agent::Tools.assert_class_accessible!(class_name, agent: agent, op: op)
+
+          creds = MCPSubscriptions.live_query_credentials_for(agent)
 
           # Idempotent: a repeat subscribe to the same URI is a no-op rather
           # than a second LiveQuery socket subscription. Enforce the per-session
@@ -388,11 +432,52 @@ module Parse
             sub.on(event) { debouncer.trigger }
           end
 
+          # Authoritative commit under the lock. The pre-check above is only a
+          # fast path — the network subscribe just ran with the lock RELEASED,
+          # so in the meantime the session may have been torn down
+          # (detach_listener), a racing subscribe may have claimed this URI, or
+          # a concurrent burst may have pushed the session to its cap. Re-check
+          # before storing, and gate on `@sessions.key?(session_id)` BEFORE
+          # indexing: `@sessions` auto-vivifies (`Hash.new { {} }`), so a bare
+          # `@sessions[session_id][uri] = …` would silently RESURRECT a detached
+          # session and leak its LiveQuery socket for the process lifetime.
+          #
           # A subscribe may legitimately arrive before the GET listening stream
-          # opens; updates published before a listener attaches are dropped by
-          # the notifier (a no-op), and start delivering once the stream is up.
-          @mutex.synchronize { @sessions[session_id][uri] = { sub: sub, debouncer: debouncer } }
-          true
+          # opens (the session entry exists, just no listener yet); updates
+          # published before a listener attaches are dropped by the notifier
+          # and start delivering once the stream is up.
+          outcome = @mutex.synchronize do
+            if !@sessions.key?(session_id)
+              :session_gone
+            elsif @sessions[session_id].key?(uri)
+              :duplicate
+            elsif @max_per_session && @sessions[session_id].size >= @max_per_session
+              :over_cap
+            else
+              @sessions[session_id][uri] = { sub: sub, debouncer: debouncer }
+              :stored
+            end
+          end
+
+          case outcome
+          when :stored
+            true
+          when :duplicate
+            # A concurrent subscribe to the same URI won; keep theirs and drop
+            # the socket we just opened so we don't leak a duplicate.
+            safe_unsubscribe(sub)
+            true
+          when :session_gone
+            # The listening stream closed while we were subscribing — don't
+            # resurrect it; tear the just-opened socket back down.
+            safe_unsubscribe(sub)
+            false
+          when :over_cap
+            safe_unsubscribe(sub)
+            raise Parse::Agent::ValidationError,
+                  "Session subscription limit reached (#{@max_per_session}). " \
+                  "Unsubscribe from a resource before adding another."
+          end
         end
 
         # Stop the LiveQuery subscription for one resource URI. Idempotent.
@@ -433,9 +518,24 @@ module Parse
               @admin_client ||= Parse::LiveQuery::Client.new(use_master_key: true)
             end
           else
-            @client_mutex.synchronize do
-              @scoped_client ||= Parse::LiveQuery.client
+            # A session-token subscription MUST ride an ACL-scoped connection.
+            # `Parse::LiveQuery.client` inherits `config.use_master_key`, so a
+            # global `Parse::LiveQuery.configure { |c| c.use_master_key = true }`
+            # would make this shared client an ADMIN (ACL-bypassing) socket —
+            # and because Parse Server fixes ACL-bypass per-connection at connect
+            # time (no per-subscription master key), every session-token
+            # subscription on it would then deliver change events for rows the
+            # user cannot read. Fail closed rather than open a mis-scoped
+            # channel, mirroring the master-key branch's authority gate.
+            sc = @client_mutex.synchronize { @scoped_client ||= Parse::LiveQuery.client }
+            if sc.respond_to?(:admin_connection?) && sc.admin_connection?
+              raise Parse::Agent::SecurityError,
+                    "the scoped LiveQuery client is an admin (master-key) connection " \
+                    "(config.use_master_key = true); refusing to bridge a session-token " \
+                    "subscription over an ACL-bypassing socket. Configure a non-admin " \
+                    "LiveQuery client for scoped subscriptions."
             end
+            sc
           end
         end
 

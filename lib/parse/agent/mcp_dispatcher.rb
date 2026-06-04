@@ -291,6 +291,12 @@ module Parse
 
       rescue Parse::Agent::Unauthorized => e
         { status: 401, body: jsonrpc_error(id, -32001, "Unauthorized") }
+      rescue Parse::Agent::AccessDenied
+        # Class-authorization denial (agent_hidden / classes: allowlist), e.g.
+        # from the resources/subscribe gate. Map to -32602 with a generic
+        # message — do NOT echo the class name, so a denied subscribe can't be
+        # used to probe which hidden classes exist.
+        { status: 200, body: jsonrpc_error(id, -32602, "Invalid params") }
       rescue Parse::Agent::SecurityError
         { status: 200, body: jsonrpc_error(id, -32602, "Invalid params") }
       rescue Parse::Agent::ValidationError => e

@@ -180,17 +180,23 @@ module Parse
     false
   end
 
-  # Check that the Parse Server is reachable AND that the configured
-  # application_id and REST key are accepted.
-  # Fires an authenticated limit-0 find against the _User class (the
-  # smallest probe that exercises the full auth stack). Returns +false+ only
-  # when the server is down or the connection is refused; a bad REST key raises
-  # {Parse::Error::AuthenticationError} at the instance-method level, which
-  # this module-boundary rescue catches and converts to +false+.
+  # Check that the Parse Server is reachable and responding.
+  # By default this probes the credential-less health endpoint, so it returns
+  # +true+ whenever the server is up (it does NOT, by itself, validate the
+  # application_id or REST key — see {Parse::Client#connected?} for why a
+  # data-class probe is unreliable on a hardened server). Pass an `endpoint`
+  # (e.g. `"classes/_User"`) to additionally exercise the auth stack against a
+  # class you know the configured key can read; a bad key then surfaces as an
+  # {Parse::Error::AuthenticationError} at the instance level, which the
+  # instance method converts to +false+. Any other failure is caught by this
+  # module-boundary rescue and converted to +false+.
   # @param conn [Symbol] the named client connection to probe. Defaults to :default.
-  # @return [Boolean] +true+ if the server is reachable and credentials are valid.
-  def self.connected?(conn = :default)
-    client(conn).connected?
+  # @param endpoint [String, nil] optional path to probe instead of the health
+  #   endpoint, to validate credentials against a readable class.
+  # @return [Boolean] +true+ if the server is reachable (and, when an endpoint
+  #   is given, the credentials are accepted).
+  def self.connected?(conn = :default, endpoint = nil)
+    client(conn).connected?(endpoint)
   rescue StandardError
     false
   end
@@ -825,18 +831,32 @@ module Parse
       false
     end
 
-    # Authenticated connectivity probe. Fires a limit-0 find against the
-    # +_User+ class with the configured application_id and REST key. Returns
-    # +true+ only when the server is up AND the credentials are accepted; a
-    # wrong application_id / REST key (or any connection, timeout, or API
-    # error) returns +false+ rather than raising, so this is a safe boolean
-    # smoke-test for "is my configuration working?". Genuine programming
-    # errors (e.g. +NoMethodError+) still propagate. Use {#reachable?} for a
-    # no-credentials liveness check that passes even with bad credentials.
-    # @return [Boolean] +true+ if the server is reachable and credentials are valid.
-    def connected?
-      response = request(:get, "#{Parse::API::Objects::CLASS_PATH_PREFIX}_User",
-                         query: { limit: 0 }, opts: { cache: false })
+    # Connectivity probe. By default hits the Parse Server health endpoint —
+    # the same target as {#reachable?} — so it returns +true+ whenever the
+    # server is up, regardless of CLP configuration.
+    #
+    # Why not a `_User` find? A limit-0 find against +_User+ exercises the auth
+    # stack, but locking +_User+ finds to the master key via a Class-Level
+    # Permission is standard production hardening — on such a server the probe
+    # gets a permission error and (wrongly) reports "not connected" for a
+    # perfectly healthy, correctly-configured deployment. The default therefore
+    # avoids any data class.
+    #
+    # To ALSO validate credentials, pass `endpoint:` a path to a class the
+    # configured key is allowed to read (e.g. `"classes/_User"` on a default
+    # server, or one of your own readable classes). The probe runs `limit: 0`
+    # so it never pulls rows, and routes through the auth middleware, so a wrong
+    # application_id / REST key surfaces as an {Parse::Error::AuthenticationError}
+    # and is converted to +false+. Any connection, timeout, or API error returns
+    # +false+ rather than raising; genuine programming errors (e.g.
+    # +NoMethodError+) still propagate.
+    # @param endpoint [String, nil] optional path to probe instead of the
+    #   health endpoint, to validate credentials against a readable class.
+    # @return [Boolean] +true+ if the server is reachable (and, when an endpoint
+    #   is given, the credentials are accepted).
+    def connected?(endpoint = nil)
+      path = endpoint || Parse::API::Server::SERVER_HEALTH_PATH
+      response = request(:get, path, query: { limit: 0 }, opts: { cache: false })
       response.success?
     rescue Parse::Error, Faraday::Error
       false
@@ -925,6 +945,15 @@ module Parse
       elsif opts[:retry].to_i > 0
         _retry_count = opts[:retry]
       end
+
+      # The effective starting budget, captured ONCE after the opts override
+      # (and, like `_retry_count`, above the `begin` so `retry` doesn't reset
+      # it). The backoff multiplier is `(_retry_max - _retry_count)`, which
+      # grows 1, 2, 3, … as attempts are consumed. Deriving it from
+      # `self.retry_limit` instead would go to zero or negative whenever a
+      # caller passes `opts: { retry: N }` with N above the instance default,
+      # silently disabling the backoff (every retry firing at zero delay).
+      _retry_max ||= _retry_count
 
       begin
       headers ||= {}
@@ -1039,7 +1068,12 @@ module Parse
 
       response
     rescue Parse::Error::RequestLimitExceededError, Parse::Error::ServiceUnavailableError => e
-      if _retry_count > 0
+      # 429 (RequestLimitExceeded): the server threw the request away, so
+      # re-sending is safe for any method. 500/503 (ServiceUnavailable) is
+      # ambiguous — a write may have applied before the error — so only
+      # re-send when the request is idempotent (see #idempotent_retry?).
+      retryable = e.is_a?(Parse::Error::RequestLimitExceededError) || idempotent_retry?(method, body)
+      if _retry_count > 0 && retryable
         warn "[Parse:Retry] Retries remaining #{_retry_count} : #{response.request}"
         _retry_count -= 1
         # Use Retry-After header if available, otherwise use exponential backoff
@@ -1050,7 +1084,7 @@ module Parse
         else
           # Deterministic exponential backoff with +/-25% jitter. Never zero —
           # zero-wait retries amplify DoS against upstream and stampede on 429.
-          backoff_delay = RETRY_DELAY * (self.retry_limit - _retry_count)
+          backoff_delay = RETRY_DELAY * (_retry_max - _retry_count)
           _retry_delay = backoff_delay * (0.75 + rand * 0.5)
         end
         sleep _retry_delay if _retry_delay > 0
@@ -1058,16 +1092,51 @@ module Parse
       end
       raise
     rescue Faraday::ClientError, Net::OpenTimeout => e
-      if _retry_count > 0
+      # Connection dropped or timed out mid-flight: the outcome is unknown, so
+      # only re-send idempotent requests to avoid double-applying a write.
+      if _retry_count > 0 && idempotent_retry?(method, body)
         warn "[Parse:Retry] Retries remaining #{_retry_count} : #{_request}"
         _retry_count -= 1
-        backoff_delay = RETRY_DELAY * (self.retry_limit - _retry_count)
+        backoff_delay = RETRY_DELAY * (_retry_max - _retry_count)
         _retry_delay = backoff_delay * (0.75 + rand * 0.5)
         sleep _retry_delay if _retry_delay > 0
         retry
       end
       raise Parse::Error::ConnectionError, "#{_request} : #{e.class} - #{e.message}"
       end
+    end
+
+    # Whether a request whose outcome is UNKNOWN (a 500/503 or a dropped
+    # connection) is safe to transparently re-send. GET and DELETE are
+    # idempotent. A full-object PUT update is idempotent ONLY when it carries
+    # no atomic `__op` mutation — an Increment/Add/AddUnique/Remove/Relation op
+    # would double-apply on replay. POST (object create / batch) is never
+    # auto-retried. 429 throttles are handled at the call site, since the
+    # server provably discarded the request and those re-send regardless.
+    # @param method [Symbol] the (downcased) HTTP method of the request.
+    # @param body [Hash, Object, nil] the request body.
+    # @return [Boolean]
+    def idempotent_retry?(method, body)
+      case method
+      when :get, :delete then true
+      when :put then !body_carries_atomic_op?(body)
+      else false
+      end
+    end
+
+    # Whether a request body carries a Parse atomic operation, i.e. any field
+    # whose value is a Hash with an `__op` key (Increment, Add, AddUnique,
+    # Remove, AddRelation, RemoveRelation, Delete). Such ops are not idempotent
+    # and must not be replayed on an ambiguous failure. Assumes the body is a
+    # Ruby Hash, which the SDK's normal save/update path always provides; a
+    # pre-serialized String body is treated as op-free (and therefore
+    # retryable), so callers handing `request` a raw JSON string for a
+    # PUT-with-op would bypass this guard.
+    # @param body [Object] the request body.
+    # @return [Boolean]
+    def body_carries_atomic_op?(body)
+      return false unless body.is_a?(Hash)
+      body.any? { |_k, v| v.is_a?(Hash) && (v.key?("__op") || v.key?(:__op)) }
     end
 
     # Send a GET request.
