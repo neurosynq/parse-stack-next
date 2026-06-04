@@ -101,7 +101,7 @@ class MCPSseE2eTest < Minitest::Test
     @orig_dispatcher  = Parse::Agent::MCPDispatcher.method(:call)
     @stub_installed   = true
 
-    Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil|
+    Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil, subscription_manager: nil|
       d = MCPSseE2eTest.class_variable_get(:@@dispatch_delay)
       sleep d if d && d > 0
 

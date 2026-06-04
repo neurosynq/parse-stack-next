@@ -2564,6 +2564,26 @@ module Parse
     def convert_constraints_for_direct_mongodb(constraints)
       return constraints unless constraints.is_a?(Hash)
 
+      # $relatedTo resolves a Parse Relation, which is stored in the
+      # `_Join:<key>:<ParentClass>` collection — a join the SDK does NOT
+      # translate on the mongo-direct path. Passed through verbatim it reaches
+      # MongoDB as an unknown `$match` operator and fails with an opaque error;
+      # and any future attempt to rewrite it into a `$lookup` would have to
+      # re-implement the `_rperm` / protectedFields enforcement that the rest of
+      # this path applies post-fetch. Parse Server's own `$relatedTo` was found
+      # to bypass exactly that enforcement (GHSA-wmwx-jr2p-4j4r), so fail closed
+      # here with a clear message rather than risk a silent leak: this query
+      # must run via REST (the default), where Parse Server resolves the
+      # relation under its own ACL / CLP enforcement.
+      if constraints.key?("$relatedTo") || constraints.key?(:"$relatedTo")
+        raise ArgumentError,
+          "[Parse::Query] $relatedTo cannot run on the mongo-direct path; a " \
+          "Parse Relation is resolved server-side via its join collection. Run " \
+          "this query via REST (omit `mongo_direct:` / `.results_direct` and any " \
+          "direct-only constraint), or express the membership as an `$inQuery` " \
+          "against the relation's join collection."
+      end
+
       result = {}
       constraints.each do |field, value|
         field_str = field.to_s
@@ -6284,8 +6304,10 @@ module Parse
     include Enumerable
 
     # @param results [Hash] the grouped results hash
-    def initialize(results)
+    # @param operation [String, nil] the aggregation operation (e.g. "count", "sum", "average", "min", "max", "list")
+    def initialize(results, operation = nil)
       @results = results
+      @operation = operation
     end
 
     # Return the raw hash results
@@ -6332,12 +6354,15 @@ module Parse
 
     # Convert grouped results to a formatted table.
     # @param format [Symbol] output format (:ascii, :csv, :json)
-    # @param headers [Array<String>] custom headers (default: ["Group", "Count"])
+    # @param headers [Array<String>, nil] custom headers; if nil, defaults to ["Group", <op-derived header>]
+    #   where the second header reflects the aggregation operation (e.g. "Average" for avg/average,
+    #   "Sum" for sum, "Min"/"Max" for min/max, "Items" for list, "Count" otherwise).
     # @return [String] formatted table
     # @example
     #   Document.group_by(:category, sortable: true).count.to_table
     #   Document.group_by(:category).sum(:file_size).to_table(headers: ["Category", "Total Size"])
-    def to_table(format: :ascii, headers: ["Group", "Count"])
+    def to_table(format: :ascii, headers: nil)
+      headers ||= ["Group", default_value_header]
       pairs = @results.to_a
 
       # Build table data
@@ -6360,6 +6385,20 @@ module Parse
     end
 
     private
+
+    # Derive a human-readable column header from the aggregation operation.
+    # @return [String] the default second-column header
+    def default_value_header
+      case @operation&.to_s
+      when "count"    then "Count"
+      when "sum"      then "Sum"
+      when "average", "avg" then "Average"
+      when "min"      then "Min"
+      when "max"      then "Max"
+      when "list"     then "Items"
+      else                 "Count"
+      end
+    end
 
     # Format group key for display
     def format_group_key(key)
@@ -6453,7 +6492,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def count
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "count")
     end
 
     # Sum a field for each group.
@@ -6461,7 +6500,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def sum(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "sum")
     end
 
     # Calculate average of a field for each group.
@@ -6469,7 +6508,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def average(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "average")
     end
 
     alias_method :avg, :average
@@ -6479,7 +6518,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def min(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "min")
     end
 
     # Find maximum value of a field for each group.
@@ -6487,14 +6526,14 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def max(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "max")
     end
 
     # Collect Parse::Object instances per group.
     # @return [GroupedResult] a sortable result object.
     def list
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "list")
     end
   end
 
@@ -7091,7 +7130,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def count
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "count")
     end
 
     # Sum a field for each time period.
@@ -7099,7 +7138,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def sum(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "sum")
     end
 
     # Calculate average of a field for each time period.
@@ -7107,7 +7146,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def average(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "average")
     end
 
     alias_method :avg, :average
@@ -7117,7 +7156,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def min(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "min")
     end
 
     # Find maximum value of a field for each time period.
@@ -7125,7 +7164,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def max(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "max")
     end
   end
 end # Parse

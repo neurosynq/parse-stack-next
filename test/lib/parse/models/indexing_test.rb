@@ -63,6 +63,90 @@ class IndexingDSLTest < Minitest::Test
     refute_nil arr, "array-typed single-field index must be permitted"
   end
 
+  # ---- unique_index_on (first_or_create! correctness floor) ----------------
+
+  class IxUniqueTuple < Parse::Object
+    parse_class "IxUniqueTuple"
+    property :email, :string
+    belongs_to :tenant, as: :user
+
+    unique_index_on :email, :tenant
+  end
+
+  def test_unique_index_on_records_unique
+    decl = IxUniqueTuple.mongo_index_declarations.first
+    assert_equal true, decl[:options][:unique]
+  end
+
+  def test_unique_index_on_compound_preserves_order_and_pointer_rewrite
+    decl = IxUniqueTuple.mongo_index_declarations.first
+    # email stays as-is; the :tenant pointer rewrites to _p_tenant, in order.
+    assert_equal({ "email" => 1, "_p_tenant" => 1 }, decl[:keys])
+  end
+
+  def test_unique_index_on_is_non_sparse_by_default
+    decl = IxUniqueTuple.mongo_index_declarations.first
+    # sparse:false is dropped from options (see register_index reject), so the
+    # index key stays identical to the dedup tuple first_or_create! re-queries.
+    refute decl[:options].key?(:sparse),
+           "unique_index_on must default to non-sparse so the key matches the recovery query"
+  end
+
+  def test_unique_index_on_sparse_true_is_honored
+    klass = Class.new(Parse::Object) do
+      def self.name; "IxUniqSparse"; end
+      property :slug, :string
+      unique_index_on :slug, sparse: true
+    end
+    decl = klass.mongo_index_declarations.first
+    assert_equal true, decl[:options][:unique]
+    assert_equal true, decl[:options][:sparse]
+  end
+
+  def test_unique_index_on_partial_filter_is_honored
+    klass = Class.new(Parse::Object) do
+      def self.name; "IxUniqPartial"; end
+      property :email, :string
+      belongs_to :tenant, as: :user
+      unique_index_on :email, :tenant,
+                      partial: { "_p_tenant" => { "$exists" => true } }
+    end
+    decl = klass.mongo_index_declarations.first
+    assert_equal({ "_p_tenant" => { "$exists" => true } }, decl[:options][:partial_filter])
+  end
+
+  def test_unique_index_on_inherits_sensitive_field_guard
+    err = assert_raises(ArgumentError) do
+      Class.new(Parse::Object) do
+        def self.name; "IxUniqSensitive"; end
+        unique_index_on :_hashed_password
+      end
+    end
+    assert_match(/sensitive Parse-internal columns/, err.message)
+  end
+
+  def test_unique_index_on_inherits_unknown_field_guard
+    err = assert_raises(ArgumentError) do
+      Class.new(Parse::Object) do
+        def self.name; "IxUniqUnknown"; end
+        unique_index_on :nope
+      end
+    end
+    assert_match(/unknown field/, err.message)
+  end
+
+  def test_unique_index_on_dedupes_against_equivalent_mongo_index
+    klass = Class.new(Parse::Object) do
+      def self.name; "IxUniqDedupe"; end
+      property :code, :string
+      mongo_index :code, unique: true
+      unique_index_on :code           # same key + same options → idempotent
+    end
+    matching = klass.mongo_index_declarations.select { |d| d[:keys] == { "code" => 1 } }
+    assert_equal 1, matching.size,
+                 "unique_index_on and an equivalent mongo_index must collapse to one declaration"
+  end
+
   # ---- validation: parallel arrays ----------------------------------------
 
   def test_compound_with_two_array_properties_rejected

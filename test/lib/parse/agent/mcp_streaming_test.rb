@@ -47,7 +47,7 @@ module StreamingDispatcherStub
       # `**hash` so it must use Symbol keys (progress:, total:, message:).
       @progress_calls = nil
 
-      Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil|
+      Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil, subscription_manager: nil|
         delay = StreamingDispatcherStub.delay || 0
 
         # Drive the simulated tool-internal progress events. The
@@ -643,7 +643,7 @@ class MCPStreamingTest < Minitest::Test
     # Dispatcher blocks until the test releases it.
     StreamingDispatcherStub.delay = 0
     original_call = Parse::Agent::MCPDispatcher.method(:call)
-    Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil|
+    Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil, subscription_manager: nil|
       release_q.pop
       StreamingDispatcherStub::FIXED_RESPONSE
     end
@@ -1268,7 +1268,7 @@ class MCPStreamingTest < Minitest::Test
     captured = nil
     StreamingDispatcherStub.progress_calls = []
     original_call = Parse::Agent::MCPDispatcher.method(:call)
-    Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil|
+    Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil, subscription_manager: nil|
       captured = progress_callback
       StreamingDispatcherStub::FIXED_RESPONSE
     end

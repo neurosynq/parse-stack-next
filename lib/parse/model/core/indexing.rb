@@ -89,6 +89,78 @@ module Parse
                        partial: partial, expire_after: expire_after, name: name)
       end
 
+      # Declare a UNIQUE index on the exact dedup tuple that
+      # `first_or_create!` / `create_or_update!` key on. This is the
+      # *correctness floor* for the synchronize-create race.
+      #
+      # The Redis-backed `synchronize:` lock (see {#first_or_create!}) is a
+      # latency optimization: in the common path it collapses concurrent
+      # callers so only one issues the create. But a lock can be bypassed —
+      # a Redis outage, a TTL expiring between the existence check and the
+      # write, a caller passing `synchronize: false`, or two app servers
+      # whose lock secrets disagree. When that happens, the *database* is the
+      # last line of defense. A unique index guarantees, unconditionally, that
+      # two racing inserts can't both land: the loser fails with DuplicateValue
+      # (Parse error 137), which `first_or_create!` rescues and resolves to the
+      # winning row via `_recover_from_duplicate_value`. Lock + index together
+      # make the net invariant "exactly one row, every caller sees the same id"
+      # hold under any race, not just the happy path.
+      #
+      # This is thin sugar over `mongo_index(*fields, unique: true, ...)` —
+      # it shares the same registration, validation (sensitive-field guard,
+      # pointer auto-rewrite, parallel-array / relation / `_id` rejection),
+      # and `IndexMigrator` apply path. The name states the intent: these
+      # fields form the dedup identity for create-or-update.
+      #
+      # Defaults match `mongo_index`: **non-sparse**. The index key is kept
+      # identical to the query `first_or_create!` re-runs on recovery, so a
+      # 137 always corresponds to a row the recovery query (`_scoped_first`
+      # on the same `query_attrs`) can find. A sparse or partial index that
+      # fires on a condition the recovery query doesn't reproduce would
+      # surface a 137 the rescue can't resolve, and the error would re-raise.
+      # `sparse:` is meaningful only when a document is missing *every* field
+      # in the tuple (a compound sparse index indexes a doc when it has at
+      # least one key); since `first_or_create!` always writes the full tuple,
+      # it never produces such a row, so sparse does not weaken the floor —
+      # leave it off unless out-of-band writers create tuple-less rows you
+      # want excluded.
+      #
+      # @example Single-field dedup floor
+      #   class Account < Parse::Object
+      #     property :email, :string
+      #     unique_index_on :email
+      #   end
+      #   Account.apply_indexes!   # provisions { email: 1 } unique via the writer
+      #
+      # @example Compound tuple with a pointer component
+      #   class Subscription < Parse::Object
+      #     property :email, :string
+      #     belongs_to :tenant, as: :user
+      #     unique_index_on :email, :tenant   # key: { email: 1, _p_tenant: 1 } unique
+      #   end
+      #
+      # @example Unique within a subset (partial filter escape hatch)
+      #   # Unique email per tenant, but rows with no tenant may repeat. You
+      #   # own the filter's lifecycle and must keep first_or_create!'s
+      #   # recovery query consistent with it.
+      #   unique_index_on :email, :tenant,
+      #                   partial: { "_p_tenant" => { "$exists" => true } }
+      #
+      # @param fields [Array<Symbol>] the dedup tuple, in declaration order.
+      #   Pointer fields auto-rewrite to `_p_<field>` like `mongo_index`.
+      # @param sparse [Boolean] default `false`; see the note above on why
+      #   it does not weaken the floor and when it actually changes behavior.
+      # @param partial [Hash, nil] partial-index filter for "unique within a
+      #   subset". Owner-managed; keep it consistent with the recovery query.
+      # @param name [String, nil] explicit index name; defaults to MongoDB
+      #   auto-naming.
+      # @return [Hash] the registered declaration (frozen)
+      # @raise [ArgumentError] same guards as `mongo_index`.
+      # @see #first_or_create!
+      def unique_index_on(*fields, sparse: false, partial: nil, name: nil)
+        mongo_index(*fields, unique: true, sparse: sparse, partial: partial, name: name)
+      end
+
       # Sugar for a 2dsphere geospatial index. Geopoint columns are
       # stored in Mongo as GeoJSON `{ type: "Point", coordinates: [lng, lat] }`
       # which `2dsphere` indexes natively.

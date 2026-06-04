@@ -66,6 +66,7 @@ paying for an index nobody uses.
 | Regular B-tree | `mongo_index :field` | Equality, range, sort on a scalar field |
 | Compound | `mongo_index :a, :b, :c` | Multi-field queries with a common prefix |
 | Unique | `mongo_index :field, unique: true` | Enforce uniqueness at the DB layer |
+| Unique dedup floor | `unique_index_on :a, :b` | Name the `first_or_create!` / `create_or_update!` dedup tuple; sugar for `unique: true` (non-sparse) |
 | Sparse | `mongo_index :field, sparse: true` | Field present on only some documents |
 | Partial | `mongo_index :field, partial: { … }` | Index only documents matching a filter |
 | TTL | `mongo_index :field, expire_after: N` | Auto-delete documents N seconds after the timestamp |
@@ -318,7 +319,27 @@ fails.
 
 **Better:** `unique: true, sparse: true` for "unique when present".
 This is exactly what `parse_reference` auto-registers, and it's the
-right pattern for any optional uniqueness constraint.
+right pattern for any optional uniqueness constraint *on a single
+field*.
+
+**Sparse does NOT generalize to compound keys.** A compound sparse
+index excludes a document only when it is missing *every* indexed
+field; a document that has at least one key is still indexed. So for a
+two-field tuple, two rows that share the present field and both omit
+the other still collide under `sparse: true`. For "unique within a
+subset" — e.g. unique `email` per `tenant`, but tenant-less rows may
+repeat — use a **partial filter**, not sparse:
+
+```ruby
+unique_index_on :email, :tenant,
+                partial: { "_p_tenant" => { "$exists" => true } }
+```
+
+For the `first_or_create!` / `create_or_update!` dedup tuple, prefer
+`unique_index_on` (sugar for `unique: true`, **non-sparse** by default
+so the index key matches the query the upsert re-runs on recovery). It
+is the durable correctness floor behind the synchronize-create lock —
+see the MongoDB Direct guide for the full rationale.
 
 ### Geo without proper coordinate order
 

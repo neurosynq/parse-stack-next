@@ -5,6 +5,7 @@ require "json"
 require "securerandom"
 require_relative "errors"
 require_relative "mcp_dispatcher"
+require_relative "mcp_subscriptions"
 require_relative "cancellation_token"
 
 module Parse
@@ -203,6 +204,23 @@ module Parse
       #   by design. `nil` (default) disables the endpoint entirely;
       #   empty-string values are coerced to `nil`. Any non-GET method
       #   on the path falls through to the standard 405 handler.
+      # @param resource_subscriptions [Boolean] enable MCP resource
+      #   subscriptions (`resources/subscribe` + `notifications/resources/updated`)
+      #   bridged onto Parse LiveQuery. Defaults to false. When true, this app
+      #   accepts a `GET` with `Accept: text/event-stream` and an
+      #   `Mcp-Session-Id` header as a long-lived server→client listening
+      #   stream, and advertises the `resources.subscribe` capability on
+      #   `initialize` — but ONLY while LiveQuery is enabled
+      #   (`Parse.live_query_enabled = true`) and available (a `live_query_url`
+      #   is configured). Requires a streaming-capable Rack server (Puma,
+      #   Falcon); WEBrick buffers responses and cannot hold the listening
+      #   stream open. See docs/mcp_guide.md for the credential-scoping and
+      #   single-process caveats.
+      # @param subscription_manager [Parse::Agent::MCPSubscriptions::Manager, nil]
+      #   inject a pre-built manager (tests, or to share a clustered-notifier
+      #   adapter). Takes precedence over `resource_subscriptions:`. When nil
+      #   and `resource_subscriptions: true`, a default in-process manager is
+      #   constructed.
       # @raise [ArgumentError] if both or neither of agent_factory/block are given.
       def initialize(agent_factory: nil, max_body_size: DEFAULT_MAX_BODY_SIZE,
                      logger: nil, streaming: false,
@@ -211,6 +229,8 @@ module Parse
                      pre_auth_rate_limiter: nil,
                      allowed_origins: nil,
                      require_custom_header: nil,
+                     resource_subscriptions: false,
+                     subscription_manager: nil,
                      health_path: nil, &block)
         if agent_factory && block
           raise ArgumentError, "Provide agent_factory: OR a block, not both"
@@ -239,6 +259,16 @@ module Parse
         # registry does not span multiple MCPRackApp mount points within
         # a process, nor multiple processes in a clustered deployment.
         @cancellation_registry      = CancellationRegistry.new
+
+        # Resource-subscription coordinator. An injected manager wins; else a
+        # default in-process manager when the operator opted in. nil disables
+        # the GET listening stream and leaves resources.subscribe unadvertised.
+        @subscription_manager =
+          if subscription_manager
+            subscription_manager
+          elsif resource_subscriptions
+            Parse::Agent::MCPSubscriptions::Manager.new(logger: @logger)
+          end
 
         # Warn operators who enable streaming without a concurrency cap.
         # An unbounded SSE endpoint with orphaned dispatcher threads is
@@ -337,7 +367,24 @@ module Parse
             return [400, json_headers, [json_rpc_error(-32_600, "Invalid Mcp-Session-Id")]]
           end
           @cancellation_registry.cancel_all_for(clean_sid, reason: :session_terminated)
+          # Tear down any resource subscriptions and the listening stream
+          # bound to this session so a terminated session leaves no LiveQuery
+          # sockets behind.
+          @subscription_manager&.detach_listener(clean_sid)
           return [204, json_headers, [""]]
+        end
+
+        # 0d. GET listening stream — the MCP 2025-06-18 Streamable HTTP
+        #     server→client channel that carries unsolicited
+        #     `notifications/resources/updated`. Only when resource
+        #     subscriptions are enabled, the client opted into SSE, and a
+        #     valid Mcp-Session-Id is present. Authenticated via the same
+        #     agent_factory as POST: the session id is a server-issued
+        #     bearer capability (returned on initialize), so possession of
+        #     it plus a valid agent gates the stream.
+        if env["REQUEST_METHOD"] == "GET" && @subscription_manager &&
+           env["HTTP_ACCEPT"].to_s.include?("text/event-stream")
+          return serve_listening_stream(env)
         end
 
         # 1. Method check — only POST is accepted.
@@ -523,7 +570,10 @@ module Parse
       # @param agent [Parse::Agent] authenticated agent.
       # @return [Array] Rack triple with Array<String> body.
       def serve_json(body, agent)
-        result = Parse::Agent::MCPDispatcher.call(body: body, agent: agent, logger: @logger)
+        result = Parse::Agent::MCPDispatcher.call(
+          body: body, agent: agent, logger: @logger,
+          subscription_manager: @subscription_manager,
+        )
         headers = json_headers
         merge_session_header!(headers, body, agent)
         # When the dispatcher returns body: nil (a JSON-RPC notification
@@ -600,17 +650,64 @@ module Parse
           on_close: -> { registry.deregister(correlation_id, req_id, registry_entry_id) if registry_entry_id },
         ) do |progress_callback|
           Parse::Agent::MCPDispatcher.call(
-            body:               body,
-            agent:              agent,
-            logger:             logger,
-            progress_callback:  progress_callback,
-            cancellation_token: cancellation_token,
+            body:                 body,
+            agent:                agent,
+            logger:               logger,
+            progress_callback:    progress_callback,
+            cancellation_token:   cancellation_token,
+            subscription_manager: @subscription_manager,
           )
         end
 
         headers = sse_headers
         merge_session_header!(headers, body, agent)
         [200, headers, sse_body]
+      end
+
+      # Serve a long-lived GET listening SSE stream for resource-subscription
+      # delivery (MCP 2025-06-18 Streamable HTTP server→client channel).
+      #
+      # Unlike {#serve_sse} (response-scoped: one dispatch then close), this
+      # stream outlives any single request — it stays open emitting
+      # `notifications/resources/updated` for the session's subscriptions until
+      # the client disconnects or the session is terminated via DELETE.
+      #
+      # Authenticated via the same `agent_factory` as POST. The `Mcp-Session-Id`
+      # header keys the listener; it is a server-issued capability (returned on
+      # `initialize`), so possession + a valid agent gates the stream. The agent
+      # itself is not retained — subscriptions (and their credentials) are
+      # created by the `resources/subscribe` POST, not here.
+      #
+      # @param env [Hash] Rack env.
+      # @return [Array] Rack triple with a {ListeningStreamBody}, or an error.
+      def serve_listening_stream(env)
+        begin
+          @agent_factory.call(env)
+        rescue Parse::Agent::Unauthorized
+          @logger&.warn("[Parse::Agent::MCPRackApp] Unauthorized listening stream")
+          return [401, json_headers, [unauthorized_body]]
+        rescue StandardError => e
+          @logger&.warn("[Parse::Agent::MCPRackApp] Factory error (listening): #{e.class.name}")
+          return [500, json_headers, [json_rpc_error(-32_603, "Internal error")]]
+        end
+
+        session_id = sanitize_session_id(env["HTTP_MCP_SESSION_ID"].to_s)
+        if session_id.nil? || session_id.empty?
+          return [400, json_headers, [json_rpc_error(-32_600, "Missing or invalid Mcp-Session-Id")]]
+        end
+
+        # The origin allowlist (when configured) guards the listening stream
+        # the same way it guards POST — a browser-driven cross-origin GET to
+        # an SSE endpoint is the analogous CSRF surface.
+        if @allowed_origins
+          origin = env["HTTP_ORIGIN"].to_s.strip
+          unless origin.empty? || origin_allowed?(origin)
+            return [403, json_headers, [json_rpc_error(-32_700, "Origin not allowed")]]
+          end
+        end
+
+        body = ListeningStreamBody.new(@subscription_manager, session_id, @heartbeat_interval, @logger)
+        [200, sse_headers, body]
       end
 
       # ---------------------------------------------------------------------------
@@ -1040,6 +1137,109 @@ module Parse
             "id"      => @req_id,
             "error"   => { "code" => -32_603, "message" => "Internal error" },
           }
+        end
+      end
+
+      # ---------------------------------------------------------------------------
+      # Listening stream body (resource subscriptions)
+      # ---------------------------------------------------------------------------
+
+      # Rack body for the long-lived GET listening stream that carries
+      # `notifications/resources/updated` to a subscribing client.
+      #
+      # On {#each} it registers a delivery callback with the
+      # {Parse::Agent::MCPSubscriptions::Manager} keyed by the session id, then
+      # blocks reading from an internal queue and yields SSE-formatted
+      # notification events as they are published by the LiveQuery bridge. A
+      # periodic SSE comment heartbeat keeps the connection warm and surfaces a
+      # dead socket as a write error so the Rack server invokes {#close}.
+      #
+      # {#close} detaches the listener and tears down every LiveQuery
+      # subscription bound to the session — so a dropped stream leaves no
+      # LiveQuery sockets behind. Re-opening the stream requires the client to
+      # re-issue its `resources/subscribe` calls (subscriptions do not survive a
+      # listening-stream disconnect in this single-process implementation).
+      #
+      # The publish callback runs on a LiveQuery dispatcher / debounce thread
+      # and only pushes to the thread-safe queue; all `yield`s happen on the
+      # Rack I/O thread driving {#each}, mirroring {SSEBody}'s threading model.
+      #
+      # @api private
+      class ListeningStreamBody
+        DONE = :__listening_done__
+
+        # @param manager [Parse::Agent::MCPSubscriptions::Manager]
+        # @param session_id [String] sanitized Mcp-Session-Id.
+        # @param heartbeat_interval [Numeric] SSE comment heartbeat period in
+        #   seconds; `<= 0` disables heartbeats.
+        # @param logger [#warn, nil]
+        def initialize(manager, session_id, heartbeat_interval, logger)
+          @manager            = manager
+          @session_id         = session_id
+          @heartbeat_interval = heartbeat_interval
+          @logger             = logger
+          @queue              = Queue.new
+          @heartbeat          = nil
+          @closed             = false
+          @close_mutex        = Mutex.new
+        end
+
+        # Rack body interface — called once by the Rack server.
+        # @yield [String] SSE-formatted event / comment strings.
+        def each
+          queue = @queue
+          @manager.attach_listener(@session_id) do |notification|
+            queue << format_event(notification)
+          end
+          # Initial comment flushes response headers and confirms the stream.
+          yield ": connected\n\n"
+          start_heartbeat
+          loop do
+            msg = @queue.pop
+            break if msg == DONE
+            yield msg
+          end
+        ensure
+          close
+        end
+
+        # Terminate the stream: stop heartbeats, detach the listener, and tear
+        # down the session's LiveQuery subscriptions. Idempotent.
+        def close
+          @close_mutex.synchronize do
+            return if @closed
+            @closed = true
+          end
+          @heartbeat&.kill
+          @heartbeat = nil
+          begin
+            @manager.detach_listener(@session_id)
+          rescue StandardError => e
+            line = "[Parse::Agent::MCPRackApp::ListeningStreamBody] detach error: #{e.class}: #{e.message}"
+            @logger ? @logger.warn(line) : warn(line)
+          end
+          @queue << DONE rescue nil
+        end
+
+        private
+
+        def start_heartbeat
+          return unless @heartbeat_interval && @heartbeat_interval > 0
+          queue    = @queue
+          interval = @heartbeat_interval
+          @heartbeat = Thread.new do
+            loop do
+              sleep interval
+              queue << ": keep-alive\n\n"
+            end
+          end
+        end
+
+        # SSE wire form for a server→client notification. Event name "message"
+        # (not "progress"/"response", which are reserved for the request-scoped
+        # SSE path).
+        def format_event(notification)
+          "event: message\ndata: #{JSON.generate(notification)}\n\n"
         end
       end
 

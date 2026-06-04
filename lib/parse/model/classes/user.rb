@@ -654,6 +654,10 @@ module Parse
 
     # Request a password reset for this user
     # @return [Boolean] true if it was successful requested. false otherwise.
+    # @raise [Parse::Error::ServiceUnavailableError] if Parse Server returns a
+    #   500/503 (e.g. no emailAdapter / publicServerURL configured). Callers that
+    #   branch on the Boolean should rescue this; `if request_password_reset(email)`
+    #   is not exception-safe on a misconfigured server.
     # @see Parse::User.request_password_reset
     def request_password_reset
       return false if email.nil?
@@ -1061,6 +1065,10 @@ module Parse
     #  Parse::User.request_password_reset("user@example.com")
     # @param email [String] The user's email address.
     # @return [Boolean] True/false if successful.
+    # @raise [Parse::Error::ServiceUnavailableError] if Parse Server returns a
+    #   500/503 (e.g. no emailAdapter / publicServerURL configured). Callers that
+    #   branch on the Boolean should rescue this; `if request_password_reset(email)`
+    #   is not exception-safe on a misconfigured server.
     def self.request_password_reset(email)
       email = email.email if email.is_a?(Parse::User)
       return false if email.blank?

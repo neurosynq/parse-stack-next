@@ -360,6 +360,116 @@ Common uses for the direct dispatcher:
 
 ---
 
+## Resource Subscriptions (LiveQuery bridge)
+
+MCP lets a client `resources/subscribe` to a resource URI and then receive
+unsolicited `notifications/resources/updated` messages whenever the underlying
+data changes. Parse Stack bridges that surface onto Parse LiveQuery: a
+subscribed `parse://<Class>/count` or `parse://<Class>/samples` resource is
+backed by a LiveQuery subscription on `<Class>`, and any matching
+create/update/delete/enter/leave event is debounced into a single coarse
+update for that URI. The client re-reads the resource via `resources/read` to
+obtain the new value — row payloads are never streamed through the resource
+surface.
+
+This is opt-in and requires a streaming-capable Rack server (Puma, Falcon —
+WEBrick buffers responses and cannot hold the listening stream open) plus
+LiveQuery enabled and configured.
+
+```ruby
+# Boot: enable LiveQuery and point it at the server.
+Parse.setup(
+  server_url:     "https://your-parse-server.com/parse",
+  application_id: "your_app_id",
+  api_key:        "your_api_key",
+  live_query_url: "wss://your-parse-server.com",
+)
+Parse.live_query_enabled = true
+
+# Mount the Rack app with resource subscriptions enabled.
+app = Parse::Agent::MCPRackApp.new(resource_subscriptions: true) do |env|
+  token = env["HTTP_AUTHORIZATION"].to_s.delete_prefix("Bearer ")
+  MyAuth.agent_for_token!(token) # returns a Parse::Agent or raises Unauthorized
+end
+```
+
+When enabled and LiveQuery is available, the `initialize` handshake advertises
+`resources.subscribe: true`. When LiveQuery is not enabled/available — or on
+the WEBrick `MCPServer`, which cannot stream — the capability stays
+`subscribe: false` and `resources/subscribe` returns a "not supported" error.
+The capability is a contract: it is never advertised unless the server can
+actually deliver updates.
+
+### Protocol flow
+
+1. **`initialize`** — the response carries a server-issued `Mcp-Session-Id`
+   header. The client echoes it on every subsequent request.
+2. **`GET` listening stream** — the client opens a long-lived `GET` to the same
+   endpoint with `Accept: text/event-stream` and the `Mcp-Session-Id` header.
+   This is the server→client channel; it stays open and emits
+   `notifications/resources/updated` events until the client disconnects.
+3. **`resources/subscribe`** — a normal `POST` with
+   `{ "uri": "parse://Post/count" }`. Returns an empty result; updates begin
+   flowing on the listening stream.
+4. **`resources/unsubscribe`** — stops one subscription. `DELETE` with the
+   session id tears the whole session down.
+
+Only `count` and `samples` resources are subscribable. `schema` is rejected
+with an invalid-params error because schema changes are not LiveQuery events.
+
+### Access control (important)
+
+The bridge enforces the same scope rules as the rest of the SDK. LiveQuery
+filters events server-side using the credential on the subscribe frame, so the
+subscription's credentials are derived from the subscribing agent:
+
+| Agent scope | LiveQuery credential | Events seen |
+|-------------|----------------------|-------------|
+| session-token agent | that session token | only rows the user can read (ACL/CLP enforced by Parse Server) |
+| master-key agent | master key | every event |
+| `acl_user:` / `acl_role:` agent | **refused** | none — see below |
+
+`acl_user:` / `acl_role:` agents are an SDK-side, mongo-direct-only construct
+with no Parse Server REST or LiveQuery equivalent (Parse Server has no
+"act as this user pointer / role" handshake). Bridging them would force a
+silent downgrade to either master key (a row-level leak) or an unscoped
+session, so the bridge **fails closed** and refuses the subscription with a
+security error. Subscribe with a session-token or master-key agent instead.
+
+Because Parse Server fixes ACL-bypass authorization at LiveQuery *connect*
+time (there is no per-subscription master key), the bridge keeps two
+connections and routes by credential: master-posture subscriptions ride a
+dedicated **admin** connection
+(`Parse::LiveQuery::Client.new(use_master_key: true)`), while session-token
+subscriptions ride a normal connection and pass their token per subscription.
+Either way, an update only fires for an object the subscription's scope is
+permitted to read — LiveQuery filters events by ACL server-side. (Whether a
+master connection additionally surfaces master-key-only rows depends on the
+Parse Server version and its `masterKeyIps` configuration.)
+
+### Operational notes and limitations
+
+- **Single-process.** Subscription state lives in the `MCPRackApp` instance
+  (like the cancellation registry), so in a clustered / multi-process
+  deployment a LiveQuery event observed on one worker does not reach a
+  listening stream held on another. The delivery seam
+  (`Parse::Agent::MCPSubscriptions::Notifier`) is isolated so a Redis-backed
+  pub/sub adapter can be supplied later without changing the bridge or the
+  dispatcher; pass it via `subscription_manager:`.
+- **Subscriptions do not survive a listening-stream reconnect.** Closing the
+  `GET` stream tears down the session's LiveQuery subscriptions; a client that
+  reconnects must re-issue its `resources/subscribe` calls.
+- **Session id is a bearer capability.** The listening stream authenticates via
+  the agent factory and keys delivery off the server-issued `Mcp-Session-Id`,
+  which the client must keep secret — possession of a valid session id (plus a
+  valid agent) is sufficient to attach. This matches the cancellation model.
+- **Per-session cap.** A client that subscribes but never opens (or later
+  drops) its listening stream leaves LiveQuery subscriptions running until the
+  session is torn down. A per-session ceiling (default 100, configurable on the
+  manager) bounds that footprint.
+
+---
+
 ## Custom Authentication
 
 The agent factory pattern gives you full control over authentication. Every request passes through the factory before any Parse operation is attempted.

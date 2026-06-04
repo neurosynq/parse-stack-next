@@ -21,7 +21,7 @@ module MCPDispatcherStub
     @original_call = Parse::Agent::MCPDispatcher.method(:call)
     @stub_response = nil
 
-    Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil|
+    Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil, subscription_manager: nil|
       MCPDispatcherStub.stub_response || MCPDispatcherStub::FIXED_RESPONSE
     end
   end

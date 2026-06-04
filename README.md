@@ -15,6 +15,7 @@ A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [
 - **`Parse::Installation` `belongs_to :user`** — read `installation.user` to find which user a device is currently signed in as. Symmetric `Parse::User#has_many :installations` for targeted-push grouping (master-key-only by Parse Server design; see the YARD for the owner-identity caveat)
 - **`Parse.setup` / `live_query_url:` fixes** — `Parse.setup` is no longer a silent no-op on re-invocation; `Parse.setup(live_query_url: …)` and `live_query: { … }` options no longer raise `ArgumentError`; `ws://` against non-loopback hosts is refused unless `live_query: { allow_insecure: true }` is also passed
 - **MCP `structuredContent` for 5 more tools** — `aggregate`, `export_data`, `atlas_text_search`, `atlas_autocomplete`, `atlas_faceted_search` now emit `structuredContent` with declared `outputSchema`s (sixteen of the built-in catalog now structured)
+- **MCP resource subscriptions (LiveQuery bridge)** — opt-in `Parse::Agent::MCPRackApp.new(resource_subscriptions: true)` serves `resources/subscribe` and pushes `notifications/resources/updated` over a long-lived `GET` listening stream, backed by Parse LiveQuery. Subscribing to a class's `count` / `samples` resource opens a debounced LiveQuery subscription; the `resources.subscribe` capability is advertised only when LiveQuery is enabled and available. Credential-scoped per agent — session-token agents see only readable rows, master-key agents use a dedicated admin connection, and `acl_user:` / `acl_role:` agents are refused (no LiveQuery equivalent). See [`docs/mcp_guide.md`](./docs/mcp_guide.md#resource-subscriptions-livequery-bridge)
 - **New ACL / CLP / `protectedFields` guide** — [`docs/acl_clp_guide.md`](./docs/acl_clp_guide.md) is the canonical reference for the five enforcement layers, the system-class CLP matrix (including the hardcoded master-key-only classes), the `_User` field-visibility recipe, role hierarchy direction, and the REST-aggregate vs `Parse::MongoDB.aggregate` enforcement asymmetry
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full 5.1 entry, including breaking changes, migration callouts, and the round-by-round security review notes.
@@ -1563,8 +1564,8 @@ user.mfa_status    # => :enabled, :disabled, or :unknown
 # Disable MFA (requires current token)
 user.disable_mfa!(current_token: "123456")
 
-# Admin reset (requires master key)
-user.disable_mfa_admin!
+# Admin reset (master key) — authorized_by must be a Parse::User
+user.disable_mfa_master_key!(authorized_by: admin_user)
 ```
 
 **SMS MFA (requires Parse Server SMS callback):**
@@ -1872,6 +1873,17 @@ band.drummer # Artist object
 
 ###### `:field`
 This option allows you to set the name of the remote Parse column for this property. Using this will explicitly set the remote property name to the value of this option. The value provided for this option will affect the name of the alias method that is generated when `alias` option is used. **By default, the name of the remote column is the lower-first camel case version of the property name. As an example, for a property with key `:my_property_name`, the framework will implicitly assume that the remote column is `myPropertyName`.**
+
+> **Pairing `belongs_to`/`has_many` when you override `:as` or `:field`.** A
+> `belongs_to`'s storage column comes from its **key** (or its explicit
+> `:field`), *not* from the class chosen by `:as`. A `has_many` on the inverse
+> side independently derives the column it queries from the **owning class
+> name**. These two defaults only line up automatically when you don't override
+> them — so if you customize one side, set `has_many ..., field:` to the exact
+> column the `belongs_to` writes, or the `has_many` query silently returns zero
+> results (it queries a column that does not exist, with no error). For example,
+> if `Post belongs_to :author, as: :workspace` (stored in column `author`), the
+> inverse must be `Workspace has_many :posts, as: :post, field: :author`.
 
 #### [Has One](https://neurosynq.github.io/parse-stack-next/Parse/Associations/HasOne.html)
 The `has_one` creates a one-to-one association with another Parse class. This association says that the other class in the association contains a foreign pointer column which references instances of this class. If your model contains a column that is a Parse pointer to another class, you should use `belongs_to` for that association instead.
@@ -2307,7 +2319,16 @@ User.first_or_create!({ email: e }, {}, synchronize: false)
 Parse.synchronize_classes = [User, Device, Subscription]
 ```
 
-The lock is a *latency optimization*; the durable correctness floor is a MongoDB unique index on the dedup tuple. When such an index exists, the synchronize wrapper rescues Parse code 137 (DuplicateValue) and re-queries inside the held lock to return the winner. On a process-local Moneta store (no Redis), the lock degrades to a per-key `Mutex` and emits a `[Parse::CreateLock]` warning. Configure `Parse.synchronize_create_secret` (or `ENV["PARSE_STACK_LOCK_SECRET"]`) to HMAC the lock keys against `query_attrs` content exposure via Redis MONITOR / snapshots.
+The lock is a *latency optimization*; the durable correctness floor is a MongoDB unique index on the dedup tuple, declared on the model with `unique_index_on`:
+
+```ruby
+class User < Parse::Object
+  property :email, :string
+  unique_index_on :email          # provisioned via User.apply_indexes!
+end
+```
+
+When such an index exists, the synchronize wrapper rescues Parse code 137 (DuplicateValue) and re-queries inside the held lock to return the winner. On a process-local Moneta store (no Redis), the lock degrades to a per-key `Mutex` and emits a `[Parse::CreateLock]` warning. Configure `Parse.synchronize_create_secret` (or `ENV["PARSE_STACK_LOCK_SECRET"]`) to HMAC the lock keys against `query_attrs` content exposure via Redis MONITOR / snapshots.
 
 ### Saving
 To commit a new record or changes to an existing record to Parse, use the `#save` method. The method will automatically detect whether it is a new object or an existing one and call the appropriate workflow. The use of ActiveModel dirty tracking allows us to send only the changes that were made to the object when saving. **Saving a record will take care of both saving all the changed properties, and associations. However, any modified linked objects (ex. belongs_to) need to be saved independently.**
@@ -2337,6 +2358,8 @@ To commit a new record or changes to an existing record to Parse, use the `#save
 ```
 
 The save operation can handle both creating and updating existing objects. If you do not want to update the association data of a changed object, you may use the `#update` method to only save the changed property values. In the case where you want to force update an object even though it has not changed, to possibly trigger your `before_save` hooks, you can use the `#update!` method. In addition, just like with other ActiveModel objects, you may call `reload!` to fetch the current record again from the data store.
+
+> **Note:** because of dirty tracking, `#save` is a no-op when the object has no changed fields — it returns `true` **without** issuing a request. A `true` return therefore does not guarantee a server write occurred (assigning a property its current value leaves the object unchanged). To force callbacks and a write even when nothing changed, pass `save(force: true)` or use `#update!`.
 
 ### Saving applying User ACLs
 You may save and delete objects from Parse on behalf of a logged in user by passing the session token to the call to `save` or `destroy`. Doing so will allow Parse to apply the ACLs of this user against the record to see if the user is authorized to read or write the record. See [Parse::Actions](https://neurosynq.github.io/parse-stack-next/Parse/Core/Actions.html).
@@ -4193,6 +4216,40 @@ You may change your local Parse ruby classes by adding new properties. To easily
   Parse.auto_upgrade!
 
 ```
+
+### Inspecting Schema Differences
+
+`Parse::Schema.diff(Klass)` returns a `SchemaDiff` describing how your local
+model and the server schema differ:
+
+- `#missing_on_server` — fields declared locally but absent on the server (what `auto_upgrade!` would add).
+- `#missing_locally` — columns present on the server but not declared in your model (e.g. dashboard-added fields). Informational only; never removed.
+- `#type_mismatches` — fields whose local type differs from the server's.
+- `#in_sync?` — `true` only when all three are empty (strict, **bidirectional** equality).
+- `#server_covers_local?` — `true` when every field your model declares is present on the server (`missing_on_server.empty? && type_mismatches.empty?`). One-way: server-only columns are ignored.
+- `#summary` — a human-readable report of the above.
+
+```ruby
+diff = Parse::Schema.diff(Post)
+puts diff.summary
+diff.missing_on_server   # => { published: :boolean }
+diff.missing_locally     # => { "legacyFlag" => :boolean }
+```
+
+**CI convergence check.** Do **not** gate CI on `in_sync?` — it is
+bidirectional and returns `false` whenever the server has extra columns (a
+dashboard-added field, or a column owned by another service), even right after
+a successful `auto_upgrade!`. Gate on the one-way check instead:
+
+```ruby
+diff = Parse::Schema.diff(Post)
+unless diff.server_covers_local?
+  abort "Post schema not converged:\n#{diff.summary}"
+end
+```
+
+Server-only columns (`missing_locally`) are expected and safe — `auto_upgrade!`
+is purely additive and never drops them.
 
 ## Push Notifications
 Push notifications are implemented through the `Parse::Push` class. To send push notifications through the REST API, you must enable `REST push enabled?` option in the `Push Notification Settings` section of the `Settings` page in your Parse application. Push notifications targeting uses the Installation Parse class to determine which devices receive the notification. You can provide any query constraint, similar to using `Parse::Query`, in order to target the specific set of devices you want given the columns you have configured in your `Installation` class.

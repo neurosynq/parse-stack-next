@@ -167,6 +167,34 @@ module Parse
     Parse::Client.client(conn)
   end
 
+  # Check that the Parse Server is reachable via the health endpoint.
+  # This is a no-credentials liveness probe — it does NOT validate the
+  # application_id or REST key. A server with a mistyped app_id still returns
+  # `true` here; use {.connected?} when you also need to validate credentials.
+  # @param conn [Symbol] the named client connection to probe. Defaults to :default.
+  # @return [Boolean] +true+ if the server responded with status "ok", +false+
+  #   if the server is unreachable or returned an unexpected response.
+  def self.reachable?(conn = :default)
+    client(conn).reachable?
+  rescue StandardError
+    false
+  end
+
+  # Check that the Parse Server is reachable AND that the configured
+  # application_id and REST key are accepted.
+  # Fires an authenticated limit-0 find against the _User class (the
+  # smallest probe that exercises the full auth stack). Returns +false+ only
+  # when the server is down or the connection is refused; a bad REST key raises
+  # {Parse::Error::AuthenticationError} at the instance-method level, which
+  # this module-boundary rescue catches and converts to +false+.
+  # @param conn [Symbol] the named client connection to probe. Defaults to :default.
+  # @return [Boolean] +true+ if the server is reachable and credentials are valid.
+  def self.connected?(conn = :default)
+    client(conn).connected?
+  rescue StandardError
+    false
+  end
+
   # The shared cache for the default client connection. This is useful if you want to
   # also utilize the same cache store for other purposes in your application.
   # This should normally be a {https://github.com/minad/moneta Moneta} unified
@@ -784,6 +812,36 @@ module Parse
       self.cache.clear if self.cache.present?
     end
 
+    # No-credentials liveness probe. Hits the Parse Server health endpoint and
+    # returns +true+ when the server responds with status "ok". No application
+    # credentials are required, so this passes even when the configured
+    # application_id or REST key is wrong. Use {#connected?} to also validate
+    # credentials.
+    # @return [Boolean] +true+ if the server is up and returned a healthy status.
+    def reachable?
+      response = request(:get, Parse::API::Server::SERVER_HEALTH_PATH, opts: { cache: false })
+      response.success?
+    rescue Parse::Error, Faraday::Error
+      false
+    end
+
+    # Authenticated connectivity probe. Fires a limit-0 find against the
+    # +_User+ class with the configured application_id and REST key. Returns
+    # +true+ only when the server is up AND the credentials are accepted; a
+    # wrong application_id / REST key (or any connection, timeout, or API
+    # error) returns +false+ rather than raising, so this is a safe boolean
+    # smoke-test for "is my configuration working?". Genuine programming
+    # errors (e.g. +NoMethodError+) still propagate. Use {#reachable?} for a
+    # no-credentials liveness check that passes even with bad credentials.
+    # @return [Boolean] +true+ if the server is reachable and credentials are valid.
+    def connected?
+      response = request(:get, "#{Parse::API::Objects::CLASS_PATH_PREFIX}_User",
+                         query: { limit: 0 }, opts: { cache: false })
+      response.success?
+    rescue Parse::Error, Faraday::Error
+      false
+    end
+
     # Send a REST API request to the server. This is the low-level API used for all requests
     # to the Parse server with the provided options. Every request sent to Parse through
     # the client goes through the configured set of middleware that can be modified by applying
@@ -855,6 +913,11 @@ module Parse
                              "Good: Parse.client.create_object('X', body, session_token: t, use_master_key: false)"
       end
 
+      # Retry budget. Initialized ONCE here, ABOVE the `begin` below, so the
+      # `retry` keyword in the rescue clauses (which re-runs only the begin
+      # block, not the whole method) preserves the countdown across attempts.
+      # If this initialization ran inside the begin it would reset on every
+      # attempt, turning a transient 500/503/429 into an infinite retry loop.
       _retry_count ||= self.retry_limit
 
       if opts[:retry] == false
@@ -863,6 +926,7 @@ module Parse
         _retry_count = opts[:retry]
       end
 
+      begin
       headers ||= {}
       # if the first argument is a Parse::Request object, then construct it
       _request = nil
@@ -1003,6 +1067,7 @@ module Parse
         retry
       end
       raise Parse::Error::ConnectionError, "#{_request} : #{e.class} - #{e.message}"
+      end
     end
 
     # Send a GET request.
