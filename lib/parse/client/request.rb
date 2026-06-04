@@ -46,12 +46,38 @@ module Parse
       # @!attribute [rw] idempotent_methods
       #   @return [Array<Symbol>] HTTP methods that should include request IDs
       attr_accessor :idempotent_methods
+
+      # @!attribute [rw] assume_server_idempotency
+      #   @return [Boolean] operator assertion that the Parse Server is
+      #     configured with `idempotencyOptions` covering the write paths the
+      #     SDK targets. When true, a request that carries a stable
+      #     `X-Parse-Request-Id` header becomes safe for {Parse::Client} to
+      #     transparently RETRY on an ambiguous failure (500/503/dropped
+      #     connection) even when it is a POST or an atomic-op write — Parse
+      #     Server deduplicates the replay server-side, so the write applies AT
+      #     MOST ONCE.
+      #
+      #     The replay does NOT transparently return the original response,
+      #     though: Parse Server rejects the duplicate with error 159, which the
+      #     SDK raises as {Parse::Error::DuplicateRequestError}. A caller relying
+      #     on this retry must rescue that error (the original write already
+      #     landed) and re-fetch by its own key if it needs the result.
+      #
+      #     Default false. Sending the `X-Parse-Request-Id` header is harmless
+      #     on its own, but ASSUMING the server deduplicates when it does not
+      #     would double-apply the write on retry. Only set this true when
+      #     Parse Server's `idempotencyOptions` is actually configured to cover
+      #     those paths (it is OFF by default on Parse Server).
+      attr_accessor :assume_server_idempotency
     end
 
     # Default configuration
     self.enable_request_id = true  # Enabled by default for production safety
     self.request_id_header = "X-Parse-Request-Id"  # Standard Parse header
     self.idempotent_methods = [:post, :put, :patch]  # Methods that can benefit from idempotency
+    # OFF by default: the client cannot know whether the server deduplicates,
+    # so it never assumes retry-safety for writes unless the operator opts in.
+    self.assume_server_idempotency = false
 
     # Creates a new request
     # @param method [String] the HTTP method
@@ -121,11 +147,23 @@ module Parse
 
       return unless should_use_request_id
 
+      header_name = self.class.request_id_header
+
+      # If a request id is already on the headers — e.g. a retry re-builds the
+      # Request with the same headers hash carried over from the first attempt
+      # — adopt it so the `request_id` ivar matches the value actually on the
+      # wire. Generating a fresh UUID here while the `||=` below leaves the old
+      # header in place would silently diverge the ivar from the sent header.
+      existing = @headers[header_name]
+      if existing && !existing.to_s.empty?
+        @request_id = existing
+        return
+      end
+
       # Use custom request ID if provided, otherwise generate one
       @request_id = @opts[:request_id] || generate_request_id
 
       # Add request ID to headers if not already present
-      header_name = self.class.request_id_header
       @headers[header_name] ||= @request_id
     end
 
@@ -209,25 +247,38 @@ module Parse
     # Enables request ID generation globally
     # @param methods [Array<Symbol>] HTTP methods to apply idempotency to
     # @param header [String] header name to use for request IDs
-    def self.enable_idempotency!(methods: [:post, :put, :patch], header: "X-Parse-Request-Id")
+    # @param assume_server_dedup [Boolean, nil] when non-nil, also sets
+    #   {assume_server_idempotency} — pass `true` ONLY when Parse Server's
+    #   `idempotencyOptions` is configured, to additionally make writes
+    #   retry-safe. Leave nil (default) to send the header without changing
+    #   the retry posture.
+    def self.enable_idempotency!(methods: [:post, :put, :patch], header: "X-Parse-Request-Id", assume_server_dedup: nil)
       self.enable_request_id = true
       self.idempotent_methods = methods
       self.request_id_header = header
+      self.assume_server_idempotency = assume_server_dedup unless assume_server_dedup.nil?
     end
 
-    # Disables request ID generation globally
+    # Disables request ID generation globally. Also clears
+    # {assume_server_idempotency} so writes are never treated as retry-safe
+    # once the header is no longer sent.
     def self.disable_idempotency!
       self.enable_request_id = false
+      self.assume_server_idempotency = false
     end
 
     # Configures idempotency settings
     # @param enabled [Boolean] whether to enable idempotency
     # @param methods [Array<Symbol>] HTTP methods to apply idempotency to
     # @param header [String] header name to use for request IDs
-    def self.configure_idempotency(enabled: true, methods: [:post, :put, :patch], header: "X-Parse-Request-Id")
+    # @param assume_server_dedup [Boolean] sets {assume_server_idempotency}
+    #   (default false). Pass true ONLY when Parse Server `idempotencyOptions`
+    #   is configured for the targeted paths.
+    def self.configure_idempotency(enabled: true, methods: [:post, :put, :patch], header: "X-Parse-Request-Id", assume_server_dedup: false)
       self.enable_request_id = enabled
       self.idempotent_methods = methods
       self.request_id_header = header
+      self.assume_server_idempotency = assume_server_dedup
     end
   end
 end

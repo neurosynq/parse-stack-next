@@ -368,10 +368,10 @@ class CacheIntegrationTest < Minitest::Test
 
   def setup_parse_client_for_cache_tests
     Parse::Client.setup(
-      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:2337/parse",
-      app_id: ENV["PARSE_TEST_APP_ID"] || "myAppId",
-      api_key: ENV["PARSE_TEST_API_KEY"] || "test-rest-key",
-      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "myMasterKey",
+      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse",
+      app_id: ENV["PARSE_TEST_APP_ID"] || "psnextItAppId",
+      api_key: ENV["PARSE_TEST_API_KEY"] || "psnext-it-rest-key",
+      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "psnextItMasterKey",
       logging: ENV["PARSE_DEBUG"] ? :debug : false,
     )
   end

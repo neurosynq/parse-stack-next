@@ -14,7 +14,7 @@ require "parse/atlas_search"
 #   docker-compose -f scripts/docker/docker-compose.atlas.yml logs -f atlas-init
 #
 # Run:
-#   ATLAS_URI="mongodb://localhost:27020/parse_atlas_test?directConnection=true" ruby -Ilib:test test/lib/parse/atlas_search_integration_test.rb
+#   ATLAS_URI="mongodb://localhost:29020/parse_atlas_test?directConnection=true" ruby -Ilib:test test/lib/parse/atlas_search_integration_test.rb
 #
 # Alternative Setup (Atlas CLI):
 #   atlas deployments setup local-atlas --type local
@@ -29,7 +29,7 @@ require "parse/atlas_search"
 #
 class AtlasSearchIntegrationTest < Minitest::Test
   # Default to Docker Atlas Local port (27020), can override with ATLAS_URI env var
-  ATLAS_URI = ENV["ATLAS_URI"] || "mongodb://localhost:27020/parse_atlas_test?directConnection=true"
+  ATLAS_URI = ENV["ATLAS_URI"] || "mongodb://localhost:29020/parse_atlas_test?directConnection=true"
 
   # Class methods on Parse::AtlasSearch that the per-test wrapper baseline
   # below force-defaults `master: true` onto. The test suite predates the

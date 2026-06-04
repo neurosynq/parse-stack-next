@@ -77,6 +77,33 @@ module Parse
     CLASS_JOB_SCHEDULE = "_JobSchedule"
     # The internal schema collection in Parse. Managed by Parse Server.
     CLASS_SCHEMA = "_SCHEMA"
+    # Maps the camelized bare name of a Parse Server built-in class to its
+    # leading-underscore storage form. Consulted by {String#to_parse_class}
+    # ONLY as a fallback when {find_class} cannot resolve the name — which
+    # happens at class-declaration time for a built-in whose Ruby class is not
+    # yet registered (e.g. +Parse::Installation+ declares +belongs_to :user+
+    # before +Parse::User+ is loaded). Without this fallback the conversion
+    # froze the wrong literal (+"User"+) into the association +references+ map
+    # and pushed it to the server schema as the pointer +targetClass+, which
+    # Parse Server then rejected (+Pointer<User>+ vs +Pointer<_User>+). A
+    # genuinely-registered class still wins via {find_class}, so a custom
+    # +parse_class+ table mapping is never overridden by this map.
+    # Keys are the camelized bare names (the form {String#to_parse_class}
+    # computes before lookup); only +User+ is actually targeted by a built-in
+    # association before its class registers, the rest are hygiene so an app
+    # that declares a pointer/relation to any built-in resolves correctly
+    # regardless of load order.
+    SYSTEM_CLASS_MAP = {
+      "User" => CLASS_USER,
+      "Role" => CLASS_ROLE,
+      "Session" => CLASS_SESSION,
+      "Installation" => CLASS_INSTALLATION,
+      "Product" => CLASS_PRODUCT,
+      "Audience" => CLASS_AUDIENCE,
+      "PushStatus" => CLASS_PUSH_STATUS,
+      "JobStatus" => CLASS_JOB_STATUS,
+      "JobSchedule" => CLASS_JOB_SCHEDULE,
+    }.freeze
     # The type label for hashes containing file data. Used by Parse::File.
     TYPE_FILE = "File"
     # The type label for hashes containing geopoints. Used by Parse::GeoPoint.
@@ -286,9 +313,13 @@ class String
   def to_parse_class(singularize: false)
     final_class = singularize ? self.singularize.camelize : self.camelize
     klass = Parse::Model.find_class(final_class) || Parse::Model.find_class(self)
-    #handles the case that a class has a custom parse table
-    final_class = klass.parse_class if klass.present?
-    final_class
+    # A registered class wins (handles a custom parse_class table mapping).
+    return klass.parse_class if klass.present?
+    # Fallback: resolve a built-in system class by name even when its Ruby
+    # class is not yet registered (declaration-time load-order). This keeps a
+    # `belongs_to :user` declared before Parse::User loads from freezing the
+    # literal "User" instead of "_User" into the schema targetClass.
+    Parse::Model::SYSTEM_CLASS_MAP[final_class] || final_class
   end
 end
 

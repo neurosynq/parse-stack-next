@@ -263,4 +263,101 @@ class TestTableFeatures < Minitest::Test
       assert_match(/obj3.*5/, data_lines[2])
     end
   end
+
+  # Tests for op-derived default header in GroupedResult#to_table
+  # TtblPost is a neutral model name used only as a namespace prefix here.
+
+  def test_grouped_result_default_header_is_count_when_no_op
+    # Bare constructor (no op arg) must keep "Count" — existing callers must not break.
+    grouped_data = { "A" => 10, "B" => 5 }
+    grouped_result = Parse::GroupedResult.new(grouped_data)
+
+    table = grouped_result.to_table
+    assert_match(/Count/, table)
+    refute_match(/Average/, table)
+    refute_match(/Sum/, table)
+  end
+
+  def test_grouped_result_default_header_for_average_op
+    # When the operation is "average", the second column header should be "Average".
+    grouped_data = { "electronics" => 299.99, "books" => 14.99 }
+    grouped_result = Parse::GroupedResult.new(grouped_data, "average")
+
+    table = grouped_result.to_table
+    assert_match(/Average/, table, "Expected 'Average' header for avg operation, got:\n#{table}")
+    refute_match(/\bCount\b/, table)
+  end
+
+  def test_grouped_result_default_header_for_avg_alias
+    # "avg" (alias string) should also map to "Average".
+    grouped_data = { "fiction" => 12.50, "non-fiction" => 22.00 }
+    grouped_result = Parse::GroupedResult.new(grouped_data, "avg")
+
+    table = grouped_result.to_table
+    assert_match(/Average/, table, "Expected 'Average' header for avg alias, got:\n#{table}")
+  end
+
+  def test_grouped_result_default_header_for_sum_op
+    grouped_data = { "TtblPostA" => 100, "TtblPostB" => 250 }
+    grouped_result = Parse::GroupedResult.new(grouped_data, "sum")
+
+    table = grouped_result.to_table
+    assert_match(/Sum/, table)
+    refute_match(/\bCount\b/, table)
+  end
+
+  def test_grouped_result_default_header_for_min_op
+    grouped_data = { "TtblPostX" => 5, "TtblPostY" => 3 }
+    grouped_result = Parse::GroupedResult.new(grouped_data, "min")
+
+    table = grouped_result.to_table
+    assert_match(/Min/, table)
+  end
+
+  def test_grouped_result_default_header_for_max_op
+    grouped_data = { "TtblPostX" => 50, "TtblPostY" => 30 }
+    grouped_result = Parse::GroupedResult.new(grouped_data, "max")
+
+    table = grouped_result.to_table
+    assert_match(/Max/, table)
+  end
+
+  def test_grouped_result_default_header_for_list_op
+    grouped_data = { "TtblPostA" => ["item1", "item2"], "TtblPostB" => ["item3"] }
+    grouped_result = Parse::GroupedResult.new(grouped_data, "list")
+
+    table = grouped_result.to_table
+    assert_match(/Items/, table)
+  end
+
+  def test_grouped_result_explicit_headers_override_op_derived_header
+    # An explicit headers: kwarg must always win, regardless of the stored operation.
+    grouped_data = { "electronics" => 299.99, "books" => 14.99 }
+    grouped_result = Parse::GroupedResult.new(grouped_data, "average")
+
+    table = grouped_result.to_table(headers: ["Category", "Avg Price"])
+    assert_match(/Category/, table)
+    assert_match(/Avg Price/, table)
+    refute_match(/\bAverage\b/, table)
+    refute_match(/\bGroup\b/, table)
+  end
+
+  def test_sortable_group_by_average_sets_average_header
+    # Simulate what SortableGroupBy#average returns and verify to_table header.
+    # We construct the GroupedResult as SortableGroupBy would.
+    price_by_category = { "electronics" => 299.99, "books" => 14.99, "clothing" => 49.99 }
+    grouped_result = Parse::GroupedResult.new(price_by_category, "average")
+
+    table = grouped_result.to_table
+    assert_match(/Average/, table, "SortableGroupBy.avg should produce 'Average' column header")
+    refute_match(/\bCount\b/, table)
+  end
+
+  def test_grouped_result_count_op_header
+    grouped_data = { "fiction" => 42, "non-fiction" => 17 }
+    grouped_result = Parse::GroupedResult.new(grouped_data, "count")
+
+    table = grouped_result.to_table
+    assert_match(/Count/, table)
+  end
 end

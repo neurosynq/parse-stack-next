@@ -231,16 +231,23 @@ module Parse
       end
 
       # Fields defined locally but missing on server.
-      # @return [Hash] field name => type pairs
+      #
+      # Iterates the model's `field_map` (one entry per canonical property,
+      # canonical name => wire column name) rather than `fields` (which carries
+      # both the snake_case and camelCase keys for every property and therefore
+      # double-counts multi-word fields). The wire name resolved from
+      # `field_map` is the authoritative server column — including custom
+      # `field:` mappings — so this both dedupes and fixes custom-column
+      # detection. Result is keyed by the CANONICAL (snake) name with the type
+      # taken from `fields[name]`.
+      # @return [Hash] canonical field name => type pairs
       def missing_on_server
-        return local_fields unless server_exists?
-
-        local = local_fields
-        server = server_field_names
+        server = server_exists? ? server_field_names : []
         missing = {}
-        local.each do |name, type|
-          name_str = name.to_s.camelize(:lower)
-          missing[name] = type unless server.include?(name_str) || core_field?(name)
+        @model_class.field_map.each do |name, wire|
+          next if core_field?(name)
+          next if server.include?(wire.to_s)
+          missing[name] = @model_class.fields[name]
         end
         missing
       end
@@ -262,15 +269,25 @@ module Parse
       end
 
       # Fields with type mismatches.
-      # @return [Hash] field name => { local: type, server: type }
+      #
+      # Iterates `field_map` (canonical name => wire column) rather than
+      # deriving the server key with `camelize(:lower)`, so a property with a
+      # custom `field:` wire column (e.g. `property :post_id, field:
+      # "postIdentifier"`) resolves to its real server column instead of a
+      # camelized guess. This both dedupes multi-word fields (which appear
+      # under two keys in `fields`) and matches the `missing_on_server`
+      # resolution path, so type drift on custom-mapped columns is no longer
+      # silently skipped.
+      # @return [Hash] canonical field name => { local: type, server: type }
       def type_mismatches
         return {} unless server_exists?
 
         mismatches = {}
-        local_fields.each do |name, local_type|
+        @model_class.field_map.each do |name, wire|
           next if core_field?(name)
-          name_str = name.to_s.camelize(:lower)
-          server_type = @server_schema.field_type(name_str)
+          local_type = @model_class.fields[name]
+          next if local_type.nil?
+          server_type = @server_schema.field_type(wire.to_s)
           next unless server_type
 
           # Normalize types for comparison
@@ -285,9 +302,28 @@ module Parse
       end
 
       # Check if schemas are in sync.
+      #
+      # Strict / bidirectional: requires the local and server schemas to match
+      # in BOTH directions — no fields missing on the server, no fields missing
+      # locally, and no type mismatches. A server that is a strict superset of
+      # the local model is NOT "in sync" by this measure (use
+      # {#server_covers_local?} for the one-way local ⊆ server check).
       # @return [Boolean]
       def in_sync?
         missing_on_server.empty? && missing_locally.empty? && type_mismatches.empty?
+      end
+
+      # Check whether the server schema covers every locally-defined field.
+      #
+      # One-way (local ⊆ server): true when nothing the model declares is
+      # missing on the server and there are no type mismatches. Unlike
+      # {#in_sync?}, this ignores server-only columns, so a server that is a
+      # strict superset of the local model still satisfies it. This is the
+      # predicate that determines whether a migration has any work to do —
+      # extra server columns are not something the migrator would add.
+      # @return [Boolean]
+      def server_covers_local?
+        missing_on_server.empty? && type_mismatches.empty?
       end
 
       # Generate a human-readable summary.
@@ -355,9 +391,17 @@ module Parse
       end
 
       # Check if migration is needed.
+      #
+      # A migration is needed when the class does not yet exist on the server,
+      # or when the server does not already cover every locally-defined field.
+      # Defined in terms of the one-way {SchemaDiff#server_covers_local?} rather
+      # than the strict bidirectional {SchemaDiff#in_sync?} so that a server
+      # which is a strict superset of the local model (extra server-only
+      # columns the migrator would never add) does not report a "needed"
+      # migration with zero operations.
       # @return [Boolean]
       def needed?
-        !@diff.in_sync? || !@diff.server_exists?
+        !@diff.server_exists? || !@diff.server_covers_local?
       end
 
       # Get the operations that would be performed.
@@ -372,7 +416,7 @@ module Parse
         @diff.missing_on_server.each do |name, type|
           ops << {
             action: :add_field,
-            field: name.to_s.camelize(:lower),
+            field: @model_class.field_map[name].to_s,
             type: REVERSE_TYPE_MAP[type] || "String",
           }
         end
@@ -424,7 +468,7 @@ module Parse
 
         # Add missing fields
         @diff.missing_on_server.each do |name, type|
-          field_name = name.to_s.camelize(:lower)
+          field_name = @model_class.field_map[name].to_s
           field_schema = { "fields" => { field_name => field_definition(type) } }
 
           response = @client.update_schema(@model_class.parse_class, field_schema)
@@ -444,15 +488,20 @@ module Parse
 
       def build_schema
         fields = {}
-        @model_class.fields.each do |name, type|
+        # Iterate `field_map` (canonical name => wire column) rather than
+        # `fields`, which carries both the snake_case and camelCase keys for
+        # every property and would emit a duplicate/phantom column for each
+        # multi-word or custom-`field:` property.
+        @model_class.field_map.each do |name, wire|
           next if %i[id object_id created_at updated_at acl objectId createdAt updatedAt ACL].include?(name)
-          field_name = name.to_s.camelize(:lower)
-          fields[field_name] = field_definition(type)
+          fields[wire.to_s] = field_definition(@model_class.fields[name])
         end
 
-        # Add pointer targets
+        # Add pointer targets. `references` is keyed by the wire column name
+        # (the `parse_field`), so use it as-is — do not re-camelize, which
+        # would corrupt custom `field:` pointer columns.
         @model_class.references.each do |name, target_class|
-          field_name = name.to_s.camelize(:lower)
+          field_name = name.to_s
           fields[field_name] = {
             "type" => "Pointer",
             "targetClass" => target_class.to_s,

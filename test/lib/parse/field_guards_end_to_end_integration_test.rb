@@ -610,7 +610,7 @@ class FieldGuardsEndToEndIntegrationTest < Minitest::Test
     # Use a busybox-free probe: just see if the parse container can resolve
     # and connect to our port. We don't strictly need a successful HTTP
     # response -- a TCP connect is enough to confirm reachability.
-    result = `docker exec parse-stack-test-server sh -c 'getent hosts host.docker.internal' 2>&1`
+    result = `docker exec #{ENV["PSNEXT_PREFIX"] || "psnext-it"}-server sh -c 'getent hosts host.docker.internal' 2>&1`
     !result.empty? && $?.success?
   end
 

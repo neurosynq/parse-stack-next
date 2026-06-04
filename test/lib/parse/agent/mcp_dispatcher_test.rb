@@ -315,6 +315,50 @@ class MCPDispatcherTest < Minitest::Test
     assert_includes r["content"].first["text"], "Simulated tool failure"
   end
 
+  # ---------- tools/call — structured error metadata forwarded to _meta -----
+
+  def test_tools_call_forwards_structured_error_metadata_to_meta
+    failing_agent = Class.new(StubAgent) do
+      def execute(tool_name, **kwargs)
+        {
+          success: false,
+          error: "Invalid arguments: field 'secret' not allowed",
+          error_code: :invalid_argument,
+          retry_after: 2.5,
+          details: { allowed_fields: %w[title body], suggested_rewrite: "keys: title,body" },
+        }
+      end
+    end.new
+
+    body = {
+      "jsonrpc" => "2.0", "id" => 7, "method" => "tools/call",
+      "params"  => { "name" => "query_class", "arguments" => {} },
+    }
+    r = D.call(body: body, agent: failing_agent)[:body]["result"]
+
+    assert_equal true, r["isError"]
+    meta = r["_meta"]
+    refute_nil meta, "structured error metadata must be forwarded under _meta"
+    assert_equal "invalid_argument", meta["parse.error_code"]
+    assert_equal 2.5, meta["parse.retry_after"]
+    assert_equal %w[title body], meta["parse.details"][:allowed_fields]
+  end
+
+  def test_tools_call_omits_meta_when_no_structured_error
+    failing_agent = Class.new(StubAgent) do
+      def execute(tool_name, **kwargs)
+        { success: false, error: "plain failure" }
+      end
+    end.new
+    body = {
+      "jsonrpc" => "2.0", "id" => 8, "method" => "tools/call",
+      "params"  => { "name" => "query_class", "arguments" => {} },
+    }
+    r = D.call(body: body, agent: failing_agent)[:body]["result"]
+    assert_equal true, r["isError"]
+    refute r.key?("_meta"), "no _meta when there is no structured error data"
+  end
+
   # ---------- tools/call — missing tool name --------------------------------
 
   def test_tools_call_without_name_returns_invalid_params

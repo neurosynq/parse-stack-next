@@ -169,6 +169,32 @@ class TestSchemaDiff < Minitest::Test
     assert_kind_of String, summary
     assert_includes summary, "TestModel"
   end
+
+  # A server that is a strict superset of the local model (every local field
+  # present, plus an extra server-only column) satisfies the one-way
+  # `server_covers_local?` check but is NOT `in_sync?` (which is strict /
+  # bidirectional and flags the unmodeled server column as missing locally).
+  def test_server_covers_local_true_while_in_sync_false_for_server_superset
+    data = {
+      "className" => "TestModel",
+      "fields" => {
+        "objectId" => { "type" => "String" },
+        "createdAt" => { "type" => "Date" },
+        "updatedAt" => { "type" => "Date" },
+        "ACL" => { "type" => "ACL" },
+        "title" => { "type" => "String" },
+        "count" => { "type" => "Number" },
+        "active" => { "type" => "Boolean" },
+        "serverOnlyExtra" => { "type" => "String" },
+      },
+    }
+    schema = Parse::Schema::SchemaInfo.new(data)
+    diff = Parse::Schema::SchemaDiff.new(TestModel, schema)
+
+    assert diff.server_covers_local?, "server superset must cover the local model"
+    refute diff.in_sync?, "strict in_sync? must flag the server-only column as missing locally"
+    assert diff.missing_locally.key?("serverOnlyExtra")
+  end
 end
 
 class TestMigration < Minitest::Test
@@ -176,6 +202,17 @@ class TestMigration < Minitest::Test
     parse_class "MigrationTestModel"
     property :name, :string
     property :value, :integer
+  end
+
+  # Exercises the wire-name derivation: a multi-word property whose default
+  # wire column is camelCase (`unit_price` -> `unitPrice`) and a custom-`field:`
+  # property whose wire column is an explicit string (`display_label`). Both
+  # caught the old `camelize(:lower)`-only path, which double-listed multi-word
+  # fields and emitted phantom columns for custom mappings.
+  class MigrationWireNameModel < Parse::Object
+    parse_class "MigrationWireNameModel"
+    property :unit_price, :integer
+    property :display_name, :string, field: "display_label"
   end
 
   # Mock client for testing
@@ -301,5 +338,31 @@ class TestMigration < Minitest::Test
     ops = migration.operations
     drop_ops = ops.select { |op| op[:action] == :drop_field || op[:action] == :remove_field }
     assert_empty drop_ops, "migrator must not generate drop_field ops"
+  end
+
+  def test_operations_use_true_wire_columns_without_duplicates
+    diff = Parse::Schema::SchemaDiff.new(MigrationWireNameModel, nil)
+    migration = Parse::Schema::Migration.new(MigrationWireNameModel, diff, client: mock_client)
+    add_fields = migration.operations
+      .select { |op| op[:action] == :add_field }
+      .map { |op| op[:field] }
+
+    # No duplicates — the old camelize-only path double-listed every
+    # multi-word property because @fields carries both the snake and camel keys.
+    assert_equal add_fields.uniq, add_fields, "add_field columns must not contain duplicates"
+
+    # Exact wire columns: default multi-word -> camelCase, custom field: -> literal.
+    assert_equal ["unitPrice", "display_label"], add_fields
+  end
+
+  def test_preview_lists_each_add_field_exactly_once
+    diff = Parse::Schema::SchemaDiff.new(MigrationWireNameModel, nil)
+    migration = Parse::Schema::Migration.new(MigrationWireNameModel, diff, client: mock_client)
+    add_lines = migration.preview.lines.grep(/ADD FIELD/)
+
+    assert_equal add_lines.uniq, add_lines, "each ADD FIELD line must appear exactly once"
+    assert_equal 1, add_lines.count { |l| l.include?("ADD FIELD unitPrice") }
+    assert_equal 1, add_lines.count { |l| l.include?("ADD FIELD display_label") }
+    refute(add_lines.any? { |l| l.include?("displayName") }, "must not emit phantom camelCase column for custom field:")
   end
 end

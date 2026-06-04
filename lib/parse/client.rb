@@ -62,6 +62,17 @@ module Parse
     # An error when the session token provided in the request is invalid.
     class InvalidSessionTokenError < Error; end
 
+    # Raised when Parse Server's request-id idempotency layer rejects a request
+    # carrying a previously-seen `X-Parse-Request-Id` (Parse error code
+    # {Parse::Response::ERROR_DUPLICATE_REQUEST}, 159). The duplicate was NOT
+    # applied a second time — the original request already succeeded. The SDK
+    # reuses the same request id across transparent retries, so a retried write
+    # that lands but loses its response will surface THIS error on the replay:
+    # treat it as "the write already applied" (re-fetch by your own key if you
+    # need the resulting object — Parse Server does not echo the original
+    # response on a duplicate).
+    class DuplicateRequestError < Error; end
+
     # An error raised when a cloud function or job returns an error response
     # (e.g. when the cloud code calls error!()). Carries the function name,
     # Parse error code, HTTP status, and the underlying Response for debugging.
@@ -165,6 +176,40 @@ module Parse
   # @return [Parse::Client] a client object for the connection name.
   def self.client(conn = :default)
     Parse::Client.client(conn)
+  end
+
+  # Check that the Parse Server is reachable via the health endpoint.
+  # This is a no-credentials liveness probe — it does NOT validate the
+  # application_id or REST key. A server with a mistyped app_id still returns
+  # `true` here; use {.connected?} when you also need to validate credentials.
+  # @param conn [Symbol] the named client connection to probe. Defaults to :default.
+  # @return [Boolean] +true+ if the server responded with status "ok", +false+
+  #   if the server is unreachable or returned an unexpected response.
+  def self.reachable?(conn = :default)
+    client(conn).reachable?
+  rescue StandardError
+    false
+  end
+
+  # Check that the Parse Server is reachable and responding.
+  # By default this probes the credential-less health endpoint, so it returns
+  # +true+ whenever the server is up (it does NOT, by itself, validate the
+  # application_id or REST key — see {Parse::Client#connected?} for why a
+  # data-class probe is unreliable on a hardened server). Pass an `endpoint`
+  # (e.g. `"classes/_User"`) to additionally exercise the auth stack against a
+  # class you know the configured key can read; a bad key then surfaces as an
+  # {Parse::Error::AuthenticationError} at the instance level, which the
+  # instance method converts to +false+. Any other failure is caught by this
+  # module-boundary rescue and converted to +false+.
+  # @param conn [Symbol] the named client connection to probe. Defaults to :default.
+  # @param endpoint [String, nil] optional path to probe instead of the health
+  #   endpoint, to validate credentials against a readable class.
+  # @return [Boolean] +true+ if the server is reachable (and, when an endpoint
+  #   is given, the credentials are accepted).
+  def self.connected?(conn = :default, endpoint = nil)
+    client(conn).connected?(endpoint)
+  rescue StandardError
+    false
   end
 
   # The shared cache for the default client connection. This is useful if you want to
@@ -784,6 +829,50 @@ module Parse
       self.cache.clear if self.cache.present?
     end
 
+    # No-credentials liveness probe. Hits the Parse Server health endpoint and
+    # returns +true+ when the server responds with status "ok". No application
+    # credentials are required, so this passes even when the configured
+    # application_id or REST key is wrong. Use {#connected?} to also validate
+    # credentials.
+    # @return [Boolean] +true+ if the server is up and returned a healthy status.
+    def reachable?
+      response = request(:get, Parse::API::Server::SERVER_HEALTH_PATH, opts: { cache: false })
+      response.success?
+    rescue Parse::Error, Faraday::Error
+      false
+    end
+
+    # Connectivity probe. By default hits the Parse Server health endpoint —
+    # the same target as {#reachable?} — so it returns +true+ whenever the
+    # server is up, regardless of CLP configuration.
+    #
+    # Why not a `_User` find? A limit-0 find against +_User+ exercises the auth
+    # stack, but locking +_User+ finds to the master key via a Class-Level
+    # Permission is standard production hardening — on such a server the probe
+    # gets a permission error and (wrongly) reports "not connected" for a
+    # perfectly healthy, correctly-configured deployment. The default therefore
+    # avoids any data class.
+    #
+    # To ALSO validate credentials, pass `endpoint:` a path to a class the
+    # configured key is allowed to read (e.g. `"classes/_User"` on a default
+    # server, or one of your own readable classes). The probe runs `limit: 0`
+    # so it never pulls rows, and routes through the auth middleware, so a wrong
+    # application_id / REST key surfaces as an {Parse::Error::AuthenticationError}
+    # and is converted to +false+. Any connection, timeout, or API error returns
+    # +false+ rather than raising; genuine programming errors (e.g.
+    # +NoMethodError+) still propagate.
+    # @param endpoint [String, nil] optional path to probe instead of the
+    #   health endpoint, to validate credentials against a readable class.
+    # @return [Boolean] +true+ if the server is reachable (and, when an endpoint
+    #   is given, the credentials are accepted).
+    def connected?(endpoint = nil)
+      path = endpoint || Parse::API::Server::SERVER_HEALTH_PATH
+      response = request(:get, path, query: { limit: 0 }, opts: { cache: false })
+      response.success?
+    rescue Parse::Error, Faraday::Error
+      false
+    end
+
     # Send a REST API request to the server. This is the low-level API used for all requests
     # to the Parse server with the provided options. Every request sent to Parse through
     # the client goes through the configured set of middleware that can be modified by applying
@@ -824,6 +913,9 @@ module Parse
     #   - This usually means you have exceeded the burst limit on requests, which will mean you will be throttled for the
     #     next 60 seconds.
     # @raise Parse::Error::InvalidSessionTokenError when the Parse response code is 209.
+    # @raise Parse::Error::DuplicateRequestError when the Parse response code is
+    #   {Parse::Response::ERROR_DUPLICATE_REQUEST} (159) — request-id idempotency
+    #   rejected a duplicate; the original write already applied.
     #   - This means the session token that was sent in the request seems to be invalid.
     # @return [Parse::Response] the response for this request.
     # @see Parse::Middleware::BodyBuilder
@@ -855,6 +947,11 @@ module Parse
                              "Good: Parse.client.create_object('X', body, session_token: t, use_master_key: false)"
       end
 
+      # Retry budget. Initialized ONCE here, ABOVE the `begin` below, so the
+      # `retry` keyword in the rescue clauses (which re-runs only the begin
+      # block, not the whole method) preserves the countdown across attempts.
+      # If this initialization ran inside the begin it would reset on every
+      # attempt, turning a transient 500/503/429 into an infinite retry loop.
       _retry_count ||= self.retry_limit
 
       if opts[:retry] == false
@@ -863,6 +960,16 @@ module Parse
         _retry_count = opts[:retry]
       end
 
+      # The effective starting budget, captured ONCE after the opts override
+      # (and, like `_retry_count`, above the `begin` so `retry` doesn't reset
+      # it). The backoff multiplier is `(_retry_max - _retry_count)`, which
+      # grows 1, 2, 3, … as attempts are consumed. Deriving it from
+      # `self.retry_limit` instead would go to zero or negative whenever a
+      # caller passes `opts: { retry: N }` with N above the instance default,
+      # silently disabling the backoff (every retry firing at zero delay).
+      _retry_max ||= _retry_count
+
+      begin
       headers ||= {}
       # if the first argument is a Parse::Request object, then construct it
       _request = nil
@@ -970,39 +1077,130 @@ module Parse
         elsif response.code == 209 # Error 209: invalid session token
           Parse::Client._safe_warn("InvalidSessionTokenError", response)
           raise Parse::Error::InvalidSessionTokenError, response
+        elsif response.code == Parse::Response::ERROR_DUPLICATE_REQUEST # 159
+          # Request-id idempotency rejected a duplicate — the original write
+          # already applied (NOT a second time). Surface a typed, catchable
+          # signal rather than a generic error; this is what a transparently-
+          # retried write that landed-but-lost-its-response sees on the replay.
+          Parse::Client._safe_warn("DuplicateRequestError", response)
+          raise Parse::Error::DuplicateRequestError, response
         end
       end
 
       response
     rescue Parse::Error::RequestLimitExceededError, Parse::Error::ServiceUnavailableError => e
-      if _retry_count > 0
+      # 429 (RequestLimitExceeded): the server threw the request away, so
+      # re-sending is safe for any method. 500/503 (ServiceUnavailable) is
+      # ambiguous — a write may have applied before the error — so only
+      # re-send when the request is idempotent (see #idempotent_retry?).
+      retryable = e.is_a?(Parse::Error::RequestLimitExceededError) || idempotent_retry?(method, body, headers)
+      if _retry_count > 0 && retryable
         warn "[Parse:Retry] Retries remaining #{_retry_count} : #{response.request}"
         _retry_count -= 1
-        # Use Retry-After header if available, otherwise use exponential backoff
+        # Use Retry-After header if available, otherwise use linear backoff
         retry_after = response.retry_after if response.respond_to?(:retry_after)
         if retry_after && retry_after > 0
           _retry_delay = retry_after
           warn "[Parse:Retry] Using Retry-After header: #{_retry_delay}s"
         else
-          # Deterministic exponential backoff with +/-25% jitter. Never zero —
+          # Linear backoff (RETRY_DELAY × attempt number) with +/-25% jitter.
+          # Never zero —
           # zero-wait retries amplify DoS against upstream and stampede on 429.
-          backoff_delay = RETRY_DELAY * (self.retry_limit - _retry_count)
+          backoff_delay = RETRY_DELAY * (_retry_max - _retry_count)
           _retry_delay = backoff_delay * (0.75 + rand * 0.5)
         end
         sleep _retry_delay if _retry_delay > 0
         retry
       end
       raise
-    rescue Faraday::ClientError, Net::OpenTimeout => e
-      if _retry_count > 0
+    rescue Faraday::ClientError, Faraday::TimeoutError, Net::OpenTimeout => e
+      # Request timed out mid-flight: the outcome is unknown (the server may
+      # have received and applied the write but never answered), so only
+      # re-send idempotent requests to avoid double-applying.
+      #
+      # Faraday 2.x raises `Faraday::TimeoutError` for a read timeout
+      # (`Timeout::Error` / `Errno::ETIMEDOUT`); it subclasses `Faraday::Error`,
+      # not `ClientError`, so it must be listed explicitly to be caught. We
+      # deliberately do NOT catch `Faraday::ConnectionFailed` (connection
+      # refused/reset, plus the wrapped connect-timeout): refused is a
+      # non-transient "server down / misconfigured" failure, and auto-retrying
+      # it only adds backoff latency before the inevitable error. Broadening to
+      # reset connections safely (retry reset, fail fast on refused) is tracked
+      # as a follow-up.
+      if _retry_count > 0 && idempotent_retry?(method, body, headers)
         warn "[Parse:Retry] Retries remaining #{_retry_count} : #{_request}"
         _retry_count -= 1
-        backoff_delay = RETRY_DELAY * (self.retry_limit - _retry_count)
+        backoff_delay = RETRY_DELAY * (_retry_max - _retry_count)
         _retry_delay = backoff_delay * (0.75 + rand * 0.5)
         sleep _retry_delay if _retry_delay > 0
         retry
       end
       raise Parse::Error::ConnectionError, "#{_request} : #{e.class} - #{e.message}"
+      end
+    end
+
+    # Whether a request whose outcome is UNKNOWN (a 500/503 or a dropped
+    # connection) is safe to transparently re-send.
+    #
+    # Server-dedup fast path: when the operator has asserted Parse Server
+    # idempotency is configured ({Parse::Request.assume_server_idempotency})
+    # AND this request carries a stable `X-Parse-Request-Id` header, the
+    # server deduplicates a replay, so even a POST or an atomic-op write is
+    # safe to retry — the write applies at most once. The replay is NOT a
+    # transparent success, though: Parse Server rejects the duplicate with
+    # error 159, surfaced as a raised {Parse::Error::DuplicateRequestError}
+    # the caller must rescue (the original write already landed). The SDK sends
+    # the same request id on every retry (the header is set once and preserved
+    # across the `retry`), which is what makes the server-side dedup match.
+    #
+    # Otherwise the conservative method/body heuristic applies: GET and DELETE
+    # are idempotent; a full-object PUT update is idempotent ONLY when it
+    # carries no atomic `__op` mutation (Increment/Add/AddUnique/Remove/Relation
+    # would double-apply on replay); POST (object create / batch) is never
+    # auto-retried. 429 throttles are handled at the call site, since the
+    # server provably discarded the request and those re-send regardless.
+    # @param method [Symbol] the (downcased) HTTP method of the request.
+    # @param body [Hash, Object, nil] the request body.
+    # @param headers [Hash, nil] the outgoing request headers (consulted for
+    #   the request-id header on the server-dedup fast path).
+    # @return [Boolean]
+    def idempotent_retry?(method, body, headers = nil)
+      return true if server_deduped_request?(headers)
+      case method
+      when :get, :delete then true
+      when :put then !body_carries_atomic_op?(body)
+      else false
+      end
+    end
+
+    # Whether this request is covered by Parse Server's server-side request-id
+    # deduplication, making a replay a no-op. True only when the operator has
+    # opted in via {Parse::Request.assume_server_idempotency} AND the request
+    # actually carries a non-blank request-id header (writes to inherently
+    # non-idempotent paths — sessions, logout, functions, push, jobs — never
+    # get a request id, so they correctly fail this check).
+    # @param headers [Hash, nil] the outgoing request headers.
+    # @return [Boolean]
+    def server_deduped_request?(headers)
+      return false unless Parse::Request.assume_server_idempotency
+      return false unless headers.is_a?(Hash)
+      rid = headers[Parse::Request.request_id_header]
+      rid.is_a?(String) && !rid.strip.empty?
+    end
+
+    # Whether a request body carries a Parse atomic operation, i.e. any field
+    # whose value is a Hash with an `__op` key (Increment, Add, AddUnique,
+    # Remove, AddRelation, RemoveRelation, Delete). Such ops are not idempotent
+    # and must not be replayed on an ambiguous failure. Assumes the body is a
+    # Ruby Hash, which the SDK's normal save/update path always provides; a
+    # pre-serialized String body is treated as op-free (and therefore
+    # retryable), so callers handing `request` a raw JSON string for a
+    # PUT-with-op would bypass this guard.
+    # @param body [Object] the request body.
+    # @return [Boolean]
+    def body_carries_atomic_op?(body)
+      return false unless body.is_a?(Hash)
+      body.any? { |_k, v| v.is_a?(Hash) && (v.key?("__op") || v.key?(:__op)) }
     end
 
     # Send a GET request.

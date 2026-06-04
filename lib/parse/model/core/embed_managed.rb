@@ -47,27 +47,32 @@ module Parse
     # provider can happen any time before the first save. Declaration
     # never makes a network call.
     #
-    # == Single vector per record (v5.0)
+    # == Single vector per record
     #
     # `embed` produces exactly one vector per record. All declared
     # source fields are concatenated (joined with "\n\n", blank values
-    # skipped) and sent to the provider as a single string. There is
-    # no built-in chunker in v5.0: long source text whose concatenation
-    # exceeds the provider's per-call token budget will be truncated
-    # provider-side, and the resulting vector will represent only the
-    # leading portion of the document.
+    # skipped) and sent to the provider as a single string. This
+    # directive is one-vector-per-record by design: long source text
+    # whose concatenation exceeds the provider's per-call token budget
+    # is truncated provider-side, and the stored vector represents only
+    # the leading portion of the document.
     #
-    # If your source text is long-form (full articles, long
-    # transcripts, multi-page PDFs), you have two options in v5.0:
+    # Chunking happens at RETRIEVAL time, not embed time. As of v5.2 the
+    # SDK ships {Parse::Retrieval.retrieve} and the `semantic_search`
+    # agent tool, which fetch the top-k whole records and split each
+    # record's text field into overlapping chunks for presentation
+    # (every chunk inherits its parent record's single score). That is
+    # presentation chunking — it does not change how embeddings are
+    # computed here.
+    #
+    # If you instead want each passage to have its OWN embedding (true
+    # embed-time chunking), keep one of these patterns:
     #
     # 1. Pre-chunk client-side and write each chunk as its own
     #    Parse::Object record with its own `embed` declaration.
-    # 2. Maintain a dedicated `Chunk` subclass that belongs_to the
-    #    parent record, with `embed :content, into: :embedding` on the
-    #    chunk class itself.
-    #
-    # A built-in chunker + `semantic_search` agent tool are scheduled
-    # for v5.1.
+    # 2. Maintain a dedicated chunk subclass that belongs_to the parent
+    #    record, with `embed :content, into: :embedding` on the chunk
+    #    class itself.
     module EmbedManaged
       # Raised when user code tries to assign directly to a vector
       # property that's managed by an {.embed} declaration. The intent

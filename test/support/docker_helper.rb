@@ -7,7 +7,7 @@ module Parse
   module Test
     class DockerHelper
       COMPOSE_FILE = "scripts/docker/docker-compose.test.yml"
-      CONTAINER_NAME = "parse-stack-test-server"
+      CONTAINER_NAME = "#{ENV["PSNEXT_PREFIX"] || "psnext-it"}-server"
       STARTUP_TIMEOUT = 30
 
       class << self
@@ -34,6 +34,53 @@ module Parse
         def restart!
           stop!
           start!
+        end
+
+        # ---------------------------------------------------------------
+        # Server-only lifecycle controls. Unlike stop!/start!/restart!
+        # (which run `docker-compose down`/`up` and therefore tear down
+        # the WHOLE stack — including mongo, wiping all data), these act
+        # on the Parse Server container ALONE via `docker stop|start|
+        # restart`. Mongo and Redis stay up and keep their volumes, so a
+        # disruptive test can simulate a server outage / restart without
+        # destroying the database the rest of the suite depends on.
+        #
+        # Used by the disruptive integration tests:
+        #   test/lib/parse/network_failure_disruptive_test.rb
+        #   test/lib/parse/webhook_restart_disruptive_test.rb
+        # ---------------------------------------------------------------
+
+        # Stop ONLY the Parse Server container. Mongo/Redis keep running,
+        # so this is a clean "server went away" simulation. Returns true
+        # on success.
+        def stop_server!
+          system("docker stop #{CONTAINER_NAME}", out: IO::NULL, err: IO::NULL)
+        end
+
+        # Start ONLY the Parse Server container (after stop_server!) and
+        # block until /health responds. Returns the wait_for_server
+        # result (true when ready, false on timeout).
+        def start_server!
+          system("docker start #{CONTAINER_NAME}", out: IO::NULL, err: IO::NULL)
+          wait_for_server
+        end
+
+        # Restart ONLY the Parse Server container in place (preserving
+        # mongo data and any server-side state persisted there, such as
+        # registered webhooks) and block until /health responds.
+        def restart_server!
+          system("docker restart #{CONTAINER_NAME}", out: IO::NULL, err: IO::NULL)
+          wait_for_server
+        end
+
+        # Idempotent best-effort restore: ensure the Parse Server
+        # container is running and healthy. Safe to call from a test
+        # teardown / ensure block regardless of current state — a no-op
+        # when the server already answers /health. Returns true once the
+        # server is ready.
+        def ensure_server_running!
+          return true if server_ready?
+          start_server!
         end
 
         def running?
@@ -70,7 +117,7 @@ module Parse
         end
 
         def server_ready?
-          uri = URI("http://localhost:2337/parse/health")
+          uri = URI("#{ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse"}/health")
           response = Net::HTTP.get_response(uri)
           response.code == "200"
         rescue StandardError

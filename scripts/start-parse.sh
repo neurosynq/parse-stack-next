@@ -70,6 +70,16 @@ export PARSE_SERVER_START_LIVE_QUERY_SERVER="${PARSE_SERVER_START_LIVE_QUERY_SER
 # both pathways: authed upload succeeds, anon upload is rejected.
 export PARSE_SERVER_FILE_UPLOAD="${PARSE_SERVER_FILE_UPLOAD:-{\"enableForPublic\":false,\"enableForAnonymousUser\":false,\"enableForAuthenticatedUser\":true}}"
 
+# Request-id idempotency — test-stack only, scoped to a single probe class so
+# it deduplicates ONLY writes the request-id integration test targets and has
+# zero effect on every other suite. Parse Server dedups POST/PUT carrying the
+# same X-Parse-Request-Id within the TTL for paths matching `paths` (regex).
+# The SDK's idempotent-retry feature relies on exactly this server-side dedup
+# when `Parse::Request.assume_server_idempotency = true`. NOTE: Parse Server
+# names this env var with an `EXPERIMENTAL_` infix and treats the value as a
+# JSON object (objectParser). Override the whole JSON to widen coverage.
+export PARSE_SERVER_EXPERIMENTAL_IDEMPOTENCY_OPTIONS="${PARSE_SERVER_EXPERIMENTAL_IDEMPOTENCY_OPTIONS:-{\"paths\":[\"classes/IdempotencyProbe\"],\"ttl\":120}}"
+
 echo "Environment configured:"
 echo "  PARSE_SERVER_APPLICATION_ID: $PARSE_SERVER_APPLICATION_ID"
 echo "  PARSE_SERVER_LIVE_QUERY: $PARSE_SERVER_LIVE_QUERY"

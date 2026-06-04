@@ -4,6 +4,19 @@
 
 A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [parse-stack-next](https://github.com/neurosynq/parse-stack-next) is a Ruby client SDK, REST client, and Active Model ORM for [Parse Server](http://parseplatform.org/), combining a low-level API client, a query engine, an object-relational mapper (ORM), and a Cloud Code Webhooks rack application in a single gem.
 
+### What's new in 5.2
+
+- **Retrieval layer — `Parse::Retrieval` (`Parse::RAG`)** — `Parse::Retrieval.retrieve(query:, klass:, k:, filter:, tenant_scope:, …)` embeds a natural-language query, runs Atlas `$vectorSearch` through the existing ACL-enforcing `find_similar`, and splits each retrieved document's text field into scored `Parse::Retrieval::Chunk`s. Chunking is presentation-only (embedding stays one-vector-per-record), via `Parse::Retrieval::Chunker::FixedSizeOverlap(size:, overlap:, by:, max_chunks_per_document:)` (subclass `Chunker::Base` for custom strategies). ACL is mongo-direct (no REST two-stage); tenant scope folds into the Atlas pre-filter
+- **`semantic_search` agent tool + `agent_searchable`** — declare `agent_searchable field:, filter_fields:` on a model to expose it to the readonly, client-safe `semantic_search` tool. The handler enforces the full agent envelope: searchable-class allowlist, recursive underscore-key refusal + filter-field allowlist on input, `field_allowlist` projection plus tenant-scope re-assertion on output, and score quantization in non-admin contexts
+- **MCP elicitation — human-in-the-loop approval** — opt in with `Parse::Agent.require_approval_for = [:write, :admin]` to require spec-native `elicitation/create` approval before destructive tool calls. A pluggable `agent.approval_gate` (reachable on the non-MCP path too) shows the dry-run diff and blocks on the client's reply; `call_method` resolves the *effective* tier from the target `agent_method`. Fails closed (no capability / no listening stream / non-streaming transport / timeout → refuse); replies are session-bound
+- **Agent impersonation** — `Parse::Agent.new(impersonate_user:, impersonate_mint:, impersonation_label:)` / `agent.impersonate(user)` resolve a real session token for a `_User` (reuse an active `_Session`, or mint a restricted one) and bind it as if `session_token:` had been passed. Master-key-required, fail-closed, with an audit label on `parse.agent.tool_call`
+- **`Parse::Agent::PromptHardening`** — schema-string sanitization (drops non-identifier field names, strips control/zero-width chars, marker-wraps descriptions) on `get_schema`/`get_all_schemas`; embedded-marker scrubbing of untrusted tool content (`prompt_marker_strict` to refuse); operator canary phrases (`prompt_injection_canaries` + `parse.agent.prompt_injection_detected`, `canary_action = :refuse`); `Parse::Agent::PROMPT_VERSION` via `agent.describe[:prompt][:version]`; and a one-time warning when `allowed_llm_endpoints` is unrestricted
+- **Agent telemetry + provenance** — embedding cost on `parse.agent.tool_call` (`embed_calls` / `embed_tokens` / `embed_cost_usd` via `Parse::Agent.embed_cost_per_million_tokens`); optional per-row `_source` citations (`{ class, tool, object_id }`) on read-tool results via `Parse::Agent.include_source_provenance`
+- **General-purpose server-initiated notifications** — `Parse::Agent::MCPRackApp.new(notifications: true)` opens the GET listening-stream bus without LiveQuery resource subscriptions; `MCPRackApp#notify(session_id, method:, params:)` pushes arbitrary `notifications/*` to a session
+- **Token economy** — `Parse::Agent.new(tools: :lean)` narrows the readonly surface to six core tools (~7.9K → ~2.6K `tools/list` tokens); read tools strip the raw `ACL` map and `get_objects`/Atlas tools share `query_class`'s compact normalization; `semantic_search` hoists each chunk's parent into a `documents` map (sent once, not per chunk) and enforces a `max_total_tokens:` budget (default 20K) with a `budget_truncated` signal; a failing `tools/call` forwards `error_code` / `retry_after` / `details` under MCP `_meta`; `get_schema` suggests near-match class names on a typo; `Parse::Agent.measure_embeddings { … }` scopes ingestion embedding cost. See [`docs/mcp_guide.md`](./docs/mcp_guide.md#token-economy)
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full 5.2 entry.
+
 ### What's new in 5.1
 
 - **`Parse::File` URL normalization + presigned-URL stash** — `Parse::File#url=` and `attributes=` now strip signed-URL query parameters (`X-Amz-Signature`, `AWSAccessKeyId`, `Key-Pair-Id`, etc.) before storage; the bare canonical URL lands in `@url`, and the original signed URL is stashed in `file.presigned_url` with a data-driven expiry in `file.presigned_url_expires_at`. New `file.presigned_url_valid?(buffer: 60)` predicate, configurable `Parse::File.signed_url_policy = :strip | :raise`, and `Parse::File.log_filter` / `log_filter_strict` regexes for `lograge` / Sentry / Honeybadger scrubbers. `Parse::File#inspect` no longer emits the URL — see CHANGELOG for the error-reporter payload migration callout
@@ -15,6 +28,7 @@ A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [
 - **`Parse::Installation` `belongs_to :user`** — read `installation.user` to find which user a device is currently signed in as. Symmetric `Parse::User#has_many :installations` for targeted-push grouping (master-key-only by Parse Server design; see the YARD for the owner-identity caveat)
 - **`Parse.setup` / `live_query_url:` fixes** — `Parse.setup` is no longer a silent no-op on re-invocation; `Parse.setup(live_query_url: …)` and `live_query: { … }` options no longer raise `ArgumentError`; `ws://` against non-loopback hosts is refused unless `live_query: { allow_insecure: true }` is also passed
 - **MCP `structuredContent` for 5 more tools** — `aggregate`, `export_data`, `atlas_text_search`, `atlas_autocomplete`, `atlas_faceted_search` now emit `structuredContent` with declared `outputSchema`s (sixteen of the built-in catalog now structured)
+- **MCP resource subscriptions (LiveQuery bridge)** — opt-in `Parse::Agent::MCPRackApp.new(resource_subscriptions: true)` serves `resources/subscribe` and pushes `notifications/resources/updated` over a long-lived `GET` listening stream, backed by Parse LiveQuery. Subscribing to a class's `count` / `samples` resource opens a debounced LiveQuery subscription; the `resources.subscribe` capability is advertised only when LiveQuery is enabled and available. Credential-scoped per agent — session-token agents see only readable rows, master-key agents use a dedicated admin connection, and `acl_user:` / `acl_role:` agents are refused (no LiveQuery equivalent). See [`docs/mcp_guide.md`](./docs/mcp_guide.md#resource-subscriptions-livequery-bridge)
 - **New ACL / CLP / `protectedFields` guide** — [`docs/acl_clp_guide.md`](./docs/acl_clp_guide.md) is the canonical reference for the five enforcement layers, the system-class CLP matrix (including the hardcoded master-key-only classes), the `_User` field-visibility recipe, role hierarchy direction, and the REST-aggregate vs `Parse::MongoDB.aggregate` enforcement asymmetry
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full 5.1 entry, including breaking changes, migration callouts, and the round-by-round security review notes.
@@ -1563,8 +1577,8 @@ user.mfa_status    # => :enabled, :disabled, or :unknown
 # Disable MFA (requires current token)
 user.disable_mfa!(current_token: "123456")
 
-# Admin reset (requires master key)
-user.disable_mfa_admin!
+# Admin reset (master key) — authorized_by must be a Parse::User
+user.disable_mfa_master_key!(authorized_by: admin_user)
 ```
 
 **SMS MFA (requires Parse Server SMS callback):**
@@ -1872,6 +1886,17 @@ band.drummer # Artist object
 
 ###### `:field`
 This option allows you to set the name of the remote Parse column for this property. Using this will explicitly set the remote property name to the value of this option. The value provided for this option will affect the name of the alias method that is generated when `alias` option is used. **By default, the name of the remote column is the lower-first camel case version of the property name. As an example, for a property with key `:my_property_name`, the framework will implicitly assume that the remote column is `myPropertyName`.**
+
+> **Pairing `belongs_to`/`has_many` when you override `:as` or `:field`.** A
+> `belongs_to`'s storage column comes from its **key** (or its explicit
+> `:field`), *not* from the class chosen by `:as`. A `has_many` on the inverse
+> side independently derives the column it queries from the **owning class
+> name**. These two defaults only line up automatically when you don't override
+> them — so if you customize one side, set `has_many ..., field:` to the exact
+> column the `belongs_to` writes, or the `has_many` query silently returns zero
+> results (it queries a column that does not exist, with no error). For example,
+> if `Post belongs_to :author, as: :workspace` (stored in column `author`), the
+> inverse must be `Workspace has_many :posts, as: :post, field: :author`.
 
 #### [Has One](https://neurosynq.github.io/parse-stack-next/Parse/Associations/HasOne.html)
 The `has_one` creates a one-to-one association with another Parse class. This association says that the other class in the association contains a foreign pointer column which references instances of this class. If your model contains a column that is a Parse pointer to another class, you should use `belongs_to` for that association instead.
@@ -2307,7 +2332,16 @@ User.first_or_create!({ email: e }, {}, synchronize: false)
 Parse.synchronize_classes = [User, Device, Subscription]
 ```
 
-The lock is a *latency optimization*; the durable correctness floor is a MongoDB unique index on the dedup tuple. When such an index exists, the synchronize wrapper rescues Parse code 137 (DuplicateValue) and re-queries inside the held lock to return the winner. On a process-local Moneta store (no Redis), the lock degrades to a per-key `Mutex` and emits a `[Parse::CreateLock]` warning. Configure `Parse.synchronize_create_secret` (or `ENV["PARSE_STACK_LOCK_SECRET"]`) to HMAC the lock keys against `query_attrs` content exposure via Redis MONITOR / snapshots.
+The lock is a *latency optimization*; the durable correctness floor is a MongoDB unique index on the dedup tuple, declared on the model with `unique_index_on`:
+
+```ruby
+class User < Parse::Object
+  property :email, :string
+  unique_index_on :email          # provisioned via User.apply_indexes!
+end
+```
+
+When such an index exists, the synchronize wrapper rescues Parse code 137 (DuplicateValue) and re-queries inside the held lock to return the winner. On a process-local Moneta store (no Redis), the lock degrades to a per-key `Mutex` and emits a `[Parse::CreateLock]` warning. Configure `Parse.synchronize_create_secret` (or `ENV["PARSE_STACK_LOCK_SECRET"]`) to HMAC the lock keys against `query_attrs` content exposure via Redis MONITOR / snapshots.
 
 ### Saving
 To commit a new record or changes to an existing record to Parse, use the `#save` method. The method will automatically detect whether it is a new object or an existing one and call the appropriate workflow. The use of ActiveModel dirty tracking allows us to send only the changes that were made to the object when saving. **Saving a record will take care of both saving all the changed properties, and associations. However, any modified linked objects (ex. belongs_to) need to be saved independently.**
@@ -2337,6 +2371,8 @@ To commit a new record or changes to an existing record to Parse, use the `#save
 ```
 
 The save operation can handle both creating and updating existing objects. If you do not want to update the association data of a changed object, you may use the `#update` method to only save the changed property values. In the case where you want to force update an object even though it has not changed, to possibly trigger your `before_save` hooks, you can use the `#update!` method. In addition, just like with other ActiveModel objects, you may call `reload!` to fetch the current record again from the data store.
+
+> **Note:** because of dirty tracking, `#save` is a no-op when the object has no changed fields — it returns `true` **without** issuing a request. A `true` return therefore does not guarantee a server write occurred (assigning a property its current value leaves the object unchanged). To force callbacks and a write even when nothing changed, pass `save(force: true)` or use `#update!`.
 
 ### Saving applying User ACLs
 You may save and delete objects from Parse on behalf of a logged in user by passing the session token to the call to `save` or `destroy`. Doing so will allow Parse to apply the ACLs of this user against the record to see if the user is authorized to read or write the record. See [Parse::Actions](https://neurosynq.github.io/parse-stack-next/Parse/Core/Actions.html).
@@ -4194,6 +4230,40 @@ You may change your local Parse ruby classes by adding new properties. To easily
 
 ```
 
+### Inspecting Schema Differences
+
+`Parse::Schema.diff(Klass)` returns a `SchemaDiff` describing how your local
+model and the server schema differ:
+
+- `#missing_on_server` — fields declared locally but absent on the server (what `auto_upgrade!` would add).
+- `#missing_locally` — columns present on the server but not declared in your model (e.g. dashboard-added fields). Informational only; never removed.
+- `#type_mismatches` — fields whose local type differs from the server's.
+- `#in_sync?` — `true` only when all three are empty (strict, **bidirectional** equality).
+- `#server_covers_local?` — `true` when every field your model declares is present on the server (`missing_on_server.empty? && type_mismatches.empty?`). One-way: server-only columns are ignored.
+- `#summary` — a human-readable report of the above.
+
+```ruby
+diff = Parse::Schema.diff(Post)
+puts diff.summary
+diff.missing_on_server   # => { published: :boolean }
+diff.missing_locally     # => { "legacyFlag" => :boolean }
+```
+
+**CI convergence check.** Do **not** gate CI on `in_sync?` — it is
+bidirectional and returns `false` whenever the server has extra columns (a
+dashboard-added field, or a column owned by another service), even right after
+a successful `auto_upgrade!`. Gate on the one-way check instead:
+
+```ruby
+diff = Parse::Schema.diff(Post)
+unless diff.server_covers_local?
+  abort "Post schema not converged:\n#{diff.summary}"
+end
+```
+
+Server-only columns (`missing_locally`) are expected and safe — `auto_upgrade!`
+is purely additive and never drops them.
+
 ## Push Notifications
 Push notifications are implemented through the `Parse::Push` class. To send push notifications through the REST API, you must enable `REST push enabled?` option in the `Push Notification Settings` section of the `Settings` page in your Parse application. Push notifications targeting uses the Installation Parse class to determine which devices receive the notification. You can provide any query constraint, similar to using `Parse::Query`, in order to target the specific set of devices you want given the columns you have configured in your `Installation` class.
 
@@ -4500,7 +4570,16 @@ export PARSE_MCP_ENABLED=true
 ```
 
 ```ruby
-# Step 2: Enable in code and start server
+# Step 2: Connect to your Parse Server FIRST — the agent's tools query it,
+# so without an active client every tool call raises a connection error.
+Parse.setup(
+  server_url:     ENV["PARSE_SERVER_URL"],   # e.g. "https://api.example.com/parse"
+  application_id: ENV["PARSE_APP_ID"],
+  api_key:        ENV["PARSE_REST_API_KEY"],
+  master_key:     ENV["PARSE_MASTER_KEY"],    # master-key agent (full read access)
+)
+
+# Then enable and start the MCP server.
 Parse.mcp_server_enabled = true
 Parse::Agent.enable_mcp!(port: 3001)
 Parse::Agent::MCPServer.run(api_key: ENV["MCP_API_KEY"])
@@ -4771,6 +4850,27 @@ You can register webhooks to handle the different object triggers: `:before_save
 ```
 
 For any `after_*` hook, return values are not needed since Parse does not utilize them. You may also register as many `after_save` or `after_delete` handlers as you prefer, all of them will be called.
+
+> **Your model's `after_save` callbacks run here too.** When an `after_save` /
+> `after_create` trigger fires, the webhook rebuilds the `Parse::Object` from the
+> payload and runs that model's ActiveModel `after_save` / `after_create`
+> callbacks — so a `webhook :after_save` block and a model `after_save :method`
+> callback are part of the same flow. They fire **exactly once** per save: for
+> saves initiated by this Ruby SDK (recognized by the `_RB_` request-id prefix
+> together with the master key), Parse Stack already ran them locally after the
+> REST response, so the webhook skips them to avoid double-firing side effects;
+> for saves from other clients (JS / iOS / REST), the webhook runs them, since
+> the SDK never had the chance.
+
+> **Keep `after_save` handlers fast.** Parse Server **waits** for the `after_save`
+> webhook response before returning to the saving client (only LiveQuery events
+> are truly fire-and-forget), so a slow handler adds latency to that client's
+> save. And because Parse Server swallows afterSave errors and never retries the
+> trigger, blocking on slow work buys you no durability. Do trivial work inline
+> and hand anything slow, external, or must-not-be-lost (notifications,
+> downstream writes) to a background job/worker, returning quickly. This matters
+> most for client-initiated saves, where the callback runs inside the webhook —
+> Ruby-SDK saves run it in-process after their own REST response instead.
 
 `before_save` and `before_delete` hooks have special functionality and multiple ways to halt operations:
 
@@ -5520,46 +5620,71 @@ The integration tests use Docker Compose to spin up a Parse Server instance with
 
 #### Docker Configuration
 
-The tests use the following Docker setup:
+The integration stack is defined in `scripts/docker/docker-compose.test.yml`
+(Parse Server, MongoDB, Redis, and the Parse Dashboard); the Atlas Search stack
+is in `scripts/docker/docker-compose.atlas.yml`. It is deliberately isolated
+from any other Parse test system on the same host — a dedicated Compose project,
+a private port block, and a dedicated database name — so two Parse stacks can
+run side by side without colliding.
 
-```yaml
-# docker-compose.test.yml
-version: '3.8'
-services:
-  mongo:
-    image: mongo:4.4
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: root
-      MONGO_INITDB_ROOT_PASSWORD: password
-  
-  redis:
-    image: redis:6-alpine
-  
-  parse-server:
-    image: parseplatform/parse-server:latest
-    environment:
-      PARSE_SERVER_APPLICATION_ID: testAppId
-      PARSE_SERVER_MASTER_KEY: testMasterKey
-      PARSE_SERVER_DATABASE_URI: mongodb://root:password@mongo:27017/parse?authSource=admin
-      PARSE_SERVER_REDIS_URL: redis://redis:6379
+Default host ports (each overridable via the env var shown):
+
+| Service              | Host port | Override env var      |
+|----------------------|-----------|-----------------------|
+| Parse Server         | 29337     | `PARSE_HOST_PORT`     |
+| MongoDB (test)       | 29017     | `MONGO_HOST_PORT`     |
+| Redis                | 29379     | `REDIS_HOST_PORT`     |
+| Parse Dashboard      | 29040     | `DASHBOARD_HOST_PORT` |
+| MongoDB Atlas Local  | 29020     | `ATLAS_HOST_PORT`     |
+
+Identity and naming:
+
+- Containers, network, and volumes are namespaced by the Compose project
+  `psnext-it`. Override the prefix with `PSNEXT_PREFIX` (e.g.
+  `PSNEXT_PREFIX=psnext-ci`) to run a second, fully separate copy of the stack.
+- Parse database name: `parse_stack_next_it`. Atlas database: `parse_atlas_test`.
+- Default credentials: app id `psnextItAppId`, master key `psnextItMasterKey`,
+  REST key `psnext-it-rest-key` (override with `PARSE_APP_ID`,
+  `PARSE_MASTER_KEY`, `PARSE_API_KEY`).
+
+Bring the stack up and verify:
+
+```bash
+docker compose -f scripts/docker/docker-compose.test.yml up -d
+curl -s http://localhost:29337/parse/health   # -> {"status":"ok"}
 ```
 
 #### Environment Variables
 
-Configure the following environment variables for testing:
+The defaults above are baked into the Compose file and the test helpers, so the
+suite is isolated out of the box. To re-point anything, export the variables in
+your shell before running (nothing auto-loads `.env.test` — it is a committed
+reference of the full set; `set -a; source .env.test; set +a` loads them all at
+once). There are two sides — the containers and the Ruby client — and when you
+move a port you set both so they agree:
 
 ```bash
-# Required for Docker tests
+# Required to route the suite at the Docker stack
 export PARSE_TEST_USE_DOCKER=true
 
-# Optional: Custom Parse Server configuration
-export PARSE_SERVER_URL=http://localhost:2337/parse
-export PARSE_APP_ID=testAppId
-export PARSE_MASTER_KEY=testMasterKey
-export PARSE_API_KEY=testRestKey
+# Compose side — what the containers publish / use
+export PSNEXT_PREFIX=psnext-it
+export PARSE_HOST_PORT=29337
+export MONGO_HOST_PORT=29017
+export REDIS_HOST_PORT=29379
+export PARSE_APP_ID=psnextItAppId
+export PARSE_MASTER_KEY=psnextItMasterKey
+export PARSE_API_KEY=psnext-it-rest-key
 
-# Optional: Redis configuration for cache tests
-export REDIS_URL=redis://localhost:6379
+# Client side — what the Ruby test suite connects to
+export PARSE_TEST_SERVER_URL=http://localhost:29337/parse
+export PARSE_TEST_APP_ID=psnextItAppId
+export PARSE_TEST_API_KEY=psnext-it-rest-key
+export PARSE_TEST_MASTER_KEY=psnextItMasterKey
+export PARSE_TEST_MONGO_URI="mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"
+export PARSE_TEST_REDIS_URL=redis://localhost:29379/0
+export PARSE_TEST_LIVE_QUERY_URL=ws://localhost:29337
+export ATLAS_URI="mongodb://localhost:29020/parse_atlas_test?directConnection=true"
 ```
 
 #### Troubleshooting
@@ -5572,9 +5697,13 @@ export REDIS_URL=redis://localhost:6379
    docker-compose --version
    ```
 
-2. **Port conflicts**: Stop other services using ports 1337, 27017, or 6379
+2. **Port conflicts**: The stack uses a dedicated `29xxx` block (29337 / 29017 /
+   29379 / 29040 / 29020) specifically to avoid colliding with a default Parse
+   setup (1337 / 27017 / 6379 / 4040). If something still holds one of those
+   ports, override it (for example `PARSE_HOST_PORT=29338`) or stop the
+   conflicting stack:
    ```bash
-   docker-compose -f docker-compose.test.yml down
+   docker compose -f scripts/docker/docker-compose.test.yml down
    ```
 
 3. **Permission errors**: Ensure Docker has proper permissions

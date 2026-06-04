@@ -132,20 +132,36 @@ class ParseLockTest < Minitest::Test
   # ---- contention --------------------------------------------------------
 
   def test_acquire_blocks_when_held_then_succeeds_after_release
-    # Holder thread holds for ~50ms; main thread waits up to 5s and
-    # should acquire shortly after holder releases.
+    # The main thread must block until the holder releases. Rather than
+    # rely on `sleep` to win a scheduling race (flaky under loaded CI —
+    # the holder thread may not have grabbed the lock yet when the main
+    # thread tries), synchronize on explicit signals: the holder reports
+    # once it actually holds the lock, and is told when to release.
+    acquired = Thread::Queue.new
+    release  = Thread::Queue.new
     holder = Thread.new do
-      Parse::Lock.acquire("contended", ttl: 5) { sleep 0.1 }
+      Parse::Lock.acquire("contended", ttl: 5) do
+        acquired << true
+        release.pop # hold the lock until the main thread says to let go
+      end
     end
 
-    sleep 0.02  # let holder grab it first
+    acquired.pop # the holder now definitely holds the lock
 
     start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    # Release the lock after a deterministic hold so the main thread's
+    # wait is bounded below by a known margin rather than by scheduling.
+    releaser = Thread.new do
+      sleep 0.08
+      release << true
+    end
+
     Parse::Lock.acquire("contended", ttl: 5, wait: 5.0) do
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start
-      assert elapsed >= 0.05, "main thread should have waited >=50ms for holder"
-      assert elapsed < 1.0,   "main thread should have acquired well under 1s"
+      assert elapsed >= 0.05, "main thread should have waited for the holder to release"
+      assert elapsed < 2.0,   "main thread should have acquired well under the wait budget"
     end
+    releaser.join
     holder.join
   end
 

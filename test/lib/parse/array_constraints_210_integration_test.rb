@@ -2169,7 +2169,7 @@ class ArrayConstraints210IntegrationTest < Minitest::Test
           begin
             require "mongo"
             require_relative "../../../lib/parse/mongodb"
-            Parse::MongoDB.configure(uri: "mongodb://admin:password@localhost:27019/parse?authSource=admin", enabled: true)
+            Parse::MongoDB.configure(uri: (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"), enabled: true)
 
             # Test $split via MongoDB direct using $literal to escape the dollar sign
             mongo_split_pipeline = [

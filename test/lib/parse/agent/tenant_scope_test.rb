@@ -702,6 +702,47 @@ class AgentTenantScopeTest < Minitest::Test
     end
   end
 
+  # A class declaring a field_map alias on the scope field stores the value
+  # under the ALIAS column (e.g. "tenant"), not the camelized form. A
+  # mongo-direct hit (semantic_search's raw $vectorSearch path) carries that
+  # storage column verbatim. The gate must resolve the alias the same way the
+  # pre-search filter (Parse::Retrieval.wire_name) does, or it falsely denies
+  # legitimately-scoped records.
+  class TenantAliased < Parse::Object
+    parse_class "TenantAliased"
+    property :org_id, :string
+  end
+  TenantAliased.field_map[:org_id] = :tenant
+
+  def test_assert_record_passes_for_field_map_alias_column
+    scope  = { field: :org_id, value: "orgC" }
+    record = { "objectId" => "x7", "tenant" => "orgC" }
+    assert_silent { Parse::Agent::Tools.assert_record_in_tenant_scope!(record, scope, "TenantAliased") }
+  end
+
+  def test_assert_record_raises_for_field_map_alias_mismatch
+    scope  = { field: :org_id, value: "orgC" }
+    record = { "objectId" => "x8", "tenant" => "orgD" }
+    assert_raises(Parse::Agent::AccessDenied) do
+      Parse::Agent::Tools.assert_record_in_tenant_scope!(record, scope, "TenantAliased")
+    end
+  end
+
+  def test_assert_record_raises_for_field_map_alias_missing
+    scope  = { field: :org_id, value: "orgC" }
+    record = { "objectId" => "x9" }
+    assert_raises(Parse::Agent::AccessDenied) do
+      Parse::Agent::Tools.assert_record_in_tenant_scope!(record, scope, "TenantAliased")
+    end
+  end
+
+  def test_assert_record_unregistered_class_falls_back_to_camel
+    # find_class -> nil for an unknown class: the snake/camel pair must still work.
+    scope  = { field: :org_id, value: "orgC" }
+    record = { "objectId" => "x10", "orgId" => "orgC" }
+    assert_silent { Parse::Agent::Tools.assert_record_in_tenant_scope!(record, scope, "TotallyUnknownClassXYZ") }
+  end
+
   # ============================================================
   # DSL validation guards
   # ============================================================

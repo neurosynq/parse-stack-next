@@ -8,7 +8,7 @@
 #   Reset:  docker-compose -f scripts/docker/docker-compose.atlas.yml down -v && docker-compose -f scripts/docker/docker-compose.atlas.yml up -d
 #
 # Run tests:
-#   ATLAS_URI="mongodb://localhost:27020/parse_atlas_test?directConnection=true" ruby -Ilib:test test/lib/parse/atlas_search_integration_test.rb
+#   ATLAS_URI="mongodb://localhost:29020/parse_atlas_test?directConnection=true" ruby -Ilib:test test/lib/parse/atlas_search_integration_test.rb
 #
 # Stability notes (see commit history for context):
 #   The mongodb-atlas-local image runs a supervisor ("runner") that intentionally
@@ -19,13 +19,17 @@
 #   which checks both mongod AND mongot. We rely on that built-in healthcheck
 #   rather than overriding it with a faster mongosh probe.
 
+# Distinct Compose project name — kept separate from the main test stack
+# (psnext-it) so `down` on one never tears down the other.
+name: ${PSNEXT_PREFIX:-psnext-it}-atlas
+
 services:
   atlas-local:
     # Pinned patch tag rather than the floating :8.0 — mongodb-atlas-local has
     # known per-patch start-up flakiness (see testcontainers/testcontainers-java#10267
     # and MongoDB community forum 321179). Bump deliberately, not by drift.
     image: mongodb/mongodb-atlas-local:8.0.10
-    container_name: parse-stack-atlas-local
+    container_name: ${PSNEXT_PREFIX:-psnext-it}-atlas
     # `hostname` is called out by the official compose example — the embedded
     # single-node replica set advertises this name, and a stable value makes
     # restart-after-down work cleanly.
@@ -37,15 +41,15 @@ services:
       MONGOT_LOG_FILE: /dev/stderr
     # Loopback-only by default — Atlas Local has no auth configured.
     ports:
-      - "${ATLAS_BIND:-127.0.0.1}:27020:27017"
+      - "${ATLAS_BIND:-127.0.0.1}:${ATLAS_HOST_PORT:-29020}:27017"
     volumes:
       # Persist mongod data, replset config, and — critically — the mongot
       # Lucene index directory. Without /data/mongot persistence, every restart
       # forces a full search re-index, which lengthens "ready" time and is a
       # real source of test flakiness. Matches the official compose example.
-      - atlas-data:/data/db
-      - atlas-configdb:/data/configdb
-      - atlas-mongot:/data/mongot
+      - psnext-it-atlas-data:/data/db
+      - psnext-it-atlas-configdb:/data/configdb
+      - psnext-it-atlas-mongot:/data/mongot
     # Recover from genuine crashes automatically. Test runs `docker compose down`
     # explicitly, so this does not interfere with teardown.
     restart: unless-stopped
@@ -59,7 +63,7 @@ services:
 
   atlas-init:
     image: mongodb/mongodb-atlas-local:8.0.10
-    container_name: parse-stack-atlas-init
+    container_name: ${PSNEXT_PREFIX:-psnext-it}-atlas-init
     depends_on:
       atlas-local:
         # Uses the image's built-in healthcheck (see above), so this now waits
@@ -71,6 +75,6 @@ services:
     restart: "no"
 
 volumes:
-  atlas-data:
-  atlas-configdb:
-  atlas-mongot:
+  psnext-it-atlas-data:
+  psnext-it-atlas-configdb:
+  psnext-it-atlas-mongot:

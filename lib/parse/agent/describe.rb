@@ -185,6 +185,7 @@ module Parse
             class_filter: strict_class_filter?,
           },
           correlation_id: @correlation_id,
+          prompt:         { version: Parse::Agent::PROMPT_VERSION },
         }
       end
 

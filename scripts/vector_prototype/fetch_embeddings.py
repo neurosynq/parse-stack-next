@@ -3,7 +3,7 @@
 Vector-search & RAG test fixture loader.
 
 Pulls a subset of a pre-computed embeddings dataset from HuggingFace and
-loads it into Atlas Local at localhost:27020 (the same container managed
+loads it into Atlas Local at localhost:29020 (the same container managed
 by scripts/docker/docker-compose.atlas.yml). Designed to be reused by both:
 
   1. Vector search integration tests (Parse::VectorSearch — v4.3 plan)
@@ -90,7 +90,7 @@ ID_FIELD = _p["id_field"]
 
 _ext = "parquet" if DATA_FORMAT == "parquet" else "json"
 LOCAL_FILE = os.environ.get("LOCAL_FILE", f"/tmp/parse-stack-fixture-{PRESET}.{_ext}")
-MONGO_URI = os.environ.get("ATLAS_URI", "mongodb://localhost:27020/?directConnection=true")
+MONGO_URI = os.environ.get("ATLAS_URI", "mongodb://localhost:29020/?directConnection=true")
 DB_NAME = os.environ.get("DB_NAME", "vector_prototype")
 # Collection name mirrors the dataset shape so RAG tests can pivot
 # without coupling test assertions to a hard-coded class name.

@@ -1,31 +1,35 @@
 version: '3.8'
 
+# Distinct Compose project name so this stack never shares containers,
+# networks, or volumes with another Parse test system on the same host.
+name: ${PSNEXT_PREFIX:-psnext-it}
+
 services:
   mongo:
     image: mongo:8
-    container_name: parse-stack-test-mongo
+    container_name: ${PSNEXT_PREFIX:-psnext-it}-mongo
     # Bind to loopback so the test database isn't reachable from the LAN
     # when a developer runs `docker-compose up`. Override with
     # `MONGO_BIND=0.0.0.0` if you really want it exposed.
     ports:
-      - "${MONGO_BIND:-127.0.0.1}:27019:27017"
+      - "${MONGO_BIND:-127.0.0.1}:${MONGO_HOST_PORT:-29017}:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-password}
       MONGO_INITDB_DATABASE: admin
     volumes:
-      - mongo-data:/data/db
+      - psnext-it-mongo-data:/data/db
       - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
 
   parse:
     build:
       context: ..
       dockerfile: docker/Dockerfile.parse
-    container_name: parse-stack-test-server
+    container_name: ${PSNEXT_PREFIX:-psnext-it}-server
     # Bind to loopback by default — Parse Server with the test master key
     # has no business being reachable on a developer's LAN.
     ports:
-      - "${PARSE_BIND:-127.0.0.1}:2337:1337"
+      - "${PARSE_BIND:-127.0.0.1}:${PARSE_HOST_PORT:-29337}:1337"
     # `host.docker.internal` is needed so Parse Server can POST to the
     # in-process WEBrick that backs webhook integration tests. Docker
     # Desktop on Mac/Windows resolves this natively; on Linux we map it
@@ -45,10 +49,10 @@ services:
       # `start-parse.sh` will abort if any of these is unset, so any
       # name drift here surfaces immediately rather than booting Parse
       # Server with whatever placeholder default the SDK README documents.
-      PARSE_SERVER_APPLICATION_ID: ${PARSE_APP_ID:-myAppId}
-      PARSE_SERVER_MASTER_KEY:     ${PARSE_MASTER_KEY:-myMasterKey}
-      PARSE_SERVER_REST_API_KEY:   ${PARSE_API_KEY:-test-rest-key}
-      PARSE_SERVER_DATABASE_URI:   mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:-password}@mongo:27017/parse?authSource=admin
+      PARSE_SERVER_APPLICATION_ID: ${PARSE_APP_ID:-psnextItAppId}
+      PARSE_SERVER_MASTER_KEY:     ${PARSE_MASTER_KEY:-psnextItMasterKey}
+      PARSE_SERVER_REST_API_KEY:   ${PARSE_API_KEY:-psnext-it-rest-key}
+      PARSE_SERVER_DATABASE_URI:   mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:-password}@mongo:27017/parse_stack_next_it?authSource=admin
       # Accept client-supplied objectId on create. Required by the
       # `parse_reference precompute: true` DSL. The SDK only forwards
       # client objectIds under master-key authority; for non-master
@@ -78,36 +82,36 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: parse-stack-test-redis
+    container_name: ${PSNEXT_PREFIX:-psnext-it}-redis
     # Loopback-only by default. Used by the cache integration test
     # (cache_redis_integration_test.rb) and the synchronize-create lock
     # tests. Override with `REDIS_BIND=0.0.0.0` if you need to point a
     # remote client at it during debugging.
     ports:
-      - "${REDIS_BIND:-127.0.0.1}:6399:6379"
+      - "${REDIS_BIND:-127.0.0.1}:${REDIS_HOST_PORT:-29379}:6379"
     command: ["redis-server", "--save", "", "--appendonly", "no"]
 
   parse-dashboard:
     image: parseplatform/parse-dashboard:9
-    container_name: parse-stack-test-dashboard
+    container_name: ${PSNEXT_PREFIX:-psnext-it}-dashboard
     # Loopback-only by default. This compose is for `rake test:integration`
     # and local debugging; do not expose to the network.
     ports:
-      - "${DASHBOARD_BIND:-127.0.0.1}:4040:4040"
+      - "${DASHBOARD_BIND:-127.0.0.1}:${DASHBOARD_HOST_PORT:-29040}:4040"
     environment:
       # `allowInsecureHTTP` and `useEncryptedPasswords: false` are kept
       # because this stack runs over plain HTTP on loopback. Do NOT copy
       # these settings to a deployed environment.
       PARSE_DASHBOARD_ALLOW_INSECURE_HTTP: "1"
-      PARSE_SERVER_MASTER_KEY: ${PARSE_MASTER_KEY:-myMasterKey}
-      PARSE_SERVER_APPLICATION_ID: ${PARSE_APP_ID:-myAppId}
-      PARSE_SERVER_URL: http://localhost:2337/parse
+      PARSE_SERVER_MASTER_KEY: ${PARSE_MASTER_KEY:-psnextItMasterKey}
+      PARSE_SERVER_APPLICATION_ID: ${PARSE_APP_ID:-psnextItAppId}
+      PARSE_SERVER_URL: http://localhost:${PARSE_HOST_PORT:-29337}/parse
       PARSE_DASHBOARD_CONFIG: |
         {
           "apps": [{
-            "serverURL": "http://localhost:2337/parse",
-            "appId": "${PARSE_APP_ID:-myAppId}",
-            "masterKey": "${PARSE_MASTER_KEY:-myMasterKey}",
+            "serverURL": "http://localhost:${PARSE_HOST_PORT:-29337}/parse",
+            "appId": "${PARSE_APP_ID:-psnextItAppId}",
+            "masterKey": "${PARSE_MASTER_KEY:-psnextItMasterKey}",
             "appName": "ParseStackTest"
           }],
           "users": [{
@@ -121,4 +125,4 @@ services:
       - parse
 
 volumes:
-  mongo-data:
+  psnext-it-mongo-data:

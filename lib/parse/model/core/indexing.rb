@@ -56,6 +56,15 @@ module Parse
         _perishable_token _password_history authData _auth_data
       ].freeze
 
+      # Guards the check-then-append in the index registration helpers. Index
+      # declarations happen at class-load time, but an app server that eager-
+      # loads models across multiple threads can otherwise have two threads
+      # both pass the idempotency check on the same (still-empty) array and
+      # append duplicate declarations — producing duplicate `createIndex`
+      # calls at migration time. A single shared mutex is sufficient: this is
+      # not a hot path, so coarse locking trades nothing for correctness.
+      INDEX_REGISTRY_MUTEX = Mutex.new
+
       # Storage for declared indexes. Each entry is a frozen Hash with
       # the keys `:keys`, `:options`, `:declared_for` (the source-of-truth
       # symbol list from the `mongo_index` call, for diagnostics).
@@ -87,6 +96,78 @@ module Parse
                       expire_after: nil, name: nil)
         register_index(fields, key_value: 1, unique: unique, sparse: sparse,
                        partial: partial, expire_after: expire_after, name: name)
+      end
+
+      # Declare a UNIQUE index on the exact dedup tuple that
+      # `first_or_create!` / `create_or_update!` key on. This is the
+      # *correctness floor* for the synchronize-create race.
+      #
+      # The Redis-backed `synchronize:` lock (see {#first_or_create!}) is a
+      # latency optimization: in the common path it collapses concurrent
+      # callers so only one issues the create. But a lock can be bypassed —
+      # a Redis outage, a TTL expiring between the existence check and the
+      # write, a caller passing `synchronize: false`, or two app servers
+      # whose lock secrets disagree. When that happens, the *database* is the
+      # last line of defense. A unique index guarantees, unconditionally, that
+      # two racing inserts can't both land: the loser fails with DuplicateValue
+      # (Parse error 137), which `first_or_create!` rescues and resolves to the
+      # winning row via `_recover_from_duplicate_value`. Lock + index together
+      # make the net invariant "exactly one row, every caller sees the same id"
+      # hold under any race, not just the happy path.
+      #
+      # This is thin sugar over `mongo_index(*fields, unique: true, ...)` —
+      # it shares the same registration, validation (sensitive-field guard,
+      # pointer auto-rewrite, parallel-array / relation / `_id` rejection),
+      # and `IndexMigrator` apply path. The name states the intent: these
+      # fields form the dedup identity for create-or-update.
+      #
+      # Defaults match `mongo_index`: **non-sparse**. The index key is kept
+      # identical to the query `first_or_create!` re-runs on recovery, so a
+      # 137 always corresponds to a row the recovery query (`_scoped_first`
+      # on the same `query_attrs`) can find. A sparse or partial index that
+      # fires on a condition the recovery query doesn't reproduce would
+      # surface a 137 the rescue can't resolve, and the error would re-raise.
+      # `sparse:` is meaningful only when a document is missing *every* field
+      # in the tuple (a compound sparse index indexes a doc when it has at
+      # least one key); since `first_or_create!` always writes the full tuple,
+      # it never produces such a row, so sparse does not weaken the floor —
+      # leave it off unless out-of-band writers create tuple-less rows you
+      # want excluded.
+      #
+      # @example Single-field dedup floor
+      #   class Account < Parse::Object
+      #     property :email, :string
+      #     unique_index_on :email
+      #   end
+      #   Account.apply_indexes!   # provisions { email: 1 } unique via the writer
+      #
+      # @example Compound tuple with a pointer component
+      #   class Subscription < Parse::Object
+      #     property :email, :string
+      #     belongs_to :tenant, as: :user
+      #     unique_index_on :email, :tenant   # key: { email: 1, _p_tenant: 1 } unique
+      #   end
+      #
+      # @example Unique within a subset (partial filter escape hatch)
+      #   # Unique email per tenant, but rows with no tenant may repeat. You
+      #   # own the filter's lifecycle and must keep first_or_create!'s
+      #   # recovery query consistent with it.
+      #   unique_index_on :email, :tenant,
+      #                   partial: { "_p_tenant" => { "$exists" => true } }
+      #
+      # @param fields [Array<Symbol>] the dedup tuple, in declaration order.
+      #   Pointer fields auto-rewrite to `_p_<field>` like `mongo_index`.
+      # @param sparse [Boolean] default `false`; see the note above on why
+      #   it does not weaken the floor and when it actually changes behavior.
+      # @param partial [Hash, nil] partial-index filter for "unique within a
+      #   subset". Owner-managed; keep it consistent with the recovery query.
+      # @param name [String, nil] explicit index name; defaults to MongoDB
+      #   auto-naming.
+      # @return [Hash] the registered declaration (frozen)
+      # @raise [ArgumentError] same guards as `mongo_index`.
+      # @see #first_or_create!
+      def unique_index_on(*fields, sparse: false, partial: nil, name: nil)
+        mongo_index(*fields, unique: true, sparse: sparse, partial: partial, name: name)
       end
 
       # Sugar for a 2dsphere geospatial index. Geopoint columns are
@@ -232,13 +313,10 @@ module Parse
           collection:    nil, # nil sentinel means "use the model's parse_class"
         }.freeze
 
-        if mongo_index_declarations.any? { |d| d[:keys] == declaration[:keys] && d[:options] == declaration[:options] && d[:collection] == declaration[:collection] }
-          # Idempotent redeclaration — same class re-opened or sub-class
-          # inherited; don't accumulate duplicates.
-          return declaration
-        end
-        mongo_index_declarations << declaration
-        declaration
+        # Idempotent redeclaration (same class re-opened or sub-class
+        # inherited) is dropped inside the locked append so a duplicate can't
+        # slip through under concurrent class loading.
+        append_index_declaration(declaration)
       end
 
       # Register one direction of a relation index. The declaration
@@ -252,11 +330,7 @@ module Parse
           declared_for: [source].freeze,
           collection:   collection,
         }.freeze
-        if mongo_index_declarations.any? { |d| d[:keys] == decl[:keys] && d[:collection] == collection }
-          return decl
-        end
-        mongo_index_declarations << decl
-        decl
+        append_index_declaration(decl)
       end
 
       # Register the compound `{owningId: 1, relatedId: 1}` unique index
@@ -274,11 +348,29 @@ module Parse
           declared_for: [source].freeze,
           collection:   collection,
         }.freeze
-        if mongo_index_declarations.any? { |d| d[:keys] == decl[:keys] && d[:options] == decl[:options] && d[:collection] == collection }
-          return decl
+        append_index_declaration(decl)
+      end
+
+      # Append an index declaration, dropping an exact-duplicate redeclaration,
+      # under {INDEX_REGISTRY_MUTEX} so concurrent class loading can't race a
+      # duplicate past the idempotency check. Two declarations are duplicates
+      # when their `:keys`, `:options`, and `:collection` all match (relation
+      # declarations carry a frozen `{}` options hash, so this is equivalent to
+      # the prior keys+collection check for those paths).
+      # @return [Hash] the declaration passed in (whether newly stored or a
+      #   dropped duplicate), preserving the previous return contract.
+      def append_index_declaration(declaration)
+        Parse::Core::Indexing::INDEX_REGISTRY_MUTEX.synchronize do
+          decls = (@mongo_index_declarations ||= [])
+          unless decls.any? { |d|
+            d[:keys] == declaration[:keys] &&
+              d[:options] == declaration[:options] &&
+              d[:collection] == declaration[:collection]
+          }
+            decls << declaration
+          end
         end
-        mongo_index_declarations << decl
-        decl
+        declaration
       end
 
       # Translate a property symbol to the wire-format column name a

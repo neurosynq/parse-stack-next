@@ -9,14 +9,12 @@ class TestSchemaBasedPointer < Minitest::Test
     def mock_response.success?
       true
     end
-    def mock_response.result
-      {
-        "results" => [
-          { "className" => "Team" },
-          { "className" => "TestClass" },
-          { "className" => "Post" },
-        ],
-      }
+    def mock_response.results
+      [
+        { "className" => "Team" },
+        { "className" => "TestClass" },
+        { "className" => "Post" },
+      ]
     end
 
     # Mock Parse.client.schemas to return our mock response

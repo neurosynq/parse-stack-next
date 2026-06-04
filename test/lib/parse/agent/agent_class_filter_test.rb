@@ -262,6 +262,63 @@ class AgentClassFilterTest < Minitest::Test
     ActiveSupport::Notifications.unsubscribe(sub) if sub
   end
 
+  # ---- $relatedTo owning-object class is subject to the filter -------------
+  # $relatedTo names a relation on an owning object in a second class. The
+  # filter must gate that owning class the same way it gates $inQuery's
+  # className, or an agent narrowed to one class could read relations
+  # anchored on an off-allowlist class (SDK analog of GHSA-wmwx-jr2p-4j4r).
+
+  def test_relatedTo_owning_class_outside_allowlist_is_refused
+    agent = silence_master_key { Parse::Agent.new(classes: { only: [ClassFilterPost] }) }
+    constraints = {
+      "$relatedTo" => {
+        "object" => { "__type" => "Pointer", "className" => "ClassFilterComment", "objectId" => "x1" },
+        "key" => "comments",
+      },
+    }
+    err = assert_raises(Parse::Agent::AccessDenied) do
+      Parse::Agent::ConstraintTranslator.translate(constraints, agent)
+    end
+    assert_equal :class_filter, err.kind,
+                 "off-allowlist $relatedTo owning class should deny with :class_filter"
+  end
+
+  def test_relatedTo_owning_class_inside_allowlist_is_permitted
+    agent = silence_master_key { Parse::Agent.new(classes: { only: [ClassFilterPost] }) }
+    constraints = {
+      "$relatedTo" => {
+        "object" => { "__type" => "Pointer", "className" => "ClassFilterPost", "objectId" => "p1" },
+        "key" => "tags",
+      },
+    }
+    # Permitted owning class: translates without raising.
+    out = Parse::Agent::ConstraintTranslator.translate(constraints, agent)
+    assert_equal "ClassFilterPost", out["$relatedTo"]["object"]["className"]
+  end
+
+  def test_relatedTo_owning_class_checked_when_nested_in_or_with_field_sibling
+    # Regression: a $relatedTo sharing a hash with a non-operator sibling
+    # inside $or must still validate its owning class. The previous
+    # all-operators gate routed mixed hashes to the field branch and skipped
+    # the check, leaving the per-agent allowlist bypassable on the REST path.
+    agent = silence_master_key { Parse::Agent.new(classes: { only: [ClassFilterPost] }) }
+    constraints = {
+      "$or" => [
+        {
+          "$relatedTo" => {
+            "object" => { "__type" => "Pointer", "className" => "ClassFilterComment", "objectId" => "c1" },
+            "key" => "comments",
+          },
+          "createdAt" => { "$exists" => true },
+        },
+      ],
+    }
+    err = assert_raises(Parse::Agent::AccessDenied) do
+      Parse::Agent::ConstraintTranslator.translate(constraints, agent)
+    end
+    assert_equal :class_filter, err.kind
+  end
+
   private
 
   def silence_master_key

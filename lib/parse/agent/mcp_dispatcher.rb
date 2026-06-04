@@ -132,7 +132,16 @@ module Parse
       #   are translated into a JSON-RPC `isError` content envelope by
       #   {#handle_tools_call}. Cleared from the agent in an ensure block
       #   before this method returns.
-      def self.call(body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil)
+      # @param subscription_manager [Parse::Agent::MCPSubscriptions::Manager, nil]
+      #   the per-transport resource-subscription coordinator. When present and
+      #   {Parse::Agent::MCPSubscriptions::Manager#supported? supported}, the
+      #   `initialize` handshake advertises the `resources.subscribe` capability
+      #   and `resources/subscribe` / `resources/unsubscribe` are routed to it.
+      #   nil (the default, and the only option on non-streaming transports like
+      #   the WEBrick MCPServer) leaves the capability unadvertised and those
+      #   methods returning a "not supported" error.
+      def self.call(body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil,
+                    subscription_manager: nil, approval_gate: nil)
         # Snapshot any prior callback/token already on the agent (e.g. a
         # token a parent dispatcher installed before a tool handler
         # invoked us recursively, or values pre-set by the application).
@@ -143,6 +152,7 @@ module Parse
         # token.
         prev_progress_callback   = agent.progress_callback   if agent.respond_to?(:progress_callback)
         prev_cancellation_token  = agent.cancellation_token  if agent.respond_to?(:cancellation_token)
+        prev_approval_gate       = agent.approval_gate        if agent.respond_to?(:approval_gate)
 
         # Install the progress callback and cancellation token on the
         # agent for the duration of the dispatch. Cleared in the ensure
@@ -156,6 +166,10 @@ module Parse
         # is documented to return a fresh agent per request.
         agent.progress_callback   = progress_callback   if progress_callback   && agent.respond_to?(:progress_callback=)
         agent.cancellation_token  = cancellation_token  if cancellation_token  && agent.respond_to?(:cancellation_token=)
+        # Install the per-session approval gate (MCP elicitation) so
+        # agent.execute can request human approval for destructive tools.
+        # Restored in the ensure block like the other per-request state.
+        agent.approval_gate       = approval_gate        if approval_gate       && agent.respond_to?(:approval_gate=)
 
         # Guard: body must be a Hash with a "method" key.
         unless body.is_a?(Hash) && body.key?("method")
@@ -175,7 +189,7 @@ module Parse
           return { status: 200, body: jsonrpc_error(id, -32600, "Invalid Request: notifications must not carry an id") }
         end
 
-        result_hash = dispatch(method, params, agent, id, logger)
+        result_hash = dispatch(method, params, agent, id, logger, subscription_manager)
         { status: result_hash[:status], body: result_hash[:body] }
 
       rescue Parse::Agent::Unauthorized => e
@@ -196,6 +210,9 @@ module Parse
         end
         if agent.respond_to?(:cancellation_token=)
           agent.cancellation_token = prev_cancellation_token
+        end
+        if agent.respond_to?(:approval_gate=)
+          agent.approval_gate = prev_approval_gate
         end
       end
 
@@ -219,10 +236,10 @@ module Parse
       # envelope, and return { status:, body: }.
       #
       # @api private
-      def self.dispatch(method, params, agent, id, logger = nil)
+      def self.dispatch(method, params, agent, id, logger = nil, subscription_manager = nil)
         result = case method
           when "initialize"
-            handle_initialize(params)
+            handle_initialize(params, subscription_manager)
           when "tools/list"
             handle_tools_list(params, agent)
           when "tools/call"
@@ -233,6 +250,10 @@ module Parse
             handle_resources_templates_list(params, agent)
           when "resources/read"
             handle_resources_read(params, agent)
+          when "resources/subscribe"
+            handle_resources_subscribe(params, agent, subscription_manager)
+          when "resources/unsubscribe"
+            handle_resources_unsubscribe(params, agent, subscription_manager)
           when "prompts/list"
             handle_prompts_list(params)
           when "prompts/get"
@@ -278,6 +299,12 @@ module Parse
 
       rescue Parse::Agent::Unauthorized => e
         { status: 401, body: jsonrpc_error(id, -32001, "Unauthorized") }
+      rescue Parse::Agent::AccessDenied
+        # Class-authorization denial (agent_hidden / classes: allowlist), e.g.
+        # from the resources/subscribe gate. Map to -32602 with a generic
+        # message — do NOT echo the class name, so a denied subscribe can't be
+        # used to probe which hidden classes exist.
+        { status: 200, body: jsonrpc_error(id, -32602, "Invalid params") }
       rescue Parse::Agent::SecurityError
         { status: 200, body: jsonrpc_error(id, -32602, "Invalid params") }
       rescue Parse::Agent::ValidationError => e
@@ -307,8 +334,11 @@ module Parse
       # returning the server's preferred version locks those clients
       # out.
       #
+      # @param subscription_manager [Parse::Agent::MCPSubscriptions::Manager, nil]
+      #   when supported, flips the advertised `resources.subscribe` capability
+      #   to true. See {#capabilities_for}.
       # @return [Hash] protocol version, capabilities, and server info.
-      def self.handle_initialize(params)
+      def self.handle_initialize(params, subscription_manager = nil)
         requested = params.is_a?(Hash) ? params["protocolVersion"] : nil
         negotiated =
           if requested.is_a?(String) && SUPPORTED_PROTOCOL_VERSIONS.include?(requested)
@@ -318,7 +348,7 @@ module Parse
           end
         {
           "protocolVersion" => negotiated,
-          "capabilities"    => CAPABILITIES,
+          "capabilities"    => capabilities_for(subscription_manager),
           "serverInfo"      => {
             "name"    => "parse-stack-mcp",
             "version" => Parse::Stack::VERSION,
@@ -326,6 +356,27 @@ module Parse
         }
       end
       private_class_method :handle_initialize
+
+      # Compute the advertised capability object for this transport.
+      #
+      # `resources.subscribe` is advertised as `true` ONLY when a subscription
+      # manager is wired AND reports itself supported (LiveQuery enabled +
+      # available, on a streaming transport that can hold a listening channel).
+      # Advertising a capability is a contract: we never claim `subscribe: true`
+      # unless the server can actually deliver `notifications/resources/updated`.
+      # On the WEBrick MCPServer (no streaming) and on the Rack app when
+      # subscriptions are disabled, this falls back to the base CAPABILITIES
+      # with `subscribe: false`.
+      #
+      # @param manager [Parse::Agent::MCPSubscriptions::Manager, nil]
+      # @return [Hash]
+      def self.capabilities_for(manager)
+        return CAPABILITIES unless manager.respond_to?(:supported?) && manager.supported?
+        CAPABILITIES.merge(
+          "resources" => CAPABILITIES["resources"].merge("subscribe" => true),
+        )
+      end
+      private_class_method :capabilities_for
 
       # Handle `tools/list`.
       #
@@ -438,12 +489,24 @@ module Parse
             envelope
           end
         else
-          {
+          # Forward the structured error metadata the agent already computed
+          # (error_code, retry_after, details such as suggested_rewrite /
+          # allowed_fields) so a client can branch deterministically and
+          # honor retry_after — instead of re-parsing the prose message. Goes
+          # in `_meta` (spec-allowed arbitrary metadata) under a `parse.`
+          # prefix; the human-readable text content is unchanged.
+          envelope = {
             "content" => [
               { "type" => "text", "text" => result[:error].to_s },
             ],
             "isError" => true,
           }
+          meta = {}
+          meta["parse.error_code"]  = result[:error_code].to_s if result[:error_code]
+          meta["parse.retry_after"] = result[:retry_after]     if result[:retry_after]
+          meta["parse.details"]     = result[:details]         if result[:details].is_a?(Hash) && result[:details].any?
+          envelope["_meta"] = meta unless meta.empty?
+          envelope
         end
       end
       private_class_method :handle_tools_call
@@ -937,6 +1000,75 @@ module Parse
         end
       end
       private_class_method :handle_resources_read
+
+      # Handle `resources/subscribe` (MCP 2025-06-18).
+      #
+      # Registers a LiveQuery-backed subscription for `params["uri"]` keyed by
+      # the agent's session identity (`correlation_id`, sourced from the
+      # `Mcp-Session-Id` header by the transport). Subsequent data changes are
+      # debounced and delivered as `notifications/resources/updated` over the
+      # session's GET listening stream.
+      #
+      # Per the MCP spec a successful subscribe returns an empty result. Errors
+      # propagate as JSON-RPC errors:
+      #   - manager absent / unsupported  → -32601 (capability not offered)
+      #   - malformed or non-subscribable URI → -32602 (ValidationError)
+      #   - agent scope with no LiveQuery equivalent → -32602 (SecurityError)
+      #
+      # @param manager [Parse::Agent::MCPSubscriptions::Manager, nil]
+      # @return [Hash] empty result, or an `:error` hash when unsupported.
+      def self.handle_resources_subscribe(params, agent, manager)
+        return subscriptions_unsupported_error unless manager.respond_to?(:supported?) && manager.supported?
+        ok = manager.subscribe(
+          session_id: agent_session_id(agent),
+          uri:        params["uri"].to_s,
+          agent:      agent,
+        )
+        return {} if ok
+        # subscribe returned false: the session's listening stream was torn down
+        # (detach_listener) while the network subscribe was in flight, so no
+        # subscription exists and no notifications/resources/updated will arrive.
+        # Surface an error rather than a false empty-success ack (per the MCP
+        # contract an empty result == subscribed) so the client reopens its GET
+        # stream and retries instead of waiting forever for updates.
+        { error: { "code" => -32602,
+                   "message" => "resources/subscribe: the session no longer has an open " \
+                                "listening stream; reopen the GET stream and retry" } }
+      end
+      private_class_method :handle_resources_subscribe
+
+      # Handle `resources/unsubscribe` (MCP 2025-06-18). Idempotent — stops the
+      # LiveQuery subscription for the URI if one exists, returns an empty
+      # result regardless.
+      #
+      # @param manager [Parse::Agent::MCPSubscriptions::Manager, nil]
+      # @return [Hash] empty result, or an `:error` hash when unsupported.
+      def self.handle_resources_unsubscribe(params, agent, manager)
+        return subscriptions_unsupported_error unless manager.respond_to?(:supported?) && manager.supported?
+        manager.unsubscribe(
+          session_id: agent_session_id(agent),
+          uri:        params["uri"].to_s,
+        )
+        {}
+      end
+      private_class_method :handle_resources_unsubscribe
+
+      # The session identity used to key resource subscriptions. The transport
+      # populates `agent.correlation_id` from `Mcp-Session-Id`.
+      # @return [String, nil]
+      def self.agent_session_id(agent)
+        agent.respond_to?(:correlation_id) ? agent.correlation_id : nil
+      end
+      private_class_method :agent_session_id
+
+      # Error hash returned when a subscribe/unsubscribe arrives but this
+      # transport does not offer the capability. -32601 (method not found) is
+      # the correct code per JSON-RPC for an unoffered method.
+      # @return [Hash]
+      def self.subscriptions_unsupported_error
+        { error: { "code" => -32601, "message" => "Resource subscriptions are not supported by this server" } }
+      end
+      private_class_method :subscriptions_unsupported_error
 
       # Handle `prompts/list`.
       #

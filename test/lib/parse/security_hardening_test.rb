@@ -1137,6 +1137,105 @@ class SecurityHardeningTest < Minitest::Test
     assert_equal "active", out["ownerId"]["$inQuery"]["where"]["status"]
   end
 
+  # ─── $relatedTo owning-object class validation (GHSA-wmwx-jr2p-4j4r analog) ─
+  #
+  # $relatedTo reaches across to a second class — the owning object whose
+  # relation is read — yet it is not a CROSS_CLASS_OPERATOR, so its owning
+  # class must be validated through its own path. These pin: (a) fail-closed
+  # when the owning class is unresolvable, and (b) a well-formed owning class
+  # passing through untouched. The class-filter denial is covered in
+  # AgentClassFilterTest where the agent harness already lives.
+
+  def test_constraint_translator_relatedTo_fails_closed_on_unresolvable_owning_class
+    # `object` carries no resolvable Parse class (bare string, no "Class$id"
+    # form, not a pointer hash). The translator must refuse rather than skip
+    # the owning-class accessibility check.
+    constraints = {
+      "$relatedTo" => { "object" => "not-a-pointer", "key" => "members" },
+    }
+    err = assert_raises(Parse::Agent::ConstraintTranslator::ConstraintSecurityError) do
+      Parse::Agent::ConstraintTranslator.translate(constraints)
+    end
+    assert_equal "$relatedTo", err.operator
+  end
+
+  def test_constraint_translator_allows_relatedTo_to_resolvable_class
+    # Well-formed pointer hash naming a non-hidden class, translated with no
+    # agent (no class filter) — passes and preserves the constraint shape.
+    constraints = {
+      "$relatedTo" => {
+        "object" => { "__type" => "Pointer", "className" => "AccessibleClass", "objectId" => "abc123" },
+        "key" => "members",
+      },
+    }
+    out = Parse::Agent::ConstraintTranslator.translate(constraints)
+    assert out.key?("$relatedTo"), "operator key should survive translation"
+    assert_equal "AccessibleClass", out["$relatedTo"]["object"]["className"]
+    assert_equal "members", out["$relatedTo"]["key"]
+  end
+
+  # ─── $relatedTo fails closed on the mongo-direct path ──────────────────────
+  #
+  # The mongo-direct translator does not resolve Parse Relations (the
+  # `_Join:<key>:<ParentClass>` collection), so $relatedTo must fail with a
+  # clear, intentional error rather than reach MongoDB as an unknown `$match`
+  # operator — and rather than risk a future $lookup rewrite that skips the
+  # `_rperm` / protectedFields enforcement the rest of the path applies.
+
+  def test_relatedTo_constraint_refused_on_mongo_direct_path
+    ptr = Parse::Pointer.new("Workspace", "owner123")
+    query = Parse::Query.new("Member", :group.related_to => ptr)
+    err = assert_raises(ArgumentError) do
+      query.send(:build_direct_mongodb_pipeline)
+    end
+    assert_match(/\$relatedTo cannot run on the mongo-direct path/, err.message)
+  end
+
+  # ─── Operators mixed with a field-key sibling are still validated ──────────
+  #
+  # `translate_hash_value` classifies each key independently, so an operator
+  # sharing a hash with a non-operator key (reachable as a $or/$and/$nor array
+  # element) is still run through the operator allow/deny lists. The previous
+  # `keys.all?(operator)` gate routed any mixed hash to the field branch and
+  # skipped `validate_operator!`, letting a blocked operator smuggle through.
+
+  def test_constraint_translator_blocks_where_mixed_with_field_sibling_in_or
+    constraints = {
+      "$or" => [
+        { "createdAt" => { "$exists" => true }, "$where" => "this.x > 1" },
+      ],
+    }
+    assert_raises(Parse::Agent::ConstraintTranslator::ConstraintSecurityError) do
+      Parse::Agent::ConstraintTranslator.translate(constraints)
+    end
+  end
+
+  def test_constraint_translator_rejects_unknown_operator_mixed_with_field_sibling
+    constraints = {
+      "$and" => [
+        { "name" => "x", "$evilOp" => 1 },
+      ],
+    }
+    assert_raises(Parse::Agent::ConstraintTranslator::InvalidOperatorError) do
+      Parse::Agent::ConstraintTranslator.translate(constraints)
+    end
+  end
+
+  def test_constraint_translator_allows_wellformed_mixed_field_hash_in_or
+    # Defense against over-tightening: an $or element of plain field keys
+    # (one with an operator-valued constraint) must still translate cleanly.
+    constraints = {
+      "$or" => [
+        { "status" => "active", "score" => { "$gt" => 5 } },
+        { "name" => "x" },
+      ],
+    }
+    out = Parse::Agent::ConstraintTranslator.translate(constraints)
+    assert_equal 2, out["$or"].size
+    assert_equal "active", out["$or"][0]["status"]
+    assert_equal 5, out["$or"][0]["score"]["$gt"]
+  end
+
   # ─── PipelineSecurity validate forensic ops in $expr (already tested
   # via validate_filter!; also confirm Agent's PipelineValidator path) ───
 

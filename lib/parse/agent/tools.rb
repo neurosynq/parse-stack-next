@@ -1096,9 +1096,18 @@ module Parse
         #   Treat the handler list as part of your application's trust boundary:
         #   register at boot from code you control; never accept registrations
         #   from configuration files at runtime.
-        def register(name:, description:, parameters:, permission:, handler:,
+        def register(name:, description:, parameters:, handler:,
+                     permission: nil, permissions: nil,
                      timeout: DEFAULT_TIMEOUT, output_schema: nil, category: "custom",
                      client_safe: false)
+          # Accept `permissions:` as an alias for the canonical `permission:`
+          # (Agent.new uses the plural, so callers mix them up). `permission:`
+          # remains effectively required — just no longer a hard keyword so the
+          # alias can satisfy it.
+          permission ||= permissions
+          if permission.nil?
+            raise ArgumentError, "permission: is required (:readonly, :write, or :admin)"
+          end
           unless %i[readonly write admin].include?(permission)
             raise ArgumentError, "permission must be :readonly, :write, or :admin (got #{permission.inspect})"
           end
@@ -1442,6 +1451,7 @@ module Parse
 
         # Enrich with local model metadata (descriptions, agent methods)
         enriched = MetadataRegistry.enriched_schemas(schemas, agent_permission: agent.permissions)
+        enriched = enriched.map { |s| Parse::Agent::PromptHardening.sanitize_schema_for_llm(s) } if enriched.is_a?(Array)
 
         ResultFormatter.format_schemas(enriched)
       end
@@ -1823,11 +1833,26 @@ module Parse
         field     = scope[:field].to_s
         value     = scope[:value]
         # Parse Server returns camelCase field names on the wire (e.g. orgId for
-        # the Ruby field org_id). Check both forms so the gate works regardless
-        # of whether the record came from a real server or a test fake.
+        # the Ruby field org_id). A mongo-direct hit (semantic_search's raw
+        # $vectorSearch path) instead carries the field under its STORAGE column
+        # — which is the class's explicit `field_map` alias when one is declared,
+        # NOT the camelized form. Check all three forms (snake, naive-camel, and
+        # the field_map alias) so this gate resolves the scope column the SAME way
+        # the pre-search filter (Parse::Retrieval.wire_name) did. Otherwise a
+        # field_map'd scope field reads as nil here and fails closed on records
+        # that legitimately belong to the tenant. field_map values may be symbols,
+        # so stringify; an unregistered/system class (find_class -> nil) falls
+        # back to the snake/camel pair.
         camel_field = field.gsub(/_([a-z])/) { Regexp.last_match(1).upcase }
+        # Assign unconditionally (the modifier-if is the RHS, yielding nil when
+        # false) so neither local is ever read before initialization.
+        klass       = (Parse::Model.find_class(class_name) if defined?(Parse::Model))
+        mapped      = (klass.field_map[field.to_sym].to_s if klass.respond_to?(:field_map))
         rec_value   = if record.is_a?(Hash)
-            record.key?(field) ? record[field] : record[camel_field]
+            keys = [field, camel_field]
+            keys << mapped if mapped && !mapped.empty?
+            found = keys.find { |k| record.key?(k) }
+            record[found] if found
           end
         unless rec_value == value
           raise Parse::Agent::AccessDenied.new(
@@ -2885,14 +2910,76 @@ module Parse
         response = agent.client.schema(class_name)
 
         unless response.success?
-          raise "Failed to fetch schema for '#{class_name}': #{response.error}"
+          # Raise a ValidationError (not a bare RuntimeError) so the message
+          # — including the did-you-mean hint — reaches the LLM via
+          # error_response instead of being collapsed to a generic
+          # "internal error" by the sanitizing StandardError rescue. A
+          # mistyped class name is the common cause; suggesting near matches
+          # lets the model self-correct in one retry instead of falling back
+          # to a full get_all_schemas sweep.
+          suggestions = suggest_class_names(class_name, agent: agent)
+          hint = suggestions.empty? ? "" : " Did you mean: #{suggestions.join(", ")}?"
+          raise Parse::Agent::ValidationError,
+                "Could not fetch schema for '#{class_name}'.#{hint}"
         end
 
         # Enrich with local model metadata (descriptions, agent methods)
         enriched = MetadataRegistry.enriched_schema(class_name, response.result, agent_permission: agent.permissions)
+        enriched = Parse::Agent::PromptHardening.sanitize_schema_for_llm(enriched)
 
         ResultFormatter.format_schema(enriched)
       end
+
+      # Locally-known Parse class names usable as did-you-mean candidates:
+      # MetadataRegistry-visible classes plus every loaded Parse::Object
+      # subclass, minus agent_hidden classes. Cheap; only called on the
+      # get_schema error path.
+      def known_class_names_for_suggestions(agent = nil)
+        names = []
+        reg = Parse::Agent::MetadataRegistry
+        names.concat(Array(reg.visible_class_names)) if reg.respond_to?(:visible_class_names)
+        if defined?(Parse::Object) && Parse::Object.respond_to?(:descendants)
+          Parse::Object.descendants.each do |klass|
+            names << klass.parse_class if klass.respond_to?(:parse_class)
+          end
+        end
+        hidden = reg.respond_to?(:hidden_class_names) ? Array(reg.hidden_class_names) : []
+        names.compact.map(&:to_s).uniq - hidden.map(&:to_s)
+      end
+      module_function :known_class_names_for_suggestions
+
+      # Up to `limit` known class names within a small edit distance of the
+      # (likely mistyped) `class_name`. Bounded threshold keeps unrelated
+      # names out of the suggestion list.
+      def suggest_class_names(class_name, agent: nil, limit: 3)
+        target = class_name.to_s.downcase
+        return [] if target.empty?
+        threshold = [3, (target.length / 2.0).ceil].max
+        known_class_names_for_suggestions(agent)
+          .map { |name| [name, name_edit_distance(target, name.downcase)] }
+          .select { |(_, dist)| dist <= threshold }
+          .sort_by { |(name, dist)| [dist, name] }
+          .first(limit)
+          .map(&:first)
+      end
+      module_function :suggest_class_names
+
+      # Compact iterative Levenshtein distance.
+      def name_edit_distance(a, b)
+        return b.length if a.empty?
+        return a.length if b.empty?
+        prev = (0..b.length).to_a
+        a.each_char.with_index do |ca, i|
+          cur = [i + 1]
+          b.each_char.with_index do |cb, j|
+            cost = ca == cb ? 0 : 1
+            cur << [cur[j] + 1, prev[j + 1] + 1, prev[j] + cost].min
+          end
+          prev = cur
+        end
+        prev[b.length]
+      end
+      module_function :name_edit_distance
 
       # ============================================================
       # QUERY TOOLS
@@ -3034,11 +3121,15 @@ module Parse
           if normalized_format && normalized_format != "json"
             format_query_results_as(normalized_format, class_name, results)
           else
-            ResultFormatter.format_query_results(class_name, results,
-                                                 limit: limit, skip: skip || 0,
-                                                 where: where, keys: keys,
-                                                 order: order, include: include,
-                                                 truncated_include_fields: truncated_includes)
+            formatted = ResultFormatter.format_query_results(class_name, results,
+                                                             limit: limit, skip: skip || 0,
+                                                             where: where, keys: keys,
+                                                             order: order, include: include,
+                                                             truncated_include_fields: truncated_includes)
+            if formatted.is_a?(Hash) && formatted[:results].is_a?(Array)
+              stamp_source!(formatted[:results], class_name: class_name, tool: :query_class)
+            end
+            formatted
           end
         end
       end
@@ -3368,12 +3459,19 @@ module Parse
             oid = obj.is_a?(Hash) ? (obj["objectId"] || obj[:objectId]) : obj.id
             h[oid] = obj
           end
+          stamp_source!(objects_by_id.values, class_name: class_name, tool: :get_objects)
 
           missing = unique_ids.reject { |id| objects_by_id.key?(id) }
 
+          # Normalize each row to the same LLM-friendly form query_class
+          # emits (Pointers -> {_type,class,id}, Dates -> ISO, ACL stripped)
+          # instead of shipping raw wire-form. Done after stamp_source! so
+          # the `_source` citation survives.
+          simplified = objects_by_id.transform_values { |obj| ResultFormatter.simplify_object(obj) }
+
           envelope = {
             class_name: class_name,
-            objects: objects_by_id,
+            objects: simplified,
             missing: missing,
             requested: unique_ids.size,
             found: objects_by_id.size,
@@ -3553,13 +3651,14 @@ module Parse
 
         # Parse Server's REST aggregate endpoint does NOT enforce per-row
         # ACL — only the SDK's mongo-direct path applies the `_rperm`
-        # `$match` injection via Parse::ACLScope. For a scoped agent
-        # (session_token / acl_user / acl_role), the caller's
+        # `$match` injection via Parse::ACLScope. For any non-master
+        # identity (session_token / acl_user / acl_role, including a
+        # runtime #impersonate that cleared @acl_scope), the caller's
         # `mongo_direct: false` would silently bypass the agent's
         # declared scope; auto-promote to mongo-direct so the ACLScope
         # enforcement runs. Master-key agents keep their REST path
         # (no ACL enforcement was claimed in the first place).
-        if !use_mongo_direct && agent.respond_to?(:acl_scope?) && agent.acl_scope? &&
+        if !use_mongo_direct && agent.respond_to?(:requires_mongo_direct?) && agent.requires_mongo_direct? &&
            defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
           use_mongo_direct = true
         end
@@ -3614,6 +3713,9 @@ module Parse
           # losing information. Opt-out via `compact_pointers: false` when
           # the caller specifically needs the raw Parse-on-Mongo shape.
           pointer_map = compact_pointers ? compact_pointers!(results) : {}
+          # Stamp provenance AFTER compaction/redaction. Grouped rows have
+          # no objectId — `_source.object_id` is nil for those (documented).
+          stamp_source!(results, class_name: class_name, tool: :aggregate)
 
           result = {
             class_name: class_name,
@@ -4209,10 +4311,11 @@ module Parse
         # Parse Server's REST aggregate endpoint does NOT enforce per-row
         # ACL — only the SDK's mongo-direct path applies the _rperm match
         # injection via Parse::ACLScope. So we must route through
-        # mongo-direct for ANY scoped agent (session_token, acl_user,
-        # acl_role), not just acl_user/acl_role. Master-key agents keep
-        # the REST path because they've already opted out of ACL.
-        use_direct = agent.respond_to?(:acl_scope?) && agent.acl_scope? &&
+        # mongo-direct for ANY non-master identity (session_token,
+        # acl_user, acl_role, including a runtime-impersonated agent whose
+        # @acl_scope was cleared), not just acl_user/acl_role. Master-key
+        # agents keep the REST path because they've already opted out of ACL.
+        use_direct = agent.respond_to?(:requires_mongo_direct?) && agent.requires_mongo_direct? &&
                      defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
 
         with_timeout(tool) do
@@ -4561,10 +4664,12 @@ module Parse
         # clips the underlying query too.
         effective_pipeline, _auto_limited = ensure_aggregate_terminal_limit(scoped_pipeline)
 
-        # Route to mongo-direct under acl_user/acl_role scope; otherwise
-        # the existing REST path handles session_token / master-key.
-        use_direct = agent.respond_to?(:acl_scope_requires_direct?) &&
-                     agent.acl_scope_requires_direct? &&
+        # Route to mongo-direct for ANY non-master identity. The REST
+        # aggregate endpoint enforces no ACL, so a session-token agent's
+        # REST aggregate would run unscoped — only master-key agents
+        # (which opted out of ACL) keep the REST path.
+        use_direct = agent.respond_to?(:requires_mongo_direct?) &&
+                     agent.requires_mongo_direct? &&
                      defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
 
         rows = nil
@@ -5361,6 +5466,37 @@ module Parse
       end
       module_function :project_object_to_allowlist
 
+      # Stamp each row hash with an SDK-added `_source` provenance
+      # citation `{ "class", "tool", "object_id" }`. No-op unless
+      # `Parse::Agent.include_source_provenance?`. MUST be called AFTER
+      # field-allowlist projection and hidden-class redaction: `_source`
+      # is SDK metadata, not a Parse field, so stamping last keeps it out
+      # of (and safe from) those gates. Idempotent — a row already
+      # carrying `_source` is left untouched. `object_id` is nil-safe
+      # (aggregation/group rows have no objectId).
+      #
+      # @param rows [Array<Hash>] row hashes (mutated in place).
+      # @param class_name [String]
+      # @param tool [Symbol, String]
+      # @param id_key [String] the row key holding the objectId.
+      # @return [Array<Hash>] the same rows.
+      def stamp_source!(rows, class_name:, tool:, id_key: "objectId")
+        return rows unless Parse::Agent.include_source_provenance?
+        return rows unless rows.is_a?(Array)
+        rows.each do |row|
+          next unless row.is_a?(Hash)
+          next if row.key?("_source") || row.key?(:_source)
+          oid = row[id_key] || row[id_key.to_sym]
+          row["_source"] = {
+            "class"     => class_name.to_s,
+            "tool"      => tool.to_s,
+            "object_id" => oid,
+          }
+        end
+        rows
+      end
+      module_function :stamp_source!
+
       # ============================================================
       # ATLAS SEARCH TOOLS
       # ============================================================
@@ -5817,6 +5953,10 @@ module Parse
         rows = result.results.map do |obj|
           row = serialize_atlas_object(obj)
           row = row.select { |k, _| permitted.include?(k.to_s) } if permitted
+          # Normalize to query_class's LLM-friendly form (compact pointers,
+          # ISO dates, ACL stripped) instead of raw wire-form. Done before
+          # the SDK-added score/highlights so those stay verbatim.
+          row = ResultFormatter.simplify_object(row)
           row["score"] = obj.search_score if obj.respond_to?(:search_score) && obj.search_score
           if highlight_field && obj.respond_to?(:search_highlights) && obj.search_highlights
             highlights = filter_atlas_highlights(obj.search_highlights, permitted)
@@ -5824,6 +5964,7 @@ module Parse
           end
           row
         end
+        stamp_source!(rows, class_name: class_name, tool: :atlas_text_search)
 
         {
           class_name: class_name,
@@ -5839,7 +5980,8 @@ module Parse
 
         rows = (result.results || []).map do |obj|
           row = serialize_atlas_object(obj)
-          permitted ? row.select { |k, _| permitted.include?(k.to_s) } : row
+          row = row.select { |k, _| permitted.include?(k.to_s) } if permitted
+          ResultFormatter.simplify_object(row)
         end
 
         {
@@ -5858,7 +6000,8 @@ module Parse
 
         rows = (result.results || []).map do |obj|
           row = serialize_atlas_object(obj)
-          permitted ? row.select { |k, _| permitted.include?(k.to_s) } : row
+          row = row.select { |k, _| permitted.include?(k.to_s) } if permitted
+          ResultFormatter.simplify_object(row)
         end
 
         {

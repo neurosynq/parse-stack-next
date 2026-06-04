@@ -15,6 +15,15 @@ module Parse
       # Maximum number of results to include in output
       MAX_RESULTS_DISPLAY = 50
 
+      # Keys stripped from every simplified data object before it reaches
+      # the LLM. The raw `ACL` map (per-role / per-user read/write bits) is
+      # operationally useless to a model reasoning over row data — the
+      # agent's effective read/write authority is enforced server-side
+      # regardless of what ACL a row carries — so surfacing it is pure
+      # token overhead plus a minor disclosure of role/user identifiers.
+      # Applied recursively (nested included records too).
+      DROPPED_OBJECT_KEYS = %w[ACL].freeze
+
       # Parse field type mappings for human-readable output
       TYPE_NAMES = {
         "String" => "string",
@@ -382,14 +391,20 @@ module Parse
         "Pointer to #{target}. Equality: #{equality}. $in/$nin: #{in_shape}."
       end
 
-      # Simplify an object for display (resolve __type fields)
+      # Simplify an object for display (resolve __type fields). Strips the
+      # raw ACL map (see {DROPPED_OBJECT_KEYS}). Public so the query/get/
+      # atlas tool envelopes can route their rows through the same
+      # normalization query_class already uses.
       def simplify_object(obj)
         return obj unless obj.is_a?(Hash)
 
-        obj.transform_values do |value|
-          simplify_value(value)
+        obj.each_with_object({}) do |(key, value), acc|
+          next if DROPPED_OBJECT_KEYS.include?(key.to_s)
+
+          acc[key] = simplify_value(value)
         end
       end
+      public :simplify_object
 
       # Simplify a single value
       def simplify_value(value)

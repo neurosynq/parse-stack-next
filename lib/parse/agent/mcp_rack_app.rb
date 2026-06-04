@@ -3,8 +3,10 @@
 
 require "json"
 require "securerandom"
+require "digest"
 require_relative "errors"
 require_relative "mcp_dispatcher"
+require_relative "mcp_subscriptions"
 require_relative "cancellation_token"
 
 module Parse
@@ -81,6 +83,12 @@ module Parse
       # Default heartbeat interval in seconds when streaming is enabled.
       DEFAULT_HEARTBEAT_INTERVAL = 2
 
+      # Seconds to wait for a human's elicitation reply before failing
+      # closed (refusing the destructive op). Generous by default — a
+      # human-in-the-loop approver needs time the tool timeout doesn't
+      # allow. Tune via `approval_timeout:`.
+      DEFAULT_APPROVAL_TIMEOUT = 300
+
       # Standard Content-Type for all JSON responses. Frozen template — call
       # {#json_headers} to obtain a per-response mutable copy that composes
       # with Rack middleware that decorates response headers (e.g. Sinatra's
@@ -95,6 +103,12 @@ module Parse
         "Connection"        => "keep-alive",
         "X-Accel-Buffering" => "no",
       }.freeze
+
+      # Process-wide live-listening-stream counter (see
+      # {.active_listening_stream_count}). Class-instance state shared across all
+      # MCPRackApp instances in the process.
+      @listening_stream_count = 0
+      @listening_stream_mutex = Mutex.new
 
       # Drop env keys that would have come from underscore-form HTTP header
       # names. The Rack-spec-compliant interpretation of HTTP headers maps
@@ -203,6 +217,23 @@ module Parse
       #   by design. `nil` (default) disables the endpoint entirely;
       #   empty-string values are coerced to `nil`. Any non-GET method
       #   on the path falls through to the standard 405 handler.
+      # @param resource_subscriptions [Boolean] enable MCP resource
+      #   subscriptions (`resources/subscribe` + `notifications/resources/updated`)
+      #   bridged onto Parse LiveQuery. Defaults to false. When true, this app
+      #   accepts a `GET` with `Accept: text/event-stream` and an
+      #   `Mcp-Session-Id` header as a long-lived server→client listening
+      #   stream, and advertises the `resources.subscribe` capability on
+      #   `initialize` — but ONLY while LiveQuery is enabled
+      #   (`Parse.live_query_enabled = true`) and available (a `live_query_url`
+      #   is configured). Requires a streaming-capable Rack server (Puma,
+      #   Falcon); WEBrick buffers responses and cannot hold the listening
+      #   stream open. See docs/mcp_guide.md for the credential-scoping and
+      #   single-process caveats.
+      # @param subscription_manager [Parse::Agent::MCPSubscriptions::Manager, nil]
+      #   inject a pre-built manager (tests, or to share a clustered-notifier
+      #   adapter). Takes precedence over `resource_subscriptions:`. When nil
+      #   and `resource_subscriptions: true`, a default in-process manager is
+      #   constructed.
       # @raise [ArgumentError] if both or neither of agent_factory/block are given.
       def initialize(agent_factory: nil, max_body_size: DEFAULT_MAX_BODY_SIZE,
                      logger: nil, streaming: false,
@@ -211,6 +242,11 @@ module Parse
                      pre_auth_rate_limiter: nil,
                      allowed_origins: nil,
                      require_custom_header: nil,
+                     resource_subscriptions: false,
+                     subscription_manager: nil,
+                     notifications: false,
+                     approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
+                     principal_resolver: nil,
                      health_path: nil, &block)
         if agent_factory && block
           raise ArgumentError, "Provide agent_factory: OR a block, not both"
@@ -240,15 +276,62 @@ module Parse
         # a process, nor multiple processes in a clustered deployment.
         @cancellation_registry      = CancellationRegistry.new
 
-        # Warn operators who enable streaming without a concurrency cap.
-        # An unbounded SSE endpoint with orphaned dispatcher threads is
-        # a practical DoS surface — a slow or hostile client opening
-        # connections faster than tools complete can exhaust the host's
-        # thread pool and downstream Parse connection pool. Leaving the
-        # default as `nil` (unlimited) preserves backward compatibility,
-        # but we tell the operator once at construction.
-        if streaming && @max_concurrent_dispatchers.nil?
-          line = "[Parse::Agent::MCPRackApp] streaming: true with max_concurrent_dispatchers: nil (unlimited). " \
+        # Elicitation (human-in-the-loop approval) state, shared across
+        # this app's requests and its GET listening streams. The
+        # capability registry records (per session) whether the client
+        # advertised `elicitation` at initialize; the pending registry
+        # holds server→client requests awaiting a reply. Both are cheap
+        # and always present; they only do work when
+        # Parse::Agent.require_approval_for opts a tier in.
+        @elicitation_capabilities   = Parse::Agent::ClientCapabilityRegistry.new
+        @pending_elicitations       = Parse::Agent::PendingElicitationRegistry.new
+        @approval_timeout           = approval_timeout
+
+        # Binds each MCP session id to the principal that established it so a
+        # listening stream can't be hijacked by another authenticated caller.
+        # Same per-instance / single-process scope as @cancellation_registry.
+        @session_owners             = SessionOwnerRegistry.new
+        if principal_resolver && !principal_resolver.respond_to?(:call)
+          raise ArgumentError, "principal_resolver must respond to #call"
+        end
+        @principal_resolver         = principal_resolver
+
+        # Listening-stream coordinator (the server→client broadcast bus
+        # backing resource subscriptions, MCP elicitation, and
+        # general-purpose server-initiated notifications). An injected
+        # manager wins. Otherwise:
+        #   - `resource_subscriptions: true` builds a LiveQuery-backed
+        #     manager whose `supported?` resolves live (advertises
+        #     `resources.subscribe` and serves subscribe POSTs).
+        #   - `notifications: true` (without resource subscriptions) builds
+        #     a manager in `supported: false` posture: the GET listening
+        #     stream + `#notify` bus work, but `resources.subscribe` stays
+        #     unadvertised and subscribe POSTs fail closed. This is the
+        #     decoupling lever — a server can push arbitrary notifications
+        #     without enabling LiveQuery resource subscriptions.
+        # nil disables the GET listening stream entirely.
+        @subscription_manager =
+          if subscription_manager
+            subscription_manager
+          elsif resource_subscriptions
+            Parse::Agent::MCPSubscriptions::Manager.new(logger: @logger)
+          elsif notifications
+            Parse::Agent::MCPSubscriptions::Manager.new(logger: @logger, supported: false)
+          end
+
+        # Warn operators who enable a streaming surface without a concurrency
+        # cap. Both request-scoped SSE (streaming:) and the long-lived GET
+        # listening stream (resource_subscriptions:/notifications:, which set
+        # @subscription_manager) spawn per-connection threads; an unbounded
+        # endpoint is a practical DoS surface — a slow or hostile client opening
+        # connections faster than they close can exhaust the host thread pool and
+        # downstream Parse connection pool. The cap bounds each surface
+        # SEPARATELY, so the effective ceiling is up to 2x max_concurrent_dispatchers
+        # across both. Leaving the default `nil` (unlimited) preserves backward
+        # compatibility, but we tell the operator once at construction.
+        if (streaming || @subscription_manager) && @max_concurrent_dispatchers.nil?
+          surface = streaming ? "streaming: true" : "resource_subscriptions/notifications"
+          line = "[Parse::Agent::MCPRackApp] #{surface} with max_concurrent_dispatchers: nil (unlimited). " \
                  "Set a finite cap (e.g. 100, or 2x your Puma max_threads) to bound the orphan-thread DoS surface. " \
                  "See docs/mcp_guide.md for sizing guidance."
           if @logger
@@ -259,6 +342,44 @@ module Parse
         end
       end
 
+      # The listening-stream coordinator backing this app's server→client
+      # bus, or nil when neither resource subscriptions nor notifications
+      # are enabled. Exposed so a clustered/Redis notifier adapter or an
+      # out-of-band publisher can reach the bus directly. Direct
+      # `#publish` accepts arbitrary messages (notifications OR id-bearing
+      # requests); prefer {#notify} for the validated notification path.
+      # @return [Parse::Agent::MCPSubscriptions::Manager, nil]
+      attr_reader :subscription_manager
+
+      # Push a server-initiated JSON-RPC NOTIFICATION to a session's open
+      # listening stream. This is the public front door for application
+      # code to deliver unsolicited `notifications/*` events (the GET
+      # stream must be open for the session — open it client-side with a
+      # `GET` carrying `Accept: text/event-stream` + `Mcp-Session-Id`).
+      #
+      # The envelope is built server-side as a notification — it never
+      # carries an `id`, which is what distinguishes it from the
+      # server-initiated *request* path (e.g. elicitation/create). A
+      # caller wanting an id-bearing request uses the internal
+      # `subscription_manager.publish` seam, not this method.
+      #
+      # @param session_id [String] the target session (Mcp-Session-Id).
+      # @param method [String] a non-empty JSON-RPC method, e.g.
+      #   `"notifications/custom"`.
+      # @param params [Hash, nil] optional params object.
+      # @return [Boolean] true if a listening stream received it; false
+      #   when notifications are disabled or no stream is attached.
+      # @raise [ArgumentError] when `method` is blank or not a String.
+      def notify(session_id, method:, params: nil)
+        unless method.is_a?(String) && !method.empty?
+          raise ArgumentError, "notify: method must be a non-empty String"
+        end
+        return false unless @subscription_manager
+        envelope = { "jsonrpc" => "2.0", "method" => method }
+        envelope["params"] = params unless params.nil?
+        !!@subscription_manager.publish(session_id, envelope)
+      end
+
       # Returns the number of currently live dispatcher threads spawned by any
       # SSEBody across all MCPRackApp instances in this process. Threads are
       # counted by the `:parse_mcp_dispatcher` thread-local tag set when each
@@ -267,6 +388,25 @@ module Parse
       # the `max_concurrent_dispatchers:` constructor option for that).
       def self.active_dispatcher_count
         Thread.list.count { |t| t[:parse_mcp_dispatcher] }
+      end
+
+      # Process-wide count of currently-open GET listening streams across all
+      # MCPRackApp instances. A listening stream is long-lived (the server→client
+      # notification channel) — each pins a server worker thread in #each plus a
+      # heartbeat thread — so it is bounded SEPARATELY from request-scoped SSE
+      # dispatchers (which #each, dispatch once, then close). Used as the soft
+      # cap in {#serve_listening_stream}. Maintained by {ListeningStreamBody}
+      # via {.adjust_listening_stream_count}; unlike a Thread.list scan this is
+      # an explicit counter because the heartbeat thread is intentionally not
+      # tagged as a dispatcher.
+      def self.active_listening_stream_count
+        @listening_stream_mutex.synchronize { @listening_stream_count }
+      end
+
+      # @api private — bump the live listening-stream counter by `delta`
+      #   (+1 when a stream begins iterating, -1 when it closes).
+      def self.adjust_listening_stream_count(delta)
+        @listening_stream_mutex.synchronize { @listening_stream_count += delta }
       end
 
       # Rack interface.
@@ -337,7 +477,33 @@ module Parse
             return [400, json_headers, [json_rpc_error(-32_600, "Invalid Mcp-Session-Id")]]
           end
           @cancellation_registry.cancel_all_for(clean_sid, reason: :session_terminated)
+          # Wake any tool thread blocked on an elicitation reply for this
+          # session (it returns `unavailable` → fail closed) and drop the
+          # session's cached elicitation capability.
+          @pending_elicitations.abort_all_for(clean_sid, :session_terminated)
+          @elicitation_capabilities.forget(clean_sid)
+          # Tear down any resource subscriptions and the listening stream
+          # bound to this session so a terminated session leaves no LiveQuery
+          # sockets behind.
+          @subscription_manager&.detach_listener(clean_sid)
+          # Drop the owner binding so the id can be reclaimed after explicit
+          # termination (only here — not on mere stream close, so a reconnect
+          # keeps its claim).
+          @session_owners.forget(clean_sid)
           return [204, json_headers, [""]]
+        end
+
+        # 0d. GET listening stream — the MCP 2025-06-18 Streamable HTTP
+        #     server→client channel that carries unsolicited
+        #     `notifications/resources/updated`. Only when resource
+        #     subscriptions are enabled, the client opted into SSE, and a
+        #     valid Mcp-Session-Id is present. Authenticated via the same
+        #     agent_factory as POST: the session id is a server-issued
+        #     bearer capability (returned on initialize), so possession of
+        #     it plus a valid agent gates the stream.
+        if env["REQUEST_METHOD"] == "GET" && @subscription_manager &&
+           env["HTTP_ACCEPT"].to_s.include?("text/event-stream")
+          return serve_listening_stream(env)
         end
 
         # 1. Method check — only POST is accepted.
@@ -402,7 +568,12 @@ module Parse
         #     amplifies into a Parse Server load problem. Empty-object
         #     and missing-method requests cannot possibly be valid
         #     JSON-RPC, so we shortcut to -32600 (Invalid Request).
-        unless body.is_a?(Hash) && body["method"].is_a?(String) && !body["method"].empty?
+        #     A method-less JSON-RPC RESPONSE ({jsonrpc,id,result|error}) is
+        #     NOT malformed: it is the client's reply to a server-issued
+        #     elicitation/create request. Let it through here; it is routed
+        #     (session-bound) after the agent_factory resolves the session.
+        unless (body.is_a?(Hash) && body["method"].is_a?(String) && !body["method"].empty?) ||
+               elicitation_reply?(body)
           return [400, json_headers, [json_rpc_error(-32_600, "Invalid Request")]]
         end
 
@@ -421,7 +592,8 @@ module Parse
         #     initialize against this transport instance (e.g. a
         #     reconnecting client cancelling a pre-disconnect request).
         unless body["method"] == "initialize" ||
-               body["method"] == "notifications/cancelled"
+               body["method"] == "notifications/cancelled" ||
+               elicitation_reply?(body)
           requested = env["HTTP_MCP_PROTOCOL_VERSION"]
           if requested.is_a?(String) && !requested.empty? &&
              !Parse::Agent::MCPDispatcher::SUPPORTED_PROTOCOL_VERSIONS.include?(requested)
@@ -445,6 +617,16 @@ module Parse
             @logger.warn(e.backtrace.join("\n")) if e.backtrace
           end
           return [500, json_headers, [json_rpc_error(-32_603, "Internal error")]]
+        end
+
+        # 5a-i. Surface the silent-ungated-writes footgun. A write/admin agent
+        #     served over MCP with no approval tier configured runs every
+        #     destructive tool without a human gate; warn once per process so
+        #     the operator notices (mirrors the unrestricted-endpoints warning).
+        if agent.respond_to?(:permissions) &&
+           %i[write admin].include?(agent.permissions) &&
+           Parse::Agent.require_approval_for.empty?
+          Parse::Agent.warn_mcp_writes_unguarded!
         end
 
         # 5b. Thread the conversation correlation id through. Source
@@ -476,6 +658,32 @@ module Parse
            agent && agent.respond_to?(:correlation_id=) &&
            agent.correlation_id.nil?
           agent.correlation_id = SecureRandom.uuid
+        end
+
+        # 5b-ii. Capture the client's elicitation capability at initialize.
+        #     The server reads (does not advertise) the client's
+        #     `capabilities.elicitation`; the approval gate consults this
+        #     per session before attempting a server→client prompt.
+        if body.is_a?(Hash) && body["method"] == "initialize" &&
+           agent.respond_to?(:correlation_id) && agent.correlation_id
+          supported = !!(body.dig("params", "capabilities", "elicitation"))
+          @elicitation_capabilities.set(agent.correlation_id, supported)
+          # Authoritatively bind this session to the initializing principal so
+          # only the same principal can later attach a listening stream for it
+          # (owner-binding; see SessionOwnerRegistry).
+          @session_owners.bind(agent.correlation_id, principal_fingerprint(agent, env))
+        end
+
+        # 5b-iii. Elicitation reply ingress. A method-less JSON-RPC
+        #     RESPONSE is the client's answer to a server-issued
+        #     elicitation/create. Route it into the pending registry,
+        #     session-bound by the same `correlation_id` the cancellation
+        #     path uses, so one session can never answer another's prompt.
+        #     Failures (no correlation_id, no match) are silent 202 no-ops
+        #     to avoid a probe oracle — exactly like notifications/cancelled.
+        if elicitation_reply?(body)
+          route_elicitation_reply(agent, body)
+          return [202, json_headers, [""]]
         end
 
         # 5c. notifications/cancelled — special-cased BEFORE the dispatcher.
@@ -522,8 +730,70 @@ module Parse
       # @param body  [Hash] parsed JSON-RPC request body.
       # @param agent [Parse::Agent] authenticated agent.
       # @return [Array] Rack triple with Array<String> body.
+      # True when `body` is a JSON-RPC RESPONSE (no "method"; carries an
+      # "id" plus "result" or "error") — the client's reply to a
+      # server-issued elicitation/create request.
+      def elicitation_reply?(body)
+        body.is_a?(Hash) && !body.key?("method") && body.key?("id") &&
+          (body.key?("result") || body.key?("error"))
+      end
+
+      # Route an elicitation reply into the pending registry, bound to the
+      # answering session's correlation id. Silent no-op on any miss.
+      def route_elicitation_reply(agent, body)
+        correlation_id = agent.respond_to?(:correlation_id) ? agent.correlation_id : nil
+        elic_id = body["id"]
+        return if correlation_id.nil? || elic_id.nil?
+        @pending_elicitations.deliver(correlation_id, elic_id, map_elicitation_action(body))
+      end
+
+      # Map an elicitation reply envelope to an approval action symbol.
+      # An `error` reply, an unknown/declined action, or an `accept` whose
+      # `content.approve` is explicitly false all map toward refusal.
+      def map_elicitation_action(body)
+        return :cancel if body.key?("error")
+        result = body["result"]
+        return :cancel unless result.is_a?(Hash)
+        case result["action"]
+        when "accept"
+          content = result["content"]
+          if content.is_a?(Hash) && content.key?("approve") && content["approve"] == false
+            :decline
+          else
+            :accept
+          end
+        when "decline"
+          :decline
+        else
+          :cancel
+        end
+      end
+
+      # Build the per-request MCP elicitation approval gate, or nil when no
+      # tier opts in (the common path). The gate self-fails-closed: with no
+      # subscription manager (no GET stream / non-streaming transport) its
+      # listener check returns false, so a required approval is REFUSED
+      # rather than silently executed.
+      def build_approval_gate(agent)
+        return nil if Parse::Agent.require_approval_for.empty?
+        return nil unless agent.respond_to?(:correlation_id)
+        mgr = @subscription_manager
+        Parse::Agent::MCPElicitationGate.new(
+          correlation_id:   agent.correlation_id,
+          pending:          @pending_elicitations,
+          publish:          ->(cid, req) { mgr ? !!mgr.publish(cid, req) : false },
+          capability_check: ->(cid) { @elicitation_capabilities.get(cid) },
+          listener_check:   ->(cid) { mgr ? mgr.listener?(cid) : false },
+          timeout:          @approval_timeout,
+        )
+      end
+
       def serve_json(body, agent)
-        result = Parse::Agent::MCPDispatcher.call(body: body, agent: agent, logger: @logger)
+        result = Parse::Agent::MCPDispatcher.call(
+          body: body, agent: agent, logger: @logger,
+          subscription_manager: @subscription_manager,
+          approval_gate: build_approval_gate(agent),
+        )
         headers = json_headers
         merge_session_header!(headers, body, agent)
         # When the dispatcher returns body: nil (a JSON-RPC notification
@@ -600,17 +870,139 @@ module Parse
           on_close: -> { registry.deregister(correlation_id, req_id, registry_entry_id) if registry_entry_id },
         ) do |progress_callback|
           Parse::Agent::MCPDispatcher.call(
-            body:               body,
-            agent:              agent,
-            logger:             logger,
-            progress_callback:  progress_callback,
-            cancellation_token: cancellation_token,
+            body:                 body,
+            agent:                agent,
+            logger:               logger,
+            progress_callback:    progress_callback,
+            cancellation_token:   cancellation_token,
+            subscription_manager: @subscription_manager,
+            approval_gate:        build_approval_gate(agent),
           )
         end
 
         headers = sse_headers
         merge_session_header!(headers, body, agent)
         [200, headers, sse_body]
+      end
+
+      # Serve a long-lived GET listening SSE stream for resource-subscription
+      # delivery (MCP 2025-06-18 Streamable HTTP server→client channel).
+      #
+      # Unlike {#serve_sse} (response-scoped: one dispatch then close), this
+      # stream outlives any single request — it stays open emitting
+      # `notifications/resources/updated` for the session's subscriptions until
+      # the client disconnects or the session is terminated via DELETE.
+      #
+      # Authenticated via the same `agent_factory` as POST. The `Mcp-Session-Id`
+      # header keys the listener; it is a server-issued capability (returned on
+      # `initialize`), so possession + a valid agent gates the stream. The agent
+      # itself is not retained — subscriptions (and their credentials) are
+      # created by the `resources/subscribe` POST, not here.
+      #
+      # @param env [Hash] Rack env.
+      # @return [Array] Rack triple with a {ListeningStreamBody}, or an error.
+      def serve_listening_stream(env)
+        begin
+          agent = @agent_factory.call(env)
+        rescue Parse::Agent::Unauthorized
+          @logger&.warn("[Parse::Agent::MCPRackApp] Unauthorized listening stream")
+          return [401, json_headers, [unauthorized_body]]
+        rescue StandardError => e
+          @logger&.warn("[Parse::Agent::MCPRackApp] Factory error (listening): #{e.class.name}")
+          return [500, json_headers, [json_rpc_error(-32_603, "Internal error")]]
+        end
+
+        session_id = sanitize_session_id(env["HTTP_MCP_SESSION_ID"].to_s)
+        if session_id.nil? || session_id.empty?
+          return [400, json_headers, [json_rpc_error(-32_600, "Missing or invalid Mcp-Session-Id")]]
+        end
+
+        # The origin allowlist (when configured) guards the listening stream
+        # the same way it guards POST — a browser-driven cross-origin GET to
+        # an SSE endpoint is the analogous CSRF surface.
+        if @allowed_origins
+          origin = env["HTTP_ORIGIN"].to_s.strip
+          unless origin.empty? || origin_allowed?(origin)
+            return [403, json_headers, [json_rpc_error(-32_700, "Origin not allowed")]]
+          end
+        end
+
+        # Owner-binding: only the principal that established this session (or,
+        # for an id that never went through initialize, the first principal to
+        # attach) may open its listening stream. A different authenticated
+        # caller who knows/guesses the id is refused, closing the
+        # cross-session subscribe/evict hijack.
+        #
+        # We return a distinguishable 403 on mismatch (vs 200 when the id is
+        # unclaimed). That is a deliberate, narrow existence oracle —
+        # acceptable because server-assigned ids are SecureRandom.uuid and so
+        # infeasible to enumerate. (Contrast the cancellation/elicitation
+        # paths, which return a uniform 202 because their ids are
+        # client-chosen and guessable.)
+        unless @session_owners.authorize_attach(session_id, principal_fingerprint(agent, env))
+          @logger&.warn("[Parse::Agent::MCPRackApp] Listening stream denied: session owned by another principal")
+          return [403, json_headers, [json_rpc_error(-32_600, "Mcp-Session-Id is owned by another principal")]]
+        end
+
+        # Soft cap on concurrent listening streams, mirroring serve_sse's
+        # dispatcher cap. Listening streams are bounded SEPARATELY from
+        # request-scoped SSE dispatchers and reuse the same configured ceiling,
+        # so total streaming thread exposure can reach 2x max_concurrent_dispatchers
+        # (up to N request SSE + N listening streams), not N. Like serve_sse the
+        # check is best-effort (not lock-protected against the per-stream
+        # increment in #each), so a burst can briefly overshoot — acceptable for
+        # a soft cap.
+        if @max_concurrent_dispatchers &&
+           MCPRackApp.active_listening_stream_count >= @max_concurrent_dispatchers
+          return [503, json_headers, [json_rpc_error(-32_000, "server busy")]]
+        end
+
+        body = ListeningStreamBody.new(@subscription_manager, session_id, @heartbeat_interval, @logger)
+        [200, sse_headers, body]
+      end
+
+      # Derive a stable, privacy-preserving principal fingerprint for the
+      # authenticated agent, used to owner-bind MCP sessions.
+      #
+      # An operator `principal_resolver:` callable wins (it lets a
+      # master-key-everywhere deployment that authenticates users upstream
+      # supply a real per-user identity). Otherwise the agent's own scope is
+      # used: a hashed session_token, then acl_user, then acl_role. A bare
+      # master-key agent with no scope falls back to the shared "mk"
+      # fingerprint — owner-binding is then a no-op (documented), since all
+      # such agents are indistinguishable admins.
+      #
+      # @param agent [Parse::Agent]
+      # @param env [Hash] the Rack env (passed to the resolver).
+      # @return [String]
+      def principal_fingerprint(agent, env)
+        if @principal_resolver
+          resolved = @principal_resolver.call(agent, env)
+          return "op:#{Digest::SHA256.hexdigest(resolved.to_s)[0, 32]}" unless resolved.nil? || resolved.to_s.empty?
+        end
+        if agent.respond_to?(:session_token) && !agent.session_token.to_s.empty?
+          return "st:#{Digest::SHA256.hexdigest(agent.session_token.to_s)[0, 32]}"
+        end
+        # acl_user / acl_role scopes are the RAW constructor input, which may be
+        # a Parse::User / Parse::Pointer / Parse::Role object whose bare #to_s
+        # is a per-instance `#<...:0x...>` string — using that directly would
+        # give the initialize and GET agents different fingerprints and
+        # false-reject the legitimate owner. Derive a stable id the same way
+        # #auth_context does: objectId for user/pointer scopes, role name for
+        # role scopes. (These are unverified constructor assertions, so the
+        # fingerprint is only as trustworthy as the factory's identity
+        # assignment — same caveat as the "mk" case; session_token is verified.)
+        if agent.respond_to?(:acl_user_scope) && agent.acl_user_scope
+          s = agent.acl_user_scope
+          id = s.respond_to?(:id) ? s.id : s.to_s
+          return "au:#{id}" unless id.nil? || id.to_s.empty?
+        end
+        if agent.respond_to?(:acl_role_scope) && agent.acl_role_scope
+          s = agent.acl_role_scope
+          name = s.respond_to?(:name) ? s.name : s.to_s.sub(/\Arole:/, "")
+          return "ar:#{name}" unless name.nil? || name.to_s.empty?
+        end
+        "mk"
       end
 
       # ---------------------------------------------------------------------------
@@ -1044,6 +1436,120 @@ module Parse
       end
 
       # ---------------------------------------------------------------------------
+      # Listening stream body (resource subscriptions)
+      # ---------------------------------------------------------------------------
+
+      # Rack body for the long-lived GET listening stream that carries
+      # `notifications/resources/updated` to a subscribing client.
+      #
+      # On {#each} it registers a delivery callback with the
+      # {Parse::Agent::MCPSubscriptions::Manager} keyed by the session id, then
+      # blocks reading from an internal queue and yields SSE-formatted
+      # notification events as they are published by the LiveQuery bridge. A
+      # periodic SSE comment heartbeat keeps the connection warm and surfaces a
+      # dead socket as a write error so the Rack server invokes {#close}.
+      #
+      # {#close} detaches the listener and tears down every LiveQuery
+      # subscription bound to the session — so a dropped stream leaves no
+      # LiveQuery sockets behind. Re-opening the stream requires the client to
+      # re-issue its `resources/subscribe` calls (subscriptions do not survive a
+      # listening-stream disconnect in this single-process implementation).
+      #
+      # The publish callback runs on a LiveQuery dispatcher / debounce thread
+      # and only pushes to the thread-safe queue; all `yield`s happen on the
+      # Rack I/O thread driving {#each}, mirroring {SSEBody}'s threading model.
+      #
+      # @api private
+      class ListeningStreamBody
+        DONE = :__listening_done__
+
+        # @param manager [Parse::Agent::MCPSubscriptions::Manager]
+        # @param session_id [String] sanitized Mcp-Session-Id.
+        # @param heartbeat_interval [Numeric] SSE comment heartbeat period in
+        #   seconds; `<= 0` disables heartbeats.
+        # @param logger [#warn, nil]
+        def initialize(manager, session_id, heartbeat_interval, logger)
+          @manager            = manager
+          @session_id         = session_id
+          @heartbeat_interval = heartbeat_interval
+          @logger             = logger
+          @queue              = Queue.new
+          @heartbeat          = nil
+          @closed             = false
+          @counted            = false
+          @close_mutex        = Mutex.new
+        end
+
+        # Rack body interface — called once by the Rack server.
+        # @yield [String] SSE-formatted event / comment strings.
+        def each
+          queue = @queue
+          # Count this stream against the concurrent-listening-stream soft cap.
+          # Incrementing here (in #each, not the constructor) means a body the
+          # Rack server never iterates — or a client that disconnects before
+          # iteration — never inflates the counter; the matching decrement is in
+          # #close, which #each's `ensure` always runs.
+          MCPRackApp.adjust_listening_stream_count(1)
+          @counted = true
+          @manager.attach_listener(@session_id) do |notification|
+            queue << format_event(notification)
+          end
+          # Initial comment flushes response headers and confirms the stream.
+          yield ": connected\n\n"
+          start_heartbeat
+          loop do
+            msg = @queue.pop
+            break if msg == DONE
+            yield msg
+          end
+        ensure
+          close
+        end
+
+        # Terminate the stream: stop heartbeats, detach the listener, and tear
+        # down the session's LiveQuery subscriptions. Idempotent.
+        def close
+          @close_mutex.synchronize do
+            return if @closed
+            @closed = true
+          end
+          # Balance the #each increment exactly once (close is idempotent via
+          # @closed, and only #each sets @counted).
+          MCPRackApp.adjust_listening_stream_count(-1) if @counted
+          @heartbeat&.kill
+          @heartbeat = nil
+          begin
+            @manager.detach_listener(@session_id)
+          rescue StandardError => e
+            line = "[Parse::Agent::MCPRackApp::ListeningStreamBody] detach error: #{e.class}: #{e.message}"
+            @logger ? @logger.warn(line) : warn(line)
+          end
+          @queue << DONE rescue nil
+        end
+
+        private
+
+        def start_heartbeat
+          return unless @heartbeat_interval && @heartbeat_interval > 0
+          queue    = @queue
+          interval = @heartbeat_interval
+          @heartbeat = Thread.new do
+            loop do
+              sleep interval
+              queue << ": keep-alive\n\n"
+            end
+          end
+        end
+
+        # SSE wire form for a server→client notification. Event name "message"
+        # (not "progress"/"response", which are reserved for the request-scoped
+        # SSE path).
+        def format_event(notification)
+          "event: message\ndata: #{JSON.generate(notification)}\n\n"
+        end
+      end
+
+      # ---------------------------------------------------------------------------
       # Cancellation registry
       # ---------------------------------------------------------------------------
 
@@ -1074,6 +1580,104 @@ module Parse
       # in a clustered deployment.
       #
       # @api private
+      # Binds an MCP session id to the principal that established it, so a
+      # listening stream (the server→client notification channel) can only be
+      # attached by the same principal — closing the cross-session hijack where
+      # any authenticated caller who knows/guesses another session's id could
+      # subscribe to its notifications or evict its listener via overwrite.
+      #
+      # Trust model and limitations (mirrored in the docs):
+      #
+      # - **Initialize-bound vs TOFU.** A session established through an
+      #   `initialize` POST is bound to that caller's principal authoritatively.
+      #   A session id that was never seen by `initialize` (the decoupled
+      #   `notifications:` bus, where app code pushes to arbitrary ids) is
+      #   claimed trust-on-first-use by whoever attaches a listener first;
+      #   subsequent attaches by a different principal are refused. TOFU is
+      #   strictly better than the prior bearer model (eviction-after-claim is
+      #   closed) but a first-mover attacker can still claim an unused id — so
+      #   notification-bus ids should be high-entropy.
+      # - **Per-instance / single-process**, exactly like CancellationRegistry:
+      #   it does not span Puma workers or survive restart. In a cluster the
+      #   GET stream and the initialize POST may land on different workers, so
+      #   the initialize-binding degrades to TOFU there.
+      # - **Principal fidelity depends on the factory.** The fingerprint is
+      #   derived from the agent the factory builds (session_token → acl_user →
+      #   acl_role), or an operator-supplied `principal_resolver`. A
+      #   master-key-everywhere factory yields one shared "mk" principal, so
+      #   owner-binding is a no-op unless a `principal_resolver` (or
+      #   per-user impersonation) supplies a real identity.
+      #
+      # LRU-bounded so an initialize-without-DELETE stream of sessions can't
+      # grow it without limit; evicting an active owner just downgrades it to
+      # TOFU on the next attach.
+      class SessionOwnerRegistry
+        DEFAULT_MAX_ENTRIES = 10_000
+
+        def initialize(max_entries: DEFAULT_MAX_ENTRIES)
+          @owners = {} # session_id => principal fingerprint (insertion-ordered for LRU)
+          @max    = max_entries
+          @mutex  = Mutex.new
+        end
+
+        # Authoritatively bind a session to a principal (initialize). A
+        # re-initialize by the same caller refreshes the binding.
+        def bind(session_id, fingerprint)
+          return if blank?(session_id) || blank?(fingerprint)
+          @mutex.synchronize do
+            @owners.delete(session_id)
+            @owners[session_id] = fingerprint
+            evict_lru!
+          end
+        end
+
+        # Authorize a listening-stream attach. Returns true when the session is
+        # unclaimed (claims it TOFU for this principal) or already owned by this
+        # principal (refreshing its LRU position); false on a principal
+        # mismatch. Blank inputs fail closed.
+        def authorize_attach(session_id, fingerprint)
+          return false if blank?(session_id) || blank?(fingerprint)
+          @mutex.synchronize do
+            owner = @owners[session_id]
+            if owner.nil?
+              @owners[session_id] = fingerprint
+              evict_lru!
+              true
+            elsif owner == fingerprint
+              @owners.delete(session_id)
+              @owners[session_id] = owner
+              true
+            else
+              false
+            end
+          end
+        end
+
+        # Drop a session's owner binding (explicit DELETE termination). Not
+        # called on mere stream close, so a reconnecting owner keeps its claim
+        # and an attacker can't grab the id during a brief disconnect.
+        def forget(session_id)
+          return if blank?(session_id)
+          @mutex.synchronize { @owners.delete(session_id) }
+        end
+
+        # @return [Integer] current number of bound sessions (tests/metrics).
+        def size
+          @mutex.synchronize { @owners.size }
+        end
+
+        private
+
+        # Hash preserves insertion order; #shift drops the oldest (LRU) entry.
+        def evict_lru!
+          @owners.shift while @owners.size > @max
+        end
+
+        def blank?(value)
+          value.nil? || value.to_s.empty?
+        end
+      end
+
       class CancellationRegistry
         def initialize
           @entries = {}

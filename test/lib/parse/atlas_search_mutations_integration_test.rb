@@ -46,7 +46,7 @@ require "parse/atlas_search"
 #   - This is environmental, not a bug in the SDK. The mongot stability
 #     story on ARM64 is outside our control.
 class AtlasSearchMutationsIntegrationTest < Minitest::Test
-  ATLAS_URI = ENV["ATLAS_URI"] || "mongodb://localhost:27020/parse_atlas_test?directConnection=true"
+  ATLAS_URI = ENV["ATLAS_URI"] || "mongodb://localhost:29020/parse_atlas_test?directConnection=true"
   # Writer URI must be string-distinct from the reader URI per
   # `configure_writer`'s operator-safety check. Same connection, different
   # appName so the Mongo driver opens a separate client.

@@ -6,7 +6,7 @@ require "timeout"
 # in particular, the question of whether updating a non-credential field
 # on an existing user invalidates that user's session.
 #
-# These hit a real Parse Server (Docker / localhost:2337) so they exercise
+# These hit a real Parse Server (Docker / localhost:29337) so they exercise
 # both the gem's client wiring and Parse Server's actual auth bookkeeping.
 class UserSaveSignupIntegrationTest < Minitest::Test
   include ParseStackIntegrationTest

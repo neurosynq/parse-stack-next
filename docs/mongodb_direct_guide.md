@@ -757,6 +757,15 @@ non-master scope so this enforcement always runs. See the
 [Atlas Vector Search Guide](./atlas_vector_search_guide.md) for the
 full API surface.
 
+`Parse::Retrieval.retrieve` and the `semantic_search` agent tool (v5.2)
+build directly on `find_similar`, so they inherit this exact Layer 1-5
+mongo-direct enforcement. The earlier RAG plan's "two-stage" REST
+re-query was intentionally NOT adopted — there is no REST vector path,
+and `acl_user:` / `acl_role:` scopes have no REST equivalent, so the
+post-`$vectorSearch` `_rperm` `$match` is the single enforcement
+boundary. The retrieval layer adds a tenant-scope fold into the Atlas
+pre-filter on top of this, never a substitute for it.
+
 ### Timeouts
 
 ```ruby
@@ -947,7 +956,7 @@ three independent flags that every mutation re-checks per call.
   Requires `clusterMonitor` privilege on the reader; returns `{}`
   when not granted so callers degrade gracefully.
 
-### Model DSL: `mongo_index` / `mongo_geo_index` / `mongo_relation_index`
+### Model DSL: `mongo_index` / `unique_index_on` / `mongo_geo_index` / `mongo_relation_index`
 
 Index declarations are class-level metadata on `Parse::Object`
 subclasses. They run validation at registration time so a typo,
@@ -967,6 +976,7 @@ class Car < Parse::Object
 
   mongo_index :make, :model, :year         # compound
   mongo_index :vin, unique: true
+  unique_index_on :registration            # dedup floor; unique { registration: 1 }
   mongo_index :owner                       # pointer auto-rewrites to _p_owner
   mongo_geo_index :location                # 2dsphere on GeoJSON Point
   mongo_index :tags                        # array field
@@ -1005,6 +1015,61 @@ class Author < Parse::Object
   # parse_reference unique_index: false        # index without unique constraint
   # parse_reference index: false               # no index registered
 end
+```
+
+### `unique_index_on` — the `first_or_create!` correctness floor
+
+`unique_index_on(*fields, sparse: false, partial: nil, name: nil)` declares
+a unique index on the exact dedup tuple that `first_or_create!` and
+`create_or_update!` key on. It is thin sugar over
+`mongo_index(*fields, unique: true, …)` — same registration, same validation
+(sensitive-field guard, pointer auto-rewrite, parallel-array / relation /
+`_id` rejection), same `apply_indexes!` writer path — but the name states the
+intent: these fields are the create-or-update identity.
+
+```ruby
+class Subscription < Parse::Object
+  property :email, :string
+  belongs_to :tenant, as: :user
+
+  unique_index_on :email, :tenant   # key: { email: 1, _p_tenant: 1 } unique
+end
+
+Subscription.apply_indexes!          # provisions the index via the writer gate
+```
+
+**Why it matters.** The Redis-backed `synchronize:` lock on `first_or_create!`
+is a *latency optimization*: in the common path it collapses concurrent
+callers so only one issues the create. The unique index is the *correctness
+floor* that survives the lock being bypassed — a Redis outage, a TTL expiring
+between the existence check and the write, a caller passing
+`synchronize: false`, or two app servers whose lock secrets disagree. When a
+race slips past the lock, the loser's insert fails with `DuplicateValue`
+(Parse error 137), which `first_or_create!` rescues and resolves to the
+winning row. Lock plus index make the net invariant — *exactly one row, every
+caller sees the same id* — hold under any race, not just the happy path.
+
+**Defaults are non-sparse, on purpose.** The index key is kept identical to
+the query `first_or_create!` re-runs on recovery (`_scoped_first` on the same
+`query_attrs`), so a 137 always corresponds to a row the recovery query can
+find. A sparse or partial index that fires on a condition the recovery query
+doesn't reproduce would surface a 137 the rescue can't resolve, and the error
+would re-raise. `sparse:` only changes behavior for a document missing *every*
+field in the tuple — a compound sparse index indexes a doc when it has at
+least one key, and `first_or_create!` always writes the full tuple, so sparse
+never weakens the floor. Leave it off unless out-of-band writers create
+tuple-less rows you want excluded.
+
+For "unique within a subset" — unique email per tenant, but rows with no
+tenant may repeat — a partial filter is the right tool, **not** `sparse:`
+(a compound sparse index still collides two rows that share the present
+fields). You own the filter's lifecycle and must keep the recovery query
+consistent with it:
+
+```ruby
+# Unique email per tenant; tenant-less rows are not constrained.
+unique_index_on :email, :tenant,
+                partial: { "_p_tenant" => { "$exists" => true } }
 ```
 
 ### Migrator: `indexes_plan` (dry-run) / `apply_indexes!` (mutate)

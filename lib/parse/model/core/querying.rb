@@ -368,6 +368,35 @@ module Parse
         query(constraints).distinct(field)
       end
 
+      # Groups records by a field and returns a GroupBy (or SortableGroupBy)
+      # aggregation object you can call .count, .sum, .average, etc. on.
+      # @example
+      #  Post.group_by(:category).count
+      #  Post.group_by(:category, sortable: true).count.sort_by_value_desc
+      # @param field [Symbol, String] the field to group by.
+      # @param opts keyword arguments forwarded to Parse::Query#group_by
+      #   (flatten_arrays:, sortable:, return_pointers:, mongo_direct:).
+      # @return [Parse::GroupBy, Parse::SortableGroupBy]
+      # @see Parse::Query#group_by
+      def group_by(field, **opts)
+        query.group_by(field, **opts)
+      end
+
+      # Groups records by a date field truncated to the given interval and
+      # returns a GroupByDate (or SortableGroupByDate) aggregation object.
+      # @example
+      #  Post.group_by_date(:created_at, :month).count
+      #  Post.group_by_date(:created_at, :day, sortable: true).count.sort_by_value_desc
+      # @param field [Symbol, String] the date field to group by.
+      # @param interval [Symbol] one of :year, :month, :week, :day, :hour, :minute, :second.
+      # @param opts keyword arguments forwarded to Parse::Query#group_by_date
+      #   (sortable:, return_pointers:, timezone:, mongo_direct:).
+      # @return [Parse::GroupByDate, Parse::SortableGroupByDate]
+      # @see Parse::Query#group_by_date
+      def group_by_date(field, interval, **opts)
+        query.group_by_date(field, interval, **opts)
+      end
+
       # Find objects matching the constraint ordered by the descending created_at date.
       # @param constraints (see #all)
       # @return [Array<Parse::Object>]

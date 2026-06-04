@@ -28,7 +28,7 @@ class ClientRestMongoDirectRequiredIntegrationTest < Minitest::Test
   include ParseStackIntegrationTest
   include Parse::Test::ClientModeHelper
 
-  MONGODB_URI = "mongodb://admin:password@localhost:27019/parse?authSource=admin"
+  MONGODB_URI = (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin")
 
   def setup
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"

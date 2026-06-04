@@ -33,6 +33,19 @@ class FocRaceTestOrder < Parse::Object
   property :amount, :integer
 end
 
+# Declares the correctness-floor index through the `unique_index_on` DSL
+# (vs. the raw-driver `ensure_unique_index!` helper used by the other 137
+# tests). Used to prove the DSL → `apply_indexes!` path provisions a working
+# floor end to end.
+class FocRaceDslUser < Parse::Object
+  parse_class "FocRaceDslUser"
+
+  property :email, :string
+  property :name, :string
+
+  unique_index_on :email
+end
+
 class FirstOrCreateRaceTest < Minitest::Test
   include ParseStackIntegrationTest
 
@@ -306,7 +319,121 @@ class FirstOrCreateRaceTest < Minitest::Test
     end
   end
 
+  # Provisions the unique index through the `unique_index_on` DSL and its
+  # `apply_indexes!` writer path (the triple-gated mutation route), NOT the
+  # raw driver — then runs the concurrent race and asserts the net invariant.
+  # This is the end-to-end proof that the DSL produces a working correctness
+  # floor: lock dedupes the common path, and the DSL-provisioned index forces
+  # a single row even if the lock is bypassed.
+  def test_unique_index_on_dsl_provisions_floor_and_dedupes_race
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    # Self-configure the Mongo reader + writer (mongo gem + reachable
+    # localhost:29017) so this floor test RUNS rather than skipping. Unlike the
+    # two raw-driver 137 tests above — which gate on ambient `mongodb_writable?`
+    # config and skip when none is present — the DSL apply path is the point of
+    # this test, so it must be continuously verified, not silently skipped.
+    skip "Mongo unavailable for DSL apply path (need mongo gem + localhost:29017)" unless setup_dsl_floor_mongo!
+
+    with_parse_server do
+      with_timeout(45, "unique_index_on DSL floor race") do
+        collection_name = FocRaceDslUser.parse_class
+        begin
+          result = FocRaceDslUser.apply_indexes![collection_name]
+          refute_nil result, "apply_indexes! must return a result for the parent collection"
+          assert_operator (result[:created].size + result[:skipped_exists].size), :>=, 1,
+                          "apply_indexes! must create or confirm the unique_index_on declaration"
+
+          raw = Parse::MongoDB.indexes(collection_name)
+          email_idx = raw.find { |i| (i["key"] || i[:key]) == { "email" => 1 } }
+          refute_nil email_idx, "unique_index_on :email must land { email: 1 } on the collection"
+          assert_equal true, email_idx["unique"], "the DSL-provisioned index must be unique"
+
+          email = "dsl-floor-#{SecureRandom.hex(4)}@example.com"
+          barrier = Queue.new
+          threads = THREAD_COUNT.times.map do |i|
+            Thread.new do
+              barrier.pop
+              begin
+                FocRaceDslUser.first_or_create!({ email: email }, { name: "D#{i}" }, synchronize: true)
+              rescue => e
+                e
+              end
+            end
+          end
+
+          THREAD_COUNT.times { barrier.push(:go) }
+          results = threads.map(&:value)
+
+          errors = results.select { |r| r.is_a?(Exception) }
+          assert_empty errors, "every caller must receive the winner row, got: #{errors.map { |e| "#{e.class}: #{e.message}" }.inspect}"
+
+          ids = results.map(&:id).compact.uniq
+          assert_equal 1, ids.size, "DSL-provisioned unique index must force a single objectId across #{THREAD_COUNT} callers"
+
+          rows = FocRaceDslUser.query(email: email).results
+          assert_equal 1, rows.size, "exactly one row despite the race"
+        ensure
+          drop_index_by_key!(collection_name, { "email" => 1 })
+          teardown_dsl_floor_mongo!
+        end
+      end
+    end
+  end
+
   private
+
+  # Reader + writer URIs match the docker-compose mapping and the db Parse
+  # Server itself uses (`/parse`), so a DSL-provisioned index lands on the same
+  # collection Parse Server writes to and the unique constraint actually
+  # engages. The writer URI is string-distinct (distinct appName) to satisfy
+  # configure_writer's operator-safety check; verify_role: false because the
+  # docker test user holds admin (production must run verify_role: true).
+  DSL_MONGO_URI  = (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin")
+  DSL_WRITER_URI = DSL_MONGO_URI + "&appName=parse-stack-foc-dsl-writer"
+
+  # Self-contained reader+writer config + mutation triple-gate (mirrors
+  # mongodb_indexes_integration_test's setup_mongodb_full!). Returns false to
+  # skip when the mongo gem or server isn't available.
+  def setup_dsl_floor_mongo!
+    require "mongo"
+    require "parse/mongodb"
+    Parse::MongoDB.reset!
+    Parse::MongoDB.configure(uri: DSL_MONGO_URI, enabled: true, verify_role: false)
+    Parse::MongoDB.configure_writer(uri: DSL_WRITER_URI, enabled: true, verify_role: false)
+    Parse::MongoDB.index_mutations_enabled = true
+    ENV[Parse::MongoDB::MUTATION_ENV_KEY] = "1"
+    # Prove the server is actually reachable before claiming the test can run,
+    # so an unreachable Mongo skips cleanly instead of failing mid-test.
+    Parse::MongoDB.indexes("FocRaceDslUser")
+    true
+  rescue LoadError, StandardError => e
+    puts "Skipping DSL floor mongo setup: #{e.class}: #{e.message}"
+    false
+  end
+
+  # Closes the mutation gate and resets Parse::MongoDB so the global state is
+  # restored for the rest of the suite (the raw-driver 137 siblings continue to
+  # gate on their own `mongodb_writable?` check and are unaffected).
+  def teardown_dsl_floor_mongo!
+    return unless defined?(Parse::MongoDB)
+    Parse::MongoDB.index_mutations_enabled = false
+    ENV.delete(Parse::MongoDB::MUTATION_ENV_KEY)
+    Parse::MongoDB.reset!
+  rescue StandardError
+    # best-effort
+  end
+
+  # Drop an index identified by key signature (the DSL auto-names indexes, so
+  # we can't drop by a name we chose). Best-effort cleanup.
+  def drop_index_by_key!(collection_name, key)
+    Parse::MongoDB.collection(collection_name).indexes.each do |idx|
+      next unless (idx["key"] || idx[:key]) == key
+      name = idx["name"] || idx[:name]
+      Parse::MongoDB.collection(collection_name).indexes.drop_one(name)
+    end
+  rescue StandardError
+    # best-effort cleanup; tests reset the DB between runs anyway
+  end
 
   def mongodb_writable?
     return false unless defined?(Parse::MongoDB)

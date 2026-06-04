@@ -375,4 +375,37 @@ class RequestIdempotencyTest < Minitest::Test
 
     puts "✅ Edge cases handled correctly"
   end
+
+  def test_assume_server_idempotency_defaults_off_and_toggles
+    puts "\n=== Testing assume_server_idempotency Opt-In ==="
+
+    # Default is OFF — sending the header is harmless, but the client never
+    # ASSUMES the server deduplicates a replay unless the operator opts in.
+    Parse::Request.configure_idempotency(enabled: true)
+    refute Parse::Request.assume_server_idempotency, "must default to false"
+
+    # enable_idempotency! with the explicit opt-in turns it on...
+    Parse::Request.enable_idempotency!(assume_server_dedup: true)
+    assert Parse::Request.assume_server_idempotency, "explicit opt-in enables the assertion"
+
+    # ...and enable_idempotency! WITHOUT the kwarg leaves it unchanged.
+    Parse::Request.enable_idempotency!
+    assert Parse::Request.assume_server_idempotency,
+           "enable_idempotency! must not reset the assertion when the kwarg is omitted"
+
+    # disable_idempotency! clears it — no header is sent, so never retry-safe.
+    Parse::Request.disable_idempotency!
+    refute Parse::Request.assume_server_idempotency, "disable clears the assertion"
+
+    # configure_idempotency resets it to the passed value (default false).
+    Parse::Request.configure_idempotency(enabled: true, assume_server_dedup: true)
+    assert Parse::Request.assume_server_idempotency
+    Parse::Request.configure_idempotency(enabled: true)
+    refute Parse::Request.assume_server_idempotency,
+           "configure_idempotency resets the assertion to false by default"
+
+    puts "✅ assume_server_idempotency opt-in verified"
+  ensure
+    Parse::Request.configure_idempotency(enabled: true)
+  end
 end

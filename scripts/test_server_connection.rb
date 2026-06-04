@@ -75,7 +75,7 @@ end
 
 puts "\n5. Connection information:"
 puts "  Parse Server: http://localhost:1337/parse"
-puts "  Parse Dashboard: http://localhost:4040"
+puts "  Parse Dashboard: http://localhost:29040"
 puts "  Dashboard login: admin/admin"
 
 puts "\nTo stop the containers, run:"

@@ -133,6 +133,21 @@ song = Song.first_or_create!({ title: "My Song" }, { artist: "Unknown" })
 song = Song.create_or_update!({ title: "My Song" }, { plays: 100 })
 ```
 
+Under concurrency these have a TOCTOU window. Pass `synchronize: true` to
+serialize the find→create→save through a Moneta-backed lock, and declare a
+`unique_index_on` on the dedup tuple as the durable correctness floor — the lock
+optimizes latency, the unique index guarantees a single row even if the lock is
+bypassed:
+
+```ruby
+class Song < Parse::Object
+  property :title, :string
+  unique_index_on :title          # provisioned via Song.apply_indexes!
+end
+
+Song.first_or_create!({ title: "My Song" }, { artist: "Unknown" }, synchronize: true)
+```
+
 ## ACLs (Access Control)
 
 ```ruby

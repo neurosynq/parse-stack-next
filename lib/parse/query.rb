@@ -69,19 +69,46 @@ module Parse
     include Parse::Client::Connectable
     include Enumerable
 
-    # Known Parse classes for fast validation - dynamically loaded from schema
+    # Built-in Parse classes always considered known, independent of the
+    # server schema. Used both as the seed for the dynamic list and as the
+    # transient fallback when the schema fetch fails.
+    BUILT_IN_PARSE_CLASSES = %w[
+      _User _Role _Session _Installation _Audience
+      User Role Session Installation Audience
+    ].freeze
+
+    # Mutex guarding lazy memoization of {known_parse_classes} so concurrent
+    # first-callers don't each fire a `schemas` request and clobber the cache.
+    @known_parse_classes_mutex = Mutex.new
+
+    # Known Parse classes for fast validation - dynamically loaded from schema.
+    #
+    # The successful result is memoized; a failed schema fetch is NOT cached —
+    # it returns the built-in fallback for this call only, so a transient
+    # server outage during boot doesn't permanently strip every application-
+    # defined class from the known set (which would make class-accessibility
+    # checks reject custom classes for the process lifetime). The narrowed
+    # rescue logs the failure instead of swallowing it silently.
     def self.known_parse_classes
-      @known_parse_classes ||= begin
-          # Get all classes from Parse schema
+      cached = @known_parse_classes
+      return cached if cached
+
+      @known_parse_classes_mutex.synchronize do
+        # Re-check under the lock: a racing caller may have populated it.
+        return @known_parse_classes if @known_parse_classes
+
+        begin
           response = Parse.client.schemas
-          schema_classes = response.success? ? response.result.dig("results")&.map { |cls| cls["className"] } || [] : []
-          # Add built-in Parse classes
-          built_in_classes = %w[_User _Role _Session _Installation _Audience User Role Session Installation Audience]
-          (built_in_classes + schema_classes).uniq.freeze
-        rescue
-          # Fallback to built-in classes if schema query fails (e.g., during testing without server)
-          %w[_User _Role _Session _Installation _Audience User Role Session Installation Audience].freeze
+          schema_classes = response.success? ? response.results.map { |cls| cls["className"] } : []
+          @known_parse_classes = (BUILT_IN_PARSE_CLASSES + schema_classes).uniq.freeze
+        rescue Parse::Error, Faraday::Error => e
+          # Don't cache the fallback — let the next call retry the fetch once
+          # the server is reachable again.
+          warn "[Parse::Query] schema fetch failed (#{e.class}: #{e.message}); " \
+               "falling back to built-in classes for this check only."
+          BUILT_IN_PARSE_CLASSES
         end
+      end
     end
 
     # Allow resetting the cached known classes (useful for testing)
@@ -2563,6 +2590,26 @@ module Parse
     # @api private
     def convert_constraints_for_direct_mongodb(constraints)
       return constraints unless constraints.is_a?(Hash)
+
+      # $relatedTo resolves a Parse Relation, which is stored in the
+      # `_Join:<key>:<ParentClass>` collection — a join the SDK does NOT
+      # translate on the mongo-direct path. Passed through verbatim it reaches
+      # MongoDB as an unknown `$match` operator and fails with an opaque error;
+      # and any future attempt to rewrite it into a `$lookup` would have to
+      # re-implement the `_rperm` / protectedFields enforcement that the rest of
+      # this path applies post-fetch. Parse Server's own `$relatedTo` was found
+      # to bypass exactly that enforcement (GHSA-wmwx-jr2p-4j4r), so fail closed
+      # here with a clear message rather than risk a silent leak: this query
+      # must run via REST (the default), where Parse Server resolves the
+      # relation under its own ACL / CLP enforcement.
+      if constraints.key?("$relatedTo") || constraints.key?(:"$relatedTo")
+        raise ArgumentError,
+          "[Parse::Query] $relatedTo cannot run on the mongo-direct path; a " \
+          "Parse Relation is resolved server-side via its join collection. Run " \
+          "this query via REST (omit `mongo_direct:` / `.results_direct` and any " \
+          "direct-only constraint), or express the membership as an `$inQuery` " \
+          "against the relation's join collection."
+      end
 
       result = {}
       constraints.each do |field, value|
@@ -6284,8 +6331,10 @@ module Parse
     include Enumerable
 
     # @param results [Hash] the grouped results hash
-    def initialize(results)
+    # @param operation [String, nil] the aggregation operation (e.g. "count", "sum", "average", "min", "max", "list")
+    def initialize(results, operation = nil)
       @results = results
+      @operation = operation
     end
 
     # Return the raw hash results
@@ -6332,12 +6381,15 @@ module Parse
 
     # Convert grouped results to a formatted table.
     # @param format [Symbol] output format (:ascii, :csv, :json)
-    # @param headers [Array<String>] custom headers (default: ["Group", "Count"])
+    # @param headers [Array<String>, nil] custom headers; if nil, defaults to ["Group", <op-derived header>]
+    #   where the second header reflects the aggregation operation (e.g. "Average" for avg/average,
+    #   "Sum" for sum, "Min"/"Max" for min/max, "Items" for list, "Count" otherwise).
     # @return [String] formatted table
     # @example
     #   Document.group_by(:category, sortable: true).count.to_table
     #   Document.group_by(:category).sum(:file_size).to_table(headers: ["Category", "Total Size"])
-    def to_table(format: :ascii, headers: ["Group", "Count"])
+    def to_table(format: :ascii, headers: nil)
+      headers ||= ["Group", default_value_header]
       pairs = @results.to_a
 
       # Build table data
@@ -6360,6 +6412,20 @@ module Parse
     end
 
     private
+
+    # Derive a human-readable column header from the aggregation operation.
+    # @return [String] the default second-column header
+    def default_value_header
+      case @operation&.to_s
+      when "count"    then "Count"
+      when "sum"      then "Sum"
+      when "average", "avg" then "Average"
+      when "min"      then "Min"
+      when "max"      then "Max"
+      when "list"     then "Items"
+      else                 "Count"
+      end
+    end
 
     # Format group key for display
     def format_group_key(key)
@@ -6453,7 +6519,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def count
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "count")
     end
 
     # Sum a field for each group.
@@ -6461,7 +6527,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def sum(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "sum")
     end
 
     # Calculate average of a field for each group.
@@ -6469,7 +6535,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def average(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "average")
     end
 
     alias_method :avg, :average
@@ -6479,7 +6545,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def min(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "min")
     end
 
     # Find maximum value of a field for each group.
@@ -6487,14 +6553,14 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def max(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "max")
     end
 
     # Collect Parse::Object instances per group.
     # @return [GroupedResult] a sortable result object.
     def list
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "list")
     end
   end
 
@@ -7091,7 +7157,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def count
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "count")
     end
 
     # Sum a field for each time period.
@@ -7099,7 +7165,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def sum(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "sum")
     end
 
     # Calculate average of a field for each time period.
@@ -7107,7 +7173,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def average(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "average")
     end
 
     alias_method :avg, :average
@@ -7117,7 +7183,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def min(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "min")
     end
 
     # Find maximum value of a field for each time period.
@@ -7125,7 +7191,7 @@ module Parse
     # @return [GroupedResult] a sortable result object.
     def max(field)
       results = super
-      GroupedResult.new(results)
+      GroupedResult.new(results, "max")
     end
   end
 end # Parse

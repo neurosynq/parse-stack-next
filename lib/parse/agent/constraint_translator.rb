@@ -170,7 +170,11 @@ module Parse
           # These enable bcrypt-hash and session-token oracle attacks via
           # count deltas even when operators are otherwise clean.
           assert_where_key_permitted!(key)
-          result[columnize(key)] = translate_value(value, depth: 0, agent: agent)
+          result[columnize(key)] = if key == "$relatedTo"
+                                     translate_related_to_value(value, depth: 0, agent: agent)
+                                   else
+                                     translate_value(value, depth: 0, agent: agent)
+                                   end
         end
       end
 
@@ -213,27 +217,45 @@ module Parse
         # Check if it's a Parse type (Pointer, Date, File, GeoPoint)
         return hash if parse_type?(hash)
 
-        # Check if all keys are operators
-        if hash.keys.all? { |k| k.to_s.start_with?("$") }
-          hash.transform_keys(&:to_s).each_with_object({}) do |(op, val), result|
-            validate_operator!(op)
-            # NEW-TOOLS-7: validate $regex / $options operands before
-            # forwarding to MongoDB.
-            assert_regex_operand_safe!(op, val) if op == "$regex" || op == "$options"
-            result[op] = if CROSS_CLASS_OPERATORS.include?(op)
-                           translate_cross_class_value(op, val, depth: depth + 1, agent: agent)
-                         else
-                           translate_value(val, depth: depth + 1, agent: agent)
-                         end
-          end
-        else
-          # Regular nested object - translate keys to columnized format.
-          # Apply the internal-field key denylist at every nesting level so
-          # a key nested inside $and/$or/$nor cannot bypass the top-level check.
-          hash.transform_keys(&:to_s).each_with_object({}) do |(k, v), result|
+        # Classify each key INDEPENDENTLY rather than branching on whether
+        # *every* key is an operator. A hash that mixes an operator key with a
+        # non-operator (field) sibling — reachable as a `$or`/`$and`/`$nor`
+        # array element — must still validate and dispatch the operator. The
+        # previous all-or-nothing `keys.all?(operator)` gate routed any mixed
+        # hash to the field branch, which skipped `validate_operator!` AND the
+        # cross-class / `$relatedTo` accessibility checks: a blocked operator
+        # (`$where`) or an off-allowlist cross-class / relation reference could
+        # smuggle through alongside a throwaway field key. Per-key dispatch
+        # closes that hole while preserving behavior for pure-operator and
+        # pure-field hashes.
+        hash.transform_keys(&:to_s).each_with_object({}) do |(k, v), result|
+          if k.start_with?("$")
+            result[k] = translate_operator_value(k, v, depth: depth, agent: agent)
+          else
+            # Field-name key: enforce the internal-field denylist at every
+            # nesting level (so a key nested inside `$and`/`$or`/`$nor` cannot
+            # bypass the top-level check), then columnize and recurse.
             assert_where_key_permitted!(k)
             result[columnize(k)] = translate_value(v, depth: depth + 1, agent: agent)
           end
+        end
+      end
+
+      # Validate and translate a single operator (`$`-prefixed) key/value pair.
+      # Centralized so the operator denylist/whitelist and the cross-class /
+      # `$relatedTo` accessibility checks run for operators in pure-operator
+      # hashes AND for operators mixed with field-key siblings.
+      def translate_operator_value(op, val, depth:, agent: nil)
+        validate_operator!(op)
+        # NEW-TOOLS-7: validate $regex / $options operands before
+        # forwarding to MongoDB.
+        assert_regex_operand_safe!(op, val) if op == "$regex" || op == "$options"
+        if CROSS_CLASS_OPERATORS.include?(op)
+          translate_cross_class_value(op, val, depth: depth + 1, agent: agent)
+        elsif op == "$relatedTo"
+          translate_related_to_value(val, depth: depth + 1, agent: agent)
+        else
+          translate_value(val, depth: depth + 1, agent: agent)
         end
       end
 
@@ -297,6 +319,55 @@ module Parse
 
         # Then recursively walk the rest for depth/operator enforcement.
         translate_value(val, depth: depth, agent: agent)
+      end
+
+      # Validate the owning-object class named by a +$relatedTo+ constraint.
+      #
+      # +$relatedTo+ has the shape +{ object: <Pointer>, key: <relation field> }+.
+      # Unlike +$inQuery+ / +$select+ it carries no +className+ / inner +where+,
+      # so it is NOT a {CROSS_CLASS_OPERATORS} entry — but it DOES reach across
+      # to a second class: the owning object whose relation is being read. Left
+      # unvalidated, an agent narrowed to one class (or with a class globally
+      # +agent_hidden+) could still name a relation anchored on an off-allowlist
+      # class via the +object+ pointer. That is the SDK-surface analog of
+      # GHSA-wmwx-jr2p-4j4r, where Parse Server's own +$relatedTo+ bypassed the
+      # owning object's ACL. Run the owning class through the same accessibility
+      # policy as every other cross-class hop, then translate the value normally.
+      #
+      # Fails closed when the owning class cannot be resolved from +object+: an
+      # unresolvable pointer is exactly the shape that would otherwise slip the
+      # check, so refuse the constraint rather than skip it.
+      def translate_related_to_value(val, depth:, agent: nil)
+        owning_class = related_to_owning_class(val)
+        if owning_class.nil? || owning_class.to_s.empty?
+          raise ConstraintSecurityError.new(
+            "SECURITY: $relatedTo requires a resolvable owning-object class; " \
+            "none could be determined from its `object` pointer.",
+            operator: "$relatedTo",
+            reason: :cross_class_denied,
+          )
+        end
+        assert_embedded_class_accessible!("$relatedTo", owning_class, agent: agent)
+        translate_value(val, depth: depth, agent: agent)
+      end
+
+      # Extract the Parse class name of a +$relatedTo+ constraint's owning
+      # object from its +object+ slot, which may be a Parse::Pointer, a Parse
+      # pointer/relation hash (+{__type:, className:, objectId:}+, string or
+      # symbol keys), or a storage-form string (+"ClassName$objectId"+).
+      # Returns nil when no class can be resolved so the caller can fail closed.
+      def related_to_owning_class(val)
+        return nil unless val.is_a?(Hash)
+        obj = val["object"] || val[:object]
+        return obj.parse_class if obj.respond_to?(:parse_class)
+        case obj
+        when Hash
+          o = obj.transform_keys(&:to_s)
+          cn = o["className"]
+          cn.nil? || cn.to_s.empty? ? nil : cn
+        when String
+          obj.include?("$") ? obj.split("$", 2).first : nil
+        end
       end
 
       # Hook into the agent-side accessibility check when the agent

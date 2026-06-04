@@ -85,22 +85,32 @@ module Parse
   class Installation < Parse::Object
     parse_class Parse::Model::CLASS_INSTALLATION
 
+    # The CLP operations Parse Server does NOT honor on `_Installation`:
+    # `find` and `delete` are hardcoded master-key-only at the REST layer,
+    # and `create`/`update` are gated on the `X-Parse-Installation-Id`
+    # header rather than CLP. Setting CLP for any of these either does
+    # nothing or breaks the SDK's device-registration flow, so the advisory
+    # fires only for them. `get`, `count`, `addField`, and `protectedFields`
+    # respond to CLP normally and are configured without a warning.
+    INEFFECTIVE_CLP_OPERATIONS = %i[find create update delete].freeze
+
     class << self
-      # Override {Parse::Object.set_clp} on `_Installation` so that any
-      # attempt to change CLP from the SDK emits a one-time advisory.
-      # Parse Server hardcodes `find` and `delete` on `_Installation` to
-      # master-key-only at the REST layer, and gates `create`/`update`
-      # on the `X-Parse-Installation-Id` header rather than CLP — so
-      # most CLP changes here either do nothing or break the SDK's
-      # device-registration flow. Behavior is otherwise unchanged.
+      # Override {Parse::Object.set_clp} on `_Installation` so that an
+      # attempt to change CLP for an operation the server ignores emits a
+      # one-time advisory. CLP changes for `get` / `count` / `addField`
+      # take effect normally and are applied without a warning. Behavior is
+      # otherwise unchanged.
       def set_clp(operation, **opts)
-        _warn_about_installation_clp!(:set_clp, operation)
+        _warn_about_installation_clp!(:set_clp, operation) if _installation_clp_ineffective?(operation)
         super
       end
 
-      # Same advisory for the bulk-config DSL.
+      # Same advisory for the bulk-config DSL — warn only about the keys that
+      # name an ineffective operation, and stay silent when the caller only
+      # touches the operations CLP actually controls.
       def set_class_access(**ops_to_access)
-        _warn_about_installation_clp!(:set_class_access, ops_to_access.keys)
+        offending = ops_to_access.keys.select { |op| _installation_clp_ineffective?(op) }
+        _warn_about_installation_clp!(:set_class_access, offending) unless offending.empty?
         super
       end
 
@@ -125,6 +135,13 @@ module Parse
       def set_write_user_fields(*fields)
         _warn_about_installation_clp!(:set_write_user_fields, fields)
         super
+      end
+
+      # @!visibility private
+      # Whether a CLP operation is one Parse Server ignores on `_Installation`
+      # (and therefore worth warning about). Normalizes Strings/Symbols.
+      def _installation_clp_ineffective?(operation)
+        INEFFECTIVE_CLP_OPERATIONS.include?(operation.to_s.to_sym)
       end
 
       # @!visibility private

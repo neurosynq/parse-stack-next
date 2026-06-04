@@ -11,7 +11,7 @@ end
 class CacheRedisIntegrationTest < Minitest::Test
   include ParseStackIntegrationTest
 
-  REDIS_URL = ENV["PARSE_TEST_REDIS_URL"] || "redis://localhost:6399/0"
+  REDIS_URL = ENV["PARSE_TEST_REDIS_URL"] || "redis://localhost:29379/0"
   CACHE_EXPIRES = 30
 
   def setup
@@ -27,19 +27,19 @@ class CacheRedisIntegrationTest < Minitest::Test
     @probe.clear
 
     @client_a = Parse::Client.new(
-      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:2337/parse",
-      app_id: ENV["PARSE_TEST_APP_ID"] || "myAppId",
-      api_key: ENV["PARSE_TEST_API_KEY"] || "test-rest-key",
-      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "myMasterKey",
+      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse",
+      app_id: ENV["PARSE_TEST_APP_ID"] || "psnextItAppId",
+      api_key: ENV["PARSE_TEST_API_KEY"] || "psnext-it-rest-key",
+      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "psnextItMasterKey",
       cache: REDIS_URL,
       expires: CACHE_EXPIRES,
     )
 
     @client_b = Parse::Client.new(
-      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:2337/parse",
-      app_id: ENV["PARSE_TEST_APP_ID"] || "myAppId",
-      api_key: ENV["PARSE_TEST_API_KEY"] || "test-rest-key",
-      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "myMasterKey",
+      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse",
+      app_id: ENV["PARSE_TEST_APP_ID"] || "psnextItAppId",
+      api_key: ENV["PARSE_TEST_API_KEY"] || "psnext-it-rest-key",
+      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "psnextItMasterKey",
       cache: REDIS_URL,
       expires: CACHE_EXPIRES,
     )
@@ -100,19 +100,19 @@ class CacheRedisIntegrationTest < Minitest::Test
 
   def test_namespaced_caches_dont_collide
     client_ns_a = Parse::Client.new(
-      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:2337/parse",
-      app_id: ENV["PARSE_TEST_APP_ID"] || "myAppId",
-      api_key: ENV["PARSE_TEST_API_KEY"] || "test-rest-key",
-      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "myMasterKey",
+      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse",
+      app_id: ENV["PARSE_TEST_APP_ID"] || "psnextItAppId",
+      api_key: ENV["PARSE_TEST_API_KEY"] || "psnext-it-rest-key",
+      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "psnextItMasterKey",
       cache: REDIS_URL,
       cache_namespace: "ns_a",
       expires: CACHE_EXPIRES,
     )
     client_ns_b = Parse::Client.new(
-      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:2337/parse",
-      app_id: ENV["PARSE_TEST_APP_ID"] || "myAppId",
-      api_key: ENV["PARSE_TEST_API_KEY"] || "test-rest-key",
-      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "myMasterKey",
+      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse",
+      app_id: ENV["PARSE_TEST_APP_ID"] || "psnextItAppId",
+      api_key: ENV["PARSE_TEST_API_KEY"] || "psnext-it-rest-key",
+      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "psnextItMasterKey",
       cache: REDIS_URL,
       cache_namespace: "ns_b",
       expires: CACHE_EXPIRES,
@@ -148,19 +148,19 @@ class CacheRedisIntegrationTest < Minitest::Test
 
   def test_same_namespace_still_shares
     shared_a = Parse::Client.new(
-      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:2337/parse",
-      app_id: ENV["PARSE_TEST_APP_ID"] || "myAppId",
-      api_key: ENV["PARSE_TEST_API_KEY"] || "test-rest-key",
-      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "myMasterKey",
+      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse",
+      app_id: ENV["PARSE_TEST_APP_ID"] || "psnextItAppId",
+      api_key: ENV["PARSE_TEST_API_KEY"] || "psnext-it-rest-key",
+      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "psnextItMasterKey",
       cache: REDIS_URL,
       cache_namespace: "shared_app",
       expires: CACHE_EXPIRES,
     )
     shared_b = Parse::Client.new(
-      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:2337/parse",
-      app_id: ENV["PARSE_TEST_APP_ID"] || "myAppId",
-      api_key: ENV["PARSE_TEST_API_KEY"] || "test-rest-key",
-      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "myMasterKey",
+      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse",
+      app_id: ENV["PARSE_TEST_APP_ID"] || "psnextItAppId",
+      api_key: ENV["PARSE_TEST_API_KEY"] || "psnext-it-rest-key",
+      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "psnextItMasterKey",
       cache: REDIS_URL,
       cache_namespace: "shared_app",
       expires: CACHE_EXPIRES,
@@ -179,10 +179,10 @@ class CacheRedisIntegrationTest < Minitest::Test
   def test_redis_wrapper_auto_threads_namespace
     wrapper = Parse::Cache::Redis.new(url: REDIS_URL, namespace: "wrapper_ns", pool_size: 4)
     client = Parse::Client.new(
-      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:2337/parse",
-      app_id: ENV["PARSE_TEST_APP_ID"] || "myAppId",
-      api_key: ENV["PARSE_TEST_API_KEY"] || "test-rest-key",
-      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "myMasterKey",
+      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse",
+      app_id: ENV["PARSE_TEST_APP_ID"] || "psnextItAppId",
+      api_key: ENV["PARSE_TEST_API_KEY"] || "psnext-it-rest-key",
+      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "psnextItMasterKey",
       cache: wrapper,
       expires: CACHE_EXPIRES,
     )
@@ -227,10 +227,10 @@ class CacheRedisIntegrationTest < Minitest::Test
   def test_client_clear_cache_through_wrapper
     wrapper = Parse::Cache::Redis.new(url: REDIS_URL, namespace: "clear_test", pool_size: 2)
     client = Parse::Client.new(
-      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:2337/parse",
-      app_id: ENV["PARSE_TEST_APP_ID"] || "myAppId",
-      api_key: ENV["PARSE_TEST_API_KEY"] || "test-rest-key",
-      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "myMasterKey",
+      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse",
+      app_id: ENV["PARSE_TEST_APP_ID"] || "psnextItAppId",
+      api_key: ENV["PARSE_TEST_API_KEY"] || "psnext-it-rest-key",
+      master_key: ENV["PARSE_TEST_MASTER_KEY"] || "psnextItMasterKey",
       cache: wrapper,
       expires: CACHE_EXPIRES,
     )

@@ -2,10 +2,10 @@
 # frozen_string_literal: true
 
 module Parse
-  # @author Anthony Persaud, Henry Spindell, Adrian Curtin
+  # @author Adrian Curtin, Anthony Persaud, Henry Spindell
   # The Parse Server SDK for Ruby
   module Stack
     # The current version.
-    VERSION = "5.1.1"
+    VERSION = "5.2.0"
   end
 end

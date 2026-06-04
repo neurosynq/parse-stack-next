@@ -1,5 +1,550 @@
 ## parse-stack-next Changelog
 
+### 5.2.0
+
+#### Retrieval layer — `Parse::Retrieval` (`Parse::RAG`)
+
+A safe-by-default retrieval-augmented-generation path on top of the existing
+vector-search stack. `Parse::Retrieval.retrieve` embeds a natural-language
+query, runs Atlas `$vectorSearch` through the existing ACL/CLP-enforcing
+`find_similar`, and splits each retrieved document's text field into scored,
+citable chunks. Chunking is a presentation step applied after retrieval —
+embedding remains one-vector-per-record, so every chunk inherits its parent
+document's single score.
+
+- **NEW**: `Parse::Retrieval::Chunker::FixedSizeOverlap(size:, overlap:, by:, max_chunks_per_document:)`
+  — a fixed-size sliding-window chunker with overlap, `by: :chars` (default) or
+  `by: :tokens`. Subclass `Parse::Retrieval::Chunker::Base` for custom
+  strategies. The `max_chunks_per_document` cap (default 200) truncates with a
+  signal rather than raising, bounding the one-document-to-many-chunks
+  amplification surface. (`lib/parse/retrieval/chunker.rb`)
+- **NEW**: `Parse::Retrieval.retrieve(query:, klass:, field:, k:, filter:, vector_filter:, chunker:, tenant_scope:, score_quantize:, **scope_opts)`
+  returns `Array<Parse::Retrieval::Chunk>` (`{ id, score, content, source, metadata }`).
+  ACL is enforced mongo-direct inside `find_similar`; scope kwargs
+  (`session_token:` / `acl_user:` / `acl_role:` / `master:`) pass through. A
+  tenant scope is merged into the Atlas pre-filter, closing the cross-tenant
+  existence side channel. (`lib/parse/retrieval/retriever.rb`)
+- **NEW**: `agent_searchable field:, filter_fields:` model macro opts a class in
+  to the agent retrieval tool and declares which fields an agent may filter on.
+  (`lib/parse/agent/metadata_dsl.rb`)
+- **NEW**: `semantic_search` agent tool (`permission: :readonly`,
+  `client_safe: true`) routing through `Parse::Retrieval.retrieve` with the full
+  agent security envelope: searchable-class allowlist, recursive underscore-key
+  refusal and filter-field allowlist on caller input, `field_allowlist`
+  projection plus tenant-scope re-assertion on every returned record, and score
+  quantization in non-admin contexts. (`lib/parse/retrieval/agent_tool.rb`)
+- **NEW**: `semantic_search` accepts `text_field:` to pick which embedded text
+  source to chunk and return as `content` — required for models that embed more
+  than one text field (previously such a model raised `AmbiguousTextField` on
+  every call with no way to disambiguate from the tool). The value is
+  constrained to the class's declared `embed` sources so it can't surface a
+  field the model never opted into embedding.
+- **FIXED**: `semantic_search` now forwards `max_chunks_per_document` to the
+  chunker (it was silently dropped on the agent path, so the per-document chunk
+  cap could not be tuned through the tool). (`lib/parse/retrieval/agent_tool.rb`)
+- **IMPROVED**: parameter-name aliases smooth over inconsistencies across the
+  surface — `Parse::Agent.new` accepts `permission:` (alias of `permissions:`)
+  and `impersonation_user:` / `impersonation_mint:` / `impersonate_label:`
+  (aliases of `impersonate_user:` / `impersonate_mint:` / `impersonation_label:`);
+  `Parse::Agent::Tools.register` accepts `permissions:` (alias of `permission:`);
+  and `semantic_search` accepts `klass:` / `class:` for `class_name` and the
+  chunker's own `size:` / `overlap:` / `by:` names. Canonical names are
+  unchanged. (`lib/parse/agent.rb`, `lib/parse/agent/tools.rb`,
+  `lib/parse/retrieval/agent_tool.rb`)
+- **NEW**: `Parse::RAG` is a discoverability alias for `Parse::Retrieval`.
+- **NEW**: `rerank:` and `hybrid:` are reserved on `retrieve` and raise
+  `NotImplementedError` if supplied, locking the API shape for later releases.
+
+#### MCP elicitation — human-in-the-loop approval for destructive operations
+
+`:write` / `:admin` tier tool calls can now require human approval before they
+run, using the MCP 2025-06-18 spec-native `elicitation/create` channel. The
+server sends the proposed dry-run diff to the client over the listening stream
+and blocks until the approver accepts or rejects.
+
+- **NEW**: `Parse::Agent.require_approval_for = [:write, :admin]` opts tiers into
+  approval. Off by default, so existing clients are unaffected.
+- **NEW**: A pluggable approval gate (`Parse::Agent#approval_gate`) consulted by
+  `Parse::Agent#execute`, reachable on the non-MCP path and unit-testable with a
+  fake approver. `Parse::Agent::MCPElicitationGate` is the spec-native
+  implementation; `Parse::Agent::NullGate` (the default) approves.
+  (`lib/parse/agent/approval_gate.rb`)
+- **NEW**: `call_method` resolves the *effective* tier from the target
+  `agent_method`'s declared permission, so write/admin methods invoked through
+  the readonly `call_method` tool are gated correctly. The approval diff reuses
+  the existing dry-run preview.
+- **NEW**: MCPRackApp captures the client's `elicitation` capability at
+  `initialize`, routes the client's reply (a method-less JSON-RPC response) into
+  a session-bound pending registry, and accepts an `approval_timeout:`.
+  (`lib/parse/agent/mcp_rack_app.rb`, `lib/parse/agent/mcp_dispatcher.rb`,
+  `lib/parse/agent/mcp_subscriptions.rb`)
+- **SECURITY**: fails closed — when approval is required but the client did not
+  advertise the capability, no listening stream is open, the transport is
+  non-streaming, or the approver times out, the destructive operation is
+  refused, never silently executed. Replies are session-bound so one session
+  cannot answer another's prompt.
+
+#### Agent roadmap: impersonation, prompt hardening, telemetry, provenance
+
+- **NEW**: Agent impersonation for user-scoped queries.
+  `Parse::Agent.new(impersonate_user:, impersonate_mint:, impersonation_label:)`
+  and `agent.impersonate(user)` / `agent.stop_impersonating!` resolve a real
+  session token for the target `_User` (reusing an active `_Session`, or
+  minting a restricted one with `impersonate_mint: true`) and bind it as if
+  `session_token:` had been passed. Fails closed: requires a master-key client,
+  rejects non-`_User` pointers, and refuses rather than widening to master-key
+  posture when no session resolves. An `impersonation_label:` audit tag (also
+  usable with `acl_role:`) surfaces on the `parse.agent.tool_call` payload.
+  Session lookups run through the agent's own client (not the process-default
+  `Parse.client`) so impersonation is correct under multi-client setups, and
+  `impersonated_user_id` is stamped only after a token resolves, so a failed
+  `impersonate` leaves the agent's identity unchanged. (`lib/parse/agent.rb`)
+- **SECURITY**: aggregate tools (`aggregate`, `group_by`, `distinct`, and the
+  pipeline export path) route through the SDK's ACL-enforcing mongo-direct path
+  for ANY non-master identity — session-token agents and runtime-impersonated
+  agents included, not only `acl_user:` / `acl_role:`. Parse Server's REST
+  aggregate endpoint enforces no per-row ACL, so this closes the gap where a
+  scoped agent whose ACL context wasn't eagerly resolved could otherwise reach
+  the unenforced REST path. (`lib/parse/agent.rb`, `lib/parse/agent/tools.rb`)
+- **NEW**: `Parse::Agent::PromptHardening` — `sanitize_schema_for_llm` (drops
+  non-identifier field names, strips control/zero-width chars, caps and
+  marker-wraps descriptions) hooked into `get_schema`/`get_all_schemas`;
+  `scrub_marker_injection` neutralizing embedded wrapper markers in untrusted
+  tool content (`Parse::Agent.prompt_marker_strict` to refuse instead);
+  operator-curated `Parse::Agent.prompt_injection_canaries` that emit
+  `parse.agent.prompt_injection_detected` (and refuse when
+  `canary_action = :refuse`); `Parse::Agent::PROMPT_VERSION` surfaced via
+  `agent.describe[:prompt][:version]`; and a one-time warning when
+  `allowed_llm_endpoints` is left unrestricted. The `allowed_llm_endpoints`
+  allowlist matches on the request's `scheme://host:port` origin (the path is
+  ignored), so an entry like `https://api.openai.com` authorizes any path on
+  that host but not `https://api.openai.com.evil.com` or
+  `…openai.com@evil.com`; a malformed endpoint or entry is a fail-closed miss.
+  (`lib/parse/agent/prompt_hardening.rb`)
+- **NEW**: Embedding-cost telemetry on `parse.agent.tool_call` — embedding calls
+  made inside a tool span contribute `embed_calls`, `embed_tokens`, and (when
+  `Parse::Agent.embed_cost_per_million_tokens` is set) `embed_cost_usd`,
+  attributed via a thread-local accumulator fed by the `parse.embeddings.embed`
+  notification. (`lib/parse/agent.rb`)
+- **NEW**: Optional per-row `_source` provenance (`{ class, tool, object_id }`)
+  on read-tool results, enabled with `Parse::Agent.include_source_provenance`
+  (default off). Stamped after field-allowlist projection and redaction across
+  `query_class`, `get_objects`, `aggregate`, `atlas_text_search`, and
+  `semantic_search`. (`lib/parse/agent/tools.rb`, `lib/parse/retrieval/agent_tool.rb`)
+- **NEW**: General-purpose server-initiated notification stream.
+  `MCPRackApp.new(notifications: true)` opens the GET listening-stream bus
+  without enabling LiveQuery resource subscriptions, and
+  `MCPRackApp#notify(session_id, method:, params:)` pushes arbitrary
+  `notifications/*` events to a session. (`lib/parse/agent/mcp_rack_app.rb`)
+- **SECURITY**: the MCP listening stream is now owner-bound. A session
+  established through `initialize` is bound to that caller's principal, and
+  only the same principal may later open its server→client SSE stream; a
+  different authenticated caller who knows or guesses the `Mcp-Session-Id` is
+  refused with `403`. An id never seen by `initialize` (the decoupled
+  `notifications:` bus) is claimed trust-on-first-use by the first principal to
+  attach, so a second principal can no longer evict or shadow an existing
+  listener. The principal is derived from the agent's scope (session_token →
+  acl_user → acl_role); a new `MCPRackApp.new(principal_resolver:)` callable
+  lets a master-key deployment that authenticates users upstream supply a real
+  per-user principal (without it, bare master-key agents share one principal
+  and owner-binding is a no-op among them). The binding registry is
+  per-process and does not span Puma workers or survive restart — the same
+  scope as the cancellation registry — so in a cluster the `initialize`
+  binding degrades to trust-on-first-use. The GET stream must carry the same
+  credential as `initialize`. (`lib/parse/agent/mcp_rack_app.rb`)
+- **IMPROVED**: operator fail-loud lints for two silent misconfigurations.
+  (1) A `:write`/`:admin` agent served over MCP with `Parse::Agent.require_approval_for`
+  empty emits a one-time `[Parse::Agent:SECURITY]` warning (every write runs
+  ungated). (2) When any class declares `agent_tenant_scope`, a class explicitly
+  exposed to agents (via `agent_fields` or `agent_searchable`) that declares none
+  emits a one-time per-class warning on the query path (the search path already
+  raises `MissingTenantScope`) — surfacing the silent cross-tenant pass-through
+  instead of leaving it to leaked rows. The warning is gated to agent-exposed
+  classes so system/incidental classes a tool merely touches don't create noise.
+  (`lib/parse/agent/mcp_rack_app.rb`, `lib/parse/agent/metadata_registry.rb`)
+- **NEW**: MCP approval round-trips emit a `parse.agent.approval`
+  `ActiveSupport::Notifications` event carrying `tool`, `effective_permission`,
+  `correlation_id`, `timeout`, `outcome`, and `reason`, with the measured wait
+  as the event duration — so a non-answering client holding a dispatcher thread
+  for the full `approval_timeout` is observable. (`lib/parse/agent/approval_gate.rb`)
+
+#### Token economy — leaner tool surface, responses, and retrieval
+
+The MCP surface is paid for in LLM context tokens. This batch cuts the fixed
+per-session tool tax, trims per-row response overhead, and guards retrieval
+against silent context blowout.
+
+- **NEW**: `Parse::Agent.new(tools: :lean)` — a named tool-surface profile that
+  narrows `:readonly` to the six core read tools (`get_all_schemas`,
+  `get_schema`, `query_class`, `count_objects`, `get_object`, `aggregate`),
+  taking a full `tools/list` payload from ~7.9K context tokens to ~2.6K (~67%).
+  Profiles (`Parse::Agent::TOOL_PROFILES`) are Symbol-only, compose with the
+  permission tier (narrow-only), and raise on an unknown name rather than
+  silently exposing the full surface. (`lib/parse/agent.rb`)
+- **IMPROVED**: read-tool responses now strip the raw `ACL` map before reaching
+  the model — it is operationally useless to a model (effective authority is
+  enforced server-side) and is pure token overhead plus a minor role/user-id
+  disclosure. (`lib/parse/agent/result_formatter.rb`)
+- **FIXED**: `get_objects` and the Atlas Search tools now normalize rows through
+  the same `simplify_object` form `query_class` uses (compact pointers, ISO
+  dates, ACL stripped) instead of shipping raw wire-form with `__type` dicts.
+  (`lib/parse/agent/tools.rb`)
+- **CHANGED**: the `semantic_search` result hoists each chunk's parent record
+  **once** into a `documents` map keyed by `objectId` instead of duplicating the
+  full source on every chunk — map a chunk to its source via
+  `metadata.object_id`. Saves the repeated-source cost on every multi-chunk
+  document. (`lib/parse/retrieval/agent_tool.rb`)
+- **NEW**: `semantic_search` `max_total_tokens:` budget (default 20,000;
+  estimated chars/4) trims the lowest-ranked chunks so a few long documents
+  can't silently blow the context window, adding `budget_truncated: true` /
+  `budget_dropped: <n>` when it trims. Pass `0` to disable.
+  (`lib/parse/retrieval/agent_tool.rb`)
+- **IMPROVED**: a failing `tools/call` now forwards its structured
+  `error_code` / `retry_after` / `details` on the MCP error envelope under
+  `_meta` (`parse.error_code`, `parse.retry_after`, `parse.details`) so clients
+  can branch deterministically and honor `retry_after` without parsing prose.
+  (`lib/parse/agent/mcp_dispatcher.rb`)
+- **IMPROVED**: `get_schema` on a mistyped class name raises a `ValidationError`
+  carrying a "Did you mean: …?" hint (near matches from locally-known classes),
+  letting the model self-correct in one retry instead of a full
+  `get_all_schemas` sweep. (`lib/parse/agent/tools.rb`)
+- **NEW**: `Parse::Agent.measure_embeddings { … }` scopes embedding usage
+  (`{ calls:, tokens:, cost_usd: }`) around arbitrary work on the calling
+  thread — capturing corpus/ingestion embeds fired at `Model.save` time that
+  the per-tool-call telemetry does not span. `Parse::Agent.embed_cost_usd(tokens)`
+  exposes the rate conversion. (`lib/parse/agent.rb`)
+
+#### Expanded integration test coverage
+
+- **IMPROVED**: Added end-to-end coverage for cloud-function error scenarios —
+  a bare cloud throw, a typed `Parse.Error`, and an application-defined error
+  code all surface as `Parse::Error::CloudCodeError` with the wire code,
+  message, and HTTP status preserved, and a `beforeSave` validation rejection
+  propagates to the object save path.
+  (`test/lib/parse/cloud_function_errors_integration_test.rb`)
+- **IMPROVED**: Added "disruptive" integration tests that exercise a real Parse
+  Server outage and restart against a live container: connectivity predicates
+  flip to false and recover, in-flight requests raise a connection-class error,
+  and a registered webhook survives a server restart with idempotent
+  re-registration. Run via `rake test:integration:disruptive` so they never
+  interleave with the rest of the suite.
+  (`test/lib/parse/network_failure_disruptive_test.rb`,
+  `test/lib/parse/webhook_restart_disruptive_test.rb`)
+
+#### `unique_index_on` — declarative correctness floor for `first_or_create!`
+
+`Parse::Object` subclasses can now declare the MongoDB unique index that backs
+the `first_or_create!` / `create_or_update!` race fix directly on the model,
+with intent-revealing syntax. The Redis-backed `synchronize:` lock is a latency
+optimization that collapses concurrent callers in the common path; the unique
+index is the correctness floor that holds when the lock is bypassed — a Redis
+outage, a TTL expiring mid-write, or a `synchronize: false` caller. With the
+index in place a duplicate insert surfaces as Parse error 137 (DuplicateValue),
+which `first_or_create!` already rescues and resolves to the winning row, so the
+net invariant — exactly one row, every caller sees the same id — holds under any
+race.
+
+- **NEW**: `unique_index_on(*fields, sparse: false, partial: nil, name: nil)`
+  declares a unique index on the exact dedup tuple. It is thin sugar over
+  `mongo_index(*fields, unique: true, …)`, sharing the same registration,
+  validation (sensitive-field guard, pointer auto-rewrite to `_p_<field>`,
+  parallel-array / relation / `_id` rejection), and `apply_indexes!` writer
+  path. (`lib/parse/model/core/indexing.rb`)
+- **NEW**: The default is non-sparse, keeping the index key identical to the
+  query `first_or_create!` re-runs on recovery so a 137 always maps to a row the
+  recovery query can find. `partial:` is the documented escape hatch for
+  "unique within a subset" (e.g. unique email per tenant, where tenant-less rows
+  may repeat); `sparse:` only changes behavior for rows missing the entire
+  tuple, which the create path never produces.
+
+#### MCP resource subscriptions bridged to LiveQuery
+
+The MCP server can now serve `resources/subscribe` and push
+`notifications/resources/updated` over a server→client channel, backed by
+Parse LiveQuery. A client subscribes to a class's `count` or `samples`
+resource; when the underlying data changes, the server emits one coarse
+update for that URI and the client re-reads the resource. Disabled by default
+and only advertised when LiveQuery is enabled and available, so the
+`resources.subscribe` capability is never claimed unless the server can
+actually deliver.
+
+- **NEW**: `Parse::Agent::MCPRackApp.new(resource_subscriptions: true)` accepts
+  a long-lived `GET` (`Accept: text/event-stream`, `Mcp-Session-Id`) as the
+  listening stream that carries `notifications/resources/updated`, and routes
+  `resources/subscribe` / `resources/unsubscribe` to a LiveQuery bridge.
+  Requires a streaming-capable Rack server (Puma, Falcon) and
+  `Parse.live_query_enabled = true`. (`lib/parse/agent/mcp_rack_app.rb`)
+- **NEW**: `Parse::Agent::MCPSubscriptions::Manager` coordinates per-session
+  subscriptions, derives LiveQuery credentials from the subscribing agent,
+  debounces bursts per `(session, uri)` into a single update, and tears down
+  LiveQuery subscriptions when the listening stream closes or the session is
+  terminated via `DELETE`. (`lib/parse/agent/mcp_subscriptions.rb`)
+- **NEW**: `resources.subscribe` is advertised on `initialize` only when a
+  supported subscription manager is wired; the WEBrick `MCPServer` and the
+  Rack app with subscriptions disabled continue to advertise `subscribe:
+  false`. (`lib/parse/agent/mcp_dispatcher.rb`)
+- **SECURITY**: the LiveQuery bridge enforces the SDK's scope asymmetry —
+  session-token agents subscribe with their token (Parse Server filters events
+  to readable rows), master-key agents subscribe over a dedicated admin
+  LiveQuery connection, and `acl_user:` / `acl_role:` agents are refused
+  because Parse Server LiveQuery has no act-as-user / act-as-role handshake.
+  Because Parse Server fixes ACL-bypass at connect time (there is no
+  per-subscription master key), master- and session-scoped subscriptions are
+  routed to separate connections; the bridge fails closed rather than open a
+  mis-scoped channel. (`lib/parse/agent/mcp_subscriptions.rb`)
+- **SECURITY**: `resources/subscribe` enforces the same class-authorization gate
+  as the read path before opening any socket — `agent_hidden` declarations and
+  the per-agent `classes:` allowlist are checked via
+  `Tools.assert_class_accessible!`, so a hidden or out-of-allowlist class (e.g.
+  `parse://_Session/count`) can no longer become a change/timing oracle through
+  a subscription that bypasses the tool surface. A denial opens no socket.
+  (`lib/parse/agent/mcp_subscriptions.rb`, `lib/parse/agent/mcp_dispatcher.rb`)
+- **SECURITY**: the master-key subscription branch is bound to the agent's own
+  master-key authority. Because the admin LiveQuery client backfills the
+  process-global master key, an unprivileged / client-mode agent (no master key
+  on its own client) in a no-scope posture is now refused rather than allowed to
+  borrow the global key for an ACL-bypassing admin socket. Symmetrically, a
+  session-token subscription is refused if the shared scoped LiveQuery client is
+  itself an admin connection (`config.use_master_key = true`), so it can never
+  ride an ACL-bypassing socket. The subscribe and cap checks are also
+  re-validated under the lock after the network subscribe so a torn-down session
+  can't be resurrected into a leaked socket. (`lib/parse/agent/mcp_subscriptions.rb`)
+- **NEW**: only `count` and `samples` resources are subscribable; `schema` is
+  rejected because schema changes are not LiveQuery events. A per-session
+  subscription cap (default 100) bounds the footprint of a client that
+  subscribes but never opens its listening stream.
+
+#### Fix wrong pointer/relation `targetClass` for built-in system-class associations
+
+A built-in association to a Parse Server system class could freeze the wrong
+`targetClass` into the generated schema. `Parse::Installation`'s
+`belongs_to :user` (and, by the same mechanism, `Parse::Session#user` and
+`Parse::Role#users`) resolved its target through `:user.to_parse_class`,
+which depends on `Parse::User` already being registered. Because the gem
+loads the built-in classes before `user.rb`, the lookup fell back to the
+camelized literal `"User"` instead of the Parse storage name `"_User"` and
+stored it in the association `references` / `relations` map. That literal was
+then emitted as the pointer column's `targetClass`, so a fresh schema push
+created `_Installation.user` with `targetClass: "User"` — and Parse Server
+rejected every `_User` pointer save against it (`expected Pointer<User> but
+got Pointer<_User>`). This is the root cause underlying the spurious
+className-mismatch warnings addressed cosmetically in 5.1.1.
+
+- **FIXED**: `belongs_to` / `has_many` / `has_one` associations to a Parse
+  Server system class (`User`, `Role`, `Session`, `Installation`, and the
+  other built-ins) now resolve to the correct leading-underscore storage name
+  regardless of class load order. `Parse::Installation.references[:user]`,
+  `Parse::Session.references[:user]`, and `Parse::Role.relations[:users]` now
+  hold `"_User"`, so the emitted schema pointer/relation `targetClass` is
+  `"_User"` and `_User` pointer saves are accepted.
+  (`lib/parse/model/model.rb`)
+- **FIXED**: `String#to_parse_class` / `Symbol#to_parse_class` now resolve a
+  built-in system class by name even when its Ruby class is not yet
+  registered, restoring the documented contract
+  (`"users".to_parse_class(singularize: true) # => "_User"`). A registered
+  class with a custom `parse_class` table mapping still takes precedence, so
+  application classes are never rewritten. (`lib/parse/model/model.rb`)
+- **NEW**: `Parse::Model::SYSTEM_CLASS_MAP` maps each built-in's camelized
+  bare name to its storage name; it is consulted by `to_parse_class` only as
+  a fallback when class resolution would otherwise fail. (`lib/parse/model/model.rb`)
+- **CHANGED**: The one-time `_Installation` CLP advisory is now
+  operation-aware. `set_clp` and `set_class_access` warn only for the
+  operations Parse Server ignores on `_Installation` (`find`, `create`,
+  `update`, `delete`); configuring the operations it honors (`get`, `count`,
+  `addField`) no longer emits a warning. The pointer-permission helpers
+  `set_read_user_fields` / `set_write_user_fields` still warn, since they have
+  no reliable owner identity to bind to on `_Installation`.
+  (`lib/parse/model/classes/installation.rb`)
+
+This corrects schema generation going forward. An environment whose schema was
+already pushed with the wrong `targetClass` must have that schema re-pushed
+(for example by re-running the schema upgrade) after upgrading; an existing
+pointer column's `targetClass` cannot be altered in place and must be replaced.
+
+#### Harden `$relatedTo` against cross-class access on agent and mongo-direct paths
+
+The `$relatedTo` query operator reaches across to a second class — the owning
+object whose relation is being read — but, unlike the other cross-class
+operators (`$inQuery` / `$notInQuery` / `$select` / `$dontSelect`), the class
+named by its `object` pointer was not run through the agent accessibility
+policy. An agent narrowed by `classes:` (or with a class declared
+`agent_hidden`) could therefore name a relation anchored on a class outside its
+allowlist. The same operator on the mongo-direct path was passed through to
+MongoDB verbatim, where it failed with an opaque "unknown operator" error.
+
+- **FIXED**: `Parse::Agent::ConstraintTranslator` now validates the owning-object
+  class of a `$relatedTo` constraint against the agent's accessibility policy,
+  matching how `$inQuery` / `$select` are already gated. The check fails closed
+  when the owning class cannot be resolved from the `object` pointer.
+  (`lib/parse/agent/constraint_translator.rb`)
+- **FIXED**: the constraint translator now classifies each key of a constraint
+  hash independently instead of only validating operators when *every* key in
+  the hash is an operator. An operator sharing a hash with a non-operator field
+  key — reachable as a `$or` / `$and` / `$nor` array element — was previously
+  routed to the field branch and skipped operator validation, so a blocked
+  operator (e.g. `$where`) or an off-allowlist cross-class / relation reference
+  could pass through alongside a throwaway field key. Operators are now
+  validated and dispatched at every nesting level regardless of sibling keys.
+  (`lib/parse/agent/constraint_translator.rb`)
+- **FIXED**: `$relatedTo` on the mongo-direct query path
+  (`results_direct` / `count_direct` / `distinct_direct`) now raises a clear
+  `ArgumentError` explaining that Parse Relations are resolved server-side, so
+  the query must run via REST. This replaces the previous opaque MongoDB error
+  and forecloses a future `$lookup` rewrite that could bypass the row-level
+  `_rperm` / `protectedFields` enforcement the rest of that path applies.
+  (`lib/parse/query.rb`)
+
+#### Schema migration — correct wire-column names and a one-way convergence check
+
+The migration tooling derived every wire column name with `camelize(:lower)`,
+which ignored custom `field:` mappings and double-counted multi-word
+properties (each property is registered under both its snake_case key and its
+camelCase wire alias). Wire names are now resolved through the model's
+`field_map`, so each column is emitted exactly once and custom mappings are
+honored.
+
+- **FIXED**: `Parse::Schema.migration(Klass).preview` / `.operations` no longer
+  list multi-word fields twice (e.g. `ADD FIELD unitPrice` appeared once per
+  alias). Each declared property now produces exactly one operation.
+  (`lib/parse/schema.rb`)
+- **FIXED**: `auto_upgrade!` and `Migration#apply!` now create the column a
+  property actually serializes to. For `property :unit_price, field: "price_usd"`
+  the migrator previously created a phantom `unitPrice` (or `priceUsd`) column
+  instead of the declared `price_usd`; it now creates `price_usd`. Pointer
+  columns are likewise emitted at their true wire name. (`lib/parse/schema.rb`)
+- **FIXED**: `SchemaDiff#missing_on_server` is keyed by the canonical property
+  name with no camelCase alias duplicates.
+- **NEW**: `Parse::Schema::SchemaDiff#server_covers_local?` — a one-way
+  convergence check (`missing_on_server.empty? && type_mismatches.empty?`) for
+  CI pipelines. Unlike `in_sync?` (which is strict and bidirectional, so it
+  reports `false` whenever the server has columns the model does not declare —
+  e.g. a dashboard-added field), `server_covers_local?` answers the question a
+  deploy gate actually asks: "is every field my model declares present on the
+  server?" (`lib/parse/schema.rb`)
+- **FIXED**: `Migration#needed?` is now defined in terms of
+  `server_covers_local?`, so a server that is a superset of the model no longer
+  produces a "needed" migration with zero operations.
+
+#### Aggregation — `group_by` class methods and operation-aware table headers
+
+- **NEW**: `Klass.group_by` and `Klass.group_by_date` class-method delegators,
+  mirroring the existing `Klass.distinct` / `Klass.count_distinct` delegation.
+  `Post.group_by(:category).count` now works without the explicit
+  `Post.query.group_by(...)` form. (`lib/parse/model/core/querying.rb`)
+- **FIXED**: `Parse::GroupedResult#to_table` derives the value-column header
+  from the aggregation operation (`Average`, `Sum`, `Min`, `Max`, …) instead of
+  always printing `Count`, so an averaged table is no longer mislabeled. An
+  explicit `headers:` override still takes precedence, and results constructed
+  without an operation continue to default to `Count`. (`lib/parse/query.rb`)
+
+#### Connectivity probes — `Parse.connected?` / `Parse.reachable?`
+
+- **NEW**: `Parse.reachable?` / `Parse::Client#reachable?` — a no-credentials
+  liveness probe that hits the server health endpoint; passes whenever the
+  server is up, even if the configured `application_id` / REST key is wrong.
+- **NEW**: `Parse.connected?` / `Parse::Client#connected?` — a connectivity
+  probe that by default hits the health endpoint, so it returns `true` whenever
+  the server is up, regardless of Class-Level-Permission configuration. (A
+  `_User` find is unreliable as the default probe: locking `_User` finds to the
+  master key via CLP is standard production hardening and would make the probe
+  report "not connected" on a perfectly healthy, correctly-configured server.)
+  Pass an endpoint — `connected?("classes/_User")`, or
+  `Parse.connected?(:default, "classes/_User")` — to additionally validate
+  credentials against a class the configured key can read; the probe runs
+  `limit: 0` (never pulls rows) and routes through the auth stack, so a wrong
+  `application_id` / REST key returns `false`. Connection failures, timeouts,
+  and API errors all return `false` rather than raising; genuine programming
+  errors still propagate. (`lib/parse/client.rb`)
+
+#### `request_password_reset` — documented failure mode
+
+- **IMPROVED**: `Parse::User.request_password_reset` (and the instance form)
+  now document that they raise `Parse::Error::ServiceUnavailableError` when the
+  server returns 500/503 (for example, when no email adapter is configured), so
+  callers branching on the documented Boolean return know to rescue it.
+  (`lib/parse/model/classes/user.rb`)
+
+#### `Parse::Client#request` — bounded, idempotency-aware retries on 500/503/429
+
+- **FIXED**: a request that received a persistent `500`/`503`
+  (`ServiceUnavailableError`) or `429` (`RequestLimitExceededError`) retried
+  **forever** instead of giving up after `retry_limit` attempts. The retry path
+  uses Ruby's `retry` keyword, which re-runs the method body; because the retry
+  counter was initialized inside that re-run, every attempt reset it back to
+  `retry_limit`. The counter is now initialized once, above the retried block,
+  so the countdown is preserved — a persistent failure makes exactly
+  `retry_limit + 1` attempts and then raises. An explicit `opts[:retry]` count
+  is likewise honored and bounded. (`lib/parse/client.rb`)
+- **FIXED**: the backoff delay collapsed to zero (or negative, so no
+  sleep at all) whenever a caller passed `opts: { retry: N }` with `N` above the
+  client's `retry_limit`, because the backoff multiplier was derived from
+  `retry_limit` rather than the effective starting budget. The multiplier now
+  uses the actual starting count, so every retry backs off by a strictly
+  positive, growing delay. (Backoff is linear in the attempt number —
+  `RETRY_DELAY × attempt` — with ±25% jitter.) (`lib/parse/client.rb`)
+- **CHANGED**: retries are now idempotency-aware, so a transient server error
+  can't double-apply a write. A `429` re-sends regardless of method (the server
+  provably discarded the request). For an ambiguous failure — a `500`/`503` or a
+  dropped connection, where the write may already have applied — only idempotent
+  requests are re-sent: `GET` and `DELETE` always, a `PUT` update only when its
+  body carries no atomic operation (`Increment` / `Add` / `AddUnique` /
+  `Remove` / relation ops), and `POST` (object create / batch) never.
+  (`lib/parse/client.rb`)
+- **FIXED**: a request that hit a read timeout was not retried. Faraday 2.x
+  raises `Faraday::TimeoutError` (a `Faraday::Error`, not a `Faraday::ClientError`)
+  for `Timeout::Error` / `Errno::ETIMEDOUT`, which the retry clause didn't list,
+  so a timed-out request propagated raw instead of being retried (when
+  idempotent) and wrapped as `Parse::Error::ConnectionError`. The clause now
+  catches `Faraday::TimeoutError`. Connection-*refused* (`Faraday::ConnectionFailed`)
+  is intentionally still not retried — it is a non-transient failure and
+  retrying it only adds backoff latency. (`lib/parse/client.rb`)
+- **NEW**: `Parse::Request.assume_server_idempotency` — an explicit opt-in that
+  makes writes retry-safe end-to-end on ambiguous failures. The SDK already
+  sends a stable `X-Parse-Request-Id` (`_RB_<uuid>`) on POST/PUT/PATCH by
+  default (`Parse::Request.enable_request_id`), and now reuses the SAME id on
+  every retry attempt, so when Parse Server is configured with
+  `idempotencyOptions` covering the targeted paths, a replayed write is
+  deduplicated server-side — the second delivery never creates a duplicate.
+  With this flag set (default `false`, also settable via
+  `enable_idempotency!(assume_server_dedup: true)` / `configure_idempotency`),
+  the retry guard treats any request carrying a request-id header as retry-safe
+  regardless of method — so a `POST` create or an atomic-op `PUT` that hits a
+  `500`/`503` or a request timeout is transparently retried. Left off, behavior
+  is unchanged (the client never assumes the server dedups). On the rare
+  ambiguous-success case (the first attempt landed but its response was lost),
+  Parse Server answers the replay with a `Duplicate request` (Parse code `159`),
+  which the SDK now surfaces as a typed, catchable `Parse::Error::DuplicateRequestError`
+  meaning "the original write already applied" — re-fetch by your own key if you
+  need the resulting object (Parse Server does not echo the original response on
+  a duplicate). Proven end-to-end by
+  `test/lib/parse/client/idempotent_retry_integration_test.rb` against a test
+  stack configured with path-scoped server idempotency.
+  (`lib/parse/client/request.rb`, `lib/parse/client.rb`)
+- **CHANGED**: two error-surface changes above are behavioral, not just
+  additive — review downstream `rescue` chains when upgrading. (1) Parse code
+  `159` now raises `Parse::Error::DuplicateRequestError`; previously it fell
+  through and returned a response with `success? == false`. Callers that branch
+  on `response.success?` / `response.error` instead of rescuing will now see an
+  exception — rescue `DuplicateRequestError` and treat it as "already applied."
+  (2) A read timeout now raises `Parse::Error::ConnectionError` (after an
+  idempotency-gated retry); previously `Faraday::TimeoutError` propagated raw,
+  so any `rescue Faraday::TimeoutError` becomes dead code. (`lib/parse/client.rb`)
+- **NEW**: `Parse::Error::DuplicateRequestError` (Parse code `159`,
+  `Parse::Response::ERROR_DUPLICATE_REQUEST`) — raised when Parse Server's
+  request-id idempotency layer rejects a duplicate `X-Parse-Request-Id`. The
+  duplicate is not applied a second time; the original request already
+  succeeded. (`lib/parse/client.rb`, `lib/parse/client/response.rb`)
+- **IMPROVED**: `first_or_create!` and `create_or_update!` now recover
+  transparently from a `DuplicateRequestError`. These methods already carry the
+  identifying `query_attrs`, so when a transparently-retried create lands but
+  loses its response (and the replay is rejected with 159), they re-find the row
+  the original attempt created and return it — turning the duplicate into a
+  successful find instead of a raised error. Applies on both the synchronized
+  (`synchronize:`) and unsynchronized paths, and composes with the existing
+  duplicate-*value* (unique-index) recovery. A plain `save!` still surfaces
+  `DuplicateRequestError` (a generic create has no natural key to re-fetch by;
+  catch it and re-query your own unique field). (`lib/parse/model/core/actions.rb`)
+
 ### 5.1.1
 
 #### Suppress spurious className-mismatch warnings for system-class underscore aliases

@@ -1,6 +1,6 @@
 // MongoDB initialization script
 // This script runs when the MongoDB container is first created
-// It grants the admin user access to the parse database for direct queries
+// It grants the admin user access to the parse_stack_next_it database for direct queries
 
 // The admin user needs readWriteAnyDatabase role to access all databases
 db = db.getSiblingDB('admin');
@@ -11,8 +11,8 @@ db.grantRolesToUser('admin', [
   { role: 'dbAdminAnyDatabase', db: 'admin' }
 ]);
 
-// Initialize the parse database
-db = db.getSiblingDB('parse');
+// Initialize the parse_stack_next_it database
+db = db.getSiblingDB('parse_stack_next_it');
 
 // Create a placeholder collection to ensure the database exists
 db.createCollection('_init');

@@ -14,7 +14,7 @@ require "rake/testtask"
 # @return [Array(String, String, String, String)]
 #   server_url, application_id, api_key, master_key
 def mcp_credentials_or_abort!
-  server_url   = ENV["PARSE_SERVER_URL"] || "http://localhost:2337/parse"
+  server_url   = ENV["PARSE_SERVER_URL"] || "http://localhost:29337/parse"
   app_id       = ENV["PARSE_APP_ID"]
   rest_api_key = ENV["PARSE_API_KEY"]
   master_key   = ENV["PARSE_MASTER_KEY"]
@@ -23,9 +23,9 @@ def mcp_credentials_or_abort!
 
   if app_id.to_s.empty? || master_key.to_s.empty?
     if is_local
-      app_id       = (app_id.to_s.empty? ? "myAppId" : app_id)
+      app_id       = (app_id.to_s.empty? ? "psnextItAppId" : app_id)
       rest_api_key = (rest_api_key.to_s.empty? ? "myApiKey" : rest_api_key)
-      master_key   = (master_key.to_s.empty? ? "myMasterKey" : master_key)
+      master_key   = (master_key.to_s.empty? ? "psnextItMasterKey" : master_key)
     else
       abort "[Rakefile] PARSE_SERVER_URL=#{server_url} is not local; refusing to fall back to " \
             "placeholder credentials. Set PARSE_APP_ID and PARSE_MASTER_KEY explicitly."
@@ -35,11 +35,15 @@ def mcp_credentials_or_abort!
   [server_url, app_id, rest_api_key, master_key]
 end
 
-# Default test task runs all tests with Docker enabled
+# Default test task runs all tests with Docker enabled.
+#
+# `*disruptive*` tests are EXCLUDED here: they stop/restart the shared
+# Parse Server container, which would flake any other test loaded into the
+# same process. Run them on their own via `rake test:integration:disruptive`.
 Rake::TestTask.new do |t|
   ENV['PARSE_TEST_USE_DOCKER'] = 'true'
   t.libs << "lib/parse/stack"
-  t.test_files = FileList["test/lib/**/*_test.rb"]
+  t.test_files = FileList["test/lib/**/*_test.rb"].exclude("test/lib/**/*disruptive*")
   t.warning = false
   t.verbose = true
 end
@@ -48,8 +52,12 @@ end
 namespace :test do
   desc "Run all integration tests (requires Docker)"
   task :integration do
+    # Disruptive tests (server stop/restart) are run separately via
+    # `test:integration:disruptive` so they never interleave with — and
+    # flake — the rest of the integration suite against the shared server.
     integration_files = FileList["test/lib/**/*integration_test.rb"]
-    
+                          .exclude("test/lib/**/*disruptive*")
+
     puts "Running #{integration_files.length} integration test files..."
     integration_files.each_with_index do |file, index|
       puts "Running integration test #{index + 1}/#{integration_files.length}: #{file}"
@@ -71,8 +79,10 @@ namespace :test do
 
   desc "Run unit tests only (no Docker required)"
   task :unit do
-    unit_files = FileList["test/lib/**/*_test.rb"].exclude("test/lib/**/*integration_test.rb")
-    
+    unit_files = FileList["test/lib/**/*_test.rb"]
+                   .exclude("test/lib/**/*integration_test.rb")
+                   .exclude("test/lib/**/*disruptive*")
+
     puts "Running #{unit_files.length} unit test files (no Docker)..."
     unit_files.each_with_index do |file, index|
       puts "Running unit test #{index + 1}/#{unit_files.length}: #{file}"
@@ -89,13 +99,49 @@ namespace :test do
     puts "\n✅ All unit tests completed successfully!"
   end
 
+  namespace :integration do
+    desc "Run DISRUPTIVE integration tests (stop/restart the Parse Server " \
+         "container). Run in isolation — these are excluded from the normal " \
+         "test / test:integration / test:unit runs."
+    task :disruptive do
+      disruptive_files = FileList["test/lib/**/*disruptive*_test.rb"]
+
+      if disruptive_files.empty?
+        puts "No disruptive test files found."
+        next
+      end
+
+      puts "Running #{disruptive_files.length} disruptive test file(s)..."
+      disruptive_files.each_with_index do |file, index|
+        puts "\n" + "=" * 80
+        puts "Running disruptive test #{index + 1}/#{disruptive_files.length}: #{file}"
+        puts "=" * 80
+        # Each file runs in its own process so a server outage in one cannot
+        # bleed into the next.
+        system("PARSE_TEST_USE_DOCKER=true ruby -Ilib:test #{file}") || begin
+          # A disruptive test may have left the server down on failure; bring
+          # it back so a follow-up run / other tasks start from a clean state.
+          system("docker start #{ENV["PSNEXT_PREFIX"] || "psnext-it"}-server", out: IO::NULL, err: IO::NULL)
+          exit(1)
+        end
+      end
+      puts "\n✅ All disruptive tests completed successfully!"
+    end
+  end
+
   desc "List all available test files"
   task :list do
     puts "\nIntegration Tests:"
-    FileList["test/lib/**/*integration_test.rb"].each { |f| puts "  #{f}" }
+    FileList["test/lib/**/*integration_test.rb"].exclude("test/lib/**/*disruptive*").each { |f| puts "  #{f}" }
+
+    puts "\nDisruptive Integration Tests (run via test:integration:disruptive):"
+    FileList["test/lib/**/*disruptive*_test.rb"].each { |f| puts "  #{f}" }
 
     puts "\nUnit Tests:"
-    FileList["test/lib/**/*_test.rb"].exclude("test/lib/**/*integration_test.rb").each { |f| puts "  #{f}" }
+    FileList["test/lib/**/*_test.rb"]
+      .exclude("test/lib/**/*integration_test.rb")
+      .exclude("test/lib/**/*disruptive*")
+      .each { |f| puts "  #{f}" }
   end
 
   # ---------------------------------------------------------------------------
