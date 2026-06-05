@@ -1,0 +1,4 @@
+services:
+  parse:
+    environment:
+      PARSE_SERVER_VERIFY_USER_EMAILS: "true"

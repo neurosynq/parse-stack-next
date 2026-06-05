@@ -83,9 +83,19 @@ Song.query.order(:plays.desc).skip(10).limit(20).results
 # Include related objects
 Song.all(includes: [:album, :comments])
 
-# Select specific fields
+# Select specific fields (allowlist)
 Song.all(keys: [:title, :artist])
+
+# Omit specific fields (denylist)
+Song.query.exclude_keys(:internal_notes).results
 ```
+
+> On the mongo-direct read path, `keys` is projected server-side while
+> `exclude_keys` is applied as a recursive post-fetch sanitize (it strips
+> matching field names at every depth and never removes reserved fields
+> such as `objectId`). See the
+> [Direct MongoDB Integration Guide](mongodb_direct_guide.md) for the
+> exact semantics and how it differs from the REST path.
 
 ## Aggregation
 

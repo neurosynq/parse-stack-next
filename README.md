@@ -4,6 +4,15 @@
 
 A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [parse-stack-next](https://github.com/neurosynq/parse-stack-next) is a Ruby client SDK, REST client, and Active Model ORM for [Parse Server](http://parseplatform.org/), combining a low-level API client, a query engine, an object-relational mapper (ORM), and a Cloud Code Webhooks rack application in a single gem.
 
+### What's new in 5.4
+
+- **5.4.0 — Hybrid search + reranking for RAG** — `Class.hybrid_search(text:, lexical:, vector:, k:, fusion:)` fuses a lexical Atlas Search branch with a `$vectorSearch` branch using reciprocal-rank fusion (RRF): lexical search nails exact tokens (codes, proper nouns), vector search nails paraphrase, and fusing the two beats either alone. Each branch enforces ACL/CLP independently before fusion (no separate hydration fetch to secure); results carry `#hybrid_score` / `#hybrid_ranks`. `Parse::VectorSearch::Hybrid.rank_fusion_supported?` detects Atlas 8.0+ native `$rankFusion` by a cached behavioural probe (native execution is opt-in; client-side RRF is the always-enforced default). `Parse::Retrieval::Reranker` adds cross-encoder reranking (`Reranker::Cohere` over `/v2/rerank`, plus a deterministic `Reranker::Fixture`), wired into `Parse::Retrieval.retrieve(hybrid:, rerank:)`. `Parse::Embeddings::SpendCap` adds an opt-in per-tenant embedding token cap (hard-refuse) at the `semantic_search` agent-tool boundary. See [CHANGELOG.md](./CHANGELOG.md) and [`docs/atlas_vector_search_guide.md`](./docs/atlas_vector_search_guide.md)
+- **5.4.0 — Vector backfill, visibility, and webhook redaction** — `Class.embed_pending!` backfills embeddings for records whose managed `:vector` field is null (objectId-cursor pagination); `Parse::Object#compute_embedding!` forces an in-place recompute without a save; `vector_visibility :owner_only | :public` controls whether a class's vectors appear in `as_json` by default; and webhook trigger payloads now strip declared `:vector` columns by default (a `:public` class keeps them). See [CHANGELOG.md](./CHANGELOG.md)
+- **5.4.0 — TOTP multi-factor auth works end to end** — the `Parse::User` MFA lifecycle is now fully functional and exercised against a real MFA-enabled Parse Server. `setup_mfa!(secret:, token:)` enrolls TOTP and returns recovery codes; `Parse::User.login_with_mfa(user, pass, code)` completes a second-factor login; `mfa_enabled?` / `mfa_status` report enrollment after an ordinary fetch — the SDK strips the raw TOTP secret and recovery codes that Parse Server returns in `authData` but preserves a leak-safe `{status: "enabled"}` projection so the status reads correctly without exposing the secret; `disable_mfa!(current_token:)` turns MFA off after re-validating the current code (a wrong code raises `Parse::MFA::VerificationError`), and `disable_mfa_master_key!(authorized_by:)` is the operator override. Each MFA write also no longer raises an internal argument error before reaching the server. Interactively, `rake client:console` now prompts for a TOTP / recovery code (or reads `PARSE_LOGIN_MFA`) when logging into an enrolled account. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.4.0 — Request email-address verification** — `Parse::User.request_email_verification(email)` and the instance `Parse::User#request_email_verification` ask Parse Server to (re)send the verification email for a registered, not-yet-verified user, mirroring `request_password_reset` (per-email rate limiting, Boolean return). Requires a server email adapter with `verifyUserEmails` enabled. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.4.0 — Audience hash queries persist correctly** — `Parse::Audience#query` is now stored as a JSON string on the wire to match Parse Server's `_Audience.query` column type, so saving an audience with a `Hash` query no longer fails the server schema check. The public API is unchanged — assign a `Hash`, read a `Hash` back. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.4.0 — Faster AtlasSearch role-cache expiry** — `Parse::AtlasSearch` `role_cache_ttl` now defaults to 30 seconds (was 120) so a role grant or revoke is reflected in `$search` ACL decisions sooner, at the cost of slightly more frequent role lookups. See [CHANGELOG.md](./CHANGELOG.md)
+
 ### What's new in 5.3
 
 - **5.3.0 — Run webhook handlers (and clients) as the calling user** — Parse Server embeds the caller's live session token in every trigger webhook fired by a logged-in user. A handler can now opt in to acting on the server *as that user* — full ACL/CLP/`protectedFields` enforcement, no master key. `payload.session_token` exposes the captured token (`nil` for master-key requests; still scrubbed from `payload.user`/`payload.object`/`as_json`/logs); `payload.user_agent` returns a client-mode `Parse::Agent`, and `payload.user_client` a non-master `Parse::Client` with the token **bound** so even raw REST calls authorize as the user. The same user-scoped client is available client-side via `Parse::User#session_client` and the `Parse::Client#become(token)` primitive, with `Parse::Client#with_session { … }` for block scoping. Backed by a new `Parse::Client.new(session_token:)` option. See [Acting as the calling user](#acting-as-the-calling-user)
@@ -209,9 +218,20 @@ result = Parse.call_function :myFunctionName, {param: value}
 
 ```
 
+## Examples
+
+Runnable, self-contained scripts live in [`examples/`](examples/) — see
+[`examples/README.md`](examples/README.md) for the full index. Highlights:
+
+- [`basic_server.rb`](examples/basic_server.rb) — master-key setup: models, schema, CRUD + queries.
+- [`basic_client.rb`](examples/basic_client.rb) — unprivileged client with row-level ACL enforcement.
+- [`live_query_listener.rb`](examples/live_query_listener.rb) — interactive LiveQuery console scoped to a user's session.
+- [`rag_chatbot.rb`](examples/rag_chatbot.rb) — retrieval-augmented generation with `semantic_search` + an OpenAI/Anthropic add-in.
+- [`transaction_example.rb`](examples/transaction_example.rb) — atomic multi-object transactions.
+
 ## Release History
 
-**Current version: 5.0.1** | **Ruby 3.2+ required**
+**Current version: 5.4.0** | **Ruby 3.2+ required**
 
 The 5.0 highlights (vector search / RAG, pooled Redis cache, AS::N instrumentation, MCP transport hardening, GraphQL type generation) are summarized in the [What's new in 5.0](#whats-new-in-50) section above. Earlier releases are recorded below.
 
@@ -1586,8 +1606,11 @@ user.mfa_status    # => :enabled, :disabled, or :unknown
 # Disable MFA (requires current token)
 user.disable_mfa!(current_token: "123456")
 
-# Admin reset (master key) — authorized_by must be a Parse::User
-user.disable_mfa_master_key!(authorized_by: admin_user)
+# Admin reset (master key) — fails closed: pass either an admin_role:
+# for the library to verify, or allow_unverified: true to assert that
+# you have already authorized the operator out-of-band.
+user.disable_mfa_master_key!(authorized_by: admin_user, admin_role: "Admin")
+# or: user.disable_mfa_master_key!(authorized_by: admin_user, allow_unverified: true)
 ```
 
 **SMS MFA (requires Parse Server SMS callback):**
@@ -4917,6 +4940,32 @@ The `parse_object` handed to your handler is the **full object as Parse Server s
 
 For any `after_*` hook, return values are not needed since Parse does not utilize them. You may also register as many `after_save` or `after_delete` handlers as you prefer, all of them will be called.
 
+For `before_save` (and functions), the handler's value **is** the response Parse Server acts on — return the (possibly mutated) `parse_object` to allow the write, or `false` / `error!` to reject it. You can set that value with an explicit `return` or as the block's last expression; both work, as do the proc idioms `next value` / `break value`:
+
+```ruby
+Parse::Webhooks.route :before_save, :Artist do
+  artist = parse_object
+  return artist if artist.name.present?   # explicit early return
+  error! "name is required"               # raise to reject the save
+end
+```
+
+`self` inside the block is the `Parse::Webhooks::Payload`, so `parse_object`, `params`, and `error!` are available directly. As anywhere in Ruby, `return` ends the handler immediately — to run work *after* the response is sent, use `after_response` (below) rather than code after the `return`.
+
+#### Deferring work until after the response
+
+`payload.after_response { … }` (alias `defer`) registers work to run **after** the webhook response has been sent, off the critical path of the save or function the client is waiting on. The handler returns its value synchronously; the deferred block runs afterward — ideal for search indexing, cache warming, or fan-out that should not add latency.
+
+```ruby
+Parse::Webhooks.route :after_save, :Post do
+  post = parse_object
+  after_response { SearchIndex.reindex(post.id) }   # runs after the reply is sent
+  post
+end
+```
+
+Under Puma or Unicorn the block runs via `rack.after_reply` once the response is flushed (same worker thread, zero added round-trip latency); on a server without it (e.g. WEBrick) it falls back to a detached thread. Multiple blocks run in order and are isolated — one raising affects neither the response nor the others. Notes: deferred blocks run **only on the success path** (a rejected `before_save` runs none), "after the response" is **not** "after the row commits" (don't rely on the persisted row inside the block), and the work is **in-process and best-effort** — it dies with the worker, so for anything that *must* happen use a durable job queue (Sidekiq / ActiveJob). Blocks are drained only when the payload runs through the mounted `Parse::Webhooks` Rack app (a no-op under direct `run_function` / `call_route`). See the [Cloud Code Webhooks Guide](docs/webhooks_guide.md#deferring-work-until-after-the-response).
+
 > **Your model's `after_save` callbacks run here too.** When an `after_save` /
 > `after_create` trigger fires, the webhook rebuilds the `Parse::Object` from the
 > payload and runs that model's ActiveModel `after_save` / `after_create`
@@ -4927,6 +4976,57 @@ For any `after_*` hook, return values are not needed since Parse does not utiliz
 > REST response, so the webhook skips them to avoid double-firing side effects;
 > for saves from other clients (JS / iOS / REST), the webhook runs them, since
 > the SDK never had the chance.
+
+#### ActiveModel callbacks vs. Parse Server triggers
+
+The SDK exposes the full ActiveModel lifecycle on every model
+(`before_validation`, `before_save`/`after_save`, `before_create`/`after_create`,
+`before_update`/`after_update`, `before_destroy`/`after_destroy`). Parse Server,
+separately, exposes a fixed set of **webhook trigger types**. They are not
+one-to-one — the SDK maps between them, and a webhook must be **registered** for
+your ActiveModel logic to run server-side for non-Ruby clients (JS / iOS / REST /
+Dashboard). Without a registered webhook, that logic runs only in the Ruby
+process that initiated the save.
+
+Supported Parse Server trigger types: `beforeSave`/`afterSave`,
+`beforeDelete`/`afterDelete`, `beforeFind`/`afterFind`, `beforeLogin`/`afterLogin`,
+`afterLogout`, `beforePasswordResetRequest`, `beforeConnect`,
+`beforeSubscribe`/`afterEvent`, and file triggers on the `@File` pseudo-class.
+
+The **authentication** triggers (`beforeLogin`/`afterLogin`/`afterLogout`/
+`beforePasswordResetRequest`) and **LiveQuery** triggers (`beforeConnect`/
+`beforeSubscribe`/`afterEvent`) route as first-class shapes — predicates
+(`before_login?` … `after_event?`, `auth_trigger?`/`live_query_trigger?`), an
+`event` accessor, and top-level `sessionToken` capture into `payload.session_token`.
+None of them run ActiveModel `save`/`create`/`destroy` callbacks, even though the
+auth triggers carry a `_User`/`_Session`. Parse Server **ignores the response body**
+for all of them, so the only signal that affects the operation is rejection, and
+only on the `before*` variants: returning `false` (or calling `error!`) from a
+`before_login`/`before_connect`/`before_subscribe`/`before_password_reset_request`
+handler denies the operation, while anything else is a success no-op. (LiveQuery
+triggers are delivered over HTTP only in a co-located single-process setup;
+`beforeConnect` is effectively in-process-only.)
+
+Key relationship — **`beforeSave`/`afterSave` carry the create variants**. Parse
+Server has **no `beforeCreate`/`afterCreate` trigger** (it rejects them). The SDK
+runs your `before_create`/`after_create` callbacks *inside* the
+`beforeSave`/`afterSave` handler for new objects, in ActiveModel order
+(`before_save → before_create`, `after_create → after_save`). So **registering a
+`beforeSave` webhook enables both `before_save` and `before_create`**, and
+`afterSave` enables both `after_save` and `after_create`. Requesting a create
+webhook raises with guidance pointing you at the save trigger.
+
+> **`after_save` is synchronous and on the critical path.** Parse Server waits
+> for the webhook to return before completing the client's write — even on
+> `afterSave`, whose return value is a no-op. Treat `after_save` as a place to
+> **enqueue** background work, not to run long logic inline, and avoid saving
+> other objects inside it (each cascading save fires more webhooks). `beforeSave`
+> can mutate or reject the write, so it is necessarily inline — keep it lean.
+
+For the full picture — trigger types, registration, the synchronous-latency
+model, the Ruby-initiated dedup, and inbound replay/freshness protection — see
+the [Cloud Code Webhooks Guide](docs/webhooks_guide.md) and
+[`examples/webhook_server.rb`](examples/webhook_server.rb).
 
 #### Trigger object state
 
@@ -5764,6 +5864,13 @@ The integration tests use Docker Compose to spin up a Parse Server instance with
 - Docker and Docker Compose installed
 - Ruby environment with bundler
 
+> **Always run the suite with `bundle exec`.** Newer `minitest` (6.0+) moved
+> `minitest/mock` out into a separate gem, so a bare `ruby`/`rake` invocation
+> activates minitest 6 and then fails to load `minitest/mock`, aborting every
+> test at load time with `cannot load such file -- minitest/mock (LoadError)`.
+> Running through bundler pins the locked versions and avoids this. If you hit
+> that LoadError, prefix the command with `bundle exec`.
+
 #### Setup and Running Tests
 
 1. **Enable Docker Tests**: Set the environment variable to enable Docker-based tests:
@@ -5847,6 +5954,56 @@ Bring the stack up and verify:
 docker compose -f scripts/docker/docker-compose.test.yml up -d
 curl -s http://localhost:29337/parse/health   # -> {"status":"ok"}
 ```
+
+#### Network Exposure and the Preflight Guard
+
+Every service binds to loopback (`127.0.0.1`) by default, and the default
+credentials above are committed to this repository — safe in combination,
+since nothing off the host can reach them. Each bind is overridable
+(`PARSE_BIND`, `MONGO_BIND`, `REDIS_BIND`, `DASHBOARD_BIND`) for the
+occasional need to attach a remote client while debugging.
+
+That override is a footgun: pointing a bind at `0.0.0.0` while the default
+credentials are still in force would publish an admin-credentialed stack
+(Mongo `admin:password`, master key `psnextItMasterKey`) onto your LAN. A
+`preflight` service runs before anything else and **refuses to start the
+stack** in exactly that case. To proceed, do one of:
+
+```bash
+# 1. Keep it loopback (the default) — just omit the *_BIND override.
+
+# 2. Supply real credentials instead of the committed test defaults.
+PARSE_MASTER_KEY="$(openssl rand -hex 24)" \
+MONGO_ROOT_PASSWORD="$(openssl rand -hex 24)" \
+MONGO_BIND=0.0.0.0 \
+  docker compose -f scripts/docker/docker-compose.test.yml up -d
+
+# 3. Acknowledge the exposure on a trusted, isolated network.
+ALLOW_INSECURE_BIND=1 MONGO_BIND=0.0.0.0 \
+  docker compose -f scripts/docker/docker-compose.test.yml up -d
+```
+
+#### Secret Injection (real credentials)
+
+The committed defaults are deliberately non-secret, so the loopback stack
+needs no secrets manager. If you point the stack at *real or shared*
+credentials (option 2 above, or a staging Mongo), keep them out of your
+shell history and the compose file by injecting them at launch. The stack
+reads plain environment variables, so any injector works:
+
+```bash
+# 1Password CLI — secrets resolved from an op:// .env reference file.
+op run --env-file=.env.secrets -- \
+  docker compose -f scripts/docker/docker-compose.test.yml up -d
+
+# Doppler — secrets pulled from a configured project/config.
+doppler run -- \
+  docker compose -f scripts/docker/docker-compose.test.yml up -d
+```
+
+Use the committed `.env.sample` as the reference for which variables each
+side expects; copy it to a gitignored `.env` (or an `op://`-referenced
+`.env.secrets`) and fill in real values there.
 
 #### Environment Variables
 

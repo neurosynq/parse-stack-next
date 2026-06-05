@@ -79,6 +79,50 @@ class TestQueryReadPreference < Minitest::Test
     assert_empty headers
   end
 
+  # --- REST BODY (the part Parse Server actually reads) -------------------
+  # Parse Server's middleware maps no `X-Parse-Read-Preference` header into
+  # request options; `RestQuery` reads `readPreference` only from restOptions
+  # (the compiled query body). Asserting the header alone is the blind spot
+  # that let the no-op ship — these pin the body.
+
+  def test_compiled_body_includes_read_preference
+    query = Parse::Query.new("TestClass")
+    query.read_pref(:secondary)
+    compiled = query.compile
+    assert_equal "SECONDARY", compiled[:readPreference]
+  end
+
+  def test_compiled_body_normalizes_secondary_preferred
+    query = Parse::Query.new("TestClass")
+    query.read_pref("secondary_preferred")
+    compiled = query.compile
+    assert_equal "SECONDARY_PREFERRED", compiled[:readPreference]
+  end
+
+  def test_compiled_body_omits_read_preference_when_unset
+    query = Parse::Query.new("TestClass")
+    compiled = query.compile
+    refute compiled.key?(:readPreference)
+  end
+
+  def test_compiled_body_omits_invalid_read_preference
+    query = Parse::Query.new("TestClass")
+    query.read_preference = :invalid_value
+    assert_output(nil, /Invalid read preference/) do
+      compiled = query.compile
+      refute compiled.key?(:readPreference)
+    end
+  end
+
+  def test_unencoded_compile_omits_read_preference
+    # `readPreference` is a REST-wire concern; the structural (encode: false)
+    # form used by mongo-direct / snapshot tooling should not carry it.
+    query = Parse::Query.new("TestClass")
+    query.read_pref(:secondary)
+    compiled = query.compile(encode: false)
+    refute compiled.key?(:readPreference)
+  end
+
   def test_invalid_read_preference_not_added_to_headers
     query = Parse::Query.new("TestClass")
     query.read_preference = :invalid_value

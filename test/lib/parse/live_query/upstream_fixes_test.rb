@@ -130,13 +130,15 @@ class LiveQueryUpstreamFixesTest < Minitest::Test
     end
 
     # Mirror Client#subscribe's signature so the kwarg propagation is exercised.
-    def subscribe(class_name, where: {}, fields: nil, session_token: nil,
+    def subscribe(class_name, where: {}, fields: nil, keys: nil, watch: nil, session_token: nil,
                   use_master_key: false, &block)
       sub = Parse::LiveQuery::Subscription.new(
         client: self,
         class_name: class_name.to_s,
         query: where,
         fields: fields,
+        keys: keys,
+        watch: watch,
         session_token: session_token,
         use_master_key: use_master_key,
       )
@@ -187,13 +189,15 @@ class LiveQueryUpstreamFixesTest < Minitest::Test
       @master_key = nil
     end
 
-    def subscribe(class_name, where: {}, fields: nil, session_token: nil,
+    def subscribe(class_name, where: {}, fields: nil, keys: nil, watch: nil, session_token: nil,
                   use_master_key: false, &block)
       sub = Parse::LiveQuery::Subscription.new(
         client: self,
         class_name: class_name.to_s,
         query: where,
         fields: fields,
+        keys: keys,
+        watch: watch,
         session_token: session_token,
         use_master_key: use_master_key,
       )

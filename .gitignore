@@ -49,6 +49,8 @@ logs
 !docs/mongodb_index_optimization_guide.md
 !docs/atlas_vector_search_guide.md
 !docs/usage_guide.md
+!docs/webhooks_guide.md
 !SECURITY.md
 !docs/client_sdk_guide.md
 !docs/acl_clp_guide.md
+!examples/README.md

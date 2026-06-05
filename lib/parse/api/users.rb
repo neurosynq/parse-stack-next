@@ -14,7 +14,11 @@ module Parse
       # @!visibility private
       LOGIN_PATH = "login"
       # @!visibility private
+      VERIFY_PASSWORD_PATH = "verifyPassword"
+      # @!visibility private
       REQUEST_PASSWORD_RESET = "requestPasswordReset"
+      # @!visibility private
+      VERIFICATION_EMAIL_REQUEST = "verificationEmailRequest"
 
       # Fetch a {Parse::User} for a given objectId.
       # @param id [String] the user objectid
@@ -130,6 +134,26 @@ module Parse
         response
       end
 
+      # Request that Parse Server (re)send the email-address verification email
+      # for a registered, not-yet-verified user. Requires the server to have an
+      # email adapter and `verifyUserEmails` enabled; otherwise Parse Server
+      # responds with an error. Rate-limited per email like password reset.
+      #
+      # @param email [String] the Parse user email.
+      # @param opts [Hash] additional options to pass to the {Parse::Client} request.
+      # @param headers [Hash] additional HTTP headers to send with the request.
+      # @return [Parse::Response]
+      def request_email_verification(email, headers: {}, **opts)
+        rate_key = "emailverify:#{email}"
+        check_login_rate_limit!(rate_key)
+        body = { email: email }
+        response = request :post, VERIFICATION_EMAIL_REQUEST, body: body, opts: opts, headers: headers
+        # Indistinguishable found/not-found response, like password reset — count
+        # every attempt toward backoff so probing can't reset the counter.
+        track_login_attempt(rate_key, false)
+        response
+      end
+
       # Login a user. Implements client-side rate limiting with exponential
       # backoff after repeated failures to mitigate brute force attacks.
       # @param username [String] the Parse user username.
@@ -180,6 +204,37 @@ module Parse
         response
       end
 
+      # Verify a user's credentials against Parse Server without minting a session.
+      # This is the canonical step-up / re-authentication primitive: it confirms
+      # that the username + password combination is correct without producing a
+      # new session token on success.
+      #
+      # Uses the +POST /parse/verifyPassword+ endpoint (credentials in the request
+      # BODY, mirroring +login+) rather than the +GET+ form. Parse Server accepts
+      # both (same handler, neither master-key gated; the POST variant landed in
+      # 7.1.0), but POST keeps the plaintext password out of the URL — and
+      # therefore out of server access logs, reverse-proxy logs, the +Referer+
+      # header, and the SDK's URL-keyed response cache.
+      #
+      # On success Parse Server returns the user object (HTTP 200) with the same
+      # shape as a login response (minus +sessionToken+). On failure it returns a
+      # 4xx with an error body, most commonly:
+      # - code 101 (+ERROR_OBJECT_NOT_FOUND+) for an unknown username or wrong password.
+      # - code 205 (+ERROR_EMAIL_NOT_FOUND+) when +preventLoginWithUnverifiedEmail+
+      #   is enabled and the account's email has not been verified.
+      #
+      # @param username [String] the Parse user username.
+      # @param password [String] the Parse user's associated password.
+      # @param headers [Hash] additional HTTP headers to send with the request.
+      # @param opts [Hash] additional options to pass to the {Parse::Client} request.
+      # @return [Parse::Response]
+      def verify_password(username, password, headers: {}, **opts)
+        body = { username: username, password: password }
+        response = request :post, VERIFY_PASSWORD_PATH, body: body, headers: headers, opts: opts
+        response.parse_class = Parse::Model::CLASS_USER
+        response
+      end
+
       # Logout a user by deleting the associated session.
       # @param session_token [String] the Parse user session token to delete.
       # @param headers [Hash] additional HTTP headers to send with the request.
@@ -223,7 +278,7 @@ module Parse
       LOGIN_RATE_LIMIT_TTL = 600
 
       # Checks if a login attempt is allowed for the given username.
-      # @raise [RuntimeError] if the account is temporarily locked out.
+      # @raise [Parse::Error::AccountLockoutError] if the account is temporarily locked out.
       def check_login_rate_limit!(username)
         @login_rate_limit_mutex ||= Mutex.new
         @login_rate_limit_mutex.synchronize do
@@ -231,7 +286,8 @@ module Parse
           return unless entry
           if entry[:locked_until] && Time.now < entry[:locked_until]
             wait = (entry[:locked_until] - Time.now).ceil
-            raise "Login rate limited for '#{username}'. Try again in #{wait} seconds."
+            raise Parse::Error::AccountLockoutError,
+                  "Login rate limited for '#{username}'. Try again in #{wait} seconds."
           end
         end
       end

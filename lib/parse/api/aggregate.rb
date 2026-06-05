@@ -66,10 +66,16 @@ module Parse
       # @param pipeline [Array] the MongoDB aggregation pipeline stages.
       # @param opts [Hash] additional options to pass to the {Parse::Client} request.
       # @param headers [Hash] additional HTTP headers to send with the request.
+      # @param raw_values [Boolean] when true, adds +rawValues: true+ to the request
+      #   so Parse Server returns un-decoded field values (PS 9.9.0+, #10438).
+      # @param raw_field_names [Boolean] when true, adds +rawFieldNames: true+ to the
+      #   request so Parse Server returns original (un-decoded) field names (PS 9.9.0+).
       # @return [Parse::Response]
       # @see Parse::Query
-      def aggregate_pipeline(className, pipeline = [], headers: {}, **opts)
+      def aggregate_pipeline(className, pipeline = [], headers: {}, raw_values: false, raw_field_names: false, **opts)
         query = { pipeline: pipeline.to_json }
+        query[:rawValues] = true if raw_values
+        query[:rawFieldNames] = true if raw_field_names
         response = request :get, aggregate_uri_path(className), query: query, headers: headers, opts: opts
         response.parse_class = className if response.present?
         response

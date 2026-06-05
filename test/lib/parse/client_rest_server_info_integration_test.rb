@@ -48,8 +48,11 @@ class ClientRestServerInfoIntegrationTest < Minitest::Test
         Parse.client.server_info!
       end
     end
-    assert_match(/master key/i, err.message,
-                 "rejection must cite the missing master key (got: #{err.message})")
+    # Don't pin the server's exact prose: older Parse Server said "master
+    # key is required", 9.x returns a generic "Permission denied (403)".
+    # The invariant is the authorization refusal, not its wording.
+    assert_match(/master key|permission denied|forbidden|\b403\b/i, err.message,
+                 "rejection must surface an authorization failure (got: #{err.message})")
   end
 
   # --------------------------------------------------------------------

@@ -363,7 +363,7 @@ module Parse
       #   events can arrive. Optional — callers may still capture the
       #   returned subscription and register callbacks later.
       # @return [Subscription]
-      def subscribe(class_name, where: {}, fields: nil, session_token: nil,
+      def subscribe(class_name, where: {}, fields: nil, keys: nil, watch: nil, session_token: nil,
                     use_master_key: false, &block)
         # Handle Parse::Object subclass
         if class_name.is_a?(Class) && class_name < Parse::Object
@@ -396,6 +396,8 @@ module Parse
           class_name: class_name,
           query: where,
           fields: fields,
+          keys: keys,
+          watch: watch,
           session_token: session_token,
           use_master_key: use_master_key,
         )

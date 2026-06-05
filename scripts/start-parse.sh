@@ -64,6 +64,52 @@ export PARSE_SERVER_ALLOW_CUSTOM_OBJECT_ID="${PARSE_SERVER_ALLOW_CUSTOM_OBJECT_I
 export PARSE_SERVER_LIVE_QUERY="${PARSE_SERVER_LIVE_QUERY:-{\"classNames\":[\"Song\",\"Album\",\"User\",\"_User\",\"TestLiveQuery\"]}}"
 export PARSE_SERVER_START_LIVE_QUERY_SERVER="${PARSE_SERVER_START_LIVE_QUERY_SERVER:-true}"
 
+# Push configuration — test-stack only. Points at a no-op adapter bind-mounted
+# from test/cloud (see test/cloud/dummy-push-adapter.js). It does NOT deliver to
+# any real device gateway; it lets Parse Server accept `POST /parse/push` and
+# create/complete a real `_PushStatus` so the push send+status lifecycle is
+# integration-testable offline. Without this, `POST /push` returns code 115
+# "Missing push configuration". DO NOT use a no-op adapter in a deployed
+# environment — it silently drops every notification.
+export PARSE_SERVER_PUSH="${PARSE_SERVER_PUSH:-{\"adapter\":\"/parse-server/cloud/dummy-push-adapter.js\"}}"
+
+# MFA / 2FA configuration — test-stack only. Enables Parse Server's built-in
+# TOTP MFA adapter so the Parse::MFA / two_factor_auth integration tests can
+# enroll a user (authData.mfa.{secret,token}) and log in with a time-based code.
+# Params match rotp's defaults (SHA1 / 6 digits / 30s period) so codes generated
+# client-side validate server-side.
+#
+# NOTE: the `auth` option is the one Parse Server option that CANNOT be passed
+# as a JSON env var — its Definitions entry has no objectParser, so
+# PARSE_SERVER_AUTH_PROVIDERS is taken as a raw string and never JSON-parsed
+# (the MFA adapter then receives `undefined` options and 500s). It must come
+# from a config file, which parse-server JSON-parses natively. We write a
+# minimal config file holding only the `auth` block and pass it to parse-server
+# below; env vars still provide — and take precedence for — everything else
+# (parse-server applies env first, then fills gaps from the file).
+PARSE_AUTH_CONFIG_FILE="${PARSE_AUTH_CONFIG_FILE:-/tmp/psnext-parse-auth-config.json}"
+cat > "$PARSE_AUTH_CONFIG_FILE" <<'AUTHCFG'
+{ "auth": { "mfa": { "options": ["TOTP"], "digits": 6, "period": 30, "algorithm": "SHA1" } } }
+AUTHCFG
+
+# Email — test-stack only. Captures outgoing mail into an `EmailCapture` class
+# (see test/cloud/capturing-email-adapter.js) instead of sending it, so the
+# client-side password-reset / verification integration tests can assert
+# delivery and read back the reset link. `PARSE_PUBLIC_SERVER_URL` is required
+# for Parse Server to build those links. Email verification is NOT enabled, so
+# ordinary signups still work without a verification round-trip. DO NOT use a
+# capturing adapter in a deployed environment — it drops every email.
+export PARSE_SERVER_EMAIL_ADAPTER="${PARSE_SERVER_EMAIL_ADAPTER:-/parse-server/cloud/capturing-email-adapter.js}"
+export PARSE_PUBLIC_SERVER_URL="${PARSE_PUBLIC_SERVER_URL:-http://localhost:${PARSE_HOST_PORT:-29337}/parse}"
+export PARSE_SERVER_APP_NAME="${PARSE_SERVER_APP_NAME:-parse-stack-next-it}"
+# Keep email verification OFF. Configuring an email adapter otherwise flips
+# Parse Server into requiring verification, which makes signup return a user
+# with NO session token until the address is verified — breaking the
+# signup-on-save suite. Password reset does not need verification, only the
+# adapter + public URL above.
+export PARSE_SERVER_VERIFY_USER_EMAILS="${PARSE_SERVER_VERIFY_USER_EMAILS:-false}"
+export PARSE_SERVER_PREVENT_LOGIN_WITH_UNVERIFIED_EMAIL="${PARSE_SERVER_PREVENT_LOGIN_WITH_UNVERIFIED_EMAIL:-false}"
+
 # File upload — test-stack only. Authenticated session-token uploads are
 # permitted; public/anonymous uploads are NOT (mirrors a typical hardened
 # Parse Server config). The client_rest_files integration tests assert
@@ -92,15 +138,17 @@ echo "Looking for parse-server..."
 which node
 ls -la /parse-server/
 
-# Try different ways to start parse-server
+# Try different ways to start parse-server. The config file argument supplies
+# the `auth` (MFA) block; every other option still comes from the environment.
+echo "  Auth config file: $PARSE_AUTH_CONFIG_FILE"
 if [ -f "/parse-server/bin/parse-server" ]; then
   echo "Using /parse-server/bin/parse-server"
-  exec /parse-server/bin/parse-server
+  exec /parse-server/bin/parse-server "$PARSE_AUTH_CONFIG_FILE"
 elif [ -f "/usr/src/app/bin/parse-server" ]; then
   echo "Using /usr/src/app/bin/parse-server"
-  exec /usr/src/app/bin/parse-server
+  exec /usr/src/app/bin/parse-server "$PARSE_AUTH_CONFIG_FILE"
 else
   echo "Trying with node and index.js"
   cd /parse-server
-  exec node ./bin/parse-server
+  exec node ./bin/parse-server "$PARSE_AUTH_CONFIG_FILE"
 fi

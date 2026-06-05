@@ -62,11 +62,21 @@ module Parse
       # @return [Parse::LiveQuery::Client] the LiveQuery client
       attr_reader :client
 
-      # @return [Array<String>] fields to watch for changes (nil = all fields)
+      # @return [Array<String>] field projection for returned events
+      #   (nil = all fields). Parse Server 7.0 renamed this subscription
+      #   option from `fields` to `keys`; {#keys} is the canonical alias.
       attr_reader :fields
+      # @return [Array<String>] alias for {#fields} under Parse Server's
+      #   post-7.0 `keys` name.
+      alias_method :keys, :fields
 
       # @return [String, nil] session token for ACL-aware subscriptions
       attr_reader :session_token
+
+      # @return [Array<String>, nil] field names that trigger update events when
+      #   changed (PS 7.0+ `watch` option). +nil+ means all field changes trigger
+      #   update events.
+      attr_reader :watch
 
       # Create a new subscription
       # @param client [Parse::LiveQuery::Client] the LiveQuery client
@@ -85,13 +95,16 @@ module Parse
       #   elevated; on a non-admin connection the client warns and the
       #   subscription stays ACL-scoped. For mixed scoped + admin needs,
       #   use two separate clients. Defaults to false.
-      def initialize(client:, class_name:, query: {}, fields: nil,
-                     session_token: nil, use_master_key: false)
+      def initialize(client:, class_name:, query: {}, fields: nil, keys: nil,
+                     session_token: nil, use_master_key: false, watch: nil)
         @monitor = Monitor.new
         @client = client
         @class_name = class_name
         @query = query
-        @fields = fields
+        # `keys` is the post-7.0 name; accept either and prefer the explicit
+        # `keys:` when both are supplied.
+        @fields = keys.nil? ? fields : keys
+        @watch = watch
         @session_token = session_token
         @use_master_key = use_master_key == true
         @request_id = generate_request_id
@@ -239,7 +252,21 @@ module Parse
           },
         }
 
-        msg[:query][:fields] = fields if fields&.any?
+        if fields&.any?
+          # Parse Server 7.0 (DEPPS9 / #8852) renamed the subscription field-
+          # projection option from `fields` to `keys`. PS 7+ reads `keys` and
+          # ignores `fields`; PS < 7 reads `fields`. Emit BOTH so projection is
+          # honored on every supported server — sending an extra key the server
+          # ignores is harmless, while sending only `fields` silently disables
+          # projection (events return all columns) on PS 7+.
+          msg[:query][:keys] = fields
+          msg[:query][:fields] = fields
+        end
+        # PS 7.0 (#8028) `watch`: fire update events only when the named fields
+        # change. Distinct from field projection (`keys`/`fields`): `watch`
+        # controls which field mutations generate an update event; `keys` controls
+        # which fields are returned in the event payload.
+        msg[:query][:watch] = watch if watch&.any?
         msg[:sessionToken] = session_token if session_token
         # The subscribe frame deliberately NEVER carries `masterKey`.
         # Parse Server's `_handleSubscribe` does not read it — master-key

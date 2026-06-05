@@ -7,15 +7,52 @@ module Parse
     module Hooks
       # @!visibility private
       HOOKS_PREFIX = "hooks/"
-      # The allowed set of Parse triggers.
-      TRIGGER_NAMES = [:afterCreate, :afterDelete, :afterFind, :afterSave, :beforeDelete, :beforeFind, :beforeSave].freeze
+      # The allowed set of Parse webhook triggers. Mirrors Parse Server's
+      # `triggers.Types` so registration of the auth / LiveQuery / password-
+      # reset hooks is no longer pre-rejected by the SDK.
+      #
+      # NOTE: this allowlist gates *registration* only. The webhook router in
+      # {Parse::Webhooks} currently shapes payloads for the object triggers
+      # (before/after save/delete/find); the login / connect / subscribe /
+      # password-reset payloads carry a different shape (no `object`) and
+      # their first-class routing is a follow-up. `beforeConnect` is a
+      # connection-global trigger whose Parse-canonical className is the
+      # `@Connect` sentinel; file triggers use `@File`. Both are accepted by
+      # the trigger-className validator ({Parse::API::PathSegment.trigger_class_name!}).
+      TRIGGER_NAMES = [
+        :afterDelete, :afterFind, :afterSave,
+        :beforeDelete, :beforeFind, :beforeSave,
+        :beforeLogin, :afterLogin, :afterLogout, :beforePasswordResetRequest,
+        :beforeConnect, :beforeSubscribe, :afterEvent,
+      ].freeze
       # @!visibility private
-      TRIGGER_NAMES_LOCAL = [:after_create, :after_delete, :after_find, :after_save, :before_delete, :before_find, :before_save].freeze
+      TRIGGER_NAMES_LOCAL = [
+        :after_delete, :after_find, :after_save,
+        :before_delete, :before_find, :before_save,
+        :before_login, :after_login, :after_logout, :before_password_reset_request,
+        :before_connect, :before_subscribe, :after_event,
+      ].freeze
+
+      # `beforeCreate` / `afterCreate` are NOT Parse Server trigger types —
+      # Parse Server rejects them ("invalid hook declaration"). They exist only
+      # as Parse-Stack ActiveModel callbacks (`before_create` / `after_create`),
+      # which the webhook router runs INSIDE the `beforeSave` / `afterSave`
+      # handler for new objects (gated on `original.nil?`). So there is nothing
+      # to register for them — register `beforeSave` / `afterSave` instead and
+      # the create callbacks fire within it.
       # @!visibility private
       def _verify_trigger(triggerName)
-        triggerName = triggerName.to_s.camelize(:lower).to_sym
-        raise ArgumentError, "Invalid trigger name #{triggerName}" unless TRIGGER_NAMES.include?(triggerName)
-        triggerName
+        camel = triggerName.to_s.camelize(:lower).to_sym
+        if %i[beforeCreate afterCreate].include?(camel)
+          save     = camel == :beforeCreate ? "beforeSave" : "afterSave"
+          callback = camel == :beforeCreate ? "before_create" : "after_create"
+          raise ArgumentError,
+                "Parse Server has no #{camel} webhook trigger. Register a " \
+                "#{save} webhook instead — Parse Stack runs your #{callback} " \
+                "ActiveModel callbacks within the #{save} handler for new objects."
+        end
+        raise ArgumentError, "Invalid trigger name #{camel}" unless TRIGGER_NAMES.include?(camel)
+        camel
       end
 
       # Fetch all defined cloud code functions.
@@ -74,7 +111,7 @@ module Parse
       # @see TRIGGER_NAMES
       def fetch_trigger(triggerName, className)
         triggerName = _verify_trigger(triggerName)
-        safe_class = Parse::API::PathSegment.identifier!(className, kind: "class name")
+        safe_class = Parse::API::PathSegment.trigger_class_name!(className, kind: "class name")
         request :get, "#{HOOKS_PREFIX}triggers/#{safe_class}/#{triggerName}"
       end
 
@@ -98,7 +135,7 @@ module Parse
       # @see Parse::API::Hooks::TRIGGER_NAMES
       def update_trigger(triggerName, className, url)
         triggerName = _verify_trigger(triggerName)
-        safe_class = Parse::API::PathSegment.identifier!(className, kind: "class name")
+        safe_class = Parse::API::PathSegment.trigger_class_name!(className, kind: "class name")
         request :put, "#{HOOKS_PREFIX}triggers/#{safe_class}/#{triggerName}", body: { url: url }
       end
 
@@ -109,7 +146,7 @@ module Parse
       # @see Parse::API::Hooks::TRIGGER_NAMES
       def delete_trigger(triggerName, className)
         triggerName = _verify_trigger(triggerName)
-        safe_class = Parse::API::PathSegment.identifier!(className, kind: "class name")
+        safe_class = Parse::API::PathSegment.trigger_class_name!(className, kind: "class name")
         request :put, "#{HOOKS_PREFIX}triggers/#{safe_class}/#{triggerName}", body: { __op: "Delete" }
       end
     end

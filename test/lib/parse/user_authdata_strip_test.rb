@@ -48,6 +48,27 @@ class UserAuthdataStripTest < Minitest::Test
     assert_nil user.auth_data, "symbol-keyed authData must also be stripped"
   end
 
+  # MFA is special: the untrusted strip keeps a non-sensitive
+  # `{ "mfa" => { "status" => "enabled" } }` projection so #mfa_enabled? /
+  # #mfa_status work after a fetch, but the raw TOTP secret and recovery codes
+  # must NOT survive.
+  def test_build_preserves_safe_mfa_status_and_strips_secret
+    row = row_with_authdata.merge(
+      "authData" => {
+        "mfa" => { "secret" => "JBSWY3DPEHPK3PXP", "recovery" => %w[rec-abc rec-def] },
+      },
+    )
+    user = Parse::User.build(row)
+
+    assert_equal({ "mfa" => { "status" => "enabled" } }, user.auth_data,
+                 "only the leak-safe MFA status should survive an untrusted hydration")
+    assert user.mfa_enabled?, "#mfa_enabled? should read the preserved status"
+
+    blob = user.auth_data.to_s
+    refute_includes blob, "JBSWY3DPEHPK3PXP", "the TOTP secret must not survive the strip"
+    refute_match(/rec-abc|rec-def|recovery/i, blob, "recovery codes must not survive the strip")
+  end
+
   # --------------------------------------------------------------------
   # Trusted-self path: login!/session!/create/MFA wrap their build calls
   # in with_authdata_trust so authData survives.

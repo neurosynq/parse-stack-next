@@ -25,7 +25,9 @@ module Parse
                      original: nil, update: nil,
                      query: nil, log: nil,
                      objects: nil,
-                     triggerName: nil }.freeze
+                     triggerName: nil,
+                     event: nil, clients: nil, subscriptions: nil,
+                     context: nil }.freeze
       include ::ActiveModel::Serializers::JSON
       # @!attribute [rw] master
       #   @return [Boolean] whether the master key was used for this request.
@@ -64,6 +66,31 @@ module Parse
       attr_accessor :master, :user, :installation_id, :params, :function_name, :object, :trigger_name
       attr_accessor :query, :log, :objects
       attr_accessor :original, :update, :raw
+      # @!attribute [rw] event
+      #   The LiveQuery event type for an +afterEvent+ trigger -- one of
+      #   +"create"+, +"enter"+, +"update"+, +"leave"+, or +"delete"+ -- or
+      #   +"connect"+ for a +beforeConnect+ trigger. +nil+ for every non-
+      #   LiveQuery trigger. See {#after_event?} / {#before_connect?}.
+      #   @return [String, nil]
+      # @!attribute [rw] clients
+      #   Connection-global metadata sent on the LiveQuery +beforeConnect+ /
+      #   +afterEvent+ triggers: the number of currently-connected LiveQuery
+      #   clients. +nil+ for non-LiveQuery triggers.
+      #   @return [Integer, nil]
+      # @!attribute [rw] subscriptions
+      #   Connection-global metadata sent on the LiveQuery +beforeConnect+ /
+      #   +afterEvent+ triggers: the number of active subscriptions. +nil+ for
+      #   non-LiveQuery triggers.
+      #   @return [Integer, nil]
+      attr_accessor :event, :clients, :subscriptions
+      # @!attribute [rw] context
+      #   The caller-supplied context object threaded from the originating REST
+      #   write or cloud-function call via the +X-Parse-Cloud-Context+ header.
+      #   Parse Server includes this as a top-level +context+ key in trigger
+      #   payloads (beforeSave/afterSave/etc.). Returns a Hash when present, or
+      #   +nil+ when the originating request carried no context.
+      #   @return [Hash, nil]
+      attr_accessor :context
       # @!attribute [r] session_token
       #   The caller's live Parse session token, captured from the incoming
       #   webhook payload (`user.sessionToken`) before credentials are scrubbed
@@ -85,10 +112,24 @@ module Parse
       # You would normally never create a {Parse::Webhooks::Payload} object since it is automatically
       # provided to you when using Parse::Webhooks.
       # @see Parse::Webhooks
-      def initialize(hash = {})
+      # @param hash [String, Hash] the raw webhook body (JSON string or Hash).
+      # @param webhook_class [String, nil] the Parse class name derived from the
+      #   webhook URL path (`<endpoint>/<triggerName>/<className>`). This is the
+      #   ONLY authoritative source of the class for beforeFind/afterFind
+      #   triggers — Parse Server omits `className` from the find payload body
+      #   entirely (the matched `objects` carry no `className` and there is no
+      #   top-level one). Threading it here lets `parse_class` resolve (so find
+      #   triggers route) and lets `:vector` columns be stripped from afterFind
+      #   `objects`. For save/delete triggers the path className equals the
+      #   body's, so it is consistent; for functions it is nil.
+      def initialize(hash = {}, webhook_class = nil)
         hash = JSON.parse(hash, max_nesting: 20) if hash.is_a?(String)
         hash = Hash[hash.map { |k, v| [k.to_s.underscore.to_sym, v] }]
         @raw = hash
+        # Set BEFORE the vector scrub below so the route-derived class is
+        # available to strip :vector columns from afterFind objects (whose
+        # body carries no className of its own).
+        @webhook_class = webhook_class.to_s if webhook_class && !webhook_class.to_s.empty?
         @master = hash[:master]
         # Capture the caller's session token from the *unscrubbed* user hash
         # before scrub_credentials strips it below. Parse Server includes
@@ -99,6 +140,16 @@ module Parse
         # still letting a handler opt in to acting as the calling user via
         # #session_token / #user_client / #user_agent.
         @session_token = self.class.extract_session_token(hash[:user])
+        # LiveQuery beforeConnect/beforeSubscribe carry the caller's session
+        # token at the TOP LEVEL (not nested under `user`), because no user is
+        # resolved yet when the trigger fires. Capture it here -- with the same
+        # "set it aside, keep it out of as_json / the log" treatment as the
+        # nested form -- so #user_client / #user_agent can act as the caller.
+        # It is intentionally NOT one of ATTRIBUTES.
+        if @session_token.nil?
+          top_token = hash[:session_token].to_s.strip
+          @session_token = top_token unless top_token.empty?
+        end
         # Webhook trigger payloads (beforeSave/afterSave/etc.) are delivered by
         # Parse Server and, when a webhook key is configured (the default; see
         # Parse::Webhooks.allow_unauthenticated for the opt-out used in tests /
@@ -125,14 +176,42 @@ module Parse
         @params = hash[:params]
         @params = @params.with_indifferent_access if @params.is_a?(Hash)
         @function_name = hash[:function_name]
-        @object = self.class.scrub_credentials(hash[:object])
         @trigger_name = hash[:trigger_name]
-        @original = self.class.scrub_credentials(hash[:original])
-        @update = self.class.scrub_credentials(hash[:update]) || {}
-        # Added for beforeFind and afterFind triggers
+        # Resolve the model class once so :vector columns can be stripped from
+        # every object-shaped payload (see scrub_vector_columns). Credentials
+        # are scrubbed first, then vectors. The route-derived @webhook_class is
+        # authoritative and preferred — it is the only class source for
+        # afterFind (whose body carries no className anywhere); for save/delete
+        # it equals the body's className. Falls back to the object/original
+        # className for older callers that don't supply a route class.
+        vec_klass = self.class.resolve_klass_by_name(@webhook_class) ||
+                    self.class.resolve_vector_klass(hash[:object], hash[:original])
+        @object = self.class.scrub_vector_columns(self.class.scrub_credentials(hash[:object]), vec_klass)
+        @original = self.class.scrub_vector_columns(self.class.scrub_credentials(hash[:original]), vec_klass)
+        @update = self.class.scrub_vector_columns(self.class.scrub_credentials(hash[:update]), vec_klass) || {}
+        # Added for beforeFind and afterFind triggers. afterFind objects are all
+        # of one class but carry no className of their own, so the route-derived
+        # vec_klass is the only way to strip their :vector columns.
         @query = hash[:query]
-        @objects = hash[:objects] || []
+        # LiveQuery connection metadata. `event` is the afterEvent event type
+        # (create/enter/update/leave/delete) or "connect" for beforeConnect;
+        # `clients`/`subscriptions` are connection-global counts. All nil for
+        # the object / auth triggers. These are plain scalars (no credential
+        # material), so they pass through unscrubbed.
+        @event = hash[:event]
+        @clients = hash[:clients]
+        @subscriptions = hash[:subscriptions]
+        @objects = Array(hash[:objects]).map do |o|
+          self.class.scrub_vector_columns(self.class.scrub_credentials(o), vec_klass)
+        end
         @log = hash[:log]
+        # Caller-supplied context object threaded via X-Parse-Cloud-Context.
+        # This is caller metadata (not a credential), so it passes through
+        # without scrubbing — mirroring the treatment of @query and @log.
+        @context = hash[:context]
+        # Blocks registered by a handler via #after_response / #defer, to run
+        # after the webhook response has been sent (drained by the Rack app).
+        @deferred_callbacks = []
       end
 
       # @!visibility private
@@ -164,6 +243,62 @@ module Parse
           name = k.to_s
           denied.include?(name) || denied.include?(name.underscore)
         end
+      end
+
+      # @!visibility private
+      # Resolve the Parse::Object subclass for a webhook payload from the
+      # `className` of the first object-shaped hash given. Returns nil when
+      # no class name is present or no matching model is registered (the
+      # caller then skips vector stripping — fail-open is acceptable here:
+      # an unregistered class has no declared `:vector` columns to strip).
+      def self.resolve_vector_klass(*candidates)
+        candidates.each do |obj|
+          next unless obj.is_a?(Hash)
+          name = obj["className"] || obj[:className]
+          next if name.nil? || name.to_s.empty?
+          klass = resolve_klass_by_name(name)
+          return klass if klass
+        end
+        nil
+      end
+
+      # @!visibility private
+      # Resolve a registered Parse::Object subclass from a bare class-name
+      # string (e.g. the route-derived @webhook_class). Returns nil for a blank
+      # name or an unregistered class (the caller then skips vector stripping —
+      # fail-open, as an unregistered class has no declared :vector columns).
+      def self.resolve_klass_by_name(name)
+        return nil if name.nil? || name.to_s.empty?
+        klass = (Parse::Object.find_class(name.to_s) rescue nil)
+        klass.respond_to?(:fields) ? klass : nil
+      end
+
+      # @!visibility private
+      # Returns a copy of +obj+ with the model's declared `:vector`
+      # columns removed. Embeddings are large dense float arrays that leak
+      # ML signal; a webhook handler has no reason to receive them, and
+      # leaving them in bloats logs and any object a handler re-persists.
+      # Mirrors the `as_json` default (vectors omitted) — a class that opts
+      # into `vector_visibility :public` keeps its vectors here too.
+      #
+      # `klass` may be passed explicitly (so changed-only payloads like
+      # `update`, which carry no `className`, are still scrubbed using the
+      # class resolved from the sibling `object`/`original` hash); when nil
+      # it is resolved from the hash's own `className`.
+      # Pass-through for non-Hash input (and nil).
+      def self.scrub_vector_columns(obj, klass = nil)
+        return obj unless obj.is_a?(Hash)
+        klass ||= resolve_vector_klass(obj)
+        return obj if klass.nil?
+        if klass.respond_to?(:vectors_public_by_default?) && klass.vectors_public_by_default?
+          return obj
+        end
+        vector_fields = klass.fields(:vector).keys.map(&:to_s)
+        return obj if vector_fields.empty?
+        field_map = klass.respond_to?(:field_map) ? klass.field_map : {}
+        wire = vector_fields.map { |f| (field_map[f.to_sym] || f).to_s }
+        denied = (vector_fields + wire)
+        obj.reject { |k, _| denied.include?(k.to_s) }
       end
 
       # @!visibility private
@@ -325,6 +460,73 @@ module Parse
         trigger? && @trigger_name.to_sym == :afterFind
       end
 
+      # true if this is a beforeLogin webhook trigger request.
+      #
+      # NOTE: a +beforeLogin+ payload carries the user being authenticated as
+      # {#object} / {#parse_object} (a +_User+), NOT as {#user} -- the caller is
+      # not yet authenticated when the trigger fires, so {#user} is +nil+. (By
+      # +afterLogin+ both are populated and equal.) Reach for {#parse_object} to
+      # inspect the logging-in user during +beforeLogin+.
+      def before_login?
+        trigger? && @trigger_name.to_sym == :beforeLogin
+      end
+
+      # true if this is a afterLogin webhook trigger request.
+      def after_login?
+        trigger? && @trigger_name.to_sym == :afterLogin
+      end
+
+      # true if this is a afterLogout webhook trigger request. The logged-out
+      # session is carried as {#object} / {#parse_object} (a +_Session+).
+      def after_logout?
+        trigger? && @trigger_name.to_sym == :afterLogout
+      end
+
+      # true if this is a beforePasswordResetRequest webhook trigger request.
+      # The target user is carried as {#object} / {#parse_object} (a +_User+).
+      def before_password_reset_request?
+        trigger? && @trigger_name.to_sym == :beforePasswordResetRequest
+      end
+
+      # true if this is a LiveQuery beforeConnect webhook trigger request.
+      # Connection-global: carries no {#object}; the className is the +@Connect+
+      # sentinel and the caller's token (if any) is in {#session_token}.
+      def before_connect?
+        trigger? && @trigger_name.to_sym == :beforeConnect
+      end
+
+      # true if this is a LiveQuery beforeSubscribe webhook trigger request.
+      # Shaped like beforeFind: carries a {#query} (see {#parse_query}) and the
+      # className comes from the request path, not the body.
+      def before_subscribe?
+        trigger? && @trigger_name.to_sym == :beforeSubscribe
+      end
+
+      # true if this is a LiveQuery afterEvent webhook trigger request. The
+      # event type (create/enter/update/leave/delete) is in {#event}.
+      def after_event?
+        trigger? && @trigger_name.to_sym == :afterEvent
+      end
+
+      # true if this is one of the authentication-side triggers
+      # (beforeLogin / afterLogin / afterLogout / beforePasswordResetRequest).
+      # These carry a +_User+ / +_Session+ as {#object} but are NOT object
+      # save/delete triggers: no ActiveModel save/create/destroy callbacks run
+      # for them, and Parse Server ignores the response body (the only way to
+      # affect a +before*+ one is to deny it -- see the webhook router).
+      def auth_trigger?
+        before_login? || after_login? || after_logout? || before_password_reset_request?
+      end
+
+      # true if this is one of the LiveQuery triggers (beforeConnect /
+      # beforeSubscribe / afterEvent). Parse Server delivers these over an HTTP
+      # webhook only in a co-located single-process LiveQuery setup;
+      # +beforeConnect+ in particular carries a live client and is effectively
+      # in-process-only. See the webhooks guide.
+      def live_query_trigger?
+        before_connect? || before_subscribe? || after_event?
+      end
+
       # true if this request is a trigger that contains an object.
       def object?
         trigger? && @object.present?
@@ -481,6 +683,49 @@ module Parse
       # @return [Parse::Webhooks::ResponseError] the raised exception
       def error!(msg = "")
         raise Parse::Webhooks::ResponseError, msg
+      end
+
+      # Register a block to run **after** this webhook's response has been sent
+      # to Parse Server, off the client's critical path. Use it to do work that
+      # should not add latency to the save/function the client is waiting on —
+      # search indexing, cache warming, fan-out notifications.
+      #
+      # The handler still returns its value synchronously (the response Parse
+      # Server acts on); the deferred block runs afterward. When the SDK is
+      # mounted under a server that supports `rack.after_reply` (Puma, Unicorn)
+      # the block runs once the response is flushed to the socket, on the same
+      # worker thread; otherwise it runs in a detached thread. Each block is
+      # isolated, so one raising neither affects the response nor the others.
+      #
+      #   Parse::Webhooks.route :after_save, :Post do
+      #     post = parse_object
+      #     after_response { SearchIndex.reindex(post.id) }
+      #     post
+      #   end
+      #
+      # `self` inside the block is this payload (it closes over the handler's
+      # scope), so `parse_object`, `params`, etc. remain available. Note the
+      # block runs in-process and does not survive a worker restart — for work
+      # that *must* happen, hand it to a durable job queue instead. Deferred
+      # callbacks fire only when the payload is processed through the mounted
+      # `Parse::Webhooks` Rack app.
+      #
+      # @yield the work to run after the response is sent.
+      # @return [Boolean] true if a block was registered.
+      def after_response(&block)
+        return false unless block_given?
+        @deferred_callbacks ||= []
+        @deferred_callbacks << block
+        true
+      end
+      alias_method :defer, :after_response
+
+      # @!visibility private
+      # The blocks registered via {#after_response}; drained by the Rack app
+      # ({Parse::Webhooks.dispatch_deferred}) after the response is finished.
+      # @return [Array<Proc>]
+      def deferred_callbacks
+        @deferred_callbacks ||= []
       end
 
       # @return [Parse::Query] the Parse query for a beforeFind trigger.

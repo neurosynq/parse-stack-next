@@ -499,6 +499,35 @@ module Parse
       end
     end
 
+    # Equivalent to the $containedBy Parse query operation. Matches documents
+    # where the array field's values are all within the supplied set (the
+    # inverse of {ContainsAllConstraint}: the field must be a *subset* of the
+    # provided array). The field column should be of type {Array} in your
+    # Parse class.
+    #
+    #  q.where :field.contained_by => [1, 2, 3]
+    #  q.where :tags.contained_by => ["ruby", "rails", "parse"]
+    #
+    # @see ContainsAllConstraint
+    # @see ContainedInConstraint
+    class ContainedByConstraint < Constraint
+      # @!method contained_by
+      # A registered method on a symbol to create the constraint.
+      # Maps to Parse operator "$containedBy".
+      # @example
+      #  q.where :tags.contained_by => ["ruby", "rails"]
+      # @return [ContainedByConstraint]
+      constraint_keyword :$containedBy
+      register :contained_by
+
+      # @return [Hash] the compiled constraint.
+      def build
+        val = formatted_value
+        val = [val].compact unless val.is_a?(Array)
+        { @operation.operand => { key => val } }
+      end
+    end
+
     # Array size constraint using MongoDB aggregation.
     # Parse Server does not natively support $size query constraint, so we use
     # MongoDB aggregation pipeline with $expr and $size to check array length.

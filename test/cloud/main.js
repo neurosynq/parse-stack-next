@@ -109,3 +109,25 @@ Parse.Cloud.beforeSave('ValidatedThing', (request) => {
     throw new Parse.Error(Parse.Error.VALIDATION_ERROR, 'amount must be a positive number');
   }
 });
+
+// Returns a saved Parse.Object. Parse Server 8.0 began encoding returned
+// Parse objects as `{ "__type": "Object", ... }` dictionaries and 9.0 made it
+// unconditional — this fixture lets the SDK assert it decodes that wire shape
+// back into a Parse::Object (see cloud_object_decode_integration_test.rb).
+Parse.Cloud.define('echoObject', async (request) => {
+  const obj = new Parse.Object('EchoObjectThing');
+  obj.set('title', request.params.title || 'echoed');
+  await obj.save(null, { useMasterKey: true });
+  return obj;
+});
+
+// Returns an array of two saved Parse.Objects, to exercise element-wise
+// decoding of an array result.
+Parse.Cloud.define('echoObjects', async (request) => {
+  const a = new Parse.Object('EchoObjectThing');
+  a.set('title', 'a');
+  const b = new Parse.Object('EchoObjectThing');
+  b.set('title', 'b');
+  await Parse.Object.saveAll([a, b], { useMasterKey: true });
+  return [a, b];
+});

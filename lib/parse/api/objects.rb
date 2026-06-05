@@ -84,8 +84,15 @@ module Parse
       # @param body [Hash] the body of the request.
       # @param opts [Hash] additional options to pass to the {Parse::Client} request.
       # @param headers [Hash] additional HTTP headers to send with the request.
+      # @param context [Hash, nil] an optional caller context forwarded as the
+      #   +X-Parse-Cloud-Context+ header. Parse Server maps it to
+      #   +req.info.context+ inside beforeSave/afterSave cloud triggers.
+      #   Omit or pass +nil+ to leave behavior unchanged.
       # @return [Parse::Response]
-      def create_object(className, body = {}, headers: {}, **opts)
+      def create_object(className, body = {}, headers: {}, context: nil, **opts)
+        unless context.nil?
+          headers = headers.merge(Parse::Protocol::CLOUD_CONTEXT => context.to_json)
+        end
         response = request :post, uri_path(className), body: body, headers: headers, opts: opts
         response.parse_class = className if response.present?
         response
@@ -135,8 +142,15 @@ module Parse
       # @param body [Hash] The key value pairs to update.
       # @param opts [Hash] additional options to pass to the {Parse::Client} request.
       # @param headers [Hash] additional HTTP headers to send with the request.
+      # @param context [Hash, nil] an optional caller context forwarded as the
+      #   +X-Parse-Cloud-Context+ header. Parse Server maps it to
+      #   +req.info.context+ inside beforeSave/afterSave cloud triggers.
+      #   Omit or pass +nil+ to leave behavior unchanged.
       # @return [Parse::Response]
-      def update_object(className, id, body = {}, headers: {}, **opts)
+      def update_object(className, id, body = {}, headers: {}, context: nil, **opts)
+        unless context.nil?
+          headers = headers.merge(Parse::Protocol::CLOUD_CONTEXT => context.to_json)
+        end
         response = request :put, uri_path(className, id), body: body, headers: headers, opts: opts
         response.parse_class = className if response.present?
         response

@@ -94,6 +94,14 @@ module Parse
         # AccessDenied for an un-bound agent on a scoped class).
         scope = Parse::Agent::Tools.resolve_tenant_scope!(agent, cname)
 
+        # Per-tenant embedding spend cap (§16.10 — agent-tool exposure
+        # mitigation). semantic_search embeds attacker-controlled query
+        # text on every call; charge the estimated query tokens against
+        # the tenant's budget BEFORE embedding. HARD-REFUSES once the
+        # tenant is over cap. No-op when no limit is configured or for
+        # trusted admin agents.
+        charge_spend_cap!(agent, scope, query)
+
         # Non-admin agents get quantized scores (membership-inference
         # defense); admin agents get full precision. Keyed on the
         # permission tier, not master-key posture.
@@ -142,6 +150,47 @@ module Parse
           envelope[:budget_dropped] = dropped
         end
         envelope
+      end
+
+      # @!visibility private
+      # Charge the estimated query-embedding token cost against the
+      # tenant's spend cap. The tenant key is the resolved tenant-scope
+      # value (so each tenant has its own budget); unscoped non-admin
+      # calls charge the shared default bucket. Admin agents are trusted
+      # and skip the cap entirely (mirrors the score-quantize tier check).
+      #
+      # A cap hit is surfaced as a structured error rather than the raw
+      # {Parse::Embeddings::SpendCap::Exceeded} — otherwise the agent's
+      # generic-error rescue would collapse it to an opaque "internal
+      # error" and the model couldn't self-correct. Two distinct cases:
+      #
+      # * Transient (`retry_after` non-nil): the window will roll off
+      #   enough tokens to admit this charge. Surface as
+      #   {Parse::Agent::RateLimitExceeded} (wire `error_code:
+      #   :rate_limited`) carrying the real backoff hint so the model
+      #   waits and retries.
+      # * Permanent (`retry_after` nil): the request alone exceeds the cap
+      #   (`requested > limit`) and can NEVER fit, no matter how long the
+      #   caller waits. Mapping that to a RateLimitExceeded would tell the
+      #   model to back off and retry an unsatisfiable request — and it
+      #   would also crash, since RateLimitExceeded#initialize calls
+      #   `retry_after.round`. Surface as {Parse::Agent::ValidationError}
+      #   so the model shrinks the query (or the operator raises the cap).
+      def charge_spend_cap!(agent, scope, query)
+        return if agent.permissions == :admin
+        tenant_id = scope && (scope[:value] || scope["value"])
+        tokens = Parse::Embeddings::SpendCap.estimate_tokens(query)
+        Parse::Embeddings::SpendCap.charge!(tenant_id: tenant_id, tokens: tokens)
+      rescue Parse::Embeddings::SpendCap::Exceeded => e
+        if e.retry_after.nil?
+          raise Parse::Agent::ValidationError,
+                "semantic_search: query too large for the embedding spend cap " \
+                "(#{e.requested} tokens requested, limit #{e.limit}/#{e.window}s). " \
+                "Shorten the query or raise the cap."
+        end
+        raise Parse::Agent::RateLimitExceeded.new(
+          retry_after: e.retry_after, limit: e.limit, window: e.window,
+        )
       end
 
       # @!visibility private

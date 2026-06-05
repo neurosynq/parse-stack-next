@@ -128,6 +128,39 @@ module Parse
         base.extend(ClassMethods)
       end
 
+      # Recompute this record's managed embedding(s) in-place, NOW,
+      # without a save. Runs the same digest-tracked recompute the
+      # `before_save` callback runs: a provider call happens only when the
+      # source text/URL changed since the last embed (digest miss). Useful
+      # to populate the vector before inspecting it, or to force a refresh
+      # in a console.
+      #
+      # @param field [Symbol, nil] limit to one embed target; nil
+      #   recomputes every declared directive.
+      # @return [self]
+      # @raise [ArgumentError] when `field:` names no embed target, or the
+      #   class declares no `embed` directives.
+      def compute_embedding!(field: nil)
+        directives = self.class.embed_directives
+        if directives.empty?
+          raise ArgumentError, "#{self.class}#compute_embedding!: no `embed` directives declared."
+        end
+        selected =
+          if field
+            d = directives[field.to_sym]
+            unless d
+              raise ArgumentError,
+                    "#{self.class}#compute_embedding!: :#{field} is not an embed target " \
+                    "(have #{directives.keys.inspect})."
+            end
+            [d]
+          else
+            directives.values
+          end
+        selected.each { |directive| Parse::Core::EmbedManaged.recompute_embedding!(self, directive) }
+        self
+      end
+
       module ClassMethods
         # Per-class registry of {EmbedDirective}s keyed by target vector
         # property symbol. Read by tests and tooling; written only by
@@ -298,6 +331,86 @@ module Parse
           install_embed_writer_guard!(into, [source])
 
           into
+        end
+
+        # Backfill embeddings for records whose managed vector field is
+        # still null — the bulk counterpart to the per-save embed path.
+        # Walks the class with objectId-cursor pagination (robust to the
+        # result set shrinking as records are embedded; terminates even
+        # when a record has no source text and stays null), saving each
+        # pending record so its `before_save` embed callback runs.
+        #
+        # Intended as an admin / maintenance operation: it reads and
+        # writes through the default client, so run it with a master-key
+        # client (or pass `save_opts:` carrying a `session_token:` that can
+        # write every row).
+        #
+        # @param field [Symbol, nil] limit the backfill to one embed
+        #   target; nil processes every declared directive.
+        # @param batch_size [Integer] rows fetched per round (default 100).
+        # @param limit [Integer, nil] stop after embedding at most this
+        #   many records across all directives; nil = no cap.
+        # @param where [Hash, nil] extra query constraints AND-ed with the
+        #   null-target filter (e.g. `{ published: true }`).
+        # @param save_opts [Hash] options forwarded to each `record.save`
+        #   (e.g. `session_token:`).
+        # @return [Integer] number of records saved (embedded).
+        # @raise [ArgumentError] when `field:` names no embed target, or
+        #   the class declares no `embed` directives.
+        def embed_pending!(field: nil, batch_size: 100, limit: nil, where: nil, save_opts: {})
+          bs = Integer(batch_size)
+          raise ArgumentError, "#{self}.embed_pending!: batch_size must be positive." if bs <= 0
+          directives = resolve_embed_directives_for_backfill(field)
+
+          processed = 0
+          directives.each do |directive|
+            remaining = limit ? (limit - processed) : nil
+            break if remaining && remaining <= 0
+            processed += backfill_embed_directive!(directive, bs, where, remaining, save_opts)
+          end
+          processed
+        end
+
+        # @!visibility private
+        def resolve_embed_directives_for_backfill(field)
+          if field
+            d = embed_directives[field.to_sym]
+            unless d
+              raise ArgumentError,
+                    "#{self}.embed_pending!: :#{field} is not an embed target " \
+                    "(have #{embed_directives.keys.inspect})."
+            end
+            [d]
+          else
+            ds = embed_directives.values
+            raise ArgumentError, "#{self}.embed_pending!: no `embed` directives declared." if ds.empty?
+            ds
+          end
+        end
+
+        # @!visibility private
+        # objectId-cursor walk over rows where `directive.into` is null.
+        def backfill_embed_directive!(directive, batch_size, where, remaining, save_opts)
+          count = 0
+          cursor = nil
+          loop do
+            q = query(directive.into.null => true)
+            q = q.where(where) if where.is_a?(Hash) && !where.empty?
+            q = q.where(:objectId.gt => cursor) if cursor
+            q.order(:objectId.asc)
+            q.limit(batch_size)
+            batch = q.results
+            break if batch.nil? || batch.empty?
+
+            batch.each do |record|
+              cursor = record.id
+              record.save(**save_opts)
+              count += 1
+              return count if remaining && count >= remaining
+            end
+            break if batch.length < batch_size
+          end
+          count
         end
 
         # @!visibility private

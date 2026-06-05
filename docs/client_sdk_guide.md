@@ -11,6 +11,11 @@ go over REST, and authorization is carried by the user's `sessionToken`.
 Every claim below is locked in by the integration tests under
 `test/lib/parse/client_*_integration_test.rb`.
 
+For a runnable starting point, see
+[`examples/basic_client.rb`](../examples/basic_client.rb) (a no-master client
+with a row-level ACL-enforcement demo) and its master-key counterpart
+[`examples/basic_server.rb`](../examples/basic_server.rb).
+
 ---
 
 ## Why a separate guide?

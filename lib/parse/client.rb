@@ -1414,9 +1414,53 @@ module Parse
   # Unwrap the `{ "result" => ... }` envelope from a successful cloud-code response.
   # Guards against unusual server payloads (non-Hash bodies) by returning the raw
   # result rather than raising TypeError on `String#[]`/`Integer#[]`.
+  #
+  # Parse Server 8.0 flipped `encodeParseObjectInCloudFunction` to true and 9.0
+  # removed the opt-out, so a cloud function that returns a Parse object now
+  # yields a `__type`-encoded dictionary (`{"__type":"Object","className":...}`)
+  # where a pre-8.x caller received a plain attribute Hash. We decode those
+  # self-describing envelopes back into `Parse::Object` / `Parse::Pointer` so the
+  # value a caller sees is consistent across server versions and matches what
+  # every other Parse SDK returns. Decoding is conservative: only a fully-shaped
+  # Object/Pointer envelope is converted, and an Object of an UNregistered class
+  # is left as a raw Hash (building it would degrade to a field-less Pointer).
+  # Plain Hashes and arbitrary `__type` app data pass through untouched.
   def self._extract_cloud_result(response)
     r = response.result
-    r.is_a?(Hash) ? r["result"] : r
+    value = r.is_a?(Hash) ? r["result"] : r
+    _decode_cloud_value(value)
+  end
+
+  # @!visibility private
+  # Recursively decode Parse-encoded values in a cloud-code result. See
+  # {._extract_cloud_result} for the rationale and the conservatism rules.
+  def self._decode_cloud_value(value)
+    case value
+    when Array
+      value.map { |v| _decode_cloud_value(v) }
+    when Hash
+      type = value["__type"] || value[:__type]
+      class_name = value["className"] || value[:className]
+      object_id  = value["objectId"] || value[:objectId]
+      if type == Parse::Model::TYPE_POINTER && class_name && object_id
+        # Pointers carry no attributes, so building one is lossless even for
+        # an unregistered class (yields a Parse::Pointer).
+        Parse::Object.build(value)
+      elsif type == Parse::Model::TYPE_OBJECT && class_name && object_id &&
+            Parse::Model.find_class(class_name)
+        # Only build a full object when the class is registered; otherwise
+        # Parse::Object.build collapses to a field-less Pointer and we'd lose
+        # the attributes — better to hand back the raw Hash.
+        Parse::Object.build(value)
+      else
+        # Plain Hash, partial envelope, or non-object `__type` (Date/GeoPoint/
+        # File/Bytes, or literal app data): leave the node shape intact and
+        # only recurse into nested values so embedded objects still decode.
+        value.transform_values { |v| _decode_cloud_value(v) }
+      end
+    else
+      value
+    end
   end
 
   # Helper method to trigger cloud jobs and get results.
@@ -1491,6 +1535,9 @@ module Parse
   # @option opts [Symbol] :client The client connection to use.
   # @option opts [Boolean] :raw Whether to return the raw response object.
   # @option opts [Boolean] :master_key Whether to use the master key for this request.
+  # @option opts [Hash, nil] :context An optional caller context forwarded as the
+  #   +X-Parse-Cloud-Context+ header. Parse Server maps it to +req.info.context+
+  #   in the function handler and flows it through beforeSave/afterSave triggers.
   # @return [Object] the result data of the response. nil if there was an error.
   def self.call_function(name, body = {}, **opts)
     conn = opts[:session] || opts[:client] || :default
@@ -1500,7 +1547,13 @@ module Parse
     request_opts[:session_token] = opts[:session_token] if opts[:session_token]
     request_opts[:master_key] = opts[:master_key] if opts[:master_key]
 
-    response = Parse::Client.client(conn).call_function(name, body, opts: request_opts)
+    # Build call kwargs; only forward context: when explicitly supplied so
+    # call sites that do not use context produce the same opts hash that
+    # existing mock expectations match against.
+    call_kwargs = { opts: request_opts }
+    call_kwargs[:context] = opts[:context] unless opts[:context].nil?
+
+    response = Parse::Client.client(conn).call_function(name, body, **call_kwargs)
     return response if opts[:raw].present?
     if response.error?
       Parse::Client._safe_warn("CloudCodeError", response, name: name)

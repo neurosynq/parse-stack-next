@@ -27,7 +27,8 @@ class RetrievalRetrieveTest < Minitest::Test
   # fold and scope-kwarg pass-through.
   class FakeModel
     class << self
-      attr_accessor :last_find_similar_kwargs, :canned_hits
+      attr_accessor :last_find_similar_kwargs, :canned_hits,
+                    :last_hybrid_kwargs, :canned_hybrid_hits
 
       def parse_class
         "FakeDoc"
@@ -45,30 +46,96 @@ class RetrievalRetrieveTest < Minitest::Test
         self.last_find_similar_kwargs = kwargs
         canned_hits || []
       end
+
+      def hybrid_search(**kwargs)
+        self.last_hybrid_kwargs = kwargs
+        canned_hybrid_hits || []
+      end
     end
   end
 
   def setup
     FakeModel.last_find_similar_kwargs = nil
     FakeModel.canned_hits = nil
+    FakeModel.last_hybrid_kwargs = nil
+    FakeModel.canned_hybrid_hits = nil
   end
 
   def hit(id:, body:, score:, **extra)
     { "_id" => id, "body" => body, "_vscore" => score }.merge(extra)
   end
 
-  # ----- reserved kwargs -----
+  # ----- hybrid + rerank wiring -----
 
-  def test_hybrid_reserved
-    assert_raises(NotImplementedError) do
-      Parse::Retrieval.retrieve(query: "q", klass: FakeModel, hybrid: true)
-    end
+  def test_hybrid_routes_to_hybrid_search
+    FakeModel.canned_hybrid_hits = [
+      { "_id" => "h1", "body" => "alpha beta", "_hybrid_score" => 0.5 },
+    ]
+    chunks = Parse::Retrieval.retrieve(
+      query: "q", klass: FakeModel, hybrid: true, k: 7,
+      session_token: "tok",
+    )
+    kw = FakeModel.last_hybrid_kwargs
+    refute_nil kw, "expected hybrid_search to be called"
+    assert_equal "q", kw[:text]
+    assert_equal "q", kw[:lexical][:query]
+    assert_equal 7, kw[:k]
+    assert_equal true, kw[:raw]
+    assert_equal "tok", kw[:session_token]
+    assert_equal 1, chunks.length
+    # chunk score derives from _hybrid_score when present.
+    assert_in_delta 0.5, chunks.first.score, 1e-9
   end
 
-  def test_rerank_reserved
-    assert_raises(NotImplementedError) do
+  def test_hybrid_config_hash_threads_lexical_vector_fusion
+    FakeModel.canned_hybrid_hits = []
+    Parse::Retrieval.retrieve(
+      query: "q", klass: FakeModel,
+      hybrid: { lexical: { index: "lex_idx" }, vector: { num_candidates: 200 },
+                fusion: { k_constant: 40 } },
+    )
+    kw = FakeModel.last_hybrid_kwargs
+    assert_equal "lex_idx", kw[:lexical][:index]
+    assert_equal 200, kw[:vector][:num_candidates]
+    assert_equal({ k_constant: 40 }, kw[:fusion])
+  end
+
+  def test_rerank_invalid_object_raises_argument_error
+    err = assert_raises(ArgumentError) do
       Parse::Retrieval.retrieve(query: "q", klass: FakeModel, rerank: Object.new)
     end
+    assert_match(/must respond to #rerank/, err.message)
+  end
+
+  def test_rerank_reorders_documents_and_overrides_score
+    # Two hits; the vector order puts "h_low" first, but the reranker
+    # (lexical-overlap Fixture) should surface "h_high" (matches query).
+    FakeModel.canned_hits = [
+      hit(id: "h_low",  body: "completely unrelated text", score: 0.99),
+      hit(id: "h_high", body: "rain and love song", score: 0.10),
+    ]
+    reranker = Parse::Retrieval::Reranker::Fixture.new
+    chunks = Parse::Retrieval.retrieve(
+      query: "rain love", klass: FakeModel, rerank: reranker,
+    )
+    # First chunk should come from the reranked-best document.
+    assert_equal "h_high", chunks.first.metadata[:object_id]
+    # The chunk score is the rerank relevance score (non-nil, from Fixture).
+    refute_nil chunks.first.score
+  end
+
+  def test_rerank_top_n_limits_documents
+    FakeModel.canned_hits = [
+      hit(id: "a", body: "rain love", score: 0.5),
+      hit(id: "b", body: "rain", score: 0.4),
+      hit(id: "c", body: "nothing", score: 0.3),
+    ]
+    chunks = Parse::Retrieval.retrieve(
+      query: "rain love", klass: FakeModel,
+      rerank: Parse::Retrieval::Reranker::Fixture.new, rerank_top_n: 1,
+    )
+    ids = chunks.map { |c| c.metadata[:object_id] }.uniq
+    assert_equal 1, ids.length, "rerank_top_n: 1 should keep a single document"
   end
 
   # ----- input validation -----

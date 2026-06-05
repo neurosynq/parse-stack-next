@@ -3,6 +3,7 @@
 
 require_relative "chunker"
 require_relative "chunk"
+require_relative "reranker"
 
 module Parse
   # Retrieval-augmented-generation (RAG) helpers. `Parse::RAG` is a
@@ -98,25 +99,33 @@ module Parse
     #   propagates and aborts the whole call (fail-closed). Kept as an
     #   injection point so this model-layer method stays free of any
     #   agent-layer dependency.
-    # @param hybrid [Object, nil] reserved — raises {NotImplementedError}
-    #   if truthy. Hybrid (vector + lexical) retrieval lands in a later
-    #   release; the kwarg locks the API shape now.
-    # @param rerank [Object, nil] reserved — raises {NotImplementedError}
-    #   if non-nil. Cross-encoder rerank lands in a later release.
+    # @param hybrid [Boolean, Hash, nil] when truthy, fuse a lexical
+    #   Atlas Search branch with the `$vectorSearch` branch via
+    #   reciprocal-rank fusion (see {Parse::Core::VectorSearchable#hybrid_search}).
+    #   `true` uses defaults (lexical query = `query`); a Hash may carry
+    #   `:lexical`, `:vector`, and `:fusion` sub-configs.
+    # @param rerank [#rerank, nil] a {Parse::Retrieval::Reranker::Base}
+    #   (or any object answering `#rerank(query:, documents:, top_n:)`).
+    #   When present, retrieved documents are reordered by the
+    #   cross-encoder relevance score BEFORE chunking, and the chunk score
+    #   becomes the rerank relevance score.
+    # @param rerank_top_n [Integer, nil] keep only the top-N documents
+    #   after reranking (defaults to all retrieved documents).
     # @param scope_opts [Hash] ACL/CLP scope kwargs forwarded verbatim to
-    #   `find_similar`: `session_token:` / `acl_user:` / `acl_role:` /
-    #   `master:`.
+    #   `find_similar` / `hybrid_search`: `session_token:` / `acl_user:` /
+    #   `acl_role:` / `master:`.
     # @return [Array<Parse::Retrieval::Chunk>] descending by score; chunk
     #   order within a document is positional.
     def retrieve(query:, klass: nil, field: nil, text_field: nil, k: 10,
                  filter: nil, vector_filter: nil, chunker: nil,
                  tenant_scope: nil, score_quantize: false,
                  source_transform: nil, hybrid: nil, rerank: nil,
-                 **scope_opts)
-      raise NotImplementedError,
-            "Parse::Retrieval.retrieve: `hybrid:` is reserved for a future release." if hybrid
-      raise NotImplementedError,
-            "Parse::Retrieval.retrieve: `rerank:` is reserved for a future release." if rerank
+                 rerank_top_n: nil, **scope_opts)
+      if rerank && !rerank.respond_to?(:rerank)
+        raise ArgumentError,
+              "Parse::Retrieval.retrieve: `rerank:` must respond to #rerank " \
+              "(a Parse::Retrieval::Reranker::Base); got #{rerank.class}."
+      end
 
       # `class:` alias (reserved word — arrives via **scope_opts).
       klass ||= scope_opts.delete(:class)
@@ -129,23 +138,58 @@ module Parse
       resolved_text_field = (text_field || infer_text_field!(klass)).to_sym
       merged_vector_filter = fold_tenant_scope(klass, vector_filter, tenant_scope)
       chunker ||= default_chunker
+      text_wire = wire_name(klass, resolved_text_field)
 
-      raw_hits = klass.find_similar(
-        text: query,
-        k: k,
-        field: field,
-        filter: filter,
-        vector_filter: merged_vector_filter,
-        raw: true,
-        **scope_opts,
-      )
+      raw_hits =
+        if hybrid
+          fetch_hybrid_hits(klass, query, k, field, filter, merged_vector_filter,
+                            tenant_scope, hybrid, scope_opts)
+        else
+          klass.find_similar(
+            text: query, k: k, field: field, filter: filter,
+            vector_filter: merged_vector_filter, raw: true, **scope_opts,
+          )
+        end
       return [] if raw_hits.nil? || raw_hits.empty?
 
-      text_wire = wire_name(klass, resolved_text_field)
+      raw_hits = apply_rerank(rerank, query, raw_hits, text_wire, rerank_top_n) if rerank
 
       raw_hits.flat_map do |doc|
         build_chunks_for(doc, klass, text_wire, score_quantize, source_transform, chunker)
       end
+    end
+
+    # @!visibility private
+    # Run the hybrid (lexical + vector) branch and return fused raw rows.
+    # Tenant scope is folded into BOTH branches: the vector branch via the
+    # Atlas pre-filter (`merged_vector_filter`) and the lexical branch via
+    # a post-`$search` `$match` (so neither branch leaks cross-tenant
+    # document existence).
+    def fetch_hybrid_hits(klass, query, k, field, filter, merged_vector_filter,
+                          tenant_scope, hybrid, scope_opts)
+      cfg = hybrid.is_a?(Hash) ? hybrid : {}
+      lexical = (cfg[:lexical] || cfg["lexical"] || {}).dup
+      vector  = (cfg[:vector]  || cfg["vector"]  || {}).dup
+      fusion  = cfg[:fusion] || cfg["fusion"]
+
+      lexical[:query] ||= query
+      # Tenant scope must be AUTHORITATIVE in BOTH branches. The previous
+      # `||=` form let a caller-supplied `vector[:vector_filter]` (or a
+      # colliding `lexical[:filter]`) REPLACE the tenant-folded filter
+      # rather than narrow within it — silently dropping tenant isolation
+      # and contradicting this method's "folded into BOTH branches"
+      # contract. `merge_filters` is last-wins, so ordering the tenant
+      # constraint LAST guarantees its key survives any caller collision:
+      # callers can narrow the result set but never escape their tenant.
+      lexical[:filter] = merge_filters(filter, lexical[:filter], tenant_filter_hash(klass, tenant_scope))
+      vector[:field] ||= field unless field.nil?
+      vector[:filter] = merge_filters(vector[:filter], filter)
+      vector[:vector_filter] = merge_filters(vector[:vector_filter], merged_vector_filter)
+
+      klass.hybrid_search(
+        text: query, lexical: lexical, vector: vector,
+        k: k, fusion: fusion, raw: true, **scope_opts,
+      )
     end
 
     # @!visibility private
@@ -228,9 +272,52 @@ module Parse
     end
 
     # @!visibility private
+    # Reorder retrieved documents by a cross-encoder reranker and stamp
+    # each surviving hit with its `_rerank_score`. The reranker scores the
+    # document's presentation text (the same `text_field` used for
+    # chunking). Index alignment between `documents` and `raw_hits` is
+    # preserved so the returned `index` maps back to the right hit.
+    def apply_rerank(reranker, query, raw_hits, text_wire, top_n)
+      documents = raw_hits.map { |doc| fetch_field(doc, text_wire, text_wire).to_s }
+      results = reranker.rerank(query: query, documents: documents, top_n: top_n)
+      results.map do |r|
+        hit = raw_hits[r.index]
+        next nil if hit.nil?
+        hit = hit.dup
+        hit["_rerank_score"] = r.relevance_score
+        hit
+      end.compact
+    end
+
+    # @!visibility private
+    # Convert a `{ field:, value: }` tenant scope into a `{ wire => value }`
+    # filter hash (the lexical branch's post-`$search` `$match`), or nil.
+    def tenant_filter_hash(klass, tenant_scope)
+      return nil if tenant_scope.nil?
+      field = tenant_scope[:field] || tenant_scope["field"]
+      return nil if field.nil?
+      value = tenant_scope.key?(:value) ? tenant_scope[:value] : tenant_scope["value"]
+      { wire_name(klass, field) => value }
+    end
+
+    # @!visibility private
+    # Shallow-merge non-empty filter hashes (left-to-right; later keys
+    # win). Returns nil when nothing is left to apply.
+    def merge_filters(*filters)
+      merged = {}
+      filters.each do |f|
+        next if f.nil? || (f.respond_to?(:empty?) && f.empty?)
+        merged.merge!(f)
+      end
+      merged.empty? ? nil : merged
+    end
+
+    # @!visibility private
     def build_chunks_for(doc, klass, text_wire, score_quantize, source_transform, chunker)
       object_id = (doc["_id"] || doc[:_id] || doc["objectId"] || doc[:objectId]).to_s
-      raw_score = doc["_vscore"] || doc[:_vscore]
+      raw_score = doc["_rerank_score"] || doc[:_rerank_score] ||
+                  doc["_hybrid_score"] || doc[:_hybrid_score] ||
+                  doc["_vscore"] || doc[:_vscore]
       score = quantize_score(raw_score, score_quantize)
 
       text = fetch_field(doc, text_wire, text_wire)

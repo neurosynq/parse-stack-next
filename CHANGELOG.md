@@ -1,5 +1,466 @@
 ## parse-stack-next Changelog
 
+### 5.4.0
+
+#### Parse Server 8.x / 9.x compatibility fixes
+
+A set of latent correctness fixes for behaviors that changed across Parse
+Server versions, plus a capability-detection layer so future server changes
+can be feature-gated rather than discovered by breakage.
+
+- **FIXED**: `Query#read_pref` now rides the REST query body
+  (`readPreference`), not just the `X-Parse-Read-Preference` header. Parse
+  Server reads read preference from request options and maps no such header,
+  so over REST the header alone was silently ignored and every read hit the
+  primary. Scoped reads now route correctly; the mongo-direct path (which
+  passes the preference straight to the driver) was already correct. The
+  normalized token (`PRIMARY`, `SECONDARY_PREFERRED`, …) is emitted verbatim,
+  matching Parse Server's accepted values.
+- **FIXED**: LiveQuery field projection now emits the `keys` subscription
+  option (and keeps `fields` for older servers). Parse Server 7.0 renamed the
+  projection option from `fields` to `keys`; a frame carrying only `fields`
+  was ignored on 7.0+, so projected subscriptions silently received every
+  column. `subscribe(keys: […])` is accepted on `Query#subscribe`,
+  `Klass.subscribe`, and the LiveQuery client, with `fields:` retained as an
+  alias.
+- **BREAKING**: cloud-function results now decode `__type`-encoded Parse objects
+  back into `Parse::Object` / `Parse::Pointer`. Parse Server 8.0 began encoding
+  returned objects and 9.0 made it unconditional, so `Parse.call_function`
+  returned an encoded dictionary where callers expected attribute access.
+  Decoding is conservative: only a fully-shaped Object/Pointer envelope is
+  converted, an Object of an unregistered class is left as a raw Hash (so no
+  attributes are lost), and plain data passes through untouched. This changes the
+  read type of typed fields for **in-process Ruby callers**: a returned object of
+  a *registered* class is now an ORM instance, so reading a field goes through the
+  property getter and carries its ORM type — an `enum` / `symbolize:` property
+  yields a Symbol (`:active`, not `"active"`), a date yields a `Parse::Date`, and
+  a pointer field yields a `Parse::Pointer`, where a pre-5.4.0 caller read the raw
+  JSON String/Hash. HTTP/JSON consumers are unaffected — JSON has no symbols, so
+  values re-serialize to strings on the way out. Migration: a cloud function whose
+  JSON shape is a contract should return an explicit plain Hash and coerce typed
+  fields (`status: obj.status.to_s`) rather than returning whole `Parse::Object`s
+  — returning objects (and `as_json`, which still emits the `__type` envelope) is
+  what triggers the client-side rebuild; reading `obj.as_json` back through a
+  caller does not escape it. Ruby callers that read typed fields off a result
+  should expect the ORM type or normalize at the read site. (`lib/parse/client.rb`)
+- **IMPROVED**: `Query#explain` surfaces actionable guidance when it hits a
+  permission error — Parse Server 9.0 defaults `allowPublicExplain` to false,
+  so a non-master explain now reports that it requires the master key or
+  `allowPublicExplain: true` instead of a bare 403.
+- **NEW**: `Parse.server_supports?(:capability)` and `Parse.server_features`
+  (and the client-level equivalents) expose a capability probe built on the
+  memoized `serverInfo` fetch. It prefers the advertised `features` block where
+  present and falls back to version inference for behavior flags the block does
+  not carry, failing open to the current server line when the version is
+  unknown.
+- **IMPROVED**: the webhook trigger allowlist now mirrors Parse Server's full
+  set of trigger types, so registering `beforeLogin`, `afterLogin`,
+  `afterLogout`, `beforePasswordResetRequest`, `beforeConnect`,
+  `beforeSubscribe`, and `afterEvent` hooks is no longer pre-rejected by the
+  SDK.
+- **NEW**: first-class webhook routing for the non-object trigger shapes — the
+  authentication triggers (`beforeLogin`, `afterLogin`, `afterLogout`,
+  `beforePasswordResetRequest`) and the LiveQuery triggers (`beforeConnect`,
+  `beforeSubscribe`, `afterEvent`). `Parse::Webhooks::Payload` gains matching
+  predicates (`before_login?` … `after_event?`, plus `auth_trigger?` /
+  `live_query_trigger?`), an `event` accessor (the `afterEvent` event type) and
+  `clients` / `subscriptions` connection counters, and captures the top-level
+  `sessionToken` that connect/subscribe carry into `#session_token` (so
+  `#user_client` / `#user_agent` work, while keeping the token out of `as_json`
+  and the request log). Dispatch matches Parse Server's response contract: the
+  response body is ignored for all seven triggers, so a handler that returns
+  `false` from a `before*` variant — which Parse Server would otherwise resolve
+  as `{success:false}` and **allow** — is converted to a rejection (`error!`
+  remains the explicit, message-carrying form), while a returned object is
+  normalized to a success no-op rather than serialized back. None of these run
+  ActiveModel `save` / `create` / `destroy` callbacks, even though the auth
+  triggers carry a `_User` / `_Session`. `@Connect` / `@File` trigger paths now
+  route correctly. LiveQuery triggers are delivered over HTTP only in a
+  co-located single-process setup; `beforeConnect` is effectively in-process
+  only.
+- **NEW**: file (`@File`) and connection (`@Connect`) triggers now have a full
+  register/fetch/delete lifecycle through the SDK.
+  `Parse::API::PathSegment.trigger_class_name!` accepts Parse Server's
+  `@`-prefixed pseudo-classes for trigger paths (previously `fetch_trigger` /
+  `delete_trigger` rejected the leading `@`, so an `@File` / `@Connect` trigger
+  could be created but not managed).
+- **CHANGED**: `beforeCreate` / `afterCreate` are no longer presented as
+  registerable webhook triggers — Parse Server has no such trigger type and
+  rejects them. They remain ActiveModel callbacks (`before_create` /
+  `after_create`) that run inside the `beforeSave` / `afterSave` handler for new
+  objects, so registering `beforeSave` / `afterSave` enables both the save and
+  create callbacks. Attempting to register a create trigger now raises a clear
+  error pointing to the save trigger instead of failing with a server-side
+  "invalid hook declaration".
+- **FIXED**: `beforeFind` / `afterFind` webhook triggers now route. Parse Server
+  omits the class name from the find payload body entirely (the matched
+  `objects` carry no `className` and there is no top-level one), so the SDK could
+  not resolve `parse_class` for a find request and the dispatcher never invoked
+  the registered handler. The class is now threaded from the webhook URL path
+  (`<endpoint>/<trigger>/<className>`) into the `Parse::Webhooks::Payload`, so
+  find handlers fire. This also matters for correctness, not just feature
+  completeness: an unrouted `afterFind` returned `{"success": true}` (not an
+  objects array), which Parse Server rejects — so a registered `afterFind`
+  previously broke every matching query with a connection error rather than
+  no-op'ing. The path segment is charset-validated before use as a routing key.
+- **FIXED**: `:vector` columns are now stripped from `afterFind` webhook payload
+  `objects`. Because the find payload carries no class name, the route-derived
+  class is the only way to resolve the model and its declared `:vector` fields;
+  the previous per-element `className` lookup found nothing and left embeddings
+  in the payload. (`vector_visibility :public` classes keep them, as elsewhere.)
+- **IMPROVED**: `Query#explain` now warns proactively (one-shot) when a clearly
+  non-master explain runs against a server known to restrict it (Parse Server
+  9.0+ defaults `allowPublicExplain` to false), and the `explain_query` agent
+  tool surfaces the same guidance on a permission error — both in addition to
+  the existing reactive message. The warning is suppressed for master-key and
+  unknown-version calls to avoid noise on a flag `/serverInfo` does not expose.
+- **DOCS**: added a Cloud Code Webhooks guide and a runnable
+  `examples/webhook_server.rb`, plus a README section on how ActiveModel
+  callbacks relate to Parse Server trigger types, the synchronous-latency model
+  for `afterSave`, and the inbound replay/freshness protection.
+
+#### `exclude_keys` honored on the direct-MongoDB read path
+
+- **IMPROVED**: `Query#exclude_keys` now takes effect on the mongo-direct read
+  path (`results_direct`, `first_direct`, and an aggregation that auto-promotes
+  to direct MongoDB, such as an `$inQuery`/`$notInQuery` pointer constraint).
+  MongoDB's `$project` is an allowlist with no denylist equivalent, so the
+  excluded fields were previously dropped silently and the full object came
+  back. The SDK now applies the denylist as a post-fetch sanitize over the
+  decoded results — the MongoDB query itself is unchanged. On this path the
+  strip is recursive by field name (it removes the field at every depth,
+  including inside included/nested objects), which is broader than the REST
+  path's top-level/dotted `excludeKeys` scoping. Decode-critical reserved
+  fields (`objectId`, `className`, `__type`, `createdAt`, `updatedAt`, `ACL`,
+  and their Mongo storage-form names) are never stripped, so excluding one of
+  them is a no-op rather than a way to break object reconstruction.
+  `exclude_keys` remains a result-shaping convenience, not an ACL/CLP boundary —
+  use `keys` or `protectedFields` to keep a field from leaving the database.
+
+#### Webhook handler blocks support explicit `return`
+
+- **IMPROVED**: a registered webhook handler (`Parse::Webhooks.route`,
+  `webhook`, `webhook_function`) can now use an explicit `return value` to set
+  its result. Previously the block ran through `instance_exec`, so a bare
+  `return` raised `LocalJumpError: unexpected return` whenever the handler was
+  defined inside a method (an initializer, a class body, a config block) — the
+  only way to return a value was to make it the last expression. Handlers now
+  run as a method on the request payload, giving `return` ordinary
+  method semantics:
+
+  ```ruby
+  Parse::Webhooks.route :before_save, :Post do
+    post = parse_object
+    return post if post.title.present?   # now works
+    error! "title required"
+  end
+  ```
+
+  The legacy idioms are unchanged — the last expression's value, `next value`,
+  and `break value` all still set the result — and `self` is still the payload,
+  so `parse_object`, `params`, and `error!` resolve directly inside the block.
+  `raise` / `error!` and returning `false` from a `before_save` halt the save
+  exactly as before. `return` ends the handler, so it cannot be followed by more
+  work in the same block; to run work after the response, use `after_response`
+  (below).
+- **NEW**: `payload.after_response { … }` (alias `defer`) registers work to run
+  **after** the webhook response has been sent, off the client's critical path —
+  for search indexing, cache warming, or fan-out that should not add latency to
+  the save/function the client is waiting on. Under a server that exposes
+  `rack.after_reply` (Puma, Unicorn) the block runs once the response is flushed
+  to the socket on the same worker thread; otherwise it falls back to a detached
+  thread. Multiple callbacks run in registration order and each is isolated, so
+  one raising affects neither the response nor the others. Callbacks are
+  dispatched only on the success path (a rejected `before_save` does not trigger
+  follow-up work) and only when the payload is processed through the mounted
+  `Parse::Webhooks` Rack app. The work runs after the response is flushed, which
+  is not a guarantee about when the row commits, and it runs in-process (it does
+  not survive a worker restart) — for work that *must* happen, use a durable job
+  queue.
+
+#### Webhook trigger coverage audit
+
+- **NEW**: `Parse::Webhooks.trigger_audit` — a master-key operator audit that
+  cross-references three sources of trigger truth across every registered class
+  and reports where they drift: a model's ActiveModel callbacks
+  (`before_save` / `after_save` / `after_create` / ...), the locally registered
+  webhook blocks (`Parse::Webhooks.routes`), and the triggers actually
+  registered with Parse Server (`hooks/triggers`). It surfaces the non-obvious
+  rule that a callback runs server-side for non-Ruby clients only when both a
+  local webhook block and the matching server trigger are registered — a
+  callback declared on its own is inert for JS/Swift/REST/Dashboard writes.
+  Findings include `callbacks_inert` (callbacks that will not run for non-Ruby
+  clients), `route_not_registered` (a local block with no server trigger),
+  `orphan_server_trigger` (a server trigger with no local handler), and
+  `local_only_callbacks` (`*_update` / `*_validation` callbacks that no server
+  trigger can ever run). Framework-internal callbacks are filtered out by source
+  location so the report shows only app-defined logic. Returns a Hash by
+  default, a human-readable summary with `pretty: true`, and `network: false`
+  audits callbacks against local routes without a master key. See the Cloud Code
+  Webhooks guide for details.
+
+#### Parse Server feature-coverage additions
+
+Closes a set of backend capabilities the SDK did not previously surface.
+
+- **NEW**: `context` propagation. Pass `context:` to `create_object` /
+  `update_object`, `call_function` / `call_function_with_session`, and
+  `Parse.call_function`; it is serialized to the `X-Parse-Cloud-Context` header
+  (`Parse::Protocol::CLOUD_CONTEXT`) and made available to Cloud Code triggers.
+  On the receive side, `Parse::Webhooks::Payload#context` exposes the incoming
+  context (not credential-scrubbed). Backward compatible — omitting `context:`
+  sends nothing.
+- **NEW**: `Parse::User#verify_password(password)` and
+  `Parse::API::Users#verify_password(username, password)` validate credentials
+  via `POST /verifyPassword` (credentials in the request body, mirroring
+  `login`) without minting a session — a step-up / re-authentication primitive.
+  POST is used over the GET form so the plaintext password stays out of the URL
+  (and therefore out of access logs, proxy logs, and the response cache key).
+- **NEW**: `Parse::Error::EmailNotVerifiedError` is raised from
+  `Parse::User.login!` when Parse Server rejects a login because the account's
+  email is unverified (`preventLoginWithUnverifiedEmail`; Parse Server returns
+  code 205 in this context). It subclasses `Parse::Error::AuthenticationError`,
+  so existing `rescue Parse::Error::AuthenticationError` handlers keep catching
+  the unverified-email case (no breaking change — it was a plain
+  `AuthenticationError` before); callers who want to distinguish "verify your
+  email" from "bad credentials" rescue the narrower subclass first.
+- **NEW**: `Query#exclude_keys(*fields)` emits the Parse Server `excludeKeys`
+  parameter (a server-side field denylist, the complement of `keys`) — fetch a
+  row minus large columns (e.g. a managed `:vector`) without enumerating every
+  field you do want.
+- **NEW**: LiveQuery `watch` — `subscribe(watch: [...])` (on `Klass.subscribe`,
+  `Query#subscribe`, and the LiveQuery client) requests update events only when
+  the named fields change, cutting event volume on busy subscriptions. Emitted
+  as the `watch` subscription option (Parse Server 7.0+).
+- **NEW**: `Query#aggregate(pipeline, raw_values:, raw_field_names:)` forwards
+  the Parse Server 9.9.0 `rawValues` / `rawFieldNames` aggregation options
+  through the REST aggregate path.
+- **NEW**: `Query#hint(index_name)` forces a specific index. Emitted in the
+  compiled REST query body and forwarded to the mongo-direct path
+  (`Parse::MongoDB.aggregate` / `find` `hint:`), so a bad plan diagnosed with
+  `explain` can be corrected without dropping to `mongosh`.
+- **NEW**: `:field.contained_by => [...]` (`$containedBy`) query constraint —
+  matches when the array field's values are all within the supplied set (the
+  inverse of `$all`), rounding out array-operator coverage.
+
+#### Hybrid search and reranking for RAG
+
+- **NEW**: `Class.hybrid_search(text:, lexical:, vector:, k:, fusion:)` fuses a
+  lexical Atlas Search branch with a `$vectorSearch` branch using
+  reciprocal-rank fusion (RRF). Lexical search captures exact-token matches
+  (proper nouns, codes); vector search captures paraphrase; fusing the two beats
+  either alone on most workloads. Each branch enforces ACL/CLP/`protectedFields`
+  independently before fusion, so results are already access-filtered — there is
+  no separate hydration fetch to secure.
+
+  ```ruby
+  Article.hybrid_search(
+    text: "how do I reset my password",
+    lexical: { index: "article_search" },
+    vector:  { num_candidates: 200 },
+    k: 20,
+    fusion: { k_constant: 60, weights: { lexical: 0.4, vector: 0.6 } },
+  )
+  ```
+
+  Returned objects carry `#hybrid_score`, `#hybrid_ranks`, and (when the branch
+  contributed) `#vector_score` / `#search_score`.
+- **NEW**: `Parse::VectorSearch::Hybrid.rrf` exposes the pure RRF fusion math,
+  and `Parse::VectorSearch::Hybrid.rank_fusion_supported?` detects Atlas 8.0+
+  native `$rankFusion` via a cached behavioural probe (1-hour TTL) rather than
+  version-string parsing.
+- **NEW**: `Parse::Retrieval::Reranker` cross-encoder reranking protocol with a
+  deterministic `Reranker::Fixture` (zero-network, for tests) and a
+  `Reranker::Cohere` adapter (`/v2/rerank`). A reranker reorders retrieved
+  documents by relevance before chunking.
+- **NEW**: `Parse::Retrieval.retrieve` now accepts `hybrid:` (route through
+  `hybrid_search`) and `rerank:` (a reranker that reorders documents and sets the
+  chunk score to the cross-encoder relevance). Both kwargs were previously
+  reserved and raised `NotImplementedError`. When `tenant_scope:` is supplied, the
+  tenant constraint is enforced authoritatively in BOTH hybrid branches: a
+  caller-supplied `vector_filter` / `lexical` filter can narrow the result set but
+  can no longer replace (and thereby escape) the tenant scope.
+- **NEW**: `Parse::Embeddings::SpendCap` adds an opt-in per-tenant cumulative
+  embedding token cap with hard-refuse semantics. The `semantic_search` agent
+  tool charges the estimated query tokens against the caller's tenant budget on
+  every call (attacker-controlled chat input embeds text); a breach surfaces as a
+  rate-limited tool error. Disabled by default; admin agents are exempt. The token
+  estimate takes the larger of a character- and a byte-based heuristic so
+  multibyte input (e.g. CJK, emoji) is not undercounted — the chars/4 ratio only
+  holds for ASCII, and this estimate is the sole basis for the refuse decision.
+- **CHANGED**: `PipelineSecurity::ALLOWED_STAGES` and `STAGE0_ONLY_ATLAS_STAGES`
+  admit `$rankFusion` (Atlas 8.0+ native server-side RRF) — a read-only,
+  stage-0 Atlas operator like `$vectorSearch`.
+- **NOTE**: Hybrid fusion runs client-side by default. The native single-roundtrip
+  `$rankFusion` path is opt-in (`fusion: { method: :rrf_native }`) and falls back
+  to client-side fusion when the cluster does not support it; detection and the
+  native pipeline shape ship, but live results route through the always-enforced
+  two-aggregate client path unless native is explicitly requested. When native
+  fusion does execute, top-level rows are re-verified against the scope's `_rperm`
+  after the fusion stage and fail closed (a row must carry an `_rperm` that
+  explicitly satisfies the scope), and `numCandidates` is clamped to Atlas's
+  `[limit, 10000]` range to match `Parse::VectorSearch`.
+
+#### RAG completeness: bulk embed, vector visibility, webhook redaction
+
+- **NEW**: `Class.embed_pending!` backfills embeddings for records whose managed
+  `:vector` field is still null, using objectId-cursor pagination (robust to the
+  result set shrinking as records embed). Intended as a master-key maintenance
+  operation; supports `field:`, `batch_size:`, `limit:`, and `where:`.
+- **NEW**: `Parse::Object#compute_embedding!` forces an in-place recompute of a
+  record's managed embedding(s) without a save (digest-tracked — a provider call
+  happens only when the source changed).
+- **NEW**: `vector_visibility :owner_only | :public` class-level DSL controls
+  whether a class's `:vector` properties are included in `as_json` by default
+  (`:owner_only` omits, the safe default; `:public` includes). An explicit
+  `include_vectors:` in the `as_json` call always wins.
+- **IMPROVED**: Webhook trigger payloads now strip declared `:vector` columns from
+  `object` / `original` / `update` / `objects` by default, mirroring the `as_json`
+  default. A class that opts into `vector_visibility :public` keeps its vectors in
+  the payload. Embeddings are large and leak ML signal; a handler has no reason to
+  receive them.
+
+#### Fix `Parse::Audience` hash-query persistence
+
+- **FIXED**: `Parse::Audience#query` is now stored as a JSON string on the wire,
+  matching Parse Server's built-in `_Audience.query` column (which is typed
+  `String`). The property previously serialized as an object, so every save of
+  an audience with a hash query was rejected by the server with a schema
+  mismatch (`expected String but got Object`). The public API is unchanged —
+  assign a `Hash` and read a `Hash` back; the value is encoded to JSON on save
+  and decoded on load, reading back as a `HashWithIndifferentAccess` so both
+  string and symbol keys resolve.
+
+#### `Parse::MFA` write, status, and disable fixes
+
+- **FIXED**: `Parse::User#setup_mfa!`, `#setup_sms_mfa!`, `#confirm_sms_mfa!`,
+  `#disable_mfa!`, and `#disable_mfa_master_key!` raised an `ArgumentError`
+  (nested `opts:`) before reaching the server. Each passed its session token or
+  master-key flag wrapped in an `opts:` hash, which the current `Parse::Client`
+  request layer rejects; the credentials are now passed as direct keyword
+  arguments so MFA enrollment and disable calls work.
+- **FIXED**: `Parse::User#mfa_enabled?` and `#mfa_status` now report correctly
+  after an ordinary fetch. The SDK strips `authData` from fetched users to avoid
+  leaking the TOTP secret and recovery codes that Parse Server returns there;
+  the strip now preserves a non-sensitive `{ "status" => "enabled" }` projection
+  (and nothing else — the secret and recovery codes are still removed), so the
+  status methods read true instead of always reporting "not enabled".
+- **FIXED**: `Parse::User#disable_mfa!` (self-service disable) now works. Parse
+  Server's TOTP adapter has no first-class self-disable, so the SDK first proves
+  possession of the current code, then unlinks the MFA provider. A wrong code is
+  rejected with `Parse::MFA::VerificationError` and leaves MFA enabled. The
+  current-code step is now classified positively — a rejected code raises
+  `VerificationError`, while any other failure (transport, session, server error)
+  surfaces as a `Parse::Client::ResponseError` instead of being mislabeled a
+  verification failure. The disable is confirmed authoritatively from the
+  server's own view (a disabled account's own session-token read returns no
+  `authData.mfa`) rather than from the in-memory projection, and the local
+  `mfa_enabled?` / `mfa_status` state is cleared to reflect the disable so a
+  subsequent read on the same object does not report a stale `enabled`.
+- **FIXED**: `Parse::User#disable_mfa_master_key!` now clears the in-memory MFA
+  status after disabling, so `mfa_enabled?` / `mfa_status` report the truth on
+  the same object without requiring a fresh load.
+- **BREAKING**: `Parse::User#disable_mfa_master_key!` now fails closed. Because it
+  bypasses MFA verification entirely via the master key, it refuses to run without
+  an authorization signal: pass `admin_role:` for the library to verify the
+  operator's role membership, or `allow_unverified: true` to explicitly assert that
+  the caller has already authorized the operator out-of-band. Callers that
+  previously passed only `authorized_by:` now raise `Parse::MFA::ForbiddenError`;
+  add `admin_role:` or `allow_unverified: true` to migrate. `authorized_by:`
+  remains required and is still validated first.
+- **FIXED**: `Parse::User#mfa_enabled?` / `#mfa_status` no longer report `enabled`
+  for a user whose `authData.mfa` carries an explicit non-`enabled` status with a
+  stale residual secret or recovery code; an explicit status is now authoritative.
+
+#### Interactive console MFA login
+
+- **NEW**: `rake client:console` now logs in MFA-enrolled accounts. When the
+  server reports that an additional MFA factor is required, the console prompts
+  for a TOTP / recovery code (or reads `PARSE_LOGIN_MFA` for non-interactive
+  use) and completes the login via `Parse::User.login_with_mfa`. A
+  password-only login of a non-enrolled account is unaffected.
+
+#### Request email-address verification
+
+- **NEW**: `Parse::User.request_email_verification(email)` and the instance
+  `Parse::User#request_email_verification` ask Parse Server to (re)send the
+  address-verification email for a registered, not-yet-verified user (the
+  `POST /verificationEmailRequest` endpoint). The server must have an email
+  adapter and `verifyUserEmails` enabled. Mirrors `request_password_reset`:
+  rate-limited per email, returns a Boolean, and raises
+  `Parse::Error::ServiceUnavailableError` on a misconfigured server.
+
+#### Faster AtlasSearch role-cache expiry
+
+- **CHANGED**: `Parse::AtlasSearch` `role_cache_ttl` now defaults to 30 seconds
+  (was 120). The shorter TTL expires cached user-to-role mappings sooner, so a
+  role grant or revoke is reflected in `$search` ACL decisions faster, at the
+  cost of slightly more frequent role lookups. Override via
+  `Parse::AtlasSearch.configure(role_cache_ttl:)`.
+
+#### MCP Streamable HTTP transport switch
+
+- **NEW**: `Parse::Agent::MCPRackApp.new(transport: :streamable_http)` (and the
+  `Parse::Agent.rack_app(transport: :streamable_http)` convenience) enables the
+  full MCP 2025-06-18 Streamable HTTP transport with one switch — POST→SSE
+  streaming plus the server→client `GET /` notification stream — instead of
+  setting `streaming: true, notifications: true` separately. Streamable HTTP is
+  now documented as the primary transport for embedded Rack deployments.
+
+  ```ruby
+  mcp_app = Parse::Agent.rack_app(transport: :streamable_http) do |env|
+    # auth factory returning a Parse::Agent
+  end
+  ```
+
+  `transport:` is a closed enum (`:streamable_http`, `:legacy`, or `nil`).
+  `resource_subscriptions: true` may be combined with `:streamable_http` to
+  upgrade the server→client bus to its LiveQuery-backed resource-subscription
+  posture.
+- **CHANGED**: Passing `transport: :streamable_http` together with an explicit
+  `streaming:` or `notifications:` raises `ArgumentError` (the switch already
+  owns those toggles); any `transport:` value outside the closed enum also
+  raises.
+- **NOTE**: The default transport is unchanged — an existing
+  `Parse::Agent.rack_app { ... }` keeps its non-streaming buffered-JSON
+  behavior until it opts in. The switch requires a streaming-capable Rack server
+  (Puma, Falcon, Unicorn) and has no effect under the WEBrick-backed
+  `MCPServer`, which cannot stream.
+- **CHANGED**: `Parse::Agent::MCPRackApp` `max_concurrent_dispatchers:` now
+  defaults to a finite **100** (`DEFAULT_MAX_CONCURRENT_DISPATCHERS`) instead of
+  `nil` (unlimited). Enabling a streaming surface is now bounded out of the box:
+  once the cap is reached, a new SSE request or `GET /` listening stream is
+  refused with a `503` JSON-RPC `-32000` ("server busy") rather than spawning an
+  unbounded number of orphan-prone threads. The cap applies separately to
+  request-scoped SSE and listening streams (effective ceiling up to 2x). Pass an
+  explicit positive integer to resize it, or `max_concurrent_dispatchers: nil`
+  to knowingly run uncapped (which logs a one-time construction warning). A
+  non-positive or non-integer value now raises `ArgumentError`.
+- **NEW**: Observability for SSE dispatchers abandoned by a client disconnect.
+  `Parse::Agent::MCPRackApp.abandoned_dispatcher_count` is a process-wide
+  cumulative counter, and each abandonment emits a
+  `parse.agent.mcp_dispatcher_abandoned` `ActiveSupport::Notifications` event
+  (`reason:`, `dispatcher_alive:`, `request_id:`) so operators can detect
+  disconnect-against-slow-tool pressure. On disconnect the dispatcher's
+  cancellation token is tripped (cooperative exit) and its lifetime is bounded
+  by the per-tool `Timeout` plus the clean MongoDB/REST I/O deadlines; the
+  orphan is intentionally NOT force-killed, because a `Thread#kill` would skip
+  the database driver's connection-invalidation and risk returning a half-used
+  pooled connection to a later request.
+- **CHANGED**: Custom tools registered via `Parse::Agent::Tools.register` now
+  have their declared `timeout:` (default 30s) actually enforced —
+  `Tools.invoke` wraps the handler in `Timeout.timeout`, raising
+  `Parse::Agent::ToolTimeoutError` when it is exceeded (previously the stored
+  timeout was not applied to the custom-handler path, so a blocking or looping
+  handler ran unbounded and could hold an MCP streaming dispatcher slot after a
+  client disconnect). Built-in tools are unaffected (they already self-applied
+  their timeout). **Migration:** a custom tool that legitimately runs longer
+  than 30s must now declare an explicit `timeout:` (e.g.
+  `register(..., timeout: 120)`); a tool that exceeds its budget will otherwise
+  raise `ToolTimeoutError`. `register` now also rejects a non-positive
+  `timeout:` with `ArgumentError` (a `0` would make `Timeout.timeout` a no-op
+  and silently disable the bound).
+
 ### 5.3.0
 
 #### Run webhook handlers as the calling user

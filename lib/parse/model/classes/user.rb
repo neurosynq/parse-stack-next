@@ -28,6 +28,59 @@ module Parse
 
     # 125	Error code indicating that the email address was invalid.
     class InvalidEmailAddress < Error; end
+
+    # Error code 205 (Parse::Response::ERROR_EMAIL_NOT_FOUND) raised by
+    # {Parse::User.login!} and {Parse::User#verify_password} when Parse Server
+    # returns code 205 because +preventLoginWithUnverifiedEmail+ is enabled and
+    # the account's email address has not been verified.
+    #
+    # It is a SUBCLASS of {AuthenticationError} on purpose: before this typed
+    # error existed, the unverified-email rejection raised a plain
+    # +AuthenticationError+, so existing callers wrapping {Parse::User.login!}
+    # in +rescue AuthenticationError+ must keep catching it (subclassing keeps
+    # that contract — making it a sibling would be a silent breaking change).
+    # Callers who want to special-case the unverified-email path just rescue
+    # this narrower subclass FIRST.
+    #
+    # @example
+    #   begin
+    #     Parse::User.login!(username, password)
+    #   rescue Parse::Error::EmailNotVerifiedError
+    #     # Prompt user to check their inbox and verify their email
+    #   rescue Parse::Error::AuthenticationError
+    #     # Wrong credentials or other login failure (still catches the above
+    #     # too, if no narrower rescue precedes it)
+    #   end
+    class EmailNotVerifiedError < AuthenticationError; end
+
+    # Raised by {Parse::Client} when the SDK's client-side login rate-limit
+    # guard fires — i.e. the same username has failed
+    # {Parse::API::Users::LOGIN_MAX_FAILURES} or more times and the exponential
+    # back-off window has not yet elapsed.
+    #
+    # The class is a subclass of {AuthenticationError} so that a single
+    # <tt>rescue Parse::Error::AuthenticationError</tt> handler covers both
+    # wrong-credential failures and lockout situations. Callers that need to
+    # distinguish the lockout case just rescue this narrower subclass first.
+    # Because the previous implementation raised a plain +RuntimeError+, there
+    # is no prior +AuthenticationError+ rescue contract to preserve — this is
+    # a new typed entry in the login-failure taxonomy.
+    #
+    # Note that +Parse::Error < StandardError+, so a bare +rescue+ or
+    # +rescue StandardError+ still catches this error.
+    #
+    # @example
+    #   begin
+    #     Parse::User.login!(username, password)
+    #   rescue Parse::Error::AccountLockoutError => e
+    #     # Too many failed attempts — tell the user how long to wait
+    #     retry_in = e.message[/\d+/]
+    #     render_lockout_page(retry_in: retry_in)
+    #   rescue Parse::Error::AuthenticationError
+    #     # Wrong credentials (or other login failure — also catches lockout
+    #     # if no narrower rescue precedes it)
+    #   end
+    class AccountLockoutError < AuthenticationError; end
   end
 
   # The main class representing the _User table in Parse. A user can either be signed up or anonymous.
@@ -504,13 +557,53 @@ module Parse
         if hash.key?(:authData) || hash.key?("authData") ||
            hash.key?(:auth_data) || hash.key?("auth_data")
           hash = hash.dup
+          raw_auth = hash[:authData] || hash["authData"] ||
+                     hash[:auth_data] || hash["auth_data"]
           hash.delete(:authData)
           hash.delete("authData")
           hash.delete(:auth_data)
           hash.delete("auth_data")
+          # Preserve ONLY a non-sensitive MFA status derived from the stripped
+          # authData, so #mfa_enabled? / #mfa_status (and the #disable_mfa!
+          # guard) work after an ordinary fetch without retaining the TOTP
+          # secret, recovery codes, mobile number, or any OAuth provider token.
+          # Non-MFA authData still strips to nil exactly as before.
+          safe = sanitized_mfa_authdata(raw_auth)
+          hash["authData"] = safe if safe
         end
       end
       super(hash, dirty_track: dirty_track, filter_protected: filter_protected, protected_set: protected_set)
+    end
+
+    # @!visibility private
+    # Reduce a server-returned +authData+ hash to a leak-safe MFA status.
+    # Parse Server returns +authData.mfa+ as +{ "secret" => ..., "recovery" =>
+    # [...] }+ (the raw TOTP secret and one-time recovery codes) even on a
+    # user's own session-token read, so the value itself must never be retained.
+    # This keeps only +{ "mfa" => { "status" => "enabled" } }+ when MFA is
+    # configured, and returns +nil+ otherwise (preserving the prior
+    # strip-to-nil behavior for OAuth-only / non-MFA authData).
+    # @return [Hash, nil]
+    def sanitized_mfa_authdata(raw)
+      return nil unless raw.is_a?(Hash)
+      mfa = raw["mfa"] || raw[:mfa]
+      return nil unless mfa.is_a?(Hash)
+
+      status = mfa["status"] || mfa[:status]
+      # An EXPLICIT non-"enabled" status is authoritative: treat the user
+      # as disabled even if a stale `secret`/`recovery` lingers in the
+      # blob. Without this, a residual credential would override an
+      # explicit `status: "disabled"` and make `mfa_enabled?` report true
+      # for a user who has turned MFA off.
+      return nil if status.is_a?(String) && status != "enabled"
+
+      recovery = mfa["recovery"] || mfa[:recovery]
+      enabled = status == "enabled" ||
+                (mfa["secret"] || mfa[:secret]).present? ||
+                (recovery.is_a?(Array) ? recovery.any? : recovery.present?) ||
+                (mfa["mobile"] || mfa[:mobile]).present?
+
+      enabled ? { "mfa" => { "status" => "enabled" } } : nil
     end
 
     # @return [Boolean] true if this user is anonymous (i.e. created
@@ -662,6 +755,17 @@ module Parse
     def request_password_reset
       return false if email.nil?
       Parse::User.request_password_reset(email)
+    end
+
+    # Request that Parse Server (re)send this user's email-address verification
+    # email. The server must have an email adapter and `verifyUserEmails` enabled.
+    # @return [Boolean] true if the request was accepted, false otherwise.
+    # @raise [Parse::Error::ServiceUnavailableError] if Parse Server returns a
+    #   500/503 (e.g. no emailAdapter / `verifyUserEmails` disabled).
+    # @see Parse::User.request_email_verification
+    def request_email_verification
+      return false if email.nil?
+      Parse::User.request_email_verification(email)
     end
 
     # You may set a password for this user when you are creating them. Parse never returns a
@@ -1069,9 +1173,21 @@ module Parse
         # Self-fetch trust: see {.login}.
         with_authdata_trust { Parse::User.build(response.result) }
       else
-        raise Parse::Error::AuthenticationError,
-              "Parse::User.login! failed for #{username.inspect}: " \
-              "#{response.error || "HTTP #{response.http_status}"} (code=#{response.code.inspect})"
+        case response.code
+        when Parse::Response::ERROR_EMAIL_NOT_FOUND
+          # Parse Server throws code 205 (EMAIL_NOT_FOUND) when
+          # +preventLoginWithUnverifiedEmail+ is set and the account's email
+          # address has not yet been verified. Raise the typed error so callers
+          # can direct the user to verify their inbox without catching every
+          # AuthenticationError.
+          raise Parse::Error::EmailNotVerifiedError,
+                "Parse::User.login! failed for #{username.inspect}: " \
+                "email address is not verified (code=205)"
+        else
+          raise Parse::Error::AuthenticationError,
+                "Parse::User.login! failed for #{username.inspect}: " \
+                "#{response.error || "HTTP #{response.http_status}"} (code=#{response.code.inspect})"
+        end
       end
     end
 
@@ -1093,6 +1209,26 @@ module Parse
       email = email.email if email.is_a?(Parse::User)
       return false if email.blank?
       response = client.request_password_reset(email)
+      response.success?
+    end
+
+    # Request that Parse Server (re)send the email-address verification email for
+    # a registered, not-yet-verified user. The server must have an email adapter
+    # and `verifyUserEmails` enabled.
+    # @example
+    #  # pass a user object
+    #  Parse::User.request_email_verification(user)
+    #  # or an email
+    #  Parse::User.request_email_verification("user@example.com")
+    # @param email [String] The user's email address (or a {Parse::User}).
+    # @return [Boolean] True/false if the request was accepted.
+    # @raise [Parse::Error::ServiceUnavailableError] if Parse Server returns a
+    #   500/503 (e.g. no emailAdapter / `verifyUserEmails` disabled). Callers that
+    #   branch on the Boolean should rescue this.
+    def self.request_email_verification(email)
+      email = email.email if email.is_a?(Parse::User)
+      return false if email.blank?
+      response = client.request_email_verification(email)
       response.success?
     end
 
@@ -1258,6 +1394,47 @@ module Parse
     #   end
     def multi_session?
       active_session_count > 1
+    end
+
+    # Verify this user's password without minting a session token.
+    #
+    # Delegates to the +GET /parse/verifyPassword+ endpoint (Parse Server
+    # 7.1.0+) using this user's +username+ and the supplied +password+. The
+    # check is purely credential validation — no session is created on
+    # success, and the user's existing sessions are unaffected.
+    #
+    # Use this as a step-up authentication gate: before allowing a sensitive
+    # action (e.g. changing an email address or deleting an account), call
+    # +verify_password+ to confirm the caller still knows the password.
+    #
+    # @param password [String] the password to verify.
+    # @return [Boolean] +true+ if the credentials are valid.
+    # @raise [Parse::Error::EmailNotVerifiedError] when the account exists but
+    #   +preventLoginWithUnverifiedEmail+ is enabled and the email has not been
+    #   verified (Parse Server error code 205). The caller may want to prompt
+    #   the user to check their inbox rather than treating this as a wrong-
+    #   password failure.
+    # @raise [Parse::Error::AuthenticationError] when the username does not
+    #   exist or the password is wrong (code 101, +OBJECT_NOT_FOUND+).
+    # @return [Boolean]
+    # @example
+    #   # Step-up check before a destructive action
+    #   if user.verify_password(params[:current_password])
+    #     user.destroy
+    #   end
+    def verify_password(password)
+      response = client.verify_password(username.to_s, password.to_s)
+      return true if response.success?
+
+      case response.code
+      when Parse::Response::ERROR_EMAIL_NOT_FOUND
+        raise Parse::Error::EmailNotVerifiedError,
+              "verify_password failed: email address is not verified (code=205)"
+      else
+        raise Parse::Error::AuthenticationError,
+              "verify_password failed: " \
+              "#{response.error || "HTTP #{response.http_status}"} (code=#{response.code.inspect})"
+      end
     end
 
     # Return the transitive upward closure of role names this user

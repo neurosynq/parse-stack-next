@@ -341,4 +341,48 @@ class SemanticSearchToolTest < Minitest::Test
       assert_equal :embedding, captured[:field]
     end
   end
+
+  # --- spend cap → structured error mapping (§16.10) ---
+
+  # A transient cap hit (the window will eventually admit the charge:
+  # `requested <= limit`) maps to RateLimitExceeded carrying the REAL
+  # backoff hint — never the window fallback — so the model waits and
+  # retries.
+  def test_spend_cap_transient_hit_maps_to_rate_limited
+    sc = Parse::Embeddings::SpendCap
+    sc.configure(limit_tokens: 100, window: 3600)
+    sc.charge!(tenant_id: nil, tokens: 90) # near the cap; window now has entries
+    # query of 80 ASCII chars → est 20 tokens: 90 + 20 > 100, but 20 <= 100,
+    # so the charge CAN fit once the window rolls off → non-nil retry_after.
+    query = "a" * 80
+    with_retrieve_returning([]) do
+      err = assert_raises(Parse::Agent::RateLimitExceeded) do
+        call(fake_agent, class_name: "SemanticSearchDoc", query: query)
+      end
+      refute_nil err.retry_after, "transient cap hit must carry a real backoff hint"
+      assert err.retry_after > 0
+      assert_equal 100, err.limit
+      assert_equal 3600, err.window
+    end
+  end
+
+  # A permanent cap hit (the request alone exceeds the cap:
+  # `requested > limit`, so SpendCap reports retry_after=nil) maps to
+  # ValidationError — retrying can never help, and RateLimitExceeded would
+  # both mislead the model and crash on `nil.round`.
+  def test_spend_cap_oversized_request_maps_to_validation_error
+    sc = Parse::Embeddings::SpendCap
+    sc.configure(limit_tokens: 10, window: 3600)
+    query = "a" * 80 # est 20 tokens > 10-token cap → can never fit
+    with_retrieve_returning([]) do
+      err = assert_raises(Parse::Agent::ValidationError) do
+        call(fake_agent, class_name: "SemanticSearchDoc", query: query)
+      end
+      assert_match(/too large/, err.message)
+    end
+  end
+
+  def teardown
+    Parse::Embeddings::SpendCap.reset_all! if defined?(Parse::Embeddings::SpendCap)
+  end
 end

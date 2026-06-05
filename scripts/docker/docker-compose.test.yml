@@ -5,9 +5,37 @@ version: '3.8'
 name: ${PSNEXT_PREFIX:-psnext-it}
 
 services:
+  # Security preflight — TEST STACK ONLY. Runs to completion before any
+  # real service starts (each gates on it via
+  # `service_completed_successfully`). Fails the stack closed when a
+  # `*_BIND` override would expose the stack on the LAN while privileged
+  # credentials are still the committed defaults. Invisible to the normal
+  # loopback run. See scripts/docker/preflight.sh for the rationale and
+  # escape hatches (ALLOW_INSECURE_BIND=1, or set real credentials).
+  preflight:
+    image: busybox:1.36
+    container_name: ${PSNEXT_PREFIX:-psnext-it}-preflight
+    environment:
+      # Resolved binds (compose applies the 127.0.0.1 default here).
+      PARSE_BIND: ${PARSE_BIND:-127.0.0.1}
+      MONGO_BIND: ${MONGO_BIND:-127.0.0.1}
+      REDIS_BIND: ${REDIS_BIND:-127.0.0.1}
+      DASHBOARD_BIND: ${DASHBOARD_BIND:-127.0.0.1}
+      # "1" only when the operator supplied a non-empty override; empty
+      # means the committed default credential is still in force.
+      PARSE_MASTER_KEY_SET: ${PARSE_MASTER_KEY:+1}
+      MONGO_ROOT_PASSWORD_SET: ${MONGO_ROOT_PASSWORD:+1}
+      ALLOW_INSECURE_BIND: ${ALLOW_INSECURE_BIND:-}
+    volumes:
+      - ./preflight.sh:/preflight.sh:ro
+    command: ["sh", "/preflight.sh"]
+
   mongo:
     image: mongo:8
     container_name: ${PSNEXT_PREFIX:-psnext-it}-mongo
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
     # Bind to loopback so the test database isn't reachable from the LAN
     # when a developer runs `docker-compose up`. Override with
     # `MONGO_BIND=0.0.0.0` if you really want it exposed.
@@ -83,6 +111,9 @@ services:
   redis:
     image: redis:7-alpine
     container_name: ${PSNEXT_PREFIX:-psnext-it}-redis
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
     # Loopback-only by default. Used by the cache integration test
     # (cache_redis_integration_test.rb) and the synchronize-create lock
     # tests. Override with `REDIS_BIND=0.0.0.0` if you need to point a

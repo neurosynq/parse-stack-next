@@ -123,6 +123,144 @@ class MCPRackAppTest < Minitest::Test
   end
 
   # ---------------------------------------------------------------------------
+  # transport: :streamable_http consolidation switch
+  # ---------------------------------------------------------------------------
+
+  # A GET env requesting the server→client listening stream.
+  def listening_stream_env(session_id: "sess-abc123")
+    {
+      "REQUEST_METHOD"      => "GET",
+      "HTTP_ACCEPT"         => "text/event-stream",
+      "HTTP_MCP_SESSION_ID" => session_id,
+    }
+  end
+
+  def test_transport_streamable_http_enables_post_sse
+    app = build_app(transport: :streamable_http)
+    env = rack_env.merge("HTTP_ACCEPT" => "text/event-stream")
+    status, headers, _body = app.call(env)
+    assert_equal 200, status
+    assert_equal "text/event-stream", headers["Content-Type"]
+  end
+
+  def test_transport_streamable_http_enables_get_listening_stream
+    app = build_app(transport: :streamable_http)
+    status, headers, _body = app.call(listening_stream_env)
+    assert_equal 200, status
+    assert_equal "text/event-stream", headers["Content-Type"]
+  end
+
+  def test_transport_streamable_http_equals_streaming_plus_notifications
+    app = build_app(transport: :streamable_http)
+    assert_equal true, app.instance_variable_get(:@streaming)
+    refute_nil app.subscription_manager,
+               "transport: :streamable_http should build the server→client notification manager"
+  end
+
+  def test_transport_default_leaves_post_non_streaming
+    app = build_app
+    env = rack_env.merge("HTTP_ACCEPT" => "text/event-stream")
+    _status, headers, _body = app.call(env)
+    assert_equal "application/json", headers["Content-Type"],
+                 "default transport must keep the historical buffered-JSON behavior"
+  end
+
+  def test_transport_default_rejects_get_with_405
+    app = build_app
+    status, _headers, _body = app.call(listening_stream_env)
+    assert_equal 405, status,
+                 "default transport opens no listening stream — GET falls through to 405"
+  end
+
+  def test_transport_legacy_is_equivalent_to_default
+    app = build_app(transport: :legacy)
+    assert_equal false, app.instance_variable_get(:@streaming)
+    assert_nil app.subscription_manager
+  end
+
+  def test_transport_streamable_http_conflicts_with_explicit_streaming
+    err = assert_raises(ArgumentError) do
+      build_app(transport: :streamable_http, streaming: true)
+    end
+    assert_match(/already enables streaming/, err.message)
+  end
+
+  def test_transport_streamable_http_conflicts_with_explicit_notifications
+    assert_raises(ArgumentError) do
+      build_app(transport: :streamable_http, notifications: true)
+    end
+  end
+
+  # Discriminating case: an EXPLICIT `false` must still conflict. This is what
+  # separates the nil-sentinel "omitted vs explicit" check from a plain
+  # truthiness check — `streaming: false` is falsey but not omitted, so the
+  # switch must still refuse it. A regression to `unless !streaming` would let
+  # these through.
+  def test_transport_streamable_http_conflicts_with_explicit_streaming_false
+    assert_raises(ArgumentError) do
+      build_app(transport: :streamable_http, streaming: false)
+    end
+  end
+
+  def test_transport_streamable_http_conflicts_with_explicit_notifications_false
+    assert_raises(ArgumentError) do
+      build_app(transport: :streamable_http, notifications: false)
+    end
+  end
+
+  def test_transport_streamable_http_combines_with_resource_subscriptions
+    # resource_subscriptions: upgrades the bus to the LiveQuery posture and is
+    # NOT subsumed by the switch, so the combination must be allowed.
+    app = build_app(transport: :streamable_http, resource_subscriptions: true)
+    assert_equal true, app.instance_variable_get(:@streaming)
+    # resource_subscriptions: builds the manager with no supported-override, so
+    # it advertises resources.subscribe live when LiveQuery is up. notifications:
+    # alone forces supported: false. Proving the override is nil here shows the
+    # switch did not subsume / downgrade resource_subscriptions.
+    assert_nil app.subscription_manager.instance_variable_get(:@supported_override),
+               "resource_subscriptions: should keep the LiveQuery-backed posture"
+  end
+
+  def test_unknown_transport_raises
+    err = assert_raises(ArgumentError) do
+      build_app(transport: :websocket)
+    end
+    assert_match(/transport:/, err.message)
+  end
+
+  # ---------------------------------------------------------------------------
+  # max_concurrent_dispatchers — finite default cap
+  # ---------------------------------------------------------------------------
+
+  def test_dispatcher_cap_defaults_to_finite
+    app = build_app
+    assert_equal Parse::Agent::MCPRackApp::DEFAULT_MAX_CONCURRENT_DISPATCHERS,
+                 app.instance_variable_get(:@max_concurrent_dispatchers)
+  end
+
+  def test_explicit_dispatcher_cap_is_honored
+    app = build_app(max_concurrent_dispatchers: 7)
+    assert_equal 7, app.instance_variable_get(:@max_concurrent_dispatchers)
+  end
+
+  def test_explicit_nil_dispatcher_cap_is_unbounded
+    app = build_app(max_concurrent_dispatchers: nil)
+    assert_nil app.instance_variable_get(:@max_concurrent_dispatchers)
+  end
+
+  def test_zero_dispatcher_cap_raises
+    assert_raises(ArgumentError) { build_app(max_concurrent_dispatchers: 0) }
+  end
+
+  def test_negative_dispatcher_cap_raises
+    assert_raises(ArgumentError) { build_app(max_concurrent_dispatchers: -5) }
+  end
+
+  def test_non_integer_dispatcher_cap_raises
+    assert_raises(ArgumentError) { build_app(max_concurrent_dispatchers: "100") }
+  end
+
+  # ---------------------------------------------------------------------------
   # Happy path
   # ---------------------------------------------------------------------------
 

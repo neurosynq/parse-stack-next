@@ -173,6 +173,58 @@ set the same kwargs on the query for chainable composition.
 Related: `first_direct(n)` for the first N rows, `count_direct` for a
 count-only query. Both accept the same auth kwargs.
 
+#### Field projection: `keys` and `exclude_keys`
+
+The two field-selection options behave differently on the direct path
+because MongoDB's `$project` is an allowlist, not a denylist:
+
+- **`keys` (allowlist)** compiles to a `$project` stage in the direct
+  pipeline, so the projection runs server-side in MongoDB — only the
+  named fields (plus the reserved envelope: `_id`, `_created_at`,
+  `_updated_at`, `_acl`) leave the database.
+
+- **`exclude_keys` (denylist)** has no `$project` equivalent, so Parse
+  Stack honors it as a **post-fetch sanitize**: the pipeline is
+  unchanged, and the SDK recursively strips every key with a matching
+  name from the decoded results in Ruby. The fields still travel from
+  MongoDB to the client — this is a result-shaping convenience, not a
+  data-minimization or access-control boundary.
+
+```ruby
+# Allowlist — projected server-side via $project
+Song.query.keys(:title, :artist).results_direct
+
+# Denylist — stripped client-side after fetch
+Song.query.exclude_keys(:internal_notes).results_direct
+```
+
+Two consequences specific to the direct path:
+
+1. **Recursive by name.** `exclude_keys(:name)` removes `name` at every
+   depth, including inside included/nested objects — so a query that
+   includes a pointer also strips the pointed-to object's `name`. This
+   is broader than Parse Server's REST `excludeKeys`, which is
+   path-scoped (top-level or dotted) and would leave the nested field
+   intact. The same query can therefore return different shapes on the
+   REST and direct paths.
+
+2. **Reserved fields are never stripped.** `objectId`, `className`,
+   `__type`, `createdAt`, `updatedAt`, `ACL`, and their Mongo
+   storage-form names (`_id`, `_created_at`, `_updated_at`, `_acl`) are
+   always retained, so excluding one of them is a no-op rather than a
+   way to break object reconstruction.
+
+The sanitize applies to the object/decoded result paths
+(`results_direct`, `first_direct`, and the auto-promoted
+`$inQuery`/`$notInQuery` aggregation). The raw aggregation accessor
+(`aggregate(...).raw`) returns documents untouched.
+
+Because `exclude_keys` here is a projection convenience and not an
+ACL/CLP/`protectedFields` boundary, the security contract in
+[Security](#security) is unaffected — to keep a field from leaving the
+database, use `keys` (allowlist) or `protectedFields`, not
+`exclude_keys`.
+
 ### `Query#aggregate(pipeline, mongo_direct: true)`
 
 ```ruby
@@ -233,8 +285,34 @@ raw = Parse::MongoDB.find(
 ```
 
 Convenience wrapper around `db.find`. Accepts `limit:`, `skip:`, `sort:`,
-`projection:`, `max_time_ms:`. When `:limit` is omitted the call applies
+`projection:`, `hint:`, `max_time_ms:`. When `:limit` is omitted the call applies
 `DEFAULT_FIND_LIMIT = 1000` and warns; pass `limit: 0` to opt out.
+
+### Forcing an index with `hint`
+
+When the query planner picks a sub-optimal index on a large collection,
+`Query#hint` forces a specific one. It applies on **both** paths — the REST body
+(`hint` parameter, Parse Server 7.4.0+) and the mongo-direct path — so a plan you
+diagnosed with `Query#explain` can be corrected without dropping to `mongosh`.
+
+```ruby
+# Diagnose, then force the index, on the mongo-direct path:
+Post.query(:status => "published").order(:created_at.desc).hint("status_1_created_at_-1")
+    .results_direct
+
+# A key pattern works too:
+Post.query(:status => "published").hint({ "status" => 1, "createdAt" => -1 }).count_direct
+```
+
+On the mongo-direct path the hint is forwarded to the driver as the Mongo `hint`
+option: `results_direct` / `count_direct` / `distinct_direct` pass it to
+`Parse::MongoDB.aggregate` (`hint:` → the aggregation `hint` option), and the
+primitives `Parse::MongoDB.aggregate(..., hint:)` and
+`Parse::MongoDB.find(..., hint:)` accept it directly. The index name (a `String`)
+or a key pattern (`Hash`) are both accepted; an unknown index name is rejected by
+MongoDB, which is the intended fail-fast signal that the hint is stale.
+
+`hint` is unset by default (the planner chooses); it is purely an override.
 
 ### Geo queries
 
@@ -619,6 +697,20 @@ ACL/CLP enforcement if the SDK applies it.
 
 As of **v4.4.0**, the SDK applies that enforcement on the mongo-direct
 path when the caller supplies a scope. Five layers compose:
+
+> **Atlas index entry points share this enforcement.** The Atlas-index
+> stages (`$vectorSearch`, `$search`, `$rankFusion`) must be stage 0 of
+> their pipeline, so they cannot route through `Parse::MongoDB.aggregate`
+> (which prepends an ACL `$match` at stage 0). `Parse::VectorSearch.search`
+> (`find_similar`), `Parse::AtlasSearch.search`, and
+> `Parse::VectorSearch::Hybrid` (`Class.hybrid_search`, v5.4.0) therefore
+> reproduce the same enforcement chain **inline** — the ACL `_rperm`
+> `$match` is appended AFTER the index stage, and CLP / `protectedFields` /
+> the internal-fields denylist run post-fetch — so the same scope kwargs
+> (`session_token:` / `acl_user:` / `acl_role:` / `master:`) and the same
+> contract apply. Hybrid search fuses two independently-enforced branches,
+> so fused rows are already access-filtered. `$rankFusion` was added to the
+> strict-mode allowlist (Layer 1) in v5.4.0 for the opt-in native path.
 
 ### Layer 1: Pipeline-security denylist (always on)
 

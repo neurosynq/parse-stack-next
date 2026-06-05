@@ -370,6 +370,19 @@ module Parse
       # @param where [Array] an array of {Parse::Constraint} objects.
       # @return [Hash] a hash representing the compiled query, with
       #   internal routing markers stripped.
+      # One-shot process latch so {#warn_if_public_explain_restricted!} emits
+      # the allowPublicExplain guidance at most once per process rather than on
+      # every explain call.
+      # @!visibility private
+      def public_explain_warned?
+        @public_explain_warned == true
+      end
+
+      # @!visibility private
+      def public_explain_warned!
+        @public_explain_warned = true
+      end
+
       def compile_where(where)
         constraint_reduce(where).reject { |k, _| k.is_a?(String) && k.start_with?("__") }
       end
@@ -480,6 +493,7 @@ module Parse
       @where = []
       @order = []
       @keys = []
+      @exclude_keys = []
       @includes = []
       @limit = nil
       @skip = 0
@@ -495,6 +509,7 @@ module Parse
       # unless the caller said otherwise.
       @use_master_key = nil
       @verbose_aggregate = false
+      @hint = nil
       conditions constraints
     end # initialize
 
@@ -615,6 +630,50 @@ module Parse
     end
 
     alias_method :select_fields, :keys
+
+    # Set a server-side field denylist for this query.
+    # When set, Parse Server excludes the named fields from each returned
+    # object, complementing the {#keys} allowlist. The two options can be
+    # combined: Parse Server first applies the {#keys} allowlist, then
+    # strips any field names listed in +excludeKeys+.
+    #
+    # @note On the REST query path (+encode: true+ in {#compile}) this maps to
+    #   Parse Server's path-scoped +excludeKeys+. On the mongo-direct path
+    #   (explicit +.results_direct+, an auto-route, or an aggregation that
+    #   auto-promotes — e.g. an +$inQuery+ pointer constraint that rewrites to
+    #   a +$lookup+) the pipeline can only project the {#keys} allowlist, so
+    #   the SDK honors the denylist as a post-fetch sanitize over the returned
+    #   results instead. That mongo-direct sanitize is recursive by name: it
+    #   strips EVERY key with a matching name at any depth, so excluding a
+    #   field also removes a same-named field inside included/nested objects —
+    #   broader than the REST path's top-level/dotted scoping. Reserved
+    #   envelope fields (+objectId+, +className+, +__type+, +createdAt+,
+    #   +updatedAt+, +ACL+ and their Mongo storage-form names) are never
+    #   stripped, so object reconstruction is unaffected. The raw aggregation
+    #   accessor (`aggregate(...).raw`) returns unredacted documents — the
+    #   sanitize applies to the object/decoded result paths. +excludeKeys+ is a
+    #   projection convenience, not an ACL/CLP boundary, so it does not affect
+    #   access control.
+    #
+    # @example Omit a single sensitive field
+    #   Post.query.exclude_keys(:secret_token).results
+    #
+    # @example Omit multiple fields
+    #   Post.query.exclude_keys(:secret_token, :internal_notes).results
+    #
+    # @param fields [Array<Symbol, String>] the field names to exclude.
+    # @return [self]
+    def exclude_keys(*fields)
+      @exclude_keys ||= []
+      fields.flatten.each do |field|
+        if field.nil? == false && field.respond_to?(:to_s)
+          @exclude_keys.push Query.format_field(field).to_sym
+        end
+      end
+      @exclude_keys.uniq!
+      @results = nil if fields.count > 0
+      self # chaining
+    end
 
     # Extract values for a specific field from all matching objects.
     # This is similar to keys() but returns an array of the actual field values
@@ -789,6 +848,31 @@ module Parse
     # @return [self]
     def read_pref(preference)
       @read_preference = preference
+      self
+    end
+
+    # Set a MongoDB index hint for this query.
+    # Forces Parse Server (and the underlying MongoDB driver) to use the
+    # named index instead of the query planner's choice. Useful for
+    # benchmarking or for working around sub-optimal plan selection.
+    # The hint is emitted in the compiled REST query body as the +hint+
+    # parameter (supported by Parse Server 7.4.0+) AND forwarded to the
+    # mongo-direct path — +results_direct+ / +count_direct+ / +distinct_direct+
+    # pass it to {Parse::MongoDB.aggregate}/{Parse::MongoDB.find} as the Mongo
+    # +hint+ option, so a plan diagnosed with {#explain} can be corrected on
+    # either path.
+    #
+    # @example Force a specific index
+    #   Post.query(:status => "published").hint("status_1_created_at_-1").results
+    #
+    # @param index_name [String, nil, :_read_] the index name or key pattern to use,
+    #   or +nil+ to clear a previously set hint. Called with no arguments acts as a
+    #   reader and returns the current hint value.
+    # @return [String, nil, self]
+    HINT_UNSET = :_hint_unset_ # @!visibility private
+    def hint(index_name = HINT_UNSET)
+      return @hint if index_name.equal?(HINT_UNSET)
+      @hint = index_name
       self
     end
 
@@ -1462,24 +1546,125 @@ module Parse
     # Build headers for the query request
     def _headers
       headers = {}
-      if read_preference.present?
-        pref = read_preference.to_s.upcase.gsub("_", " ").split.join("_")
-        # Normalize common formats
-        pref = case pref
-          when "PRIMARY" then "PRIMARY"
-          when "PRIMARY_PREFERRED", "PRIMARYPREFERRED" then "PRIMARY_PREFERRED"
-          when "SECONDARY" then "SECONDARY"
-          when "SECONDARY_PREFERRED", "SECONDARYPREFERRED" then "SECONDARY_PREFERRED"
-          when "NEAREST" then "NEAREST"
-          else pref
-          end
-        if Parse::Protocol::READ_PREFERENCES.include?(pref)
-          headers[Parse::Protocol::READ_PREFERENCE] = pref
-        else
-          warn "[ParseQuery] Invalid read preference: #{read_preference}. Valid values: #{Parse::Protocol::READ_PREFERENCES.join(", ")}"
-        end
-      end
+      pref = normalized_read_preference
+      headers[Parse::Protocol::READ_PREFERENCE] = pref if pref
       headers
+    end
+
+    # Normalize the query's `read_pref` value to the canonical Parse Server
+    # token (`PRIMARY`, `PRIMARY_PREFERRED`, `SECONDARY`, `SECONDARY_PREFERRED`,
+    # `NEAREST`). Parse Server's `_parseReadPreference` upcases the incoming
+    # string and matches exactly these forms, so the SDK emits them verbatim.
+    # @return [String, nil] the canonical token, or nil when no preference is
+    #   set. Warns and returns nil on an unrecognized value.
+    # @!visibility private
+    def normalized_read_preference
+      return nil unless read_preference.present?
+      pref = read_preference.to_s.upcase.gsub("_", " ").split.join("_")
+      pref = case pref
+        when "PRIMARY" then "PRIMARY"
+        when "PRIMARY_PREFERRED", "PRIMARYPREFERRED" then "PRIMARY_PREFERRED"
+        when "SECONDARY" then "SECONDARY"
+        when "SECONDARY_PREFERRED", "SECONDARYPREFERRED" then "SECONDARY_PREFERRED"
+        when "NEAREST" then "NEAREST"
+        else pref
+        end
+      return pref if Parse::Protocol::READ_PREFERENCES.include?(pref)
+      warn "[ParseQuery] Invalid read preference: #{read_preference}. Valid values: #{Parse::Protocol::READ_PREFERENCES.join(", ")}"
+      nil
+    end
+
+    # Proactive guidance for {#explain} on Parse Server 9.0+. PS 9.0 defaults
+    # `allowPublicExplain` to false, so a NON-master explain is rejected unless
+    # the operator re-enabled it server-side. That flag is not surfaced in
+    # `/serverInfo`, so we cannot know for certain whether the call will be
+    # allowed — we therefore WARN (one-shot) and still run the call:
+    # `allowPublicExplain: true` servers return the plan; restricted servers
+    # fail and {#explain}'s reactive enrichment explains why.
+    #
+    # We warn only when the query is clearly non-master (explicit
+    # `use_master_key: false`, or a session-token scope) AND the server version
+    # is known to restrict it — so a master-default explain (the common case)
+    # and unknown-version servers don't get spurious noise.
+    # @!visibility private
+    def warn_if_public_explain_restricted!
+      non_master = use_master_key == false ||
+                   (session_token.present? && use_master_key != true)
+      return unless non_master
+      return unless client.respond_to?(:server_supports?) && client.respond_to?(:server_version)
+      return if client.server_version.to_s.empty?      # known version only
+      return if client.server_supports?(:public_explain)
+      return if Parse::Query.public_explain_warned?
+      Parse::Query.public_explain_warned!
+      message = "[ParseQuery:Explain] Parse Server #{client.server_version} defaults " \
+                "`allowPublicExplain` to false; a non-master explain will be rejected " \
+                "unless the server enables it. Run explain with use_master_key: true, or " \
+                "set `allowPublicExplain: true` in the server's databaseOptions."
+      if defined?(Parse) && Parse.respond_to?(:logger) && Parse.logger
+        Parse.logger.warn(message)
+      else
+        warn message
+      end
+    end
+
+    # Honor the `exclude_keys` denylist on the mongo-direct path by redacting
+    # the matching fields from the fetched results in Ruby — the mongo-direct
+    # pipeline projects only the `keys` allowlist (Parse Server's REST
+    # `excludeKeys` has no mongo-direct equivalent), so without this the
+    # denylist would silently have no effect. This is a pure post-fetch
+    # sanitize over the Parse-format result hashes; it does NOT change the
+    # MongoDB query or pipeline.
+    #
+    # Semantics differ from the REST path: `excludeKeys` on REST is
+    # path-scoped (top-level / dotted), whereas this drops EVERY key with a
+    # matching name at ANY depth — so excluding `:name` also strips `name`
+    # from included/nested objects. This matches the "recursively drop all
+    # keys with that name" contract for the mongo-direct path.
+    #
+    # `exclude_keys` is a projection convenience, NOT an ACL/CLP boundary, so
+    # this redaction is about returned-object shape, not access control.
+    #
+    # Decode-critical structural keys are never stripped, so a query can ask
+    # to exclude e.g. `:objectId` without breaking object reconstruction.
+    # @param results [Array<Hash>] Parse-format result hashes (mutated in place)
+    # @return [Array<Hash>] the same array, with excluded keys removed
+    # @!visibility private
+    def redact_excluded_keys!(results)
+      return results unless @exclude_keys&.any?
+      names = @exclude_keys.map(&:to_s) - RESERVED_EXCLUDE_KEYS
+      return results if names.empty?
+      drop = names.to_set
+      results.each { |row| recursively_drop_keys!(row, drop) }
+      results
+    end
+
+    # Reserved fields that {#redact_excluded_keys!} never strips: dropping these
+    # would break {#decode} (objectId / className / __type) or remove the
+    # required Parse envelope. Both the Parse-format names (objectId, createdAt,
+    # updatedAt, ACL) and their Mongo storage-form counterparts (_id,
+    # _created_at, _updated_at, _acl) are guarded, so the redaction is safe even
+    # if it is ever pointed at a raw Mongo document, and a caller can't break
+    # reconstruction by excluding e.g. `:_id`. This is an SDK safety choice, not
+    # an assertion about which fields Parse Server's REST `excludeKeys` strips.
+    RESERVED_EXCLUDE_KEYS = %w[
+      objectId className __type createdAt updatedAt ACL
+      _id _created_at _updated_at _acl
+    ].freeze
+
+    # Recursively delete every key named in +names+ from a nested
+    # Hash/Array structure, in place. Symbol and string keys both match.
+    # @param value [Object] a Hash, Array, or scalar
+    # @param names [Set<String>] the key names to drop
+    # @!visibility private
+    def recursively_drop_keys!(value, names)
+      case value
+      when Hash
+        value.reject! { |k, _| names.include?(k.to_s) }
+        value.each_value { |v| recursively_drop_keys!(v, names) }
+      when Array
+        value.each { |v| recursively_drop_keys!(v, names) }
+      end
+      value
     end
 
     # Performs the fetch request for the query.
@@ -1921,10 +2106,17 @@ module Parse
                                              master: master,
                                              acl_user: acl_user,
                                              acl_role: acl_role,
-                                             read_preference: @read_preference)
+                                             read_preference: @read_preference,
+                                             hint: @hint)
 
       # Convert MongoDB documents to Parse format
       parse_results = Parse::MongoDB.convert_documents_to_parse(raw_results, @table)
+
+      # Honor exclude_keys on the mongo-direct path: the pipeline can only
+      # project the keys allowlist, so apply the denylist here as a post-fetch
+      # sanitize over the Parse-format hashes (before the raw/decode fork so
+      # both shapes are redacted). Does not alter the MongoDB query.
+      redact_excluded_keys!(parse_results)
 
       if raw
         return parse_results.each(&block) if block_given?
@@ -2042,7 +2234,8 @@ module Parse
                                              master: master,
                                              acl_user: acl_user,
                                              acl_role: acl_role,
-                                             read_preference: @read_preference)
+                                             read_preference: @read_preference,
+                                             hint: @hint)
 
       # Extract count from result
       return 0 if raw_results.empty?
@@ -2121,6 +2314,7 @@ module Parse
       raw_results = Parse::MongoDB.aggregate(@table, pipeline,
                                              allow_internal_fields: true,
                                              read_preference: @read_preference,
+                                             hint: @hint,
                                              session_token: session_token,
                                              master: master,
                                              acl_user: acl_user,
@@ -2239,7 +2433,8 @@ module Parse
         # SDK-built pipeline only — see results_direct for rationale.
         raw_results = Parse::MongoDB.aggregate(@table, pipeline,
                                                allow_internal_fields: true,
-                                               read_preference: @read_preference)
+                                               read_preference: @read_preference,
+                                             hint: @hint)
 
         # Convert results
         if options[:raw]
@@ -3032,7 +3227,7 @@ module Parse
     #   events can arrive. Optional.
     # @return [Parse::LiveQuery::Subscription] the subscription object
     # @see Parse::LiveQuery::Subscription
-    def subscribe(fields: nil, session_token: nil, client: nil, use_master_key: false, &block)
+    def subscribe(fields: nil, keys: nil, watch: nil, session_token: nil, client: nil, use_master_key: false, &block)
       require_relative "live_query"
 
       lq_client = client || Parse::LiveQuery.client
@@ -3040,6 +3235,8 @@ module Parse
         @table,
         where: compile_where,
         fields: fields,
+        keys: keys,
+        watch: watch,
         session_token: session_token || @session_token,
         use_master_key: use_master_key,
         &block
@@ -3063,11 +3260,22 @@ module Parse
     # @note This feature requires MongoDB explain support in Parse Server.
     #   The format of the returned plan depends on the MongoDB version.
     def explain
+      warn_if_public_explain_restricted!
       compiled_query = compile
       compiled_query[:explain] = true
-      response = client.find_objects(@table, compiled_query.as_json, **_opts)
+      response = client.find_objects(@table, compiled_query.as_json, headers: _headers, **_opts)
       if response.error?
-        puts "[ParseQuery:Explain] #{response.error}"
+        # Parse Server 9.0+ defaults `allowPublicExplain` to false, so a
+        # non-master explain that worked on 8.x now returns a permission
+        # error. Surface that as actionable guidance instead of a bare 403.
+        if response.respond_to?(:permission_denied?) && response.permission_denied?
+          puts "[ParseQuery:Explain] #{response.error} — Parse Server 9.0+ defaults " \
+               "`allowPublicExplain` to false; query explain now requires the master key " \
+               "(use_master_key: true) or `allowPublicExplain: true` in the server's " \
+               "databaseOptions."
+        else
+          puts "[ParseQuery:Explain] #{response.error}"
+        end
         return {}
       end
       response.result
@@ -3131,7 +3339,7 @@ module Parse
     #   at the top-level stage.
     BLOCKED_PIPELINE_STAGES = Parse::PipelineSecurity::DENIED_OPERATORS
 
-    def aggregate(pipeline, verbose: nil, mongo_direct: nil, rewrite_lookups: nil)
+    def aggregate(pipeline, verbose: nil, mongo_direct: nil, rewrite_lookups: nil, raw_values: false, raw_field_names: false)
       validate_pipeline!(pipeline)
 
       # Auto-rewrite LLM-style $lookup stages against logical Parse class
@@ -3275,7 +3483,8 @@ module Parse
         complete_pipeline = translate_pipeline_for_direct_mongodb(complete_pipeline)
       end
 
-      Aggregation.new(self, complete_pipeline, verbose: verbose, mongo_direct: use_mongo_direct || false)
+      Aggregation.new(self, complete_pipeline, verbose: verbose, mongo_direct: use_mongo_direct || false,
+                      raw_values: raw_values, raw_field_names: raw_field_names)
     end
 
     # Apply the direct-MongoDB stage converter to every stage in a pipeline.
@@ -3938,6 +4147,7 @@ module Parse
 
         q[:include] = @includes.join(",") unless @includes.empty?
         q[:keys] = @keys.join(",") unless @keys.empty?
+        q[:excludeKeys] = @exclude_keys.join(",") if encode && @exclude_keys&.any?
         q[:order] = @order.join(",") unless @order.empty?
         unless @where.empty?
           q[:where] = Parse::Query.compile_where(@where)
@@ -3949,6 +4159,17 @@ module Parse
           q[:limit] = 0
           q[:count] = 1
         end
+        # Read preference must ride the REST query body (restOptions), NOT a
+        # header: Parse Server's middleware does not map any
+        # `X-Parse-Read-Preference` header into request options, so the
+        # header alone is silently ignored and the read always hits the
+        # primary. `RestQuery` reads `readPreference` from restOptions, so
+        # emitting it here is what actually routes the read. (The header is
+        # still sent for any intermediary that honors it; it is harmless.)
+        if encode && (pref = normalized_read_preference)
+          q[:readPreference] = pref
+        end
+        q[:hint] = @hint if @hint
         if includeClassName
           q[:className] = @table
         end
@@ -5207,7 +5428,7 @@ module Parse
       cloned_query = Parse::Query.new(self.instance_variable_get(:@table))
       # Note: :client is intentionally excluded - it contains non-serializable objects
       # (Redis connections, Faraday connections) and should be obtained lazily
-      [:count, :where, :order, :keys, :includes, :limit, :skip, :cache, :use_master_key].each do |param|
+      [:count, :where, :order, :keys, :exclude_keys, :includes, :limit, :skip, :cache, :use_master_key, :hint].each do |param|
         if instance_variable_defined?(:"@#{param}")
           value = instance_variable_get(:"@#{param}")
           if value.is_a?(Array) || value.is_a?(Hash)
@@ -5503,12 +5724,19 @@ module Parse
     # @param mongo_direct [Boolean] if true, uses MongoDB directly bypassing Parse Server (required for $literal)
     # @param max_time_ms [Integer, nil] optional server-side time limit in milliseconds passed to
     #   {Parse::MongoDB.aggregate} when mongo_direct is true. Pass +nil+ (the default) for no cap.
-    def initialize(query, pipeline, verbose: nil, mongo_direct: false, max_time_ms: nil)
+    # @param raw_values [Boolean] when true, passes +rawValues: true+ to the Parse Server REST
+    #   aggregate endpoint (PS 9.9.0+). Has no effect on the mongo-direct path.
+    # @param raw_field_names [Boolean] when true, passes +rawFieldNames: true+ to the Parse Server
+    #   REST aggregate endpoint (PS 9.9.0+). Has no effect on the mongo-direct path.
+    def initialize(query, pipeline, verbose: nil, mongo_direct: false, max_time_ms: nil,
+                   raw_values: false, raw_field_names: false)
       @query = query
       @pipeline = pipeline
       @cached_response = nil
       @mongo_direct = mongo_direct
       @max_time_ms = max_time_ms
+      @raw_values = raw_values
+      @raw_field_names = raw_field_names
       # Use provided verbose setting, or fall back to query's verbose_aggregate setting
       @verbose = verbose.nil? ? @query.instance_variable_get(:@verbose_aggregate) : verbose
     end
@@ -5532,6 +5760,8 @@ module Parse
           @query.instance_variable_get(:@table),
           @pipeline,
           headers: {},
+          raw_values: @raw_values,
+          raw_field_names: @raw_field_names,
           **@query.send(:_opts),
         )
       end
@@ -5555,7 +5785,11 @@ module Parse
     def execute_direct!(max_time_ms: @max_time_ms)
       table = @query.instance_variable_get(:@table)
       auth_kwargs = @query.send(:mongo_direct_auth_kwargs)
-      Parse::MongoDB.aggregate(table, @pipeline, max_time_ms: max_time_ms, **auth_kwargs)
+      # Forward the parent query's index hint so `query.hint(...).aggregate(...)`
+      # honors it on the mongo-direct path too (parity with results_direct /
+      # count_direct / distinct_direct).
+      hint = @query.instance_variable_get(:@hint)
+      Parse::MongoDB.aggregate(table, @pipeline, max_time_ms: max_time_ms, hint: hint, **auth_kwargs)
     end
 
     # Returns processed results from the aggregation.
@@ -5607,6 +5841,10 @@ module Parse
     def convert_direct_aggregation_item(raw, table)
       if raw_is_parse_document?(raw)
         parse_doc = Parse::MongoDB.convert_document_to_parse(raw, table)
+        # Honor exclude_keys on this mongo-direct aggregation path (e.g. the
+        # $inQuery -> $lookup rewrite) by redacting the denylisted fields from
+        # the converted document before decode. Mirrors results_direct.
+        @query.send(:redact_excluded_keys!, [parse_doc])
         @query.send(:decode, [parse_doc]).first
       else
         AggregationResult.new(Parse::MongoDB.convert_aggregation_document(raw))

@@ -50,7 +50,7 @@ class ApiUsersPasswordResetRateLimitTest < Minitest::Test
 
   def test_sixth_attempt_locks_email_out
     5.times { @client.request_password_reset("locked@example.com") }
-    err = assert_raises(RuntimeError) do
+    err = assert_raises(Parse::Error::AccountLockoutError) do
       @client.request_password_reset("locked@example.com")
     end
     assert_match(/Login rate limited/, err.message,
@@ -68,7 +68,7 @@ class ApiUsersPasswordResetRateLimitTest < Minitest::Test
     assert_equal 6, @client.requests.size
 
     # And a@ is still locked.
-    assert_raises(RuntimeError) do
+    assert_raises(Parse::Error::AccountLockoutError) do
       @client.request_password_reset("a@example.com")
     end
   end

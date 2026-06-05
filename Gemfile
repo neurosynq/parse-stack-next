@@ -32,5 +32,12 @@ group :test, :development do
   gem "puma"
   gem "sinatra"
   gem "rack-test"
+  # MFA / TOTP test infrastructure (Parse::MFA, two_factor_auth).
+  # rotp:    generates TOTP secrets and time-based codes so the MFA unit and
+  #          integration tests can enroll and log in against Parse Server's
+  #          TOTP adapter (SHA1 / 6 digits / 30s — rotp's defaults match).
+  # rqrcode: renders the provisioning QR code exercised by Parse::MFA.qr_code.
+  gem "rotp"
+  gem "rqrcode"
   # gem "thin" # for yard server - disabled due to eventmachine compilation issues
 end

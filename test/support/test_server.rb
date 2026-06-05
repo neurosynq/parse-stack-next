@@ -112,6 +112,12 @@ module Parse
             email: email,
           )
           user.save
+
+          # Parse Server 9.x issues NO session token for a master-key signup
+          # (admin-provisioning semantics). Callers of this helper expect a
+          # usable session token (e.g. to call cloud functions as the user),
+          # so log in after signup to obtain one when the signup didn't.
+          user.login!(password) if user.session_token.to_s.empty?
           user
         end
 

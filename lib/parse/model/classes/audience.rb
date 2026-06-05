@@ -155,12 +155,60 @@ module Parse
     property :name
 
     # @!attribute query
-    # The query constraints that define which installations belong to this audience.
-    # This is stored as a hash matching the Installation query format.
-    # @return [Hash] The query constraint hash.
+    # The query constraints that define which installations belong to this
+    # audience, as a Hash matching the Installation query format.
+    #
+    # On the wire this is persisted as a JSON **string**, matching Parse
+    # Server's built-in `_Audience.query` column (typed `String`, not Object).
+    # Assigning a Hash and reading a Hash back is handled transparently. The
+    # previous `property :query, :object` emitted a JSON object, so every save
+    # of a hash query was rejected by the server with a schema mismatch
+    # ("expected String but got Object").
+    # @return [ActiveSupport::HashWithIndifferentAccess, nil] the query hash.
     # @example
     #   audience.query = { "deviceType" => "ios", "appVersion" => { "$gte" => "2.0" } }
-    property :query, :object
+    property :query_json, :string, field: :query
+
+    # JSON-encode a Hash/Array assigned to the query field before the `:string`
+    # property coercion runs. Every assignment path — `query=`,
+    # `query_constraint=`, mass-assignment via `new(query:)`, and server
+    # hydration — funnels through `format_value`, so intercepting here (rather
+    # than the public setter, which mass-assignment bypasses) is the single
+    # reliable place to keep the wire value valid JSON (`{"k":"v"}`) instead of
+    # Ruby's `Hash#to_s` (`{"k"=>"v"}`). A String passed in (e.g. a row loaded
+    # from the server) falls through to the normal string coercion untouched.
+    def format_value(key, val, data_type = nil)
+      if key == :query_json && (val.is_a?(Hash) || val.is_a?(Array))
+        return val.to_json
+      end
+      super
+    end
+
+    # The query constraints as a Hash (decoded from the stored JSON string).
+    # @return [ActiveSupport::HashWithIndifferentAccess, nil]
+    def query
+      raw = query_json
+      case raw
+      when nil, "" then nil
+      when Hash then raw.with_indifferent_access
+      when String
+        decoded = begin
+            JSON.parse(raw)
+          rescue JSON::ParserError
+            nil
+          end
+        decoded.is_a?(Hash) ? decoded.with_indifferent_access : decoded
+      else
+        raw
+      end
+    end
+
+    # Assign the audience query. Accepts a Hash (preferred) or a pre-encoded
+    # JSON String; either form is persisted as a JSON string.
+    # @param value [Hash, String, nil]
+    def query=(value)
+      self.query_json = value
+    end
 
     # Alias for query to match Parse Server naming conventions.
     # @return [Hash] The query constraint hash.

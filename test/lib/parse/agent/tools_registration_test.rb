@@ -318,6 +318,61 @@ class ToolsRegistrationTest < Minitest::Test
   end
 
   # -------------------------------------------------------------------------
+  # invoke — registered-handler timeout enforcement
+  # -------------------------------------------------------------------------
+
+  # A custom handler that runs past its declared timeout is interrupted with
+  # ToolTimeoutError — the bound is enforced by Tools.invoke's with_timeout
+  # wrap, not left to the handler. Proves the orphan-bounding contract holds
+  # for custom tools (previously the handler ran unbounded).
+  def test_invoke_enforces_registered_handler_timeout
+    T.register(
+      name: :slow_custom,
+      description: "Sleeps past its timeout",
+      parameters: { type: "object", properties: {}, required: [] },
+      permission: :readonly,
+      timeout: 1,
+      handler: ->(_agent, **_args) { sleep 2; { ok: true } },
+    )
+    agent = Parse::Agent.new
+    assert_raises(Parse::Agent::ToolTimeoutError) do
+      T.invoke(agent, :slow_custom)
+    end
+  end
+
+  # A fast handler well under its timeout must NOT be falsely interrupted.
+  def test_invoke_does_not_time_out_fast_registered_handler
+    T.register(
+      name: :fast_custom,
+      description: "Returns immediately",
+      parameters: { type: "object", properties: {}, required: [] },
+      permission: :readonly,
+      timeout: 5,
+      handler: ->(_agent, **_args) { { ok: true } },
+    )
+    agent = Parse::Agent.new
+    assert_equal({ ok: true }, T.invoke(agent, :fast_custom))
+  end
+
+  # register refuses a non-positive timeout: Timeout.timeout(0) would silently
+  # disable the bound, so the registration must fail loudly at boot.
+  def test_register_rejects_non_positive_timeout
+    %i[zero fractional negative].zip([0, 0.5, -3]).each do |label, value|
+      err = assert_raises(ArgumentError, "timeout: #{value.inspect} (#{label}) should raise") do
+        T.register(
+          name: :bad_timeout,
+          description: "x",
+          parameters: { type: "object", properties: {}, required: [] },
+          permission: :readonly,
+          timeout: value,
+          handler: ->(_a, **) { {} },
+        )
+      end
+      assert_match(/timeout must be a positive integer/, err.message)
+    end
+  end
+
+  # -------------------------------------------------------------------------
   # permission_for
   # -------------------------------------------------------------------------
 
