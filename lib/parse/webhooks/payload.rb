@@ -64,6 +64,18 @@ module Parse
       attr_accessor :master, :user, :installation_id, :params, :function_name, :object, :trigger_name
       attr_accessor :query, :log, :objects
       attr_accessor :original, :update, :raw
+      # @!attribute [r] session_token
+      #   The caller's live Parse session token, captured from the incoming
+      #   webhook payload (`user.sessionToken`) before credentials are scrubbed
+      #   from {#user} / {#object} / {#original} / {#update}. Present only when
+      #   the originating request was made by a logged-in user -- a master-key
+      #   request carries no user and no token, so this is +nil+. It is
+      #   intentionally NOT one of {ATTRIBUTES}, so it never appears in
+      #   {#as_json} or in the redacted request log. Reach for it (or the
+      #   higher-level {#user_client} / {#user_agent}) only when a handler
+      #   deliberately wants to act on the server as the calling user.
+      #   @return [String, nil]
+      attr_reader :session_token
       # @!visibility private
       attr_accessor :webhook_class
       alias_method :installationId, :installation_id
@@ -78,6 +90,15 @@ module Parse
         hash = Hash[hash.map { |k, v| [k.to_s.underscore.to_sym, v] }]
         @raw = hash
         @master = hash[:master]
+        # Capture the caller's session token from the *unscrubbed* user hash
+        # before scrub_credentials strips it below. Parse Server includes
+        # `user.sessionToken` on every trigger fired by a logged-in caller
+        # (it is absent for master-key-originated requests). Pulling it aside
+        # here -- rather than leaving it in @user -- keeps it out of any object
+        # a handler might persist and out of #as_json / the request log, while
+        # still letting a handler opt in to acting as the calling user via
+        # #session_token / #user_client / #user_agent.
+        @session_token = self.class.extract_session_token(hash[:user])
         # Webhook trigger payloads (beforeSave/afterSave/etc.) are delivered by
         # Parse Server and, when a webhook key is configured (the default; see
         # Parse::Webhooks.allow_unauthenticated for the opt-out used in tests /
@@ -85,7 +106,8 @@ module Parse
         # server-authoritative state. A handler is meant to receive the full
         # object -- createdAt/updatedAt, ACL, internal fields and all. The only
         # thing stripped here is genuine credential material a handler never
-        # legitimately needs to read (live session tokens, offline-crackable
+        # legitimately needs to read inline (live session tokens -- captured
+        # above for opt-in user-scoped clients first -- and offline-crackable
         # password hashes); see WEBHOOK_TRIGGER_CREDENTIAL_KEYS. Protection
         # against *persisting* forged privileged fields lives on the write path
         # (changes_payload emits only declared, dirty-tracked properties), not on
@@ -144,9 +166,37 @@ module Parse
         end
       end
 
+      # @!visibility private
+      # Pulls the caller's session token out of the (unscrubbed) +user+ hash.
+      # Parse Server sends it as the camelCase string key +sessionToken+; this
+      # tolerates a symbol key and the snake_case form too, mirroring the
+      # leniency in +scrub_credentials+. Returns +nil+ for a blank token or a
+      # non-Hash / absent user (a master-key request has no user).
+      def self.extract_session_token(user_hash)
+        return nil unless user_hash.is_a?(Hash)
+        token = user_hash["sessionToken"] || user_hash[:sessionToken] ||
+                user_hash["session_token"] || user_hash[:session_token]
+        token = token.to_s.strip
+        token.empty? ? nil : token
+      end
+
       # @return [ATTRIBUTES]
       def attributes
         ATTRIBUTES
+      end
+
+      # Redacted inspection. The default Ruby `#inspect` would dump every ivar,
+      # including the captured `@session_token` and the *pre-scrub* `@raw` hash
+      # (which still holds the caller's sessionToken and any password hashes).
+      # That is exactly the surface an error reporter or a stray `p payload`
+      # hits, so show only non-sensitive routing fields and a boolean for the
+      # token's presence. Use #as_json / the individual accessors for the
+      # (already credential-scrubbed) object data.
+      def inspect
+        "#<#{self.class.name} trigger=#{@trigger_name.inspect} " \
+        "function=#{@function_name.inspect} class=#{parse_class.inspect} " \
+        "id=#{parse_id.inspect} master=#{@master ? true : false} " \
+        "session_token=#{@session_token ? "[FILTERED]" : "nil"}>"
       end
 
       # Method to print to standard that utilizes the an internal id to make it easier
@@ -168,6 +218,51 @@ module Parse
       # true if the master key was used for this request.
       def master?
         @master.present?
+      end
+
+      # true if this payload carried a caller session token -- i.e. the
+      # originating request was made by a logged-in user rather than the
+      # master key, so {#user_client} / {#user_agent} can act as that user.
+      # @return [Boolean]
+      def session_token?
+        !@session_token.nil?
+      end
+
+      # An opt-in, user-scoped {Parse::Client} for acting on the server as the
+      # webhook's calling user. It mirrors the default client's connection
+      # settings (+server_url+, +application_id+, +api_key+) but carries NO
+      # master key and BINDS the caller's {#session_token}, so every request it
+      # makes -- with no further ceremony -- is authorized by Parse Server as
+      # that user: ACL, CLP and +protectedFields+ are all enforced. (A
+      # `Parse.with_session` block still overrides the bound token if you need
+      # to act as someone else within a call.) Memoized per payload, since each
+      # webhook delivery carries a distinct token.
+      # @return [Parse::Client, nil] +nil+ when the payload carried no token.
+      def user_client
+        return nil if @session_token.nil?
+        @user_client ||= Parse::Client.client.become(@session_token)
+      end
+
+      # An opt-in, non-master {Parse::Agent} scoped to the webhook caller's
+      # session token. Because its client has no master key and it is built
+      # with a non-empty +session_token:+, the agent runs in CLIENT MODE:
+      # every tool/query routes through a path Parse Server (or the SDK's own
+      # ACL/CLP enforcement layer) authorizes as the calling user, with no
+      # master-key fallback to silently bypass row-level security. This is the
+      # handle to use when a handler should read or act strictly within the
+      # caller's permissions. Additional agent options (e.g.
+      # +permissions: :readwrite+) may be passed through.
+      # @param opts [Hash] extra keyword args forwarded to {Parse::Agent#initialize}.
+      # @return [Parse::Agent, nil] +nil+ when the payload carried no token.
+      def user_agent(**opts)
+        return nil if @session_token.nil?
+        require_relative "../agent" unless defined?(Parse::Agent)
+        # Strip the two identity kwargs from the passthrough: a Ruby double-splat
+        # that repeats an explicit keyword WINS, so user_agent(client: master)
+        # or user_agent(session_token: other) would otherwise silently defeat the
+        # whole point (scoping to the caller). The scoping is non-negotiable here.
+        opts = opts.except(:session_token, :client)
+        Parse::Agent.new(session_token: @session_token, client: user_client, **opts)
       end
 
       # @return [String] the name of the Parse class for this request.
@@ -321,9 +416,57 @@ module Parse
           return o
         end
 
-        # afterSave on a CREATE (and every other trigger): the full object as the
-        # server sent it. createdAt/updatedAt survive (only credentials are
-        # scrubbed), so `new?` / `existed?` read correctly.
+        # afterSave on a CREATE: there is no prior persisted state, so every
+        # populated data field is new. Build symmetry with the UPDATE path above
+        # by seeding the identity / system fields (objectId, timestamps, ACL,
+        # className, plus the credential / permission keys) into a pristine
+        # object, then overlaying the full object with dirty tracking. Because
+        # the overlay's protected_set is exactly the seed key set, the system
+        # fields come ONLY from the clean seed and the overlay touches ONLY
+        # declared data properties (nil -> value -> changed) -- so `*_changed?`
+        # reports every field the create populated while createdAt / updatedAt /
+        # ACL stay clean. This lets handlers key off dirty tracking uniformly
+        # across create and update (e.g. building a sync payload from changed
+        # fields). Credentials / _rperm / _wperm / authData / roles are filtered
+        # from the overlay (seeded read-only, never marked changed), and an
+        # after-trigger response is only true/false, so nothing here can persist
+        # a forged field.
+        if after_save? && @object.is_a?(Hash)
+          seed_keys = Parse::Properties::PROTECTED_INITIALIZE_KEYS +
+                      %w[objectId createdAt updatedAt ACL className __type]
+          seed = @object.slice(*seed_keys)
+          o = Parse::Object.build seed, parse_class
+          # `build` applies declared `default:` values onto the seed and then
+          # clears changes, baking each default into the "pristine" baseline.
+          # Without correction, the overlay's dirty guard (`unless val ==
+          # current`) would SUPPRESS marking any create value equal to its
+          # default (e.g. status: "draft", count: 0, archived: false), silently
+          # defeating this branch's whole purpose. Reset the default-bearing
+          # ivars to nil for the fields the overlay is about to set, then
+          # re-clear, so the overlay's guard sees a differing current ivar and
+          # marks every populated data field changed. (`*_changed?` / `changes`
+          # / `changed` then report the field; for a defaulted field the
+          # reported prior value is the default rather than nil, since the
+          # getter re-derives the default — its prior *effective* value.)
+          # `defaults_list` never contains the seeded system fields
+          # (objectId/createdAt/updatedAt/ACL), so this cannot disturb them;
+          # defaults for fields ABSENT from the payload are left intact so their
+          # value still reads through.
+          fmap = o.class.respond_to?(:field_map) ? o.class.field_map : {}
+          o.class.defaults_list.each do |k|
+            wire = (fmap[k] || k).to_s
+            next unless @object.key?(wire) || @object.key?(k.to_s)
+            o.instance_variable_set(:"@#{k}", nil)
+          end
+          o.clear_changes!
+          o.apply_attributes! @object, dirty_track: true, protected_set: seed_keys
+          return o
+        end
+
+        # Every other trigger (afterDelete, afterFind, and any before* path that
+        # did not match above): the full object as the server sent it.
+        # createdAt/updatedAt survive (only credentials are scrubbed), so
+        # `new?` / `existed?` read correctly.
         Parse::Object.build(@object, parse_class)
       end
 

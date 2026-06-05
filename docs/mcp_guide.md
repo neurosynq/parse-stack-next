@@ -3106,6 +3106,66 @@ Four different refusal reasons each produce a distinct `:error_code` and message
 
 **Resolution order at dispatch:** operator filter ▷ mutation gate ▷ mode ceiling ▷ in-tool class gate. Operator-filter precedence is deliberate — when a tool is excluded by both the operator's `tools: { except: [...] }` AND the mutation gate (or the mode ceiling), the operator-filter message wins so the operator looks at the right knob first. The mode-ceiling message names the tool, not the class — even when the request would have hit an `agent_hidden` class, the ceiling fires first for a refused tool, so the LLM does not learn anything about the class. For tools that pass the ceiling (e.g. `query_class`) the in-tool `assert_class_accessible!` runs next and the `agent_hidden` message echoes the class name supplied by the caller.
 
+### Client mode from a webhook — run a handler as the calling user (v5.3.0)
+
+Parse Server includes the caller's live session token (`user.sessionToken`) in
+every trigger webhook fired by a logged-in user (it is absent for a master-key
+request). `Parse::Webhooks::Payload` captures that token before scrubbing it out
+of `payload.user` / `payload.object` (so it never lands in `payload.as_json` or
+the request log) and exposes two opt-in, user-scoped handles — the webhook
+counterpart of constructing a client-mode agent by hand:
+
+```ruby
+Parse::Webhooks.route(:after_save, "Post") do
+  # self is the Parse::Webhooks::Payload.
+  next true unless session_token?            # master-key save → no caller token
+
+  # A client-mode Parse::Agent bound to the caller — ACL/CLP enforced, no
+  # master-key fallback. Same posture as Parse::Agent.new(session_token:, client: <no master_key>).
+  visible = user_agent.execute(:query_class, class_name: "Post", limit: 20)
+
+  # …or a raw user-scoped Parse::Client (token is BOUND, so plain REST calls
+  # are authorized as the user with no per-call session_token: needed):
+  mine = user_client.request(:get, "classes/Post").result
+  true
+end
+```
+
+| Payload handle | Returns | `nil` when |
+|----------------|---------|-----------|
+| `payload.session_token` | the caller's raw token (`String`) | master-key request (no user) |
+| `payload.user_agent(**opts)` | non-master `Parse::Agent` in **client mode**, token bound | no token |
+| `payload.user_client` | non-master `Parse::Client` with the token **bound** | no token |
+
+`user_client` binds the token via the new `Parse::Client.new(session_token:)`
+option, applied as the lowest-priority auth fallback on every request — an
+explicit per-call `session_token:`, a `Parse.with_session` block, or an explicit
+`use_master_key: true` all still take precedence. Everything the Client Mode
+ceiling above says about a hand-built client-mode agent applies verbatim to
+`payload.user_agent`: read tools only unless `allow_mutations: true`, and
+`acl_user:` / `acl_role:` are not available on a no-master client.
+
+The same user-scoped client is available client-side from a login
+(`Parse::User#session_client`, or `Parse.client.become(token)` from any token),
+and `Parse::User#with_session` / `Parse::Client#with_session` run a block as the
+user so ordinary model operations are implicitly scoped:
+
+```ruby
+client = Parse::User.login(username, password).session_client   # non-master, token bound
+Parse::Query.new("Post", client: client).results                # query as the user
+Parse::User.login(username, password).with_session { Post.query.count }
+```
+
+`with_session` (and `Parse.with_session`) authorize **REST-routed** operations
+(`find` / `get` / `count` / `save`) as the user. Mongo-direct queries
+(`results_direct`, `aggregate`, Atlas search) do NOT pick up the ambient
+session — they resolve auth from the query's own `session_token:` / `acl_user:`
+and otherwise run in **master** mode (a full master read, not anonymous), so
+scope them explicitly with a per-query `session_token:` or a scoped
+`Parse::Agent`. This is deliberate: mongo-direct scoping is always explicit in
+this SDK, so the ambient fiber state can never silently flip a mongo-direct
+query into user scope (or be mistaken for it).
+
 ---
 
 ## `agent_hidden` — Per-Class Agent-Surface Denial

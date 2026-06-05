@@ -51,6 +51,18 @@ class FidelityPost < Parse::Object
   property :body, :string
 end
 
+# Model with declared defaults, to lock in that an afterSave CREATE marks a
+# field changed even when its create value EQUALS the property default. `build`
+# applies defaults then clears changes; without the create-branch reset the
+# overlay's dirty guard would suppress the mark for default-equal values.
+class DefaultPost < Parse::Object
+  parse_class "DefaultPost"
+  property :title, :string
+  property :status, :string, default: "draft"
+  property :count, :integer, default: 0
+  property :archived, :boolean, default: false
+end
+
 # Records `self` inside each model lifecycle callback so the tests can assert
 # that a webhook-built object handed to before_save / before_create /
 # after_create / after_save is the full object the server sent.
@@ -225,6 +237,75 @@ class WebhookAfterSavePayloadFidelityTest < Minitest::Test
                "a create payload has no original"
   end
 
+  # ----- Change detection on an afterSave CREATE ---------------------------
+  # afterSave on a create is now dirty-tracked: every populated data field is
+  # reported changed (nil -> value) so a handler can build a sync/diff payload
+  # from `*_changed?` / `changes` uniformly across create and update, while the
+  # system fields (createdAt / updatedAt / ACL) stay clean and still readable.
+  def test_new_payload_dirty_tracking
+    obj = Parse::Webhooks::Payload.new(new_aftersave_payload).parse_object
+    assert obj.title_changed?,  "title must be reported changed on an afterSave create"
+    assert obj.status_changed?, "status must be reported changed on an afterSave create"
+    assert_includes obj.changed, "title"
+    assert_includes obj.changed, "status"
+    # System fields are present (readable) but NOT reported as data changes.
+    refute obj.created_at_changed?, "createdAt must stay clean on a create"
+    refute obj.updated_at_changed?, "updatedAt must stay clean on a create"
+    refute obj.acl_changed?,        "ACL must stay clean on a create"
+    refute_nil obj.created_at, "createdAt is still readable"
+    refute_nil obj.acl,        "ACL is still readable"
+  end
+
+  # Regression guard for the default-value bug: a property whose create value
+  # EQUALS its declared default must STILL be reported changed. `build` applies
+  # defaults and clears changes; the create branch resets default-bearing ivars
+  # so the overlay's `unless val == current` guard fires anyway. Without the
+  # reset, status/count/archived come back changed? == false.
+  def test_new_payload_dirty_tracking_with_default_values
+    payload = {
+      "triggerName" => "afterSave",
+      "object" => {
+        "className" => "DefaultPost",
+        "objectId"  => "DEFobj0001",
+        "title"     => "hello",
+        "status"    => "draft", # == default
+        "count"     => 0,       # == default
+        "archived"  => false,   # == default
+        "createdAt" => CREATED_AT,
+        "updatedAt" => CREATED_AT,
+      },
+    }
+    obj = Parse::Webhooks::Payload.new(payload).parse_object
+    assert obj.status_changed?,   "status == default must still mark changed on a create"
+    assert obj.count_changed?,    "count == default must still mark changed on a create"
+    assert obj.archived_changed?, "archived == default must still mark changed on a create"
+    assert obj.title_changed?,    "a non-default field marks changed too"
+    %w[status count archived title].each do |f|
+      assert_includes obj.changed, f, "#{f} must be in changed"
+    end
+    refute obj.created_at_changed?, "system fields stay clean even with defaults in play"
+  end
+
+  # A defaulted property ABSENT from the afterSave payload keeps its default
+  # value (still readable) and is NOT reported changed.
+  def test_new_payload_absent_default_preserves_value
+    payload = {
+      "triggerName" => "afterSave",
+      "object" => {
+        "className" => "DefaultPost",
+        "objectId"  => "DEFobj0002",
+        "title"     => "hello",
+        "createdAt" => CREATED_AT,
+        "updatedAt" => CREATED_AT,
+      },
+    }
+    obj = Parse::Webhooks::Payload.new(payload).parse_object
+    assert_equal "draft", obj.status, "a defaulted field absent from the payload keeps its default"
+    assert_equal 0, obj.count, "absent defaulted field keeps its default value"
+    refute obj.status_changed?, "a field absent from the payload is not a change"
+    assert obj.title_changed?,  "the present field is reported changed"
+  end
+
   # ========================================================================
   # A2. CHANGED object semantics
   # ========================================================================
@@ -253,10 +334,11 @@ class WebhookAfterSavePayloadFidelityTest < Minitest::Test
     refute obj.new?, "new? must be false for an already-persisted, updated object"
   end
 
-  # ----- Change detection: TODAY variant (holds on HEAD) -------------------
-  # afterSave does NOT dirty-track (build_parse_object only merges original on
-  # before_trigger?), so `*_changed?` is false on HEAD. The supported way to
-  # diff today is to compare original_parse_object vs parse_object explicitly.
+  # ----- Change detection: explicit original-vs-object diff ----------------
+  # afterSave is dirty-tracked (see test_changed_payload_dirty_tracking and the
+  # create-dirty tests above), but comparing original_parse_object vs
+  # parse_object explicitly is still a supported, self-evident way to diff a
+  # specific field across the prior and final state.
   def test_changed_payload_diff_via_original_vs_object
     payload = Parse::Webhooks::Payload.new(changed_aftersave_payload)
     obj  = payload.parse_object

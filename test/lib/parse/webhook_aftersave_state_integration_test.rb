@@ -163,6 +163,14 @@ class WebhookAfterSaveStateIntegrationTest < Minitest::Test
                "[SPEC] built object must expose server updatedAt in afterSave"
     refute captured[:existed?],
            "a brand-new object must report existed? == false"
+
+    # afterSave-create dirty tracking: the created fields are reported changed,
+    # so a handler can build a sync payload from #changed / *_changed? on a
+    # create the same way it does on an update.
+    assert captured[:title_changed?],
+           "afterSave create reports the created field as changed"
+    assert_includes captured[:changed], "title",
+                    "the created field appears in #changed on an afterSave create"
   end
 
   def test_b_new_object_full_state_on_ruby_model_save
@@ -183,6 +191,12 @@ class WebhookAfterSaveStateIntegrationTest < Minitest::Test
     refute_nil captured[:created_at],
                "[SPEC] built object must expose createdAt for a Ruby model save"
     refute captured[:existed?], "Ruby-created object must report existed? == false"
+
+    # afterSave-create dirty tracking holds for a Ruby-initiated save too.
+    assert captured[:title_changed?],
+           "afterSave create reports the created field as changed (Ruby save)"
+    assert_includes captured[:changed], "title",
+                    "the created field appears in #changed (Ruby save)"
   end
 
   def test_b_changed_object_full_state_and_change_detection_on_update

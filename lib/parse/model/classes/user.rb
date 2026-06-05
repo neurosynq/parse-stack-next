@@ -835,6 +835,26 @@ module Parse
       @session
     end
 
+    # A non-master {Parse::Client} bound to this user's session token, for
+    # acting on the server *as this user* with full ACL / CLP / +protectedFields+
+    # enforcement and no master-key fallback. It mirrors the connection settings
+    # of +base+ (the configured client by default) but carries no master key and
+    # binds {#session_token}, so even raw REST calls through it are authorized as
+    # the user with no per-call ceremony. The web-counterpart of
+    # {Parse::Webhooks::Payload#user_client}; the typical client-side entry point
+    # is right after a login:
+    #
+    #   client = Parse::User.login(username, password).session_client
+    #   Parse::Query.new("Post", client: client).results   # scoped to the user
+    #
+    # @param base [Parse::Client] the client whose connection settings to mirror.
+    # @return [Parse::Client, nil] +nil+ when the user has no session token
+    #   (e.g. fetched/saved under the master key rather than logged in).
+    def session_client(base = self.client)
+      return nil if @session_token.nil? || @session_token.to_s.strip.empty?
+      base.become(@session_token)
+    end
+
     # @!visibility private
     # Keys that must never flow through +Parse::User.create+ from a
     # mass-assigned hash. +authData+ on the user-signup endpoint causes

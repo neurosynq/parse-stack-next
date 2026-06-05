@@ -548,6 +548,21 @@ module Parse
   #   PARSE_STRICT_POINTER_SHAPES=true
   @strict_pointer_shapes = ENV["PARSE_STRICT_POINTER_SHAPES"] == "true"
 
+  # Configuration for automatic pluralized class-name aliases. When enabled
+  # (the default), referencing the plural form of a {Parse::Object} subclass
+  # constant resolves to that class, so `Posts.where(...)` works for a class
+  # `Post`. The alias is created lazily on first reference via `const_missing`
+  # and points at the same class object, so every class method
+  # (`where`, `query`, `count`, `find`, `all`, scopes) works for free and
+  # `Posts.parse_class` still returns `"Post"`. Classes whose name already
+  # ends in `s` are skipped. Set to false to opt out globally.
+  # @example Opt out globally
+  #   Parse.pluralized_aliases = false
+  # @example ENV opt-out
+  #   PARSE_PLURALIZED_ALIASES=false
+  # @see Parse::Core::Querying#pluralized_alias!
+  @pluralized_aliases = ENV["PARSE_PLURALIZED_ALIASES"] != "false"
+
   # Tuning bundle for the synchronize-create lock. Per-call kwargs override.
   # Keys: :ttl (seconds, default 3, max 30), :wait (seconds, default 2.0,
   # max 30), :on_degraded (:warn, :warn_throttled, :raise, :proceed).
@@ -630,7 +645,8 @@ module Parse
                   :rewrite_lookups, :strict_property_redefinition,
                   :synchronize_create_default, :synchronize_create_options, :synchronize_create_secret,
                   :synchronize_create_store, :synchronize_classes,
-                  :strict_pointer_shapes, :suppress_server_version_warning
+                  :strict_pointer_shapes, :suppress_server_version_warning,
+                  :pluralized_aliases
 
     # Check whether the Parse Server version deprecation warning is
     # silenced. Returns true if either the in-process accessor or the
@@ -712,6 +728,140 @@ module Parse
     # @return [Boolean]
     def strict_pointer_shapes?
       @strict_pointer_shapes == true
+    end
+
+    # Whether automatic pluralized class-name aliases are enabled. Defaults
+    # to true; opt out with `Parse.pluralized_aliases = false` or
+    # `PARSE_PLURALIZED_ALIASES=false`. See {Parse.pluralized_aliases}.
+    # @return [Boolean]
+    def pluralized_aliases?
+      @pluralized_aliases != false
+    end
+
+    # @!visibility private
+    # Resolve a (possibly plural) missing constant to its singular
+    # {Parse::Object} subclass and install the alias on the referencing
+    # module. Returns the class when an alias was created, otherwise nil so
+    # the caller (`const_missing`) can fall through to `super` and preserve
+    # normal `NameError` / autoloading behavior.
+    #
+    # Guards (fail-through to nil unless ALL hold):
+    #   - the feature is enabled,
+    #   - {Parse::Object} is loaded,
+    #   - the name singularizes to a *different* string (i.e. looks plural),
+    #   - the singular form does NOT already end in `s` (per design: classes
+    #     whose name ends in `s` are not auto-aliased),
+    #   - the singular constant is defined (searching ancestors so a
+    #     top-level model is visible from a nested reference) and is a
+    #     `Parse::Object` subclass,
+    #   - the plural is not already defined on the referencing module.
+    #
+    # @param mod [Module] the module/class on which `const_missing` fired.
+    # @param name [Symbol] the missing constant name.
+    # @return [Class, nil]
+    def __pluralized_alias_for(mod, name)
+      return nil unless pluralized_aliases?
+      return nil unless defined?(Parse::Object)
+      str = name.to_s
+      singular = str.singularize
+      return nil if singular == str
+      return nil if singular.end_with?("s")
+      sym = singular.to_sym
+      return nil unless mod.const_defined?(sym, true)
+      klass = mod.const_get(sym)
+      return nil unless klass.is_a?(Class) && klass < Parse::Object
+      return nil if mod.const_defined?(name, false)
+      mod.const_set(name, klass)
+      klass
+    rescue NameError, LoadError
+      # const_get/const_defined? can raise on malformed names or autoload
+      # failures; never let alias resolution mask the original lookup.
+      nil
+    end
+
+    # Verify that every association target across the loaded {Parse::Object}
+    # subclasses resolves to a known Parse class. Covers `belongs_to` and
+    # `property … as:` pointer targets (via each class's `references`),
+    # `has_many … through: :relation` targets (via `relations`), and the
+    # query- and array-backed `has_many` targets (via `has_many_associations`)
+    # — the bucket where an `as:` typo otherwise stays latent until the
+    # association is first traversed at call time.
+    #
+    # This is the deferred companion to the definition-time scalar guard in
+    # {Parse::Associations::BelongsTo::ClassMethods#belongs_to}: at declaration
+    # time a forward reference (a target class that is required later) is legal
+    # and indistinguishable from a typo, so the cross-class resolution check is
+    # run here — after all models are loaded. Intended to run once at boot, in
+    # CI, or from a rake task ("during the upgrade").
+    #
+    # A target resolves when it is a Parse system class (`_User`, `_Role`,
+    # `_Installation`, `_Session`, …) or a registered {Parse::Object} subclass
+    # (via {Parse::Model.find_class}). Note this checks against *loaded Ruby
+    # models*: if you intentionally point at a server-side class that has no
+    # Ruby model, define a stub model for it or exclude it via `classes:`.
+    #
+    # @param classes [Array<Class>, nil] optional subset of Parse::Object
+    #   subclasses to check; defaults to every loaded subclass.
+    # @raise [ArgumentError] if any target is unresolved, listing each
+    #   offending `Class#field -> 'Target'`.
+    # @return [true] when every association target resolves.
+    def validate_associations!(classes: nil)
+      models = classes || Parse::Object.descendants
+      problems = []
+      models.each do |klass|
+        next unless klass.respond_to?(:parse_class)
+        if klass.respond_to?(:references)
+          klass.references.each do |field, target|
+            next if _association_target_resolvable?(target)
+            # `references` is keyed by the remote (camelCase) column; report the
+            # declared Ruby accessor so the operator can find the offending line.
+            accessor = (klass.respond_to?(:field_map) && klass.field_map.key(field)) || field
+            problems << "#{klass}##{accessor} -> #{target.inspect} (no such Parse class)"
+          end
+        end
+        if klass.respond_to?(:relations)
+          klass.relations.each do |field, target|
+            next if _association_target_resolvable?(target)
+            problems << "#{klass}##{field} (relation) -> #{target.inspect} (no such Parse class)"
+          end
+        end
+        if klass.respond_to?(:has_many_associations)
+          klass.has_many_associations.each do |accessor, meta|
+            # `:relation`-storage has_many is mirrored into `relations` and is
+            # already reported above; only the `:query` and `:array` storage
+            # targets (which live nowhere else) need checking here. This is the
+            # branch where a `has_many … as:` typo hides, since a query-backed
+            # has_many resolves its target lazily at call time.
+            next if meta[:storage] == :relation
+            target = meta[:target_class]
+            next if target.nil? || _association_target_resolvable?(target)
+            problems << "#{klass}##{accessor} (has_many #{meta[:storage]}) -> " \
+                        "#{target.inspect} (no such Parse class)"
+          end
+        end
+      end
+      unless problems.empty?
+        raise ArgumentError,
+              "Unresolved Parse association targets:\n  " + problems.join("\n  ") +
+              "\nRequire/define the target class, or fix the `as:`/`class_name:` name."
+      end
+      true
+    end
+
+    # @!visibility private
+    # Whether an association target class name resolves to a known Parse
+    # class. Parse system classes resolve against {Parse::Model::SYSTEM_CLASS_MAP}
+    # — both the canonical `_`-prefixed value (`_User`) and the bare-name key
+    # (`User`) — even when their Ruby class is not loaded; everything else must
+    # resolve via {Parse::Model.find_class}. A leading underscore is NOT a
+    # blanket pass: a typo'd system name such as `_Usr` is neither in the map
+    # nor a registered model, so it is still surfaced as unresolved.
+    def _association_target_resolvable?(target)
+      name = target.to_s
+      return false if name.empty?
+      return true if Parse::Model::SYSTEM_CLASS_MAP.key?(name) ||
+                     Parse::Model::SYSTEM_CLASS_MAP.value?(name)
+      !Parse::Model.find_class(name).nil?
     end
 
     # Check if MCP server feature is enabled
@@ -850,5 +1000,10 @@ end
 # the ENV path needs an explicit kick because nothing else calls into
 # the setter on load.
 Parse._attach_slow_query_subscriber! if Parse.slow_query_threshold_ms
+
+# Install the lazy pluralized class-name alias hook (Posts -> Post). Loaded
+# last so Parse::Object and the Parse.__pluralized_alias_for helper are
+# already defined. Gated at runtime on Parse.pluralized_aliases?.
+require_relative "model/core/pluralized_aliases"
 
 require_relative "stack/railtie" if defined?(::Rails)

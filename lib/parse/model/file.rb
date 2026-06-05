@@ -734,10 +734,43 @@ module Parse
       ATTRIBUTES
     end
 
-    # @return [Boolean] Two files are equal if they have the same url
+    # The value used to decide whether two {Parse::File}s refer to the same
+    # underlying file -- for equality ({#==}) and, through it, for dirty
+    # tracking (the property setter compares files with `==` to decide whether
+    # a `:file` field changed).
+    #
+    # Today this is the bare canonical {#url}: signed-URL query parameters are
+    # stripped into `@presigned_url` and `force_ssl` coercion is applied, so two
+    # files at the same storage location compare equal regardless of how the URL
+    # was signed or whether it was `http`/`https`. The URL is the best identity
+    # signal currently available -- Parse Server's S3 files adapter does not
+    # surface a content digest (ETag / MD5 / sha256) through `Parse::File`.
+    #
+    # FUTURE DIRECTION: when a files adapter can expose a content hash, this is
+    # the single seam to override so equality keys off file *content* instead of
+    # URL -- e.g. a custom `Parse::File` subclass or adapter shim returning the
+    # S3 ETag / sha256 here. Overriding this one method updates {#==} (and a
+    # future `#eql?`/`#hash` pair, if added) without touching dirty tracking.
+    # No content-hash source exists yet, so the URL is authoritative for now.
+    # @return [String, nil]
+    def content_signature
+      url
+    end
+
+    # @return [Boolean] Two files are equal when their {#content_signature}
+    #   matches. Both sides go through the same reader, so the comparison is
+    #   symmetric and force_ssl-consistent: the previous `@url == u.url` form
+    #   compared one side's raw stored URL against the other's normalized
+    #   reader, so two files at the same location read as unequal whenever
+    #   {Parse::File.force_ssl} coerced one side from `http://` to `https://`
+    #   (and `a == b` disagreed with `b == a`). Because the default signature is
+    #   the bare canonical URL (signed-URL query parameters stripped into
+    #   `@presigned_url`), a freshly re-signed URL for the same object is equal
+    #   while a different underlying location is not. See {#content_signature}
+    #   for the content-hash override seam.
     def ==(u)
       return false unless u.is_a?(self.class)
-      @url == u.url
+      content_signature == u.content_signature
     end
 
     # Allows mass assignment from a Parse JSON hash.

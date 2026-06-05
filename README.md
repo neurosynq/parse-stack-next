@@ -4,6 +4,12 @@
 
 A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [parse-stack-next](https://github.com/neurosynq/parse-stack-next) is a Ruby client SDK, REST client, and Active Model ORM for [Parse Server](http://parseplatform.org/), combining a low-level API client, a query engine, an object-relational mapper (ORM), and a Cloud Code Webhooks rack application in a single gem.
 
+### What's new in 5.3
+
+- **5.3.0 — Run webhook handlers (and clients) as the calling user** — Parse Server embeds the caller's live session token in every trigger webhook fired by a logged-in user. A handler can now opt in to acting on the server *as that user* — full ACL/CLP/`protectedFields` enforcement, no master key. `payload.session_token` exposes the captured token (`nil` for master-key requests; still scrubbed from `payload.user`/`payload.object`/`as_json`/logs); `payload.user_agent` returns a client-mode `Parse::Agent`, and `payload.user_client` a non-master `Parse::Client` with the token **bound** so even raw REST calls authorize as the user. The same user-scoped client is available client-side via `Parse::User#session_client` and the `Parse::Client#become(token)` primitive, with `Parse::Client#with_session { … }` for block scoping. Backed by a new `Parse::Client.new(session_token:)` option. See [Acting as the calling user](#acting-as-the-calling-user)
+- **5.3.0 — Pluralized class-name aliases** — referencing the plural form of a model constant now resolves to that class, so `Posts.where(:author.eq => user).count` works for a class `Post`. The alias is created lazily on first reference and is the *same class object*, so every class method (`query`/`where`, `count`, `find`, `all`, scopes) works through it and `Posts.parse_class` still returns `"Post"`. Because it is the same class it adds no `Parse::Object.descendants` entry and never registers a separate Parse schema class. Classes whose name already ends in `s` are skipped by the automatic path; non-Parse plurals and typos fall through to a normal `NameError`. On by default — opt out with `Parse.pluralized_aliases = false` (or `PARSE_PLURALIZED_ALIASES=false`). For a custom plural, an `s`-ending class, or a namespaced model, call `pluralized_alias!` in the class body. See [Pluralized class-name aliases](#pluralized-class-name-aliases)
+- **5.3.0 — afterSave create reports changed fields; force_ssl-consistent file equality** — a trigger handler that keys off dirty tracking now sees every field on an `afterSave` *create*, symmetric with `afterSave` updates: the built object marks each populated data property changed (from `nil`) while `createdAt`/`updatedAt`/`ACL`/`objectId` stay clean and object readability, `new?`, and `existed?` are unchanged — so a handler that builds a payload from `*_changed?` / `changes` works uniformly across create and update. Separately, `Parse::File#==` now compares both files through the canonical `url` reader, so two files at the same location compare equal regardless of `Parse::File.force_ssl` (and `a == b` matches `b == a`), and a re-signed URL for the same object no longer reads as a change. See [Cloud Code Triggers](#cloud-code-triggers)
+
 ### What's new in 5.2
 
 - **5.2.1 — Webhook triggers receive the full Parse object** — trigger handlers (`beforeSave`/`afterSave`/…) now get the complete server object (`createdAt`/`updatedAt`, `ACL`, internal fields); only live credentials (session tokens, password hashes) are stripped. `Parse::Object#existed?` / `#new?` are reliable in `afterSave`, `afterSave` updates carry dirty tracking, and the model lifecycle runs in ActiveModel order — `before_save → before_create` then `after_create → after_save` — so `before_create` now fires for REST/JS/Auth0 creates (and `after_save` no longer double-fires). See [Cloud Code Triggers](#cloud-code-triggers)
@@ -296,6 +302,7 @@ The 1.x line is the original [`modernistik/parse-stack`](https://github.com/mode
     - [Linking and Unlinking](#linking-and-unlinking)
     - [Request Password Reset](#request-password-reset)
 - [Modeling and Subclassing](#modeling-and-subclassing)
+  - [Pluralized class-name aliases](#pluralized-class-name-aliases)
   - [Defining Properties](#defining-properties)
     - [Accessor Aliasing](#accessor-aliasing)
     - [Property Options](#property-options)
@@ -1621,6 +1628,61 @@ class Commentary < Parse::Object
 	parse_class "Comment"
 end
 ```
+
+### Pluralized class-name aliases
+
+As a convenience, the plural form of a model constant resolves to that class, so the plural reads naturally at a query call site:
+
+```ruby
+class Post < Parse::Object
+  property :title, :string
+  belongs_to :author, as: :user
+end
+
+# `Posts` resolves to `Post` on first reference:
+Posts.where(:author.eq => current_user).count
+Posts.query(:title.exists => true).results
+Posts.find("abc123")
+```
+
+The alias is created lazily (via `const_missing`) the first time the plural constant is referenced, and it is the **same class object** as the singular — `Posts.equal?(Post)` is `true`. As a result:
+
+- Every class method works through it for free: `query`/`where`, `count`, `find`, `all`, and any `scope` you define.
+- `Posts.parse_class` still returns `"Post"`. The alias is purely a Ruby-constant convenience.
+- It adds no `Parse::Object.descendants` entry and **never registers a separate Parse schema class** — schema introspection and `Parse.auto_upgrade!` see exactly one class.
+
+The automatic path is deliberately conservative:
+
+- A class whose name already ends in `s` (for example `Status`, `Series`) is **skipped**, since its plural is ambiguous.
+- A plural that does not singularize to a known `Parse::Object` subclass (a typo, or `Strings` → `String`) falls through to a normal `NameError` — the SDK does not change Ruby's behavior for non-model constants.
+
+The feature is enabled by default. Opt out globally:
+
+```ruby
+Parse.pluralized_aliases = false      # programmatic
+# or
+# PARSE_PLURALIZED_ALIASES=false      # environment
+```
+
+For a custom plural, a class whose name ends in `s` that you *do* want aliased, or a namespaced model (where the alias should live on the enclosing module rather than at the top level), declare it explicitly with the `pluralized_alias!` macro. The explicit macro ignores the global flag and the `s`-ending guard:
+
+```ruby
+class Status < Parse::Object
+  pluralized_alias! :Statuses          # defines ::Statuses => Status
+end
+
+module Blog
+  class Article < Parse::Object
+    pluralized_alias!                   # defines Blog::Articles => Blog::Article
+  end
+end
+```
+
+If the target constant already exists and is not the class itself, `pluralized_alias!` raises `ArgumentError` rather than clobbering it (a code reloader swapping the class object is detected and the alias is re-pointed instead).
+
+The automatic path and the macro differ in *where* the alias constant is installed. The macro always anchors it on the class's own parent — top level for `Post`, the enclosing module for a namespaced model. The automatic path installs it on the module where the plural was first referenced (Ruby's `const_missing` fires on the referencing lexical scope), so a bare `Posts` written inside `module Blog` defines `Blog::Posts`. Both resolve to the same class; if you want a single, predictable top-level constant, prefer the macro.
+
+> **Note on reloading:** under a code reloader (for example Zeitwerk in Rails development), a model class is swapped for a fresh object on reload, but the alias constant the SDK created is not tracked by the reloader and is therefore not removed. The `pluralized_alias!` macro detects this on the next run of the class body and re-points the alias to the current class. An *automatically*-created alias, however, stays bound to the previous class object until the process restarts (`const_missing` cannot re-fire for a constant that is still defined). If you depend on the plural during development and want fully deterministic reload behavior, declare it explicitly with `pluralized_alias!`, or disable the feature with `Parse.pluralized_aliases = false`.
 
 ### Defining Properties
 Properties are considered a literal-type of association. This means that a defined local property maps directly to a column name for that remote Parse class which contain the value. **All properties are implicitly formatted to map to a lower-first camelcase version in Parse (remote).** Therefore a local property defined as `like_count`, would be mapped to the remote column of `likeCount` automatically. The only special behavior to this rule is the `:id` property which maps to `objectId` in Parse. This implicit conversion mapping is the default behavior, but can be changed on a per-property basis. All Parse data types are supported and all Parse::Object subclasses already provide definitions for `:id` (objectId), `:created_at` (createdAt), `:updated_at` (updatedAt) and `:acl` (ACL) properties.
@@ -4929,6 +4991,80 @@ double-firing. `:if`/`:unless` conditions on these callbacks are honored.
 > downstream writes) to a background job/worker, returning quickly. This matters
 > most for client-initiated saves, where the callback runs inside the webhook —
 > Ruby-SDK saves run it in-process after their own REST response instead.
+
+#### Acting as the calling user
+
+Parse Server includes the caller's live session token (`user.sessionToken`) in
+every trigger webhook fired by a logged-in user (it is absent for a master-key
+request). A handler can opt in to acting on the server **as that user** —
+authorized by Parse Server with full ACL, CLP, and `protectedFields`
+enforcement — instead of reaching for the application master key. Three opt-in
+handles are available on the `payload`:
+
+| Handle | Returns | `nil` when |
+|---|---|---|
+| `payload.session_token` | the caller's raw token (`String`) | master-key request (no user) |
+| `payload.user_agent(**opts)` | a non-master `Parse::Agent` in **client mode**, token bound | no token |
+| `payload.user_client` | a non-master `Parse::Client` with the token **bound** | no token |
+
+```ruby
+Parse::Webhooks.route :after_save, :Post do
+  next true unless session_token?            # master-key save → no caller token
+
+  # A client-mode Parse::Agent scoped to the caller (read tools only unless
+  # you pass allow_mutations: true). ACL/CLP enforced; no master-key fallback.
+  visible = user_agent.execute(:query_class, class_name: "Post", limit: 20)
+
+  # …or a raw user-scoped Parse::Client. The token is BOUND, so plain REST
+  # calls authorize as the user with no per-call session_token: argument:
+  mine = user_client.request(:get, "classes/Post").result
+  true
+end
+```
+
+The token is captured before the payload's credential scrubbing runs, so it is
+still removed from `payload.user` / `payload.object` and never appears in
+`payload.as_json`, `payload.inspect`, or the request log. `user_client` binds it
+via the `Parse::Client.new(session_token:)` option, applied as the
+lowest-priority auth fallback — an explicit per-call `session_token:`, a
+`Parse.with_session` block, or an explicit `use_master_key: true` all still take
+precedence. This applies to **webhook-delivered** triggers (including the model
+`webhook :before_save` DSL, which is HTTP-delivered); a genuine in-process
+ActiveModel `before_save :method` callback has no incoming request and therefore
+no caller token.
+
+The same user-scoped client is available on the **client side**. Two shapes:
+
+```ruby
+# 1. A client object you can pass around (carries the user's token + the
+#    server connection, no master key):
+client = Parse::User.login(username, password).session_client
+Parse::Query.new("Post", client: client).results        # runs as the user
+# (Parse.client.become(token) builds the same thing from any token.)
+
+# 2. A block that runs ordinary model operations as the user, without
+#    threading session_token: through each call:
+Parse::User.login(username, password).with_session do
+  Post.query.count            # counts only the user's readable Posts
+  Post.create(title: "Hi")    # created under the user's permissions
+end
+```
+
+`with_session` (on a `Parse::User`, a `Parse::Client`, or `Parse.with_session`)
+scopes by binding the token as the ambient session — it authorizes
+**REST-routed** operations (`find` / `get` / `count` / `save`) as the user. It
+does **not** scope mongo-direct queries (`results_direct`, `aggregate`, Atlas
+search): those resolve auth from the query's own `session_token:` / `acl_user:`
+and otherwise run in **master** mode, so scope them explicitly with a per-query
+`session_token:` or a scoped `Parse::Agent`. (To run a query as a user *without*
+a token — via the master key and SDK-side ACL simulation — use
+`Parse::Query#scope_to_user(user)`.) `Parse::Client#anonymous` builds the same
+non-master client with no token, for an explicitly unauthenticated request.
+
+To explore a server as a specific user from this repo, `rake client:console`
+opens an IRB session whose default client is a non-master client bound to a user
+(session token, login, or anonymous), so every query in the session runs with
+that user's ACL/CLP — with `whoami` and `as_master { … }` helpers.
 
 `before_save` and `before_delete` hooks have special functionality and multiple ways to halt operations:
 

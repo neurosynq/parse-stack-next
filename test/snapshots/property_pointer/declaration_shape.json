@@ -1,0 +1,40 @@
+{
+  "owner": {
+    "description": null,
+    "enum": null,
+    "field_type": "pointer",
+    "reference_class": "Owner",
+    "remote_field": "owner",
+    "remote_field_type": "pointer",
+    "required": false
+  },
+  "rejected_by": {
+    "description": null,
+    "enum": null,
+    "field_type": "pointer",
+    "reference_class": "_User",
+    "remote_field": "rejectedBy",
+    "remote_field_type": "pointer",
+    "required": false
+  },
+  "reviewer": {
+    "description": null,
+    "enum": null,
+    "field_type": "pointer",
+    "reference_class": "_User",
+    "remote_field": "reviewedBy",
+    "remote_field_type": "pointer",
+    "required": true
+  },
+  "workspace": {
+    "description": "owning workspace",
+    "enum": {
+      "primary": "the primary workspace"
+    },
+    "field_type": "pointer",
+    "reference_class": "Workspace",
+    "remote_field": "workspace",
+    "remote_field_type": "pointer",
+    "required": false
+  }
+}
