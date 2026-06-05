@@ -48,55 +48,92 @@ Rake::TestTask.new do |t|
   t.verbose = true
 end
 
+# Shared runner for the file-per-process test tasks. Each test file runs in its
+# own Ruby process (isolation against the shared Parse Server); output streams
+# live, and — for trackability — a PASS/FAIL + duration line per file is printed
+# to STDOUT *and* appended to a progress log you can `tail -f` from another
+# shell while the run is in flight (works even when the run is backgrounded or
+# piped, where STDOUT would otherwise buffer until completion).
+#
+# Env knobs:
+#   TEST_PATTERN=<substr>       run only files whose path includes <substr>
+#                               (e.g. TEST_PATTERN=webhook)
+#   CONTINUE_ON_FAILURE=false   stop at the first failing file
+#                               (default: run them all, then list every failure)
+#
+# Exits non-zero if any file failed.
+def run_test_files!(label, files, log:)
+  $stdout.sync = true
+  require "fileutils"
+  if (pattern = ENV["TEST_PATTERN"].to_s).length.positive?
+    files = files.select { |f| f.include?(pattern) }
+    puts "TEST_PATTERN=#{pattern} -> #{files.length} matching file(s)"
+  end
+  continue = ENV.fetch("CONTINUE_ON_FAILURE", "true") != "false"
+  FileUtils.mkdir_p(File.dirname(log))
+  total = files.length
+  started = Time.now
+  results = []
+  File.write(log, "#{label}: #{total} files, started #{started}\n")
+  puts "\n>> #{label}: #{total} files (progress log: #{log})"
+
+  files.each_with_index do |file, i|
+    n = i + 1
+    puts "\n" + "=" * 80
+    puts "[#{n}/#{total}] #{file}"
+    puts "=" * 80
+    t0 = Time.now
+    ok = system("PARSE_TEST_USE_DOCKER=true ruby -Ilib:test #{file}")
+    dt = Time.now - t0
+    results << [file, ok, dt]
+    summary = format("[%d/%d] %-4s %7.1fs  %s", n, total, ok ? "PASS" : "FAIL", dt, file)
+    puts summary
+    File.open(log, "a") { |f| f.puts summary }
+    if !ok && !continue
+      File.open(log, "a") { |f| f.puts "STOPPED at first failure (CONTINUE_ON_FAILURE=false)" }
+      break
+    end
+  end
+
+  elapsed = Time.now - started
+  passed = results.count { |_, ok, _| ok }
+  failed = results.reject { |_, ok, _| ok }
+  footer = format("%s: %d/%d passed in %.1fs (%.1f min)",
+                  label, passed, results.length, elapsed, elapsed / 60.0)
+  puts "\n" + "=" * 80
+  puts footer
+  unless failed.empty?
+    puts "Failed (#{failed.length}):"
+    failed.each { |f, _, d| puts format("  FAIL %7.1fs  %s", d, f) }
+  end
+  puts "=" * 80
+  File.open(log, "a") do |f|
+    f.puts footer
+    failed.each { |ff, _, d| f.puts format("  FAIL %7.1fs  %s", d, ff) }
+  end
+  exit(1) unless failed.empty?
+end
+
 # Integration tests require Docker
 namespace :test do
-  desc "Run all integration tests (requires Docker)"
+  desc "Run all integration tests (requires Docker). " \
+       "Knobs: TEST_PATTERN=<substr>, CONTINUE_ON_FAILURE=false."
   task :integration do
     # Disruptive tests (server stop/restart) are run separately via
     # `test:integration:disruptive` so they never interleave with — and
     # flake — the rest of the integration suite against the shared server.
-    integration_files = FileList["test/lib/**/*integration_test.rb"]
-                          .exclude("test/lib/**/*disruptive*")
-
-    puts "Running #{integration_files.length} integration test files..."
-    integration_files.each_with_index do |file, index|
-      puts "Running integration test #{index + 1}/#{integration_files.length}: #{file}"
-
-      # 10: docker integration test fails for cloud functions
-      skip_till = 0
-      if (index + 1) <= skip_till
-        puts "Skipping test #{index + 1} as per configuration\n"
-        next
-      end
-
-      puts "\n" + "="*80
-      puts "Running: #{file}"
-      puts "="*80
-      system("PARSE_TEST_USE_DOCKER=true ruby -Ilib:test #{file}") || exit(1)
-    end
-    puts "\n✅ All integration tests completed successfully!"
+    files = FileList["test/lib/**/*integration_test.rb"]
+              .exclude("test/lib/**/*disruptive*")
+    run_test_files!("Integration tests", files, log: "tmp/integration-progress.log")
   end
 
-  desc "Run unit tests only (no Docker required)"
+  desc "Run unit tests only (no Docker required). " \
+       "Knobs: TEST_PATTERN=<substr>, CONTINUE_ON_FAILURE=false."
   task :unit do
-    unit_files = FileList["test/lib/**/*_test.rb"]
-                   .exclude("test/lib/**/*integration_test.rb")
-                   .exclude("test/lib/**/*disruptive*")
-
-    puts "Running #{unit_files.length} unit test files (no Docker)..."
-    unit_files.each_with_index do |file, index|
-      puts "Running unit test #{index + 1}/#{unit_files.length}: #{file}"
-
-      # 73 is problematic Testing Contains and Nin with Parse Objects with contains and nin 
-      skip_till = 0
-      if (index + 1) <= skip_till
-        puts "Skipping test #{index + 1} as per configuration"
-        next
-      end
-
-      system("PARSE_TEST_USE_DOCKER=true ruby -Ilib:test #{file}") || exit(1)
-    end
-    puts "\n✅ All unit tests completed successfully!"
+    files = FileList["test/lib/**/*_test.rb"]
+              .exclude("test/lib/**/*integration_test.rb")
+              .exclude("test/lib/**/*disruptive*")
+    run_test_files!("Unit tests", files, log: "tmp/unit-progress.log")
   end
 
   namespace :integration do
