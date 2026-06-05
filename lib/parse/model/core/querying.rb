@@ -120,6 +120,76 @@ module Parse
 
       alias_method :where, :query
 
+      # Define a pluralized constant alias for this class so the plural form
+      # can be used as a query entry point — e.g. `Posts.where(...).count`
+      # for a class `Post`. The alias is the same class object, so every
+      # class method (`where`, `query`, `count`, `find`, `all`, scopes)
+      # works through it and `Posts.parse_class` still returns `"Post"`.
+      #
+      # This is the explicit counterpart to the automatic
+      # {Parse.pluralized_aliases} behavior. Use it when automatic aliasing
+      # is disabled, when the class name ends in `s` (which the automatic
+      # path skips), when you want a custom plural, or for namespaced models
+      # (the alias is defined on the enclosing module, not at top level).
+      #
+      # @example default plural
+      #   class Post < Parse::Object
+      #     pluralized_alias!          # defines ::Posts => Post
+      #   end
+      #
+      # @example custom plural for a name ending in `s`
+      #   class Status < Parse::Object
+      #     pluralized_alias! :Statuses
+      #   end
+      #
+      # @example namespaced model
+      #   module Blog
+      #     class Post < Parse::Object
+      #       pluralized_alias!        # defines Blog::Posts => Blog::Post
+      #     end
+      #   end
+      #
+      # @param constant_name [Symbol, String, nil] the plural constant to
+      #   define; defaults to the ActiveSupport pluralization of the class's
+      #   demodulized name.
+      # @raise [ArgumentError] if the target constant already exists and is
+      #   not this class.
+      # @return [self, nil] self when an alias exists/was created; nil if the
+      #   class is anonymous or the plural matches the singular name.
+      def pluralized_alias!(constant_name = nil)
+        base = name
+        return nil if base.nil?
+        parts = base.split("::")
+        short = parts.last
+        plural = (constant_name && constant_name.to_s) || short.pluralize
+        return nil if plural == short
+        # NOTE: bare `Object` here would lexically resolve to `Parse::Object`
+        # (we are inside module Parse::Core::Querying), so the alias must be
+        # anchored at the true top level with `::Object`.
+        parent = parts.length > 1 ? parts[0..-2].join("::").constantize : ::Object
+        if parent.const_defined?(plural.to_sym, false)
+          existing = parent.const_get(plural.to_sym)
+          return self if existing.equal?(self)
+          # A code reloader (Zeitwerk in development) swaps `self` for a fresh
+          # class object but does not clean up the alias constant we set — it
+          # owns no autoload entry for it. On re-run of the class body the
+          # plural still points at the now-orphaned previous class. Re-point it
+          # to the current class instead of raising on every reload. Only a
+          # genuinely foreign constant (not a Parse model mapping to the same
+          # remote class) is treated as a conflict.
+          stale_reload = existing.is_a?(Class) && existing < Parse::Object &&
+                         existing.parse_class == parse_class
+          unless stale_reload
+            raise ArgumentError,
+                  "Cannot define pluralized alias #{plural} for #{base}: " \
+                  "constant already defined as #{existing}."
+          end
+          parent.send(:remove_const, plural.to_sym)
+        end
+        parent.const_set(plural.to_sym, self)
+        self
+      end
+
       # @param conditions (see Parse::Query#where)
       # @return (see Parse::Query#where)
       # @see Parse::Query#where

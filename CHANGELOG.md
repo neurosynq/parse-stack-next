@@ -1,5 +1,160 @@
 ## parse-stack-next Changelog
 
+### 5.3.0
+
+#### Run webhook handlers as the calling user
+
+Parse Server includes the caller's live session token (`user.sessionToken`) in
+every trigger webhook fired by a logged-in user. A handler can now opt in to
+acting on the server *as that user* — with full ACL, CLP, and `protectedFields`
+enforcement — instead of reaching for the application master key.
+
+- **NEW**: `Parse::Webhooks::Payload#session_token` exposes the caller's session
+  token, captured from the incoming payload. It is `nil` for a master-key
+  request (which carries no user). The token is captured before the payload's
+  credential scrubbing runs, so it is still removed from `payload.user` /
+  `payload.object` and never appears in `payload.as_json` or the request log.
+- **NEW**: `Parse::Webhooks::Payload#user_agent` returns a non-master
+  `Parse::Agent` bound to the caller's session token, so it runs in client mode
+  and every query is authorized as the user. Returns `nil` when there is no
+  token.
+- **NEW**: `Parse::Webhooks::Payload#user_client` returns a non-master
+  `Parse::Client` that binds the caller's session token, so even raw REST calls
+  through it are authorized as the user with no further ceremony. Returns `nil`
+  when there is no token.
+- **NEW**: `Parse::Client.new` accepts a `session_token:` option that binds a
+  token to the client. It is applied as the lowest-priority auth fallback on
+  every request (explicit per-call `session_token:` and `Parse.with_session`
+  still take precedence, and an explicit `use_master_key: true` skips it).
+  Pair it with `master_key: nil` to build a user-scoped client.
+- **NEW**: `Parse::Client#become(session_token)` returns a new non-master client
+  that mirrors the receiver's connection settings (`server_url`/`app_id`/
+  `api_key`) but binds the given token — the primitive behind `payload.user_client`
+  and `Parse::User#session_client`. `Parse::Client#anonymous` returns the same
+  shape with no token (unauthenticated REST) to drop a bound identity.
+- **NEW**: `Parse::User#session_client` returns a non-master `Parse::Client`
+  bound to a logged-in user's session token — the client-side counterpart of
+  `payload.user_client` (e.g. `Parse::User.login(u, p).session_client`).
+- **NEW**: `Parse::Client#with_session { ... }` runs a block with the client's
+  bound session token active as the ambient session, so REST-routed operations
+  (`find`/`get`/`count`/`save`) inside it are authorized as the user without
+  passing `session_token:` per call (the client-receiver flavor of
+  `Parse.with_session` / `Parse::User#with_session`). Mongo-direct queries
+  (`results_direct`, `aggregate`, Atlas search) are unaffected and still require
+  explicit per-query scoping.
+- **NEW**: `rake client:console` opens an interactive console whose default
+  client is a non-master client bound to a user (session token, login, or
+  anonymous), so every query in the session runs with that user's ACL / CLP /
+  `protectedFields` rather than the master key.
+- **FIXED**: `Parse::Client#inspect` and `Parse::Webhooks::Payload#inspect` no
+  longer print the master key or session token (and, for the payload, the
+  pre-scrub raw credentials) in cleartext — they are redacted, so an error
+  reporter or stray `inspect` cannot leak them.
+- **FIXED**: a whitespace-only `Parse::Client` `session_token:` is now treated
+  as no token, so it can never silently fall through to the master key.
+
+#### Pluralized class-name aliases
+
+Referencing the plural form of a model constant now resolves to that class, so
+the plural reads naturally as a query entry point — `Posts.where(...).count`
+works for a class `Post`.
+
+- **NEW**: The plural alias is created lazily on first reference and is the
+  *same class object* as the singular (`Posts.equal?(Post)` is `true`), so every
+  class method works through it (`query`/`where`, `count`, `find`, `all`, and any
+  `scope`) and `Posts.parse_class` still returns `"Post"`. Because it is the same
+  class, it adds no `Parse::Object.descendants` entry and never registers a
+  separate Parse schema class.
+- **NEW**: `pluralized_alias!` class macro for explicit opt-in — use it for a
+  custom plural, a class whose name ends in `s`, or a namespaced model (the alias
+  is defined on the enclosing module). It ignores the global flag and raises
+  `ArgumentError` rather than clobbering an existing unrelated constant.
+- **NEW**: `Parse.pluralized_aliases` configuration (default `true`; opt out with
+  `Parse.pluralized_aliases = false` or `PARSE_PLURALIZED_ALIASES=false`).
+- **CHANGED**: The automatic path is conservative — a class whose name already
+  ends in `s` is skipped, and a plural that does not singularize to a known
+  `Parse::Object` subclass falls through to a normal `NameError`.
+
+#### Pointer associations declared with `property … as:` — BREAKING: now serialize as Pointers
+
+Declaring a pointer with `property` instead of `belongs_to` used to fail
+silently: the `as:` option was dropped and the field became a plain `:string`
+column, so an assigned object was stored as a String and never serialized as a
+Parse pointer. `property … as:` now resolves to the same pointer association as
+`belongs_to`.
+
+- **BREAKING**: a field declared with `property … as:` now serializes as a
+  Pointer (`{__type: "Pointer", …}`) instead of a String. If a deployed app
+  previously used `property … as:` and saved records, Parse Server pinned that
+  column as `String` on first write, and a Pointer write against it is rejected
+  with error 111 (schema type mismatch). Drop or migrate that column to a
+  Pointer type before deploying. Apps that never used `property … as:` are
+  unaffected — the option was a silent no-op, so no working pointer behavior
+  depended on it.
+- **FIXED**: `property <name>, as: <class>` and `property <name>, :pointer` now
+  declare a pointer association identical to the equivalent `belongs_to` — same
+  `:pointer` field type, remote column, target-class reference, getter/setter,
+  dirty tracking, and `{__type: "Pointer", …}` wire form. Previously `as:` was
+  ignored and the field defaulted to `:string`, with no warning.
+- **NEW**: `belongs_to` (and the delegating `property … as:`) raise an
+  `ArgumentError` at declaration time when `as:` names a scalar data type such
+  as `as: :string` — a scalar cannot be a pointer target. The message points to
+  the intended `property <name>, :<type>` form. The guard fires only on an
+  explicit `as:`, so existing `belongs_to :field` declarations are unaffected.
+- **NEW**: `Parse.validate_associations!` verifies that every `belongs_to` /
+  `property … as:` pointer target and every `has_many` target — relation-,
+  array-, and query-backed — resolves to a known Parse class, reporting any
+  unresolved target as a `Class#field -> "Target"` offender. The query- and
+  array-backed `has_many` targets are the bucket where an `as:` typo otherwise
+  stays latent until the association is first traversed. Forward references are
+  legal at
+  declaration time and indistinguishable from typos there, so this cross-class
+  check is meant to run once after all models load (boot, CI, or a rake task).
+- **IMPROVED**: `belongs_to` now stores `_description:` and `_enum:` agent
+  metadata, which previously only `property` retained. A documented pointer
+  association keeps its semantic description, including when declared through
+  `property … as:`.
+
+#### afterSave create reports changed fields; file equality is force_ssl-consistent
+
+A trigger handler that keys off dirty tracking (`*_changed?` / `changes`) now
+sees every field an object was created with on an `afterSave` create, symmetric
+with the existing `afterSave` update behavior, and two `Parse::File` values that
+point at the same location compare equal regardless of `force_ssl`.
+
+- **NEW**: On an `afterSave` trigger for a newly created object (no prior
+  persisted state), the built `Parse::Object` now marks every populated data
+  property as changed, so a handler can use `*_changed?` / `changes` / `changed`
+  uniformly across create and update. Previously the create object
+  was pristine, so `*_changed?` returned `false` for every field and a handler
+  that builds a payload from changed fields would see nothing on creates. A
+  property whose create value equals its declared `default:` (e.g.
+  `status: "draft"`, `count: 0`, `archived: false`) is correctly reported as
+  changed. System fields (`createdAt` / `updatedAt` / `ACL` / `objectId`) stay
+  clean — they are not reported as changed — and object readability, `new?`, and
+  `existed?` are unchanged. Credential and row-permission fields remain filtered
+  from the built object. The `afterSave` update path is unchanged.
+- **CHANGED**: As a result of the above, model `after_save` / `after_create`
+  callbacks fired through the webhook dispatcher now observe an `afterSave`-create
+  object whose data fields are dirty (rather than pristine). A handler that
+  branched on dirty state for a created object should review that expectation;
+  the values themselves are unchanged.
+- **FIXED**: `Parse::File#==` now compares both files through the canonical
+  `url` reader rather than the raw stored URL on one side, so the comparison is
+  symmetric (`a == b` matches `b == a`) and consistent when
+  `Parse::File.force_ssl` coerces a stored `http://` URL to `https://`. Two
+  files at the same location previously read as unequal under `force_ssl`, which
+  could spuriously mark a file property as changed during dirty tracking.
+  Signed-URL query parameters are still stripped before comparison, so a
+  re-signed URL for the same object compares equal while a different underlying
+  location does not.
+- **NEW**: `Parse::File#content_signature` is the overridable seam that `==`
+  uses to decide whether two files refer to the same underlying file. It returns
+  the canonical `url` today (Parse Server's S3 files adapter exposes no content
+  digest); a files-adapter shim or `Parse::File` subclass can override it to key
+  equality off a content hash (S3 ETag / sha256) in the future without touching
+  dirty tracking.
+
 ### 5.2.1
 
 #### Webhook trigger handlers now receive the full Parse object

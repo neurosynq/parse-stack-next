@@ -331,7 +331,86 @@ module Parse
     attr_accessor :cache
     attr_writer :retry_limit
     attr_reader :application_id, :api_key, :master_key, :server_url
+    # @return [String, nil] the session token bound to this client, if any
+    #   (see the `:session_token` constructor option). Applied as the
+    #   lowest-priority auth fallback on every request.
+    attr_reader :session_token
     alias_method :app_id, :application_id
+
+    # Redacted inspection. The default Ruby `#inspect` would dump every ivar,
+    # exposing the master key and any bound session token in cleartext wherever
+    # a client is logged or surfaced in an error reporter. Show only the
+    # connection identity and a boolean for each credential's presence.
+    def inspect
+      "#<#{self.class.name} server_url=#{@server_url.inspect} " \
+      "app_id=#{@application_id.inspect} master_key=#{@master_key ? "[FILTERED]" : "nil"} " \
+      "session_token=#{@session_token ? "[FILTERED]" : "nil"}>"
+    end
+
+    # A NEW non-master {Parse::Client} that mirrors THIS client's connection
+    # settings (`server_url` / `application_id` / `api_key`) but carries no
+    # master key and binds +session_token+, so it acts on the server as that
+    # user (ACL / CLP / `protectedFields` enforced, no master-key fallback).
+    # This is the general primitive behind {Parse::Webhooks::Payload#user_client}
+    # and {Parse::User#session_client}: derive a user-scoped client from a
+    # configured (e.g. master) client without re-specifying the connection.
+    #
+    #   user_client = Parse.client.become(user.session_token)
+    #   Parse::Query.new("Post", client: user_client).results   # as the user
+    #
+    # @param session_token [String, #session_token] the token to bind. A blank
+    #   token yields a tokenless non-master client (anonymous REST).
+    # @return [Parse::Client]
+    def become(session_token)
+      Parse::Client.new(
+        server_url: @server_url,
+        app_id: @application_id,
+        api_key: @api_key,
+        master_key: nil,
+        session_token: session_token,
+      )
+    end
+
+    # A NEW anonymous client that mirrors THIS client's connection but carries
+    # neither a master key nor a session token — every request it makes is
+    # unauthenticated (app-id + REST key only). Use it to drop the bound user
+    # identity for a one-off public read without mutating a shared client.
+    # Equivalent to {#become} with no token.
+    # @return [Parse::Client]
+    def anonymous
+      become(nil)
+    end
+
+    # Run a block with this client's bound {#session_token} active as the
+    # ambient session, so every query / object operation inside it that resolves
+    # the default client (e.g. `Post.count`, `Post.all`, `obj.save`) is
+    # authorized by Parse Server as that user — ACL and CLP enforced, master key
+    # suppressed — without threading `session_token:` through each call.
+    #
+    # This is the client-receiver flavor of {Parse.with_session} (and mirrors
+    # {Parse::User#with_session}); it scopes by binding the token as the AMBIENT
+    # session — it does not re-route operations through this client object, so
+    # the connection used inside the block is still the resolved default client.
+    # If you need operations to run against a different client, pass that client
+    # explicitly (e.g. `Parse::Query.new("Post", client: #{become}(...))`).
+    #
+    #   total = Parse::User.login(u, p).with_session { Post.count }   # readable Posts only
+    #
+    # Scopes REST-routed operations (`find` / `get` / `count` / `save`). It does
+    # NOT scope mongo-direct queries (`results_direct`, `aggregate`, Atlas
+    # search): those resolve auth from the query's own `session_token:` /
+    # `acl_user:` and, absent that, run in MASTER mode — so a mongo-direct read
+    # inside this block is a full master read, not anonymous. Scope mongo-direct
+    # explicitly with a per-query `session_token:` or a scoped {Parse::Agent}.
+    #
+    # @raise [ArgumentError] if this client has no bound session token (scoping
+    #   would be a no-op and almost certainly a mistake).
+    # @return the value of the block.
+    def with_session(&block)
+      raise ArgumentError, "Parse::Client#with_session requires a block" unless block_given?
+      raise ArgumentError, "Parse::Client#with_session requires a client with a bound session_token" if @session_token.nil?
+      Parse.with_session(@session_token, &block)
+    end
     # The client can support multiple sessions. The first session created, will be placed
     # under the default session tag. The :default session will be the default client to be used
     # by the other classes including Parse::Query and Parse::Objects
@@ -415,6 +494,14 @@ module Parse
     # @option opts [String] :master_key The Parse application master key (optional).
     #    If this key is set, it will be sent on every request sent by the client
     #    and your models. Defaults to ENV['PARSE_SERVER_MASTER_KEY'].
+    # @option opts [String] :session_token An optional session token bound to
+    #    this client. When set, every request that does not pass an explicit
+    #    `session_token:` / `use_master_key: true` and is not inside a
+    #    `Parse.with_session` block sends this token (and suppresses the master
+    #    key), so the client transparently acts as that user. Precedence is
+    #    explicit per-call > `Parse.with_session` ambient > this bound token.
+    #    Typically paired with `master_key: nil` to build a user-scoped client
+    #    (see {Parse::Webhooks::Payload#user_client}).
     # @option opts [Boolean, Symbol] :logging Controls request/response logging.
     #    - `true` - Enable logging at :info level
     #    - `:debug` - Enable verbose logging with headers and body content
@@ -492,7 +579,26 @@ module Parse
       @server_url = opts[:server_url] || ENV["PARSE_SERVER_URL"] || Parse::Protocol::SERVER_URL
       @application_id = opts[:application_id] || opts[:app_id] || ENV["PARSE_SERVER_APPLICATION_ID"] || ENV["PARSE_APP_ID"]
       @api_key = opts[:api_key] || opts[:rest_api_key] || ENV["PARSE_SERVER_REST_API_KEY"] || ENV["PARSE_API_KEY"]
-      @master_key = opts[:master_key] || ENV["PARSE_SERVER_MASTER_KEY"] || ENV["PARSE_MASTER_KEY"]
+      # Distinguish an explicit `master_key: nil` (deliberately a non-master
+      # client — what user_client / session_client / user_agent rely on) from
+      # an omitted key (fall back to ENV). The previous `opts[:master_key] ||
+      # ENV[...]` form silently re-inherited the process master key for the
+      # explicit-nil case, putting a "non-master" client back into master mode
+      # in any deployment that exports PARSE_SERVER_MASTER_KEY / PARSE_MASTER_KEY.
+      @master_key = if opts.key?(:master_key)
+                      opts[:master_key]
+                    else
+                      ENV["PARSE_SERVER_MASTER_KEY"] || ENV["PARSE_MASTER_KEY"]
+                    end
+      # Optional token bound to this client; applied per request as the
+      # lowest-priority auth fallback (see #request). Normalize blank/whitespace
+      # to nil so it never trips the "token present" branch at request time
+      # (where `present?` is false for whitespace) and silently fall back to the
+      # master key on a master-configured client.
+      bound_token = opts[:session_token]
+      bound_token = bound_token.session_token if bound_token.respond_to?(:session_token)
+      bound_token = bound_token.to_s.strip
+      @session_token = bound_token.empty? ? nil : bound_token
 
       @require_https = opts.fetch(:require_https, ENV["PARSE_REQUIRE_HTTPS"] == "true")
       @allow_faraday_proxy = opts.fetch(:allow_faraday_proxy, false)
@@ -1016,14 +1122,20 @@ module Parse
 
       token = opts[:session_token]
       # When no explicit token was passed AND the caller didn't ask to send
-      # the master key, fall through to the fiber-local ambient set by
-      # `Parse.with_session`. Explicit `use_master_key: true` is treated as
-      # a deliberate admin call and skips the ambient — otherwise an
-      # `admin.do_thing(use_master_key: true)` nested inside a
-      # `with_session(user)` block would silently downgrade.
+      # the master key, fall through to (in order) the fiber-local ambient set
+      # by `Parse.with_session`, then this client's own bound `@session_token`.
+      # Explicit `use_master_key: true` is treated as a deliberate admin call
+      # and skips both — otherwise an `admin.do_thing(use_master_key: true)`
+      # nested inside a `with_session(user)` block (or on a token-bound client)
+      # would silently downgrade. The ambient wins over the bound token so a
+      # `with_session` override inside a user-scoped client still takes effect.
       if token.nil? && !(explicit_master && opts[:use_master_key] == true)
         ambient = Parse.current_session_token
-        token = ambient if ambient.is_a?(String) && !ambient.empty?
+        # A whitespace-only ambient must not count as present: otherwise it
+        # blocks the bound-token fallback below and then fails the later
+        # `token.present?` check, silently sending the master key instead.
+        token = ambient if ambient.is_a?(String) && !ambient.strip.empty?
+        token = @session_token if (token.nil? || token.to_s.strip.empty?) && @session_token
       end
       if token.present?
         token = token.session_token if token.respond_to?(:session_token)

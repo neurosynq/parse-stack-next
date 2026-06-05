@@ -35,6 +35,54 @@ def mcp_credentials_or_abort!
   [server_url, app_id, rest_api_key, master_key]
 end
 
+# Resolve the identity for `rake client:console`. Returns a session-token String,
+# or nil to mean "anonymous" (no token, no master). Order: PARSE_SESSION_TOKEN,
+# PARSE_CLIENT_ANONYMOUS=true, PARSE_LOGIN_USER (+PARSE_LOGIN_PASSWORD), else
+# prompt for login / token / anon. The login path uses the configured default
+# client (the master client set up just before this is called).
+def client_console_token!
+  token = ENV["PARSE_SESSION_TOKEN"].to_s.strip
+  return token unless token.empty?
+  return nil if ENV["PARSE_CLIENT_ANONYMOUS"].to_s == "true"
+
+  user = ENV["PARSE_LOGIN_USER"].to_s.strip
+  if user.empty?
+    print "Identity? [login/token/anon] (login): "
+    case $stdin.gets.to_s.strip.downcase
+    when "anon", "anonymous" then return nil
+    when "token"
+      print "Session token (r:...): "
+      t = $stdin.gets.to_s.strip
+      return t.empty? ? nil : t
+    else
+      print "Username (blank for anonymous): "
+      user = $stdin.gets.to_s.strip
+      return nil if user.empty?
+    end
+  end
+
+  pwd = ENV["PARSE_LOGIN_PASSWORD"].to_s
+  if pwd.empty?
+    begin
+      require "io/console"
+      print "Password for #{user}: "
+      pwd = $stdin.noecho(&:gets).to_s
+      puts
+    rescue LoadError, IOError, SystemCallError
+      # io/console missing, or stdin is not a TTY (piped input raises
+      # Errno::ENOTTY, a SystemCallError — not an IOError). Fall back to a
+      # plain read; warn that it will echo.
+      warn "[client:console] WARNING: cannot disable echo; password will be visible."
+      print "Password for #{user}: "
+      pwd = $stdin.gets.to_s
+    end
+  end
+  u = Parse::User.login(user, pwd.chomp)
+  abort "[client:console] login failed for #{user.inspect}" if u.nil? || u.session_token.to_s.empty?
+  puts "Logged in as #{u.username} (#{u.id})."
+  u.session_token
+end
+
 # Default test task runs all tests with Docker enabled.
 #
 # `*disruptive*` tests are EXCLUDED here: they stop/restart the shared
@@ -636,6 +684,74 @@ namespace :mcp do
     result = agent.execute(tool_name, **kwargs)
     puts JSON.pretty_generate(result)
     exit(result[:success] ? 0 : 1)
+  end
+end
+
+# rake client:console — IRB whose DEFAULT client is a non-master client bound to
+# a user's session, so every model query runs as that user (ACL/CLP enforced).
+# Identity: PARSE_SESSION_TOKEN, or PARSE_LOGIN_USER/PARSE_LOGIN_PASSWORD, else
+# prompt. Connection env matches the other tasks; the master key is used only to
+# log in. Helpers in the REPL: client, whoami, as_master { … }.
+namespace :client do
+  desc "Interactive console authenticated as a Parse user (session token or login), not master"
+  task :console do
+    require "irb"
+    begin; require "dotenv/load"; rescue LoadError; end
+    $LOAD_PATH.unshift(File.expand_path("lib", __dir__))
+    require "parse-stack"
+
+    server_url, app_id, rest_api_key, master_key = mcp_credentials_or_abort!
+    Parse.setup(server_url: server_url, application_id: app_id, api_key: rest_api_key, master_key: master_key)
+    master_client = Parse.client
+    token = client_console_token! # String, or nil for anonymous
+
+    # Models memoize their resolved client at the class level (`@client ||=`),
+    # so swapping clients[:default] alone is NOT enough — every swap must also
+    # drop those cached ivars or already-touched classes keep the old client.
+    reset_client_caches = lambda do
+      next unless defined?(Parse::Object)
+      [Parse::Object, *Parse::Object.descendants, Parse::Query].each do |k|
+        k.remove_instance_variable(:@client) if k.instance_variable_defined?(:@client)
+      end
+    end
+
+    # Make a non-master client (session-bound, or anonymous) the default so
+    # every model query runs as the user.
+    user_client = token ? master_client.become(token) : master_client.anonymous
+    Parse::Client.clients[:default] = user_client
+    reset_client_caches.call
+
+    Object.send(:define_method, :client) { user_client }
+    # Redacted: GET /users/me returns a Parse::User carrying the live
+    # sessionToken, and Parse::Object has no redacted #inspect, so returning the
+    # raw object would print the token in the REPL. Hand back a safe summary.
+    Object.send(:define_method, :whoami) do
+      next "anonymous (no session)" unless token
+      r = user_client.current_user(token)
+      next "whoami failed: #{r.error}" unless r.success?
+      u = r.result
+      { "username" => u["username"], "objectId" => u["objectId"], "session_token" => "[FILTERED]" }
+    rescue StandardError => e
+      "whoami failed: #{e.message}"
+    end
+    # Escalate to the master key for the block, then restore the user client.
+    # Both swaps must reset the class client caches (see reset_client_caches),
+    # otherwise a class touched inside the block keeps master afterward, or a
+    # previously-touched class never escalates. Already-instantiated Parse::Query
+    # objects held in REPL locals keep their own client and are not reset.
+    Object.send(:define_method, :as_master) do |&blk|
+      Parse::Client.clients[:default] = master_client
+      reset_client_caches.call
+      blk.call
+    ensure
+      Parse::Client.clients[:default] = user_client
+      reset_client_caches.call
+    end
+
+    mode = token ? "a USER" : "ANONYMOUS"
+    puts "parse-stack-next client console — as #{mode} (no master key). Helpers: client, whoami, as_master { }."
+    ARGV.clear
+    IRB.start
   end
 end
 

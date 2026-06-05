@@ -119,6 +119,23 @@ module Parse
 
         # These items are added as attributes with the special data type of :pointer
         def belongs_to(key, opts = {})
+          # An explicitly-passed `as:` that names a scalar data type
+          # (`:string`, `:integer`, `:boolean`, …) is almost always a mistake —
+          # you cannot point at a scalar — and most often means a `property`
+          # was written with `as:` out of habit. Reject it at declaration time.
+          # This is the only association footgun decidable without all models
+          # loaded: an unresolved *class* name may simply be a forward
+          # reference (the target is required later), so that check is deferred
+          # to {Parse.validate_associations!}.
+          explicit_as = opts.key?(:as) ? opts[:as] : nil
+          if explicit_as && Parse::Properties::TYPES.include?(explicit_as.to_s.to_sym)
+            scalar = explicit_as.to_s.to_sym
+            raise ArgumentError,
+                  "#{self}##{key}: `as: #{explicit_as.inspect}` names the reserved data type " \
+                  ":#{scalar}, not a Parse class. For a scalar column write " \
+                  "`property #{key.inspect}, #{scalar.inspect}`; if you really mean a Parse class " \
+                  "named #{scalar.to_s.camelize.inspect}, pass `class_name: #{scalar.to_s.camelize.inspect}` instead."
+          end
           opts = { as: key, field: key.to_s.camelize(:lower), required: false }.merge(opts)
           # `opts[:class_name]` is the explicit target Parse class name; it takes
           # precedence over the legacy `as: :symbol` shorthand (where the
@@ -134,6 +151,22 @@ module Parse
           set_attribute_method = :"#{key}_set_attribute!"
 
           if self.fields[key].present? && Parse::Properties::BASE_FIELD_MAP[key].nil?
+            existing_type = self.fields[key]
+            # A structural redeclaration that CHANGES the type to a pointer
+            # (e.g. a field first declared `property :owner, :string` and then
+            # `property :owner, as: :user` / `belongs_to :owner`) is almost
+            # always a bug — and, because `property … as:` now delegates here,
+            # it is the same silent-String failure mode this whole feature
+            # exists to fix. Honor the same `strict_property_redefinition`
+            # contract that `property` enforces so the conflict is not
+            # downgraded to a warning. A same-type reopen (existing :pointer)
+            # still just warns, matching the prior behavior.
+            if existing_type != :pointer && Parse.strict_property_redefinition
+              raise ArgumentError,
+                    "#{self}##{key} is already defined as :#{existing_type}; refusing to " \
+                    "redeclare it as a :pointer association (target #{klassName}). Set " \
+                    "Parse.strict_property_redefinition = false to fall back to warn-and-ignore."
+            end
             warn "Belongs relation #{self}##{key} already defined with type #{klassName}"
             return false
           end
@@ -150,6 +183,20 @@ module Parse
           self.fields.merge!(key => :pointer, parse_field => :pointer)
           # Mapping between local attribute name and the remote column name
           self.field_map.merge!(key => parse_field)
+
+          # Agent metadata: a belongs_to pointer can carry a semantic description
+          # (and per-value enum descriptions) just like a `property` can. This
+          # also lets `property :x, as: :user, _description: "..."` round-trip its
+          # metadata through the delegation in Parse::Properties#property.
+          if opts[:_description].present?
+            self.property_descriptions[key] = opts[:_description].to_s.freeze
+          end
+          if opts[:_enum].is_a?(Hash) && opts[:_enum].any?
+            normalized = opts[:_enum].each_with_object({}) do |(value, desc), h|
+              h[value.to_s] = desc.to_s.freeze
+            end
+            self.property_enum_descriptions[key] = normalized.freeze
+          end
 
           # used for dirty tracking
           define_attribute_methods key

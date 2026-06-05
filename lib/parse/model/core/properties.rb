@@ -197,6 +197,33 @@ module Parse
           # data_type = :timezone if key == :time_zone || key == :timezone
         end
 
+        # A property that names a pointer target — via `as:`/`class_name:` or an
+        # explicit :pointer data type — is really a belongs_to association, not a
+        # scalar column. Delegate so `property :rejected_by, as: :user` behaves
+        # identically to `belongs_to :rejected_by, as: :user` instead of silently
+        # storing a String (the `as:` option was previously dropped, leaving the
+        # field as the default :string type). Reusing belongs_to keeps the
+        # className-trust guard and autofetch/dirty-tracking in one place rather
+        # than duplicating pointer handling here. `opts` is still raw user input
+        # at this point (the defaults merge happens further down), so only an
+        # explicitly-passed :field is forwarded and belongs_to defaults the rest.
+        if opts.key?(:as) || opts.key?(:class_name) || data_type == :pointer
+          forwarded = %i[as class_name field required _description _enum]
+          bt_opts = {}
+          forwarded.each { |o| bt_opts[o] = opts[o] if opts.key?(o) }
+          # belongs_to has no scalar-property machinery (defaults, symbolize,
+          # enum validation, alias toggles, scope generation). Surface — rather
+          # than silently drop — any such option so a `default:`/`symbolize:` on
+          # a pointer property isn't quietly ignored.
+          dropped = opts.keys.map(&:to_sym) - forwarded
+          unless dropped.empty?
+            warn "[#{self}] property #{key.inspect} resolves to a pointer association; " \
+                 "ignoring unsupported option(s) #{dropped.map(&:inspect).join(', ')} " \
+                 "(not available on belongs_to)."
+          end
+          return belongs_to(key, bt_opts)
+        end
+
         data_type = :timezone if data_type == :string && (key == :time_zone || key == :timezone)
 
         # allow :bool for :boolean

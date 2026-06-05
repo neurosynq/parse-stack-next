@@ -180,6 +180,39 @@ This duality is intentional. The high-level convenience method matches
 what mobile SDKs do; the raw client preserves the response so you can
 log or reroute.
 
+#### A user-scoped client straight from login
+
+`Parse::User#session_client` turns a logged-in user into a **non-master client
+with that user's token bound**, so you don't thread `session_token:` through
+every call. (`Parse.client.become(token)` builds the same thing from any token.)
+`Parse::User#with_session` runs a block as the user:
+
+```ruby
+client = Parse::User.login("ada", "p4ssw0rd!").session_client
+Parse::Query.new("Post", client: client).results     # runs as Ada
+
+# Or a block — every REST-routed op inside is authorized as Ada:
+Parse::User.login("ada", "p4ssw0rd!").with_session do
+  Post.query.count
+  Post.create(title: "Hello")
+end
+```
+
+`session_client` returns `nil` if the user has no session token (e.g. it was
+fetched/saved under the master key rather than logged in). The bound token is
+applied as the lowest-priority auth fallback, so an explicit per-call
+`session_token:`, a `Parse.with_session` block, or `use_master_key: true` all
+still take precedence.
+
+> **Scope boundary.** `with_session` (and `Parse.with_session`) authorize
+> **REST-routed** operations (`find` / `get` / `count` / `save`) as the user.
+> Mongo-direct queries (`results_direct`, `aggregate`, Atlas search) do **not**
+> pick up the ambient session — scope them explicitly with a per-query
+> `session_token:` or a scoped `Parse::Agent`. A no-master client like this one
+> has no mongo-direct path anyway. To run a query as a user *without* a token —
+> via the master key and SDK-side ACL simulation — use
+> `Parse::Query#scope_to_user(user)`.
+
 ### 2.3 Validate / refresh a session
 
 ```ruby
