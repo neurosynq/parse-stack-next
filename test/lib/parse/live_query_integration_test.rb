@@ -95,22 +95,16 @@ class LiveQueryIntegrationTest < Minitest::Test
     # Wait for subscription to be confirmed
     wait_for_subscription(subscription)
 
-    # Create an object - should trigger callback
-    new_obj = TestLiveQueryModel.new
-    new_obj.name = "Test Object"
-    new_obj.value = 42
-    new_obj.status = "active"
+    # Create a publicly-readable object - should trigger callback
+    new_obj = build_public(name: "Test Object", value: 42, status: "active")
     new_obj.save
 
     # Wait for callback (with timeout)
-    callback_called.wait(5)
+    callback_called.wait(EVENT_TIMEOUT)
 
-    if callback_called.set?
-      assert_equal "Test Object", created_object.name
-      assert_equal 42, created_object.value
-    else
-      skip "LiveQuery create event not received (may be server configuration issue)"
-    end
+    assert callback_called.set?, "LiveQuery create event not received within #{EVENT_TIMEOUT}s"
+    assert_equal "Test Object", created_object.name
+    assert_equal 42, created_object.value
 
     subscription.unsubscribe
     new_obj.destroy
@@ -119,10 +113,8 @@ class LiveQueryIntegrationTest < Minitest::Test
   def test_subscribe_receives_update_event
     skip_unless_livequery_available
 
-    # Create initial object
-    obj = TestLiveQueryModel.new
-    obj.name = "Original"
-    obj.value = 1
+    # Create initial publicly-readable object
+    obj = build_public(name: "Original", value: 1)
     obj.save
 
     updated_object = nil
@@ -143,14 +135,11 @@ class LiveQueryIntegrationTest < Minitest::Test
     obj.value = 2
     obj.save
 
-    callback_called.wait(5)
+    callback_called.wait(EVENT_TIMEOUT)
 
-    if callback_called.set?
-      assert_equal "Updated", updated_object.name
-      assert_equal 2, updated_object.value
-    else
-      skip "LiveQuery update event not received (may be server configuration issue)"
-    end
+    assert callback_called.set?, "LiveQuery update event not received within #{EVENT_TIMEOUT}s"
+    assert_equal "Updated", updated_object.name
+    assert_equal 2, updated_object.value
 
     subscription.unsubscribe
     obj.destroy
@@ -159,10 +148,8 @@ class LiveQueryIntegrationTest < Minitest::Test
   def test_subscribe_receives_delete_event
     skip_unless_livequery_available
 
-    # Create object to delete
-    obj = TestLiveQueryModel.new
-    obj.name = "ToDelete"
-    obj.value = 99
+    # Create publicly-readable object to delete
+    obj = build_public(name: "ToDelete", value: 99)
     obj.save
     object_id = obj.id
 
@@ -180,13 +167,10 @@ class LiveQueryIntegrationTest < Minitest::Test
     # Delete the object
     obj.destroy
 
-    callback_called.wait(5)
+    callback_called.wait(EVENT_TIMEOUT)
 
-    if callback_called.set?
-      assert_equal object_id, deleted_object.id
-    else
-      skip "LiveQuery delete event not received (may be server configuration issue)"
-    end
+    assert callback_called.set?, "LiveQuery delete event not received within #{EVENT_TIMEOUT}s"
+    assert_equal object_id, deleted_object.id
 
     subscription.unsubscribe
   end
@@ -207,26 +191,19 @@ class LiveQueryIntegrationTest < Minitest::Test
     wait_for_subscription(subscription)
 
     # Create object that doesn't match filter
-    obj1 = TestLiveQueryModel.new
-    obj1.name = "Low Value"
-    obj1.value = 10
+    obj1 = build_public(name: "Low Value", value: 10)
     obj1.save
 
     # Create object that matches filter
-    obj2 = TestLiveQueryModel.new
-    obj2.name = "High Value"
-    obj2.value = 100
+    obj2 = build_public(name: "High Value", value: 100)
     obj2.save
 
-    callback_called.wait(5)
+    callback_called.wait(EVENT_TIMEOUT)
 
-    if callback_called.set?
-      # Should only receive the high value object
-      assert_equal 1, received_objects.length
-      assert_equal "High Value", received_objects.first.name
-    else
-      skip "LiveQuery filtered create event not received"
-    end
+    assert callback_called.set?, "LiveQuery filtered create event not received within #{EVENT_TIMEOUT}s"
+    # Should only receive the high value object
+    assert_equal 1, received_objects.length
+    assert_equal "High Value", received_objects.first.name
 
     subscription.unsubscribe
     obj1.destroy
@@ -247,9 +224,10 @@ class LiveQueryIntegrationTest < Minitest::Test
     subscription.unsubscribe
     assert subscription.unsubscribed?
 
-    # Create object after unsubscribe
-    obj = TestLiveQueryModel.new
-    obj.name = "After Unsubscribe"
+    # Create a publicly-readable object after unsubscribe. Public ACL means a
+    # leaked subscription WOULD receive it, so a passing assertion genuinely
+    # proves unsubscribe stopped delivery (rather than ACL filtering masking it).
+    obj = build_public(name: "After Unsubscribe")
     obj.save
 
     sleep 2 # Wait to ensure no callback is triggered
@@ -264,28 +242,27 @@ class LiveQueryIntegrationTest < Minitest::Test
 
     sub1_received = []
     sub2_received = []
+    sub1_got = Concurrent::Event.new
+    sub2_got = Concurrent::Event.new
 
     sub1 = TestLiveQueryModel.subscribe(where: { status: "active" })
-    sub1.on(:create) { |obj| sub1_received << obj }
+    sub1.on(:create) { |obj| sub1_received << obj; sub1_got.set }
 
     sub2 = TestLiveQueryModel.subscribe(where: { status: "inactive" })
-    sub2.on(:create) { |obj| sub2_received << obj }
+    sub2.on(:create) { |obj| sub2_received << obj; sub2_got.set }
 
     wait_for_subscription(sub1)
     wait_for_subscription(sub2)
 
-    # Create objects with different statuses
-    active_obj = TestLiveQueryModel.new
-    active_obj.name = "Active"
-    active_obj.status = "active"
+    # Create publicly-readable objects with different statuses
+    active_obj = build_public(name: "Active", status: "active")
     active_obj.save
 
-    inactive_obj = TestLiveQueryModel.new
-    inactive_obj.name = "Inactive"
-    inactive_obj.status = "inactive"
+    inactive_obj = build_public(name: "Inactive", status: "inactive")
     inactive_obj.save
 
-    sleep 3 # Wait for events
+    sub1_got.wait(EVENT_TIMEOUT)
+    sub2_got.wait(EVENT_TIMEOUT)
 
     # Clean up
     sub1.unsubscribe
@@ -293,10 +270,9 @@ class LiveQueryIntegrationTest < Minitest::Test
     active_obj.destroy
     inactive_obj.destroy
 
-    # Skip assertion if events weren't received
-    if sub1_received.empty? && sub2_received.empty?
-      skip "LiveQuery events not received for multiple subscriptions"
-    end
+    # Each subscription should receive only the object matching its filter.
+    assert_equal ["Active"], sub1_received.map(&:name), "sub1 (status=active) should receive only the active object"
+    assert_equal ["Inactive"], sub2_received.map(&:name), "sub2 (status=inactive) should receive only the inactive object"
   end
 
   def test_subscription_callback_chaining
@@ -318,6 +294,26 @@ class LiveQueryIntegrationTest < Minitest::Test
   end
 
   private
+
+  # Build a TestLiveQuery instance that an anonymous (client-key only)
+  # LiveQuery subscription can actually read. The SDK's default ACL policy
+  # is `:owner_else_private`, which stamps an empty (master-key-only) ACL on
+  # owner-less objects; Parse Server's LiveQuery server then refuses to push
+  # events for such objects to a subscription that connected without a
+  # session token. A public-read ACL makes the delivery path deterministic,
+  # so these tests assert real event delivery instead of skipping. (The
+  # ACL-scoped delivery path — subscribe-as-user, private rows — is covered
+  # separately by client_livequery_integration_test.rb.)
+  def build_public(attrs = {})
+    obj = TestLiveQueryModel.new(attrs)
+    obj.acl = Parse::ACL.everyone(true, true)
+    obj
+  end
+
+  # Generous wait for an event to land. Delivery is normally sub-second once
+  # the subscription is confirmed; the headroom absorbs cold-Parse-Server-boot
+  # latency without reintroducing the old silent skips.
+  EVENT_TIMEOUT = 10
 
   def skip_unless_livequery_available
     unless livequery_server_available?

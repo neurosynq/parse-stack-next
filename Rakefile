@@ -77,10 +77,55 @@ def client_console_token!
       pwd = $stdin.gets.to_s
     end
   end
-  u = Parse::User.login(user, pwd.chomp)
+  u = console_login_with_optional_mfa(user, pwd.chomp)
   abort "[client:console] login failed for #{user.inspect}" if u.nil? || u.session_token.to_s.empty?
   puts "Logged in as #{u.username} (#{u.id})."
   u.session_token
+end
+
+# Log `user` in, transparently handling an MFA-enrolled account. If the server
+# reports that additional MFA auth is required, prompt for a TOTP / recovery
+# code (or read +PARSE_LOGIN_MFA+ for non-interactive use) and retry via
+# {Parse::User.login_with_mfa}. Returns a logged-in {Parse::User}, or nil when
+# the credentials themselves are rejected (so the caller's "login failed" abort
+# still fires for a bad password).
+def console_login_with_optional_mfa(user, pwd)
+  # Parse Server signals "this account needs an MFA token" two ways depending on
+  # the error code path: a returned error response ("Missing additional
+  # authData ...") or a raised Parse::Error for the OTHER_CAUSE (code <= 100)
+  # variant. Treat both as "prompt for MFA"; anything else is a real credential
+  # failure and must NOT trigger an MFA prompt.
+  mfa_indicator = /additional\s+authData|missing.*mfa|\bMFA\b/i
+  begin
+    response = Parse.client.login(user, pwd)
+    if response.success?
+      return Parse::User.with_authdata_trust { Parse::User.build(response.result) }
+    end
+    return nil unless response.error.to_s.match?(mfa_indicator)
+  rescue Parse::Error, Parse::Client::ResponseError => e
+    raise unless e.message.to_s.match?(mfa_indicator)
+  end
+
+  token = ENV["PARSE_LOGIN_MFA"].to_s.strip
+  if token.empty?
+    print "MFA token (authenticator code or recovery code): "
+    token = $stdin.gets.to_s.strip
+  end
+  abort "[client:console] MFA token required for #{user.inspect}" if token.empty?
+
+  # A wrong/expired token can surface either as Parse::MFA::VerificationError or,
+  # depending on the server error code path, as a generic Parse::Error (e.g.
+  # ServiceUnavailableError for the OTHER_CAUSE code) or a nil return. Since a
+  # token was supplied here, treat any failure as an MFA verification failure
+  # and abort cleanly rather than letting an unhandled exception escape.
+  result =
+    begin
+      Parse::User.login_with_mfa(user, pwd, token)
+    rescue Parse::MFA::VerificationError, Parse::Error => e
+      abort "[client:console] MFA verification failed for #{user.inspect}: #{e.message}"
+    end
+  abort "[client:console] MFA verification failed for #{user.inspect}" if result.nil?
+  result
 end
 
 # Default test task runs all tests with Docker enabled.
@@ -131,7 +176,11 @@ def run_test_files!(label, files, log:)
     puts "[#{n}/#{total}] #{file}"
     puts "=" * 80
     t0 = Time.now
-    ok = system("PARSE_TEST_USE_DOCKER=true ruby -Ilib:test #{file}")
+    # Always go through `bundle exec` so the locked gem versions win. With a
+    # bare `ruby`, RubyGems activates the newest installed minitest (6.0.x),
+    # which dropped the bundled `minitest/mock`; the standalone `minitest-mock`
+    # gem then can't co-activate and `test_helper.rb` fails to load every file.
+    ok = system("PARSE_TEST_USE_DOCKER=true bundle exec ruby -Ilib:test #{file}")
     dt = Time.now - t0
     results << [file, ok, dt]
     summary = format("[%d/%d] %-4s %7.1fs  %s", n, total, ok ? "PASS" : "FAIL", dt, file)
@@ -203,7 +252,7 @@ namespace :test do
         puts "=" * 80
         # Each file runs in its own process so a server outage in one cannot
         # bleed into the next.
-        system("PARSE_TEST_USE_DOCKER=true ruby -Ilib:test #{file}") || begin
+        system("PARSE_TEST_USE_DOCKER=true bundle exec ruby -Ilib:test #{file}") || begin
           # A disruptive test may have left the server down on failure; bring
           # it back so a follow-up run / other tasks start from a clean state.
           system("docker start #{ENV["PSNEXT_PREFIX"] || "psnext-it"}-server", out: IO::NULL, err: IO::NULL)

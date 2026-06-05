@@ -182,13 +182,15 @@ module Parse
     # that `Parse::AtlasSearch` calls do not break. `$vectorSearch` is
     # included for `Parse::VectorSearch` — like `$search`, it is a
     # read-only Atlas index stage and must be the FIRST stage of the
-    # pipeline (Atlas refuses it otherwise).
+    # pipeline (Atlas refuses it otherwise). `$rankFusion` (Atlas 8.0+)
+    # is the native server-side reciprocal-rank-fusion stage used by
+    # `Parse::VectorSearch::Hybrid` — also a read-only stage-0 operator.
     ALLOWED_STAGES = %w[
       $match $group $sort $project $limit $skip $unwind $lookup
       $count $addFields $set $unset $bucket $bucketAuto $facet
       $sample $sortByCount $replaceRoot $replaceWith $redact
       $graphLookup $unionWith
-      $search $searchMeta $listSearchIndexes $vectorSearch
+      $search $searchMeta $listSearchIndexes $vectorSearch $rankFusion
     ].freeze
 
     # Atlas operators that are valid only as the FIRST stage of a
@@ -202,7 +204,7 @@ module Parse
     # for full-text and vector search is the dedicated
     # `atlas_search` / `semantic_search` tools, not raw aggregate.
     STAGE0_ONLY_ATLAS_STAGES = %w[
-      $search $searchMeta $vectorSearch $listSearchIndexes
+      $search $searchMeta $vectorSearch $listSearchIndexes $rankFusion
     ].freeze
 
     # Cap on the length of a caller-supplied `$regex` (or the `regex:`

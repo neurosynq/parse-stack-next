@@ -372,6 +372,10 @@ embed-time chunking), use one of these patterns:
 
 ## Retrieval (RAG)
 
+> For an end-to-end runnable script — managed `embed`, `agent_searchable`,
+> `semantic_search`, and an OpenAI/Anthropic generation add-in — see
+> [`examples/rag_chatbot.rb`](../examples/rag_chatbot.rb).
+
 `Parse::Retrieval` (`Parse::RAG` is an alias) sits on top of
 `find_similar`. `Parse::Retrieval.retrieve` embeds a natural-language
 query, runs Atlas `$vectorSearch` through `find_similar` (so ACL/CLP are
@@ -395,8 +399,88 @@ chunks = Parse::Retrieval.retrieve(
 # => Array<Parse::Retrieval::Chunk> — { id, score, content, source, metadata }
 ```
 
-`rerank:` and `hybrid:` are reserved on the signature and raise
-`NotImplementedError` if supplied.
+`retrieve` also accepts `hybrid:` (fuse a lexical branch with the vector
+branch — see [Hybrid search](#hybrid-search-vector--lexical) below) and
+`rerank:` (reorder retrieved documents with a cross-encoder before
+chunking — see [Reranking](#reranking)). Both were reserved in earlier
+releases and now ship in 5.4.0.
+
+### Hybrid search (vector + lexical)
+
+`Class.hybrid_search` runs a lexical Atlas Search (`$search`) branch and a
+`$vectorSearch` branch as **two independent aggregations**, then fuses
+their ranked results with reciprocal-rank fusion (RRF). Two aggregations
+(not a single `$facet`) is mandatory: `$vectorSearch` is prohibited inside
+`$facet` / `$lookup` / `$unionWith` and must be stage 0 of its pipeline.
+Each branch enforces ACL/CLP/`protectedFields` independently before
+fusion (via `Parse::AtlasSearch.search` and `Parse::VectorSearch.search`),
+so the fused rows are already access-filtered — there is no separate
+hydration fetch.
+
+```ruby
+hits = Article.hybrid_search(
+  text:    "how do I reset my password",   # embedded for the vector branch;
+                                            # also the default lexical query
+  lexical: { index: "article_search", fields: %w[title body] },
+  vector:  { index: "article_embedding_idx", num_candidates: 200 },
+  k:       20,
+  fusion:  { k_constant: 60, weights: { lexical: 0.4, vector: 0.6 } },
+  session_token: user.session_token,        # ACL scope, applied to BOTH branches
+)
+# => Array<Parse::Object>; each carries #hybrid_score, #hybrid_ranks,
+#    and #vector_score / #search_score when that branch contributed.
+```
+
+**RRF math.** `fused_score(d) = Σ_b weight_b / (k_constant + rank_b(d))`,
+where `rank_b(d)` is the document's 1-based rank in branch `b`. A larger
+`k_constant` (default 60) flattens the contribution curve. `weights`
+defaults to 1.0 per branch. `Parse::VectorSearch::Hybrid.rrf` exposes the
+pure fusion if you want to fuse pre-fetched ranked lists yourself.
+
+**Native `$rankFusion` (Atlas 8.0+).**
+`Parse::VectorSearch::Hybrid.rank_fusion_supported?(collection)` detects
+the native server-side fusion stage via a cached behavioural probe (1-hour
+TTL — not version-string parsing). Native execution is **opt-in**
+(`fusion: { method: :rrf_native }`) and falls back to the client-side path
+when the cluster does not support it; the default `:rrf` always fuses
+client-side, which is the fully-enforced, deterministic path. `$rankFusion`
+is admitted to `PipelineSecurity::ALLOWED_STAGES` for the native path.
+
+`Parse::Retrieval.retrieve(hybrid: true, ...)` routes through
+`hybrid_search` and chunks the fused results; pass `hybrid: { lexical:,
+vector:, fusion: }` to configure the branches. Tenant scope is folded into
+**both** branches (the vector Atlas pre-filter and the lexical
+post-`$search` `$match`) so neither leaks cross-tenant document existence.
+
+### Reranking
+
+A reranker reorders retrieved documents by a cross-encoder relevance score
+**before** chunking. Pass any object answering
+`#rerank(query:, documents:, top_n:)` — typically a
+`Parse::Retrieval::Reranker::Base` subclass:
+
+```ruby
+reranker = Parse::Retrieval::Reranker::Cohere.new(
+  api_key: ENV.fetch("COHERE_API_KEY"), model: "rerank-v3.5",
+)
+chunks = Parse::Retrieval.retrieve(
+  query: "reset my password", klass: Article, k: 30,
+  rerank: reranker, rerank_top_n: 5,    # keep the 5 most relevant docs
+)
+# Reranked chunks' score is the cross-encoder relevance_score.
+```
+
+`Reranker::Fixture` is a deterministic, zero-network reranker (lexical
+token overlap) for tests. The `Reranker::Base` protocol validates inputs,
+bounds `top_n`, rejects out-of-range indices, and sorts descending —
+adapters implement only the network call (`#rerank_scores`).
+
+> **Spend cap.** The `semantic_search` agent tool charges the estimated
+> query-embedding tokens against the caller's tenant budget via
+> `Parse::Embeddings::SpendCap` (opt-in; `configure(limit_tokens:,
+> window:)`). A breach hard-refuses (surfaced to the agent as a
+> rate-limited tool error). Admin agents are exempt; direct
+> `find_similar` / `retrieve` callers are not metered.
 
 ### Chunkers
 

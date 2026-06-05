@@ -155,7 +155,7 @@ module Parse
           },
         }
 
-        response = client.update_user(id, { authData: auth_data_payload }, opts: { session_token: session_token })
+        response = client.update_user(id, { authData: auth_data_payload }, session_token: session_token)
 
         if response.error?
           if response.result.to_s.include?("Invalid MFA")
@@ -208,7 +208,7 @@ module Parse
           },
         }
 
-        response = client.update_user(id, { authData: auth_data_payload }, opts: { session_token: session_token })
+        response = client.update_user(id, { authData: auth_data_payload }, session_token: session_token)
 
         if response.error?
           raise Parse::Client::ResponseError, response
@@ -245,7 +245,7 @@ module Parse
           },
         }
 
-        response = client.update_user(id, { authData: auth_data_payload }, opts: { session_token: session_token })
+        response = client.update_user(id, { authData: auth_data_payload }, session_token: session_token)
 
         if response.error?
           if response.result.to_s.include?("Invalid MFA token")
@@ -276,27 +276,60 @@ module Parse
         raise MFA::NotEnabledError, "MFA is not enabled for this user" unless mfa_enabled?
         raise ArgumentError, "Current token is required" if current_token.blank?
 
-        # To disable, we need to update authData.mfa with the old token for validation
-        # and then set it to null
-        auth_data_payload = {
-          mfa: {
-            old: current_token,
-            secret: nil,  # Setting to nil disables TOTP
-          },
-        }
-
-        response = client.update_user(id, { authData: auth_data_payload }, opts: { session_token: session_token })
-
-        if response.error?
-          if response.result.to_s.include?("Invalid MFA token")
-            raise MFA::VerificationError, response.result.to_s
-          end
-          raise Parse::Client::ResponseError, response
+        # Parse Server's TOTP adapter exposes no first-class "disable via authData
+        # update" path — its validateUpdate always re-runs setup, so a partial
+        # mfa payload is rejected outright. Disabling is therefore a two-step:
+        #
+        #   1. Prove possession of the current code by submitting it as
+        #      `{ mfa: { old: <token> } }`. In the *update* context (unlike a
+        #      fresh login) the adapter validates that code against the stored
+        #      secret. A WRONG code fails at validateLogin ("Invalid MFA token");
+        #      a CORRECT code passes validateLogin and is then blocked by the
+        #      re-setup requirement ("Invalid MFA data") — which is precisely the
+        #      signal that the code was accepted. (This re-entry of the current
+        #      code is the deliberate confirmation gate for turning MFA off.)
+        #   2. Disable MFA by unlinking the provider with `{ mfa: nil }`.
+        #
+        # This keeps self-disable gated on a valid current code even though the
+        # server offers no dedicated TOTP self-disable endpoint.
+        verify = client.update_user(id, { authData: { mfa: { old: current_token } } },
+                                    session_token: session_token)
+        # Classify the two-step response POSITIVELY instead of treating
+        # "anything that isn't success-or-one-magic-string" as a bad
+        # token. The current code is ACCEPTED iff the server either
+        # succeeds or rejects only the follow-on re-setup ("Invalid MFA
+        # data") — that block fires AFTER validateLogin has already
+        # accepted the code. A WRONG code fails earlier at validateLogin
+        # ("Invalid MFA token"). Any OTHER error (transport, session, 5xx)
+        # is a real fault surfaced as-is, not mislabeled a verification
+        # failure.
+        err = verify.error.to_s
+        code_rejected = err.match?(/Invalid MFA token/i)
+        code_accepted = verify.success? || err.match?(/Invalid MFA data/i)
+        if code_rejected
+          raise MFA::VerificationError, "Invalid MFA token"
+        elsif !code_accepted
+          raise Parse::Client::ResponseError, verify
         end
 
-        # Refresh auth_data
-        fetch
+        response = client.update_user(id, { authData: { mfa: nil } }, session_token: session_token)
+        raise Parse::Client::ResponseError, response if response.error?
 
+        # CONFIRM the disable took effect from the SERVER's own view — a
+        # positive post-condition rather than trusting the unlink response
+        # alone. We must read the server directly here, NOT lean on the
+        # in-memory #mfa_enabled? projection: Parse Server omits +authData+
+        # entirely for a user with no providers, so once MFA is unlinked an
+        # ordinary fetch carries no +authData+ key at all and therefore can
+        # never clear the +{ mfa: { status: "enabled" } }+ value pinned at
+        # enrollment. An enabled account's own (session-token) read returns
+        # +authData.mfa+; a disabled one omits it — so an absent/mfa-less
+        # authData on this trusted self-read is the authoritative signal.
+        if mfa_enabled_on_server?
+          raise MFA::VerificationError, "MFA disable did not take effect (still enabled after unlink)"
+        end
+
+        clear_local_mfa_projection!
         true
       end
 
@@ -315,20 +348,26 @@ module Parse
       #
       # @param authorized_by [Parse::User, Parse::Pointer] the operator
       #   performing the override. Required.
-      # @param admin_role [Parse::Role, String, nil] optional role (or role
-      #   name) that +authorized_by+ must belong to.
+      # @param admin_role [Parse::Role, String, nil] role (or role name)
+      #   that +authorized_by+ must belong to. Library-enforced. Either
+      #   this or +allow_unverified: true+ is REQUIRED (fail-closed).
+      # @param allow_unverified [Boolean] explicitly accept caller-side
+      #   authorization without a library role check. Defaults to +false+;
+      #   must be set deliberately to bypass MFA without an +admin_role+.
       # @return [Boolean] True if disabled successfully.
       # @raise [ArgumentError] when +authorized_by:+ is missing or not a User.
-      # @raise [Parse::MFA::ForbiddenError] when +admin_role+ is supplied
+      # @raise [Parse::MFA::ForbiddenError] when neither +admin_role+ nor
+      #   +allow_unverified:+ is supplied, or when +admin_role+ is supplied
       #   and the operator is not a member.
       #
-      # @example Caller-verified authorization
-      #   user.disable_mfa_master_key!(authorized_by: current_admin)
-      #
-      # @example Library-enforced role check
+      # @example Library-enforced role check (preferred)
       #   user.disable_mfa_master_key!(authorized_by: current_admin,
       #                                admin_role: "Admin")
-      def disable_mfa_master_key!(authorized_by:, admin_role: nil)
+      #
+      # @example Caller-verified authorization (explicit opt-out)
+      #   user.disable_mfa_master_key!(authorized_by: current_admin,
+      #                                allow_unverified: true)
+      def disable_mfa_master_key!(authorized_by:, admin_role: nil, allow_unverified: false)
         operator = authorized_by
         unless operator.is_a?(Parse::User) ||
                (operator.is_a?(Parse::Pointer) && operator.parse_class == Parse::User.parse_class)
@@ -338,6 +377,18 @@ module Parse
         end
         if operator.respond_to?(:id) && operator.id.blank?
           raise ArgumentError, "authorized_by: User must be persisted (have an objectId)"
+        end
+
+        # FAIL CLOSED: this method bypasses MFA verification entirely via
+        # the master key, so it refuses to run without SOME authorization
+        # signal. Either supply an `admin_role:` for the library to verify,
+        # or pass `allow_unverified: true` to deliberately assert that the
+        # caller has already authorized the operator out-of-band.
+        if admin_role.nil? && !allow_unverified
+          raise MFA::ForbiddenError,
+                "disable_mfa_master_key! refuses to bypass MFA without an authorization " \
+                "check: pass admin_role: to enforce role membership, or " \
+                "allow_unverified: true to explicitly accept caller-side authorization."
         end
 
         if admin_role
@@ -357,14 +408,19 @@ module Parse
         end
 
         auth_data_payload = { mfa: nil }
-        response = client.update_user(id, { authData: auth_data_payload }, opts: { use_master_key: true })
+        response = client.update_user(id, { authData: auth_data_payload }, use_master_key: true)
 
         if response.error?
           raise Parse::Client::ResponseError, response
         end
 
-        # Refresh auth_data
+        # Refresh auth_data, then drop the in-memory MFA projection. As in
+        # #disable_mfa!, a disabled user's read omits +authData+, so the
+        # +{ mfa: { status: "enabled" } }+ value pinned at enrollment won't
+        # self-clear on fetch — clear it explicitly so #mfa_enabled? reports
+        # the truth after a master-key disable.
         fetch
+        clear_local_mfa_projection!
 
         true
       end
@@ -434,6 +490,42 @@ module Parse
       def mfa_qr_code(secret, issuer: nil, format: :svg)
         account_name = email.presence || username.presence || id
         MFA.qr_code(secret, account_name, issuer: issuer, format: format)
+      end
+
+      private
+
+      # @!visibility private
+      # Authoritative server-side MFA check via a trusted self-read.
+      # Reads +authData.mfa+ straight from a fresh session-token fetch
+      # rather than the (possibly stale) in-memory projection. An enabled
+      # account returns +authData.mfa+ with a +status+/+secret+; a disabled
+      # one omits +authData+ — so absence (or an mfa-less authData) means
+      # disabled.
+      # @return [Boolean]
+      def mfa_enabled_on_server?
+        result = client.fetch_object(self.class.parse_class, id,
+                                     session_token: session_token).result
+        mfa = result.is_a?(Hash) ? result["authData"] : nil
+        mfa = mfa["mfa"] if mfa.is_a?(Hash)
+        mfa.is_a?(Hash) && (mfa["status"] == "enabled" || mfa["secret"].present?)
+      end
+
+      # @!visibility private
+      # Drop the in-memory MFA projection after a disable. A disabled user's
+      # server read omits +authData+ entirely, so an ordinary fetch can
+      # never clear the +{ mfa: { status: "enabled" } }+ value pinned at
+      # enrollment; do it explicitly here. Only the +mfa+ subkey is removed
+      # (any anonymous/OAuth authData is preserved), and the assignment runs
+      # through the non-dirtying hydration path inside a +with_authdata_trust+
+      # scope so it is neither stripped nor marked dirty — a later #save will
+      # not resend +authData+.
+      def clear_local_mfa_projection!
+        cleared = auth_data.is_a?(Hash) ? auth_data.dup : {}
+        cleared.delete("mfa")
+        cleared.delete(:mfa)
+        self.class.with_authdata_trust do
+          apply_attributes!({ "authData" => cleared }, dirty_track: false)
+        end
       end
     end
 

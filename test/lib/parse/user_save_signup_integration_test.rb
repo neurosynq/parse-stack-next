@@ -11,6 +11,11 @@ require "timeout"
 class UserSaveSignupIntegrationTest < Minitest::Test
   include ParseStackIntegrationTest
 
+  # Parse Server 9.x does not issue a session token for a master-key signup (it
+  # treats master-key user creation as admin provisioning), so tests that need a
+  # live user session log in right after signup via the shared
+  # {ParseStackIntegrationTest#login_after_signup!} helper.
+
   def with_timeout(seconds, description)
     Timeout.timeout(seconds) { yield }
   rescue Timeout::Error
@@ -39,9 +44,10 @@ class UserSaveSignupIntegrationTest < Minitest::Test
         user = Parse::User.new(username: username, password: "p4ssw0rd!", email: "#{username}@test.com")
         assert user.save, "Parse::User.new(...).save should succeed against real server"
         @test_context.track(user)
+        login_after_signup!(user, "p4ssw0rd!")
 
         refute_nil user.id, "user must have a server-assigned objectId"
-        refute_nil user.session_token, "signup-on-save must populate session_token"
+        refute_nil user.session_token, "signup-on-save + login must populate session_token"
         assert user.logged_in?, "user should be logged_in? after signup-via-save"
         assert session_token_valid?(user.session_token),
                "session token from signup-via-save must be live on the server"
@@ -62,6 +68,7 @@ class UserSaveSignupIntegrationTest < Minitest::Test
         user = Parse::User.new(username: username, password: "p4ssw0rd!", email: "#{username}@test.com")
         assert user.save, "initial signup"
         @test_context.track(user)
+        login_after_signup!(user, "p4ssw0rd!")
 
         original_token = user.session_token
         refute_nil original_token
@@ -156,6 +163,7 @@ class UserSaveSignupIntegrationTest < Minitest::Test
         user = Parse::User.new(username: username, password: "p4ssw0rd!", email: "#{username}@test.com")
         assert user.signup!
         @test_context.track(user)
+        login_after_signup!(user, "p4ssw0rd!")
 
         original_token = user.session_token
         refute_nil original_token
@@ -214,6 +222,7 @@ class UserSaveSignupIntegrationTest < Minitest::Test
         user = Parse::User.new(username: username, password: "old_p4ss!", email: "#{username}@test.com")
         assert user.save
         @test_context.track(user)
+        login_after_signup!(user, "old_p4ss!")
 
         original_token = user.session_token
         refute_nil original_token
@@ -286,9 +295,10 @@ class UserSaveSignupIntegrationTest < Minitest::Test
         # update!  sends only parseReference and the save succeeds.
         assert user.save!, "save! on parse_reference User subclass must succeed"
         @test_context.track(user)
+        login_after_signup!(user, "p4ssw0rd!")
 
         refute_nil user.id, "user must have an objectId after signup"
-        refute_nil user.session_token, "signup-on-save must populate session_token"
+        refute_nil user.session_token, "signup-on-save + login must populate session_token"
         assert session_token_valid?(user.session_token),
                "session token must remain live (no bcrypt rehash path triggered)"
 

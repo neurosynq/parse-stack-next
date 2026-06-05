@@ -45,6 +45,39 @@ module Parse
         s
       end
 
+      # Parse trigger className pattern: a normal identifier, OR one of Parse
+      # Server's `@`-prefixed pseudo-classes (`@File` for file triggers,
+      # `@Connect` for the connection-global LiveQuery trigger). The optional
+      # leading `@` is the only relaxation; the rest stays path-safe (no `/`,
+      # `.`, or `..`).
+      TRIGGER_CLASS_PATTERN = /\A@?[A-Za-z_][A-Za-z0-9_]*\z/.freeze
+
+      # Validate a className used in a webhook-trigger path
+      # (`hooks/triggers/<className>/<trigger>`). Same as {.identifier!} but
+      # additionally accepts the `@File` / `@Connect` pseudo-classes that Parse
+      # Server uses for file and connection triggers. `create_trigger` carries
+      # the className in the request BODY (not the path), so it already accepts
+      # these; this keeps fetch / update / delete symmetric with create.
+      #
+      # @param value the className to validate.
+      # @param kind [String] human-readable name for error messages.
+      # @return [String] the validated className.
+      # @raise [ArgumentError] if blank or otherwise fails the pattern.
+      def trigger_class_name!(value, kind: "class name")
+        s = value.to_s
+        if s.empty?
+          raise ArgumentError, "#{kind} must not be empty"
+        end
+        unless TRIGGER_CLASS_PATTERN.match?(s)
+          raise ArgumentError,
+            "#{kind} #{s.inspect} contains characters that are not allowed in " \
+            "a Parse trigger class name. Names must match " \
+            "/\\A@?[A-Za-z_][A-Za-z0-9_]*\\z/ (an identifier, optionally an " \
+            "@-prefixed pseudo-class such as @File or @Connect)."
+        end
+        s
+      end
+
       # Validate and percent-encode a less-restrictive path segment, used
       # for file names which can contain hyphens, periods, and other
       # filename-safe characters but must never contain a literal `/`,

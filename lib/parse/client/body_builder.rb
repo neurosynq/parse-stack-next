@@ -74,6 +74,11 @@ module Parse
         Parse::Protocol::MASTER_KEY,
         Parse::Protocol::API_KEY,
         Parse::Protocol::SESSION_TOKEN,
+        # Caller-supplied Cloud Code context (X-Parse-Cloud-Context) carries
+        # `context.to_json`, which may hold PII / request metadata. Redact it in
+        # the header log; the body/as_json log path scrubs sensitive sub-values
+        # of context separately.
+        Parse::Protocol::CLOUD_CONTEXT,
         "X-Parse-JavaScript-Key",
         "Authorization",
         "Cookie",

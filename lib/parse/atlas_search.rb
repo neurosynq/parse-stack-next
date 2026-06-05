@@ -105,10 +105,10 @@ module Parse
 
       # @!attribute [rw] role_cache_ttl
       #   TTL (seconds) for {Session}'s user-id → role-name cache.
-      #   Default: 120 (2 minutes). Short on purpose: stale role
-      #   data yields incorrect ACL decisions, so the cache is sized
-      #   to amortize within a single request/turn but expire well
-      #   inside the response time the operator notices a role grant.
+      #   Default: 30. Short on purpose: stale role data yields
+      #   incorrect ACL decisions, so the cache is sized to amortize
+      #   within a single request/turn but expire well inside the
+      #   response time the operator notices a role grant or revoke.
       #   @return [Integer]
       attr_accessor :role_cache_ttl
 
@@ -141,7 +141,7 @@ module Parse
       # @param session_cache_ttl [Integer] session-token cache TTL
       #   (seconds). Default: 3600.
       # @param role_cache_ttl [Integer] role-name cache TTL (seconds).
-      #   Default: 120.
+      #   Default: 30.
       # @example
       #   Parse::AtlasSearch.configure(enabled: true, default_index: "default")
       def configure(enabled: true,
@@ -195,7 +195,7 @@ module Parse
         @allow_raw = default_allow_raw
         @require_session_token = false
         @session_cache_ttl = 3600
-        @role_cache_ttl = 120
+        @role_cache_ttl = 30
         @session_cache = Session::MemoryCache.new
         @role_cache = Session::MemoryCache.new
         @master_warned = false
@@ -1015,7 +1015,7 @@ module Parse
     @allow_raw = nil
     @require_session_token = false
     @session_cache_ttl = 3600
-    @role_cache_ttl = 120
+    @role_cache_ttl = 30
     @session_cache = Session::MemoryCache.new
     @role_cache = Session::MemoryCache.new
     @master_warned = false

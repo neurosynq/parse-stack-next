@@ -1499,7 +1499,7 @@ module Parse
       # @raise [Parse::ACLScope::ACLRequired] when neither
       #   `session_token:` nor `master: true` is supplied and
       #   {Parse::ACLScope.require_session_token} is enabled.
-      def aggregate(collection_name, pipeline, max_time_ms: nil, rewrite_lookups: nil, allow_internal_fields: false, session_token: nil, master: nil, acl_user: nil, acl_role: nil, read_preference: nil)
+      def aggregate(collection_name, pipeline, max_time_ms: nil, rewrite_lookups: nil, allow_internal_fields: false, session_token: nil, master: nil, acl_user: nil, acl_role: nil, read_preference: nil, hint: nil)
         # AS::N envelope. Payload is intentionally metadata-only —
         # `stage_count`, `stage_types`, `collection`, `scope`,
         # `result_count`, `max_time_ms`, `read_preference`. Pipeline
@@ -1620,6 +1620,11 @@ module Parse
 
         agg_opts = {}
         agg_opts[:max_time_ms] = max_time_ms if max_time_ms
+        # Forced index hint (Query#hint). Mirrors Parse Server's REST `hint`
+        # on the mongo-direct path so a bad plan diagnosed with `explain` can
+        # be corrected here too. Accepts an index name (String) or a key
+        # pattern (Hash).
+        agg_opts[:hint] = hint unless hint.nil?
         coll = collection(collection_name)
         if (mode = normalize_read_preference(read_preference))
           coll = coll.with(read: { mode: mode })
@@ -1838,6 +1843,7 @@ module Parse
         cursor = cursor.skip(options[:skip]) if options[:skip]
         cursor = cursor.sort(options[:sort]) if options[:sort]
         cursor = cursor.projection(options[:projection]) if options[:projection]
+        cursor = cursor.hint(options[:hint]) unless options[:hint].nil?
         cursor = cursor.max_time_ms(max_time_ms) if max_time_ms
         results = cursor.to_a
 

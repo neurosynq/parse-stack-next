@@ -20,6 +20,34 @@ module Parse
     # (method, content-type, body-size, and JSON-parse checks) and then
     # delegates to Parse::Agent::MCPDispatcher.call for all protocol handling.
     #
+    # == Transport (`transport: :streamable_http`)
+    #
+    # The MCP 2025-06-18 "Streamable HTTP" transport is the recommended,
+    # primary transport. Rather than toggling its constituent pieces
+    # individually (`streaming:` for POST→SSE, `notifications:` for the
+    # server→client `GET /` stream), pass `transport: :streamable_http` to
+    # enable the whole transport with one switch:
+    #
+    #   app = Parse::Agent::MCPRackApp.new(transport: :streamable_http) { |env| ... }
+    #
+    # That is exactly equivalent to `streaming: true, notifications: true`.
+    # `resource_subscriptions: true` may still be added alongside it to
+    # upgrade the server→client bus from the plain notification posture to
+    # the LiveQuery-backed resource-subscription posture.
+    #
+    # `transport:` is a closed enum — `:streamable_http`, `:legacy`, or `nil`.
+    # `:legacy` and `nil` both select the historical default (no streaming, no
+    # server→client stream); the standalone SSE/JSON behavior remains a
+    # supported fallback. Passing `transport: :streamable_http` together with
+    # an explicit `streaming:` or `notifications:` raises `ArgumentError`,
+    # since the switch already owns those toggles.
+    #
+    # The default is unchanged (`transport: nil`): an existing
+    # `MCPRackApp.new { ... }` keeps its non-streaming JSON behavior. A
+    # streaming-capable Rack server (Puma, Falcon, Unicorn) is required for
+    # `:streamable_http` to have any effect — the WEBrick-backed `MCPServer`
+    # buffers responses and cannot deliver it.
+    #
     # == SSE Streaming (MCP progress notifications)
     #
     # When constructed with `streaming: true`, requests that include
@@ -83,6 +111,16 @@ module Parse
       # Default heartbeat interval in seconds when streaming is enabled.
       DEFAULT_HEARTBEAT_INTERVAL = 2
 
+      # Default bound on concurrently-active streaming dispatchers — and,
+      # separately, on concurrently-open listening streams — when the
+      # `max_concurrent_dispatchers:` constructor argument is omitted. Finite by
+      # default so that enabling a streaming surface (request-scoped SSE or the
+      # long-lived `GET /` stream) does not silently expose an unbounded
+      # orphan-thread DoS surface. The cap is applied SEPARATELY to each
+      # surface, so the effective ceiling across both is up to 2x this value.
+      # Pass an explicit `nil` to knowingly opt into the unbounded surface.
+      DEFAULT_MAX_CONCURRENT_DISPATCHERS = 100
+
       # Seconds to wait for a human's elicitation reply before failing
       # closed (refusing the destructive op). Generous by default — a
       # human-in-the-loop approver needs time the tool timeout doesn't
@@ -109,6 +147,27 @@ module Parse
       # MCPRackApp instances in the process.
       @listening_stream_count = 0
       @listening_stream_mutex = Mutex.new
+
+      # Process-wide CUMULATIVE counter of GENUINE orphaned dispatchers — a
+      # client disconnected (stream closed before its response was delivered)
+      # WHILE the dispatcher thread was still running (see
+      # {.abandoned_dispatcher_count}). It deliberately excludes the
+      # already-finished-but-undelivered case (dispatcher had pushed its
+      # response but the client dropped before {#each} popped it), which is a
+      # delivery miss, not an orphan holding a connection-pool slot. A monotonic
+      # counter (not a live gauge like the two above): operators watch its rate
+      # of increase to detect a disconnect storm against slow tools, which is the
+      # orphan-thread pressure signal. (The companion
+      # `parse.agent.mcp_dispatcher_abandoned` notification fires for EVERY
+      # premature close and carries a `dispatcher_alive` flag, so subscribers can
+      # also observe the delivery-miss case and filter on `dispatcher_alive:
+      # true` for orphans.) The orphaned dispatcher is cooperatively cancelled
+      # (its token is tripped) and bounded in duration by the per-tool Timeout
+      # and the clean MongoDB/REST I/O timeouts; it is intentionally NOT
+      # force-killed (see {SSEBody#close} for why a hard kill would risk
+      # connection-pool corruption).
+      @abandoned_dispatcher_count = 0
+      @abandoned_dispatcher_mutex = Mutex.new
 
       # Drop env keys that would have come from underscore-form HTTP header
       # names. The Rack-spec-compliant interpretation of HTTP headers maps
@@ -171,13 +230,20 @@ module Parse
       # @param heartbeat_interval [Numeric] seconds between progress heartbeat
       #   events when streaming is active. Defaults to DEFAULT_HEARTBEAT_INTERVAL.
       #   Ignored when `streaming: false`.
-      # @param max_concurrent_dispatchers [Integer, nil] when set, limits the
-      #   number of concurrently active dispatcher threads across all SSE
-      #   connections served by this app instance. When the limit is reached a
-      #   new SSE request immediately receives a 503 JSON-RPC error envelope
-      #   (`-32000` "server busy") rather than spawning another dispatcher.
-      #   Defaults to `nil` (unlimited). Use `active_dispatcher_count` to
-      #   monitor current concurrency from operator tooling.
+      # @param max_concurrent_dispatchers [Integer, nil] limits the number of
+      #   concurrently active dispatcher threads across all SSE connections
+      #   served by this app instance (and, separately, the number of open
+      #   listening streams). When the limit is reached a new SSE request
+      #   immediately receives a 503 JSON-RPC error envelope (`-32000` "server
+      #   busy") rather than spawning another dispatcher.
+      #
+      #   Defaults to a finite {DEFAULT_MAX_CONCURRENT_DISPATCHERS} (100) — so a
+      #   streaming surface is bounded out of the box rather than unbounded.
+      #   Pass an explicit positive `Integer` to set the cap, or `nil` to
+      #   knowingly opt into the unbounded surface (which warns at
+      #   construction). A non-positive or non-integer value raises
+      #   `ArgumentError`. Use `active_dispatcher_count` to monitor current
+      #   concurrency from operator tooling.
       # @param pre_auth_rate_limiter [#check!, nil] optional rate limiter
       #   consulted at the top of every request, BEFORE the agent_factory is
       #   invoked. Closes the factory-amplification DoS where each malformed
@@ -234,17 +300,30 @@ module Parse
       #   adapter). Takes precedence over `resource_subscriptions:`. When nil
       #   and `resource_subscriptions: true`, a default in-process manager is
       #   constructed.
+      # @param transport [Symbol, nil] MCP transport selector. Pass
+      #   `:streamable_http` to enable the full MCP 2025-06-18 Streamable HTTP
+      #   transport in one switch — exactly equivalent to `streaming: true,
+      #   notifications: true` (POST→SSE plus the server→client `GET /`
+      #   stream). `resource_subscriptions: true` may still be combined to
+      #   upgrade the bus to its LiveQuery-backed posture. `:legacy` (or the
+      #   default `nil`) selects the historical non-streaming behavior; the
+      #   standalone SSE/JSON path stays a supported fallback. Any other value
+      #   raises `ArgumentError`. Passing `:streamable_http` together with an
+      #   explicit `streaming:` or `notifications:` also raises, since the
+      #   switch already owns those toggles. Requires a streaming-capable Rack
+      #   server (Puma, Falcon, Unicorn); has no effect under WEBrick.
       # @raise [ArgumentError] if both or neither of agent_factory/block are given.
       def initialize(agent_factory: nil, max_body_size: DEFAULT_MAX_BODY_SIZE,
-                     logger: nil, streaming: false,
+                     logger: nil, streaming: nil,
                      heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
-                     max_concurrent_dispatchers: nil,
+                     max_concurrent_dispatchers: DEFAULT_MAX_CONCURRENT_DISPATCHERS,
                      pre_auth_rate_limiter: nil,
                      allowed_origins: nil,
                      require_custom_header: nil,
                      resource_subscriptions: false,
                      subscription_manager: nil,
-                     notifications: false,
+                     notifications: nil,
+                     transport: nil,
                      approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
                      principal_resolver: nil,
                      health_path: nil, &block)
@@ -258,11 +337,41 @@ module Parse
           raise ArgumentError, "pre_auth_rate_limiter must respond to #check!"
         end
 
+        # `transport:` is the consolidation switch over the granular
+        # `streaming:` / `notifications:` toggles. `streaming` and
+        # `notifications` default to nil (not false) precisely so we can tell
+        # "operator left it alone" from "operator explicitly set it" and raise
+        # on a conflicting combination instead of silently letting the switch
+        # win. Closed enum — unknown values fail closed.
+        unless transport.nil? || %i[legacy streamable_http].include?(transport)
+          raise ArgumentError,
+                "transport: must be :streamable_http, :legacy, or nil, got #{transport.inspect}"
+        end
+        if transport == :streamable_http
+          unless streaming.nil? && notifications.nil?
+            raise ArgumentError,
+                  "transport: :streamable_http already enables streaming and the server-initiated " \
+                  "notification stream; do not also pass streaming:/notifications: " \
+                  "(resource_subscriptions: may still be combined to upgrade the bus to LiveQuery)"
+          end
+          streaming     = true
+          notifications = true
+        end
+        # Collapse the nil sentinel to the historical default for the
+        # remainder of the constructor (and @streaming below).
+        streaming     = false if streaming.nil?
+        notifications = false if notifications.nil?
+
         @agent_factory              = agent_factory || block
         @max_body_size              = max_body_size
         @logger                     = logger
         @streaming                  = streaming
         @heartbeat_interval         = heartbeat_interval
+        # The dispatcher cap defaults to the finite DEFAULT_MAX_CONCURRENT_DISPATCHERS
+        # (set in the signature). An explicit positive Integer overrides it; an
+        # explicit nil knowingly opts into the unbounded surface; anything else
+        # is a config error and raises.
+        validate_max_concurrent_dispatchers!(max_concurrent_dispatchers)
         @max_concurrent_dispatchers = max_concurrent_dispatchers
         @pre_auth_rate_limiter      = pre_auth_rate_limiter
         @allowed_origins            = normalize_allowed_origins(allowed_origins)
@@ -319,21 +428,24 @@ module Parse
             Parse::Agent::MCPSubscriptions::Manager.new(logger: @logger, supported: false)
           end
 
-        # Warn operators who enable a streaming surface without a concurrency
-        # cap. Both request-scoped SSE (streaming:) and the long-lived GET
-        # listening stream (resource_subscriptions:/notifications:, which set
+        # Warn operators who enable a streaming surface AND have explicitly
+        # opted into an unbounded dispatcher cap. Both request-scoped SSE
+        # (streaming:) and the long-lived GET listening stream
+        # (resource_subscriptions:/notifications:, which set
         # @subscription_manager) spawn per-connection threads; an unbounded
         # endpoint is a practical DoS surface — a slow or hostile client opening
         # connections faster than they close can exhaust the host thread pool and
         # downstream Parse connection pool. The cap bounds each surface
         # SEPARATELY, so the effective ceiling is up to 2x max_concurrent_dispatchers
-        # across both. Leaving the default `nil` (unlimited) preserves backward
-        # compatibility, but we tell the operator once at construction.
+        # across both. The default is now the finite DEFAULT_MAX_CONCURRENT_DISPATCHERS,
+        # so a nil here means the operator deliberately chose `nil` (unbounded) —
+        # we warn once at construction so the choice is visible.
         if (streaming || @subscription_manager) && @max_concurrent_dispatchers.nil?
           surface = streaming ? "streaming: true" : "resource_subscriptions/notifications"
-          line = "[Parse::Agent::MCPRackApp] #{surface} with max_concurrent_dispatchers: nil (unlimited). " \
-                 "Set a finite cap (e.g. 100, or 2x your Puma max_threads) to bound the orphan-thread DoS surface. " \
-                 "See docs/mcp_guide.md for sizing guidance."
+          line = "[Parse::Agent::MCPRackApp] #{surface} with an explicitly unbounded dispatcher cap " \
+                 "(max_concurrent_dispatchers: nil). This is an orphan-thread DoS surface. " \
+                 "Prefer the finite default (#{DEFAULT_MAX_CONCURRENT_DISPATCHERS}) or pass a value sized to " \
+                 "~2x your Puma max_threads. See docs/mcp_guide.md for sizing guidance."
           if @logger
             @logger.warn(line)
           else
@@ -407,6 +519,28 @@ module Parse
       #   (+1 when a stream begins iterating, -1 when it closes).
       def self.adjust_listening_stream_count(delta)
         @listening_stream_mutex.synchronize { @listening_stream_count += delta }
+      end
+
+      # Process-wide CUMULATIVE count of GENUINE orphaned dispatchers — a client
+      # disconnect that closed the stream while the dispatcher thread was still
+      # running. Excludes already-finished-but-undelivered closes (a delivery
+      # miss, not an orphan). Unlike {.active_dispatcher_count} /
+      # {.active_listening_stream_count} this is a monotonic total, not a live
+      # gauge — operators alert on its *rate* of increase, the orphan-thread
+      # pressure signal under a disconnect-against-slow-tools storm. EVERY
+      # premature close (orphan or delivery-miss) also emits a
+      # `parse.agent.mcp_dispatcher_abandoned` ActiveSupport::Notifications event
+      # carrying `dispatcher_alive:`, so subscribers wanting the broader
+      # delivery-miss signal can filter there. Reset is not supported (counters
+      # are process-lifetime); subtract a baseline if you need a windowed delta.
+      def self.abandoned_dispatcher_count
+        @abandoned_dispatcher_mutex.synchronize { @abandoned_dispatcher_count }
+      end
+
+      # @api private — increment the cumulative abandoned-dispatcher counter.
+      #   Called by {SSEBody#close} on the client-disconnect path.
+      def self.record_abandoned_dispatcher!
+        @abandoned_dispatcher_mutex.synchronize { @abandoned_dispatcher_count += 1 }
       end
 
       # Rack interface.
@@ -1104,6 +1238,10 @@ module Parse
                                     ->(t, i) { t.join(i) }
           @queue                  = Queue.new
           @worker                 = nil
+          # The dispatcher thread spawned inside @worker. Published under
+          # @close_mutex once started so {#close} can snapshot its liveness for
+          # the abandonment signal. Never force-killed (see #close).
+          @dispatcher_thread      = nil
           # Flipped to true by #each when the DONE sentinel is consumed.
           # #close uses this to decide whether to trip the cancellation
           # token (false = client disconnect) or skip the trip (true =
@@ -1158,38 +1296,56 @@ module Parse
         # sentinel was not consumed by {#each}), this is interpreted as
         # a client disconnect and:
         #
-        # 1. The cancellation token (if any) is tripped BEFORE the
-        #    worker is killed, so tools that observe `agent.cancelled?`
-        #    at a checkpoint can exit cooperatively. The kill becomes
-        #    the fallback for tools stuck inside a blocking I/O call.
+        # 1. The cancellation token (if any) is tripped, so a tool that
+        #    observes `agent.cancelled?` at a checkpoint exits
+        #    cooperatively. The orphaned dispatcher is NOT force-killed
+        #    (see below); its lifetime is bounded by the per-tool
+        #    Timeout and the clean MongoDB/REST I/O deadlines.
+        # 2. The abandonment is recorded — a `parse.agent.mcp_dispatcher_abandoned`
+        #    notification is emitted for every premature close, and the
+        #    process-wide {MCPRackApp.abandoned_dispatcher_count} counter is
+        #    bumped when the dispatcher was still running (a genuine orphan) —
+        #    so operators can see disconnect-against-slow-tool pressure even
+        #    though each orphan is individually bounded.
         #
-        # When called AFTER normal completion, the token is NOT tripped
-        # — the request finished on its own; cancellation would only
-        # confuse a tool that races to check the flag.
+        # When called AFTER normal completion, neither happens — the
+        # request finished on its own; cancellation would only confuse a
+        # tool that races to check the flag, and there is nothing to
+        # report.
         #
         # Either path:
-        #   - Kills the worker thread if still alive.
+        #   - Kills the WORKER thread (the heartbeat loop) if still alive.
         #   - Invokes the on_close hook so MCPRackApp can deregister
         #     the token from its per-app registry. Failures in the hook
         #     are logged and swallowed — close must always succeed.
         #
-        # Cancellation note: blocking I/O calls (MongoDB query, Parse
-        # REST roundtrip) do not observe the token until they return.
-        # The Ruby-level `Timeout.timeout` already wrapping each tool is
-        # the hard upper bound on wasted work; cancellation reduces it,
-        # not eliminates it.
+        # Why the dispatcher is not force-killed: a `Thread#kill` (or a
+        # foreign `Thread#raise`) skips the DB driver's rescue-based
+        # connection-invalidation, so `connection_pool`'s `ensure` could
+        # return a half-used connection to the pool and corrupt a later
+        # request that reuses it. Blocking I/O calls do not observe the
+        # cancellation token, but they ARE bounded by the per-tool
+        # `Timeout.timeout` (Tools::TOOL_TIMEOUTS, 5–60s) and the clean
+        # MongoDB `socket_timeout` (10s) / REST `timeout` (30s) deadlines,
+        # which reclaim the connection-pool slot through the driver's
+        # clean error path. Cooperative cancellation reduces wasted work;
+        # the bounded timeouts cap it; a forcible kill is intentionally
+        # avoided.
         def close
           # Idempotent — concurrent invocations from the I/O fiber and
           # a disconnect-handler thread short-circuit after the first
           # caller wins the mutex.
           completed_normally = nil
+          dispatcher_alive   = false
           @close_mutex.synchronize do
             return if @closed
             @closed = true
             completed_normally = @completed_normally
+            dispatcher_alive   = @dispatcher_thread&.alive? || false
           end
           unless completed_normally
             @cancellation_token&.cancel!(reason: :client_disconnect)
+            record_abandonment(dispatcher_alive)
           end
           @worker&.kill if @worker&.alive?
           @worker = nil
@@ -1227,6 +1383,36 @@ module Parse
 
         private
 
+        # Record a client-disconnect abandonment. `dispatcher_alive` reports
+        # whether the dispatcher was still running at close time (true = a
+        # genuine mid-flight orphan holding its slot; false = it had already
+        # finished but the DONE sentinel was never consumed — a delivery miss).
+        #
+        # The cumulative counter tracks GENUINE orphans only (gated on
+        # `dispatcher_alive`), matching {MCPRackApp.abandoned_dispatcher_count}'s
+        # contract. The `parse.agent.mcp_dispatcher_abandoned` notification fires
+        # for EVERY premature close and carries the flag, so subscribers can see
+        # delivery misses too and filter on `dispatcher_alive: true` for orphans.
+        # Best-effort and fully guarded — observability must never break stream
+        # teardown.
+        #
+        # Subscriber discipline matches the rest of the SDK's instrumentation:
+        # subscribers run synchronously on the thread that calls close (a Rack
+        # I/O fiber or a disconnect-handler thread); keep them cheap.
+        def record_abandonment(dispatcher_alive)
+          MCPRackApp.record_abandoned_dispatcher! if dispatcher_alive
+          return unless defined?(ActiveSupport::Notifications)
+          ActiveSupport::Notifications.instrument(
+            "parse.agent.mcp_dispatcher_abandoned",
+            reason:            :client_disconnect,
+            dispatcher_alive:  dispatcher_alive,
+            request_id:        @req_id,
+          )
+        rescue StandardError => e
+          line = "[Parse::Agent::MCPRackApp::SSEBody] abandonment-record error: #{e.class}: #{e.message}"
+          @logger ? @logger.warn(line) : warn(line)
+        end
+
         def start_worker
           # Subscribe to listChanged events BEFORE spawning the worker
           # so any registry mutation that races with the start of the
@@ -1250,40 +1436,62 @@ module Parse
               # every @interval seconds until the call completes OR until a
               # tool starts reporting its own progress (@tool_progress_reported).
               #
-              # Cancellation note: if the consumer disconnects (close is called),
-              # the outer @worker is killed but dispatcher_thread is orphaned and
-              # runs to completion. A proper cancellation mechanism (e.g. passing
-              # a cancel token into MCPDispatcher) is a separate deferred item
-              # (see CHANGELOG / project plans).
+              # Cancellation contract on client disconnect (close is called):
+              # the outer @worker is killed and the dispatcher thread is
+              # cooperatively cancelled — {#close} trips the cancellation token
+              # so a tool checking `agent.cancelled?` at a checkpoint exits
+              # promptly. The dispatcher is NOT force-killed: a `Thread#kill`
+              # (or a foreign `Thread#raise`) would skip the DB driver's
+              # rescue-based connection-invalidation, so connection_pool's
+              # ensure could check a half-used connection back in and corrupt a
+              # subsequent request. Instead the orphan's lifetime is bounded by
+              # (a) for BUILT-IN tools, the per-tool `Timeout.timeout` budget
+              # (Tools::TOOL_TIMEOUTS, 5–60s, applied inside each built-in tool
+              # via Tools.with_timeout) and (b) the clean MongoDB `socket_timeout`
+              # (10s) / REST `timeout` (30s) I/O deadlines, which DO route through
+              # the driver's clean error path. For CUSTOM registered tools the
+              # handler IS wrapped by Tools.invoke in its declared `timeout:`
+              # (default 30s; register rejects a non-positive value), so a
+              # blocking or looping custom handler is bounded just like a
+              # built-in. (A handler that swallows ToolTimeoutError or blocks in
+              # an uninterruptible C call can still evade Timeout, but the default
+              # path is bounded.) The
+              # max_concurrent_dispatchers: cap still bounds how MANY orphans can
+              # exist; the abandonment counter + `parse.agent.mcp_dispatcher_abandoned`
+              # notification surface how OFTEN it happens (see {#close} and
+              # {.abandoned_dispatcher_count}).
               #
-              # Each dispatcher_thread is tagged with :parse_mcp_dispatcher so
-              # operators can observe concurrency via
-              # Parse::Agent::MCPRackApp.active_dispatcher_count. Orphaned
-              # dispatchers (from client disconnects) are counted until they
-              # complete naturally. Forcible kill is intentionally not attempted
-              # here — killing threads inside MCPDispatcher.call risks leaving
-              # agent state corrupt. The max_concurrent_dispatchers: constructor
-              # option provides a concurrency cap that fires 503 before a new
-              # dispatcher is admitted.
-              dispatcher_thread = Thread.new do
-                Thread.current[:parse_mcp_dispatcher] = true
-                begin
-                  # The block receives the SSEBody's progress callback so
-                  # tools running inside MCPDispatcher.call can emit
-                  # notifications/progress events without coupling to
-                  # SSEBody internals.
-                  result = @dispatcher_blk.call(@progress_callback)
-                rescue StandardError => e
-                  # Log the unexpected failure (MCPDispatcher.call normally catches
-                  # StandardError internally; anything reaching here is unusual).
-                  line = "[Parse::Agent::MCPRackApp::SSEBody] Dispatcher error: #{e.class}: #{e.message}"
-                  if @logger
-                    @logger.warn(line)
-                  else
-                    warn line
+              # Each dispatcher thread is tagged with :parse_mcp_dispatcher so
+              # operators can observe live concurrency via
+              # {.active_dispatcher_count}. The spawn and the publish to
+              # @dispatcher_thread happen together under @close_mutex so a
+              # concurrent {#close} (e.g. an out-of-band disconnect-handler
+              # thread) observes the thread as either entirely absent or fully
+              # published — never a created-but-unpublished orphan it would
+              # miscount as a delivery miss.
+              dispatcher_thread = nil
+              @close_mutex.synchronize do
+                dispatcher_thread = Thread.new do
+                  Thread.current[:parse_mcp_dispatcher] = true
+                  begin
+                    # The block receives the SSEBody's progress callback so
+                    # tools running inside MCPDispatcher.call can emit
+                    # notifications/progress events without coupling to
+                    # SSEBody internals.
+                    result = @dispatcher_blk.call(@progress_callback)
+                  rescue StandardError => e
+                    # Log the unexpected failure (MCPDispatcher.call normally catches
+                    # StandardError internally; anything reaching here is unusual).
+                    line = "[Parse::Agent::MCPRackApp::SSEBody] Dispatcher error: #{e.class}: #{e.message}"
+                    if @logger
+                      @logger.warn(line)
+                    else
+                      warn line
+                    end
+                    result = { status: 200, body: build_error_envelope(e) }
                   end
-                  result = { status: 200, body: build_error_envelope(e) }
                 end
+                @dispatcher_thread = dispatcher_thread
               end
 
               while dispatcher_thread.alive?
@@ -1848,6 +2056,21 @@ module Parse
           "id" => nil,
           "error" => { "code" => -32_001, "message" => "Unauthorized" },
         })
+      end
+
+      # Validate the `max_concurrent_dispatchers:` argument. A positive Integer
+      # caps the streaming surface; an explicit `nil` is a knowing opt-in to the
+      # unbounded surface (warned about at construction); anything else is a
+      # code-level config error and raises loudly.
+      #
+      # @param value [Object] the constructor argument.
+      # @raise [ArgumentError] when value is neither nil nor a positive Integer.
+      def validate_max_concurrent_dispatchers!(value)
+        return if value.nil?
+        unless value.is_a?(Integer) && value >= 1
+          raise ArgumentError,
+                "max_concurrent_dispatchers must be a positive Integer or nil (unbounded), got #{value.inspect}"
+        end
       end
 
       # Normalize the allowed-origins kwarg into a frozen Array of

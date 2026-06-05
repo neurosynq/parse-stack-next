@@ -1066,7 +1066,10 @@ module Parse
         # @param description [String] human-readable description (required)
         # @param parameters [Hash] JSON Schema object definition (required)
         # @param permission [Symbol] :readonly, :write, or :admin (required)
-        # @param timeout [Integer] seconds before ToolTimeoutError (default: 30)
+        # @param timeout [Integer] positive seconds before ToolTimeoutError
+        #   (default: 30). Enforced by Tools.invoke, which wraps the handler in
+        #   Timeout.timeout. Must be >= 1 (a non-positive value raises
+        #   ArgumentError, since Timeout.timeout(0) would disable the bound).
         # @param handler [Proc] lambda(agent, **args) -> Hash (required)
         # @param client_safe [Boolean] when +true+, the tool is dispatchable
         #   from a client-mode agent (one whose client has no master_key).
@@ -1089,9 +1092,14 @@ module Parse
         #   - Bypass the agent_fields allowlist enforced by built-in tools when
         #     they return raw Parse::Object instances. Project fields manually
         #     in the handler.
-        #   - Receive a Timeout.timeout budget derived from TOOL_TIMEOUTS (or the
-        #     custom :timeout kwarg), but note that Parse Server's REST surface
-        #     does not accept maxTimeMS — the only timeout is the Ruby-level one.
+        #   - Be wrapped by Tools.invoke in a Timeout.timeout budget equal to the
+        #     handler's declared :timeout kwarg (default 30s) — so a blocking or
+        #     looping handler is bounded and raises ToolTimeoutError. (Built-in
+        #     tools derive their budget from TOOL_TIMEOUTS; a registered handler
+        #     uses its own :timeout.) Note that Parse Server's REST surface does
+        #     not accept maxTimeMS — the only timeout is this Ruby-level one, so
+        #     a handler that ignores `agent.cancelled?` is interrupted only when
+        #     the Timeout fires.
         #
         #   Treat the handler list as part of your application's trust boundary:
         #   register at boot from code you control; never accept registrations
@@ -1120,6 +1128,17 @@ module Parse
           end
           category_str = category.to_s
           raise ArgumentError, "category must be a non-empty string" if category_str.empty?
+          # Guarantee an enforceable wall-clock bound: Tools.invoke wraps the
+          # handler in Timeout.timeout(timeout), and Timeout.timeout(0) means
+          # "no timeout" — so a 0 (or fractional value that floors to 0) would
+          # silently leave the handler unbounded. Require a positive integer of
+          # seconds. Operators who genuinely need a long-running tool pass a
+          # large value, not 0.
+          if timeout.to_i < 1
+            raise ArgumentError,
+                  "timeout must be a positive integer number of seconds (got #{timeout.inspect}); " \
+                  "Timeout.timeout(0) would disable the bound"
+          end
 
           sym = name.to_sym
           # NEW-TOOLS-6: refuse names that collide with a builtin tool. The
@@ -1207,15 +1226,28 @@ module Parse
         # Dispatch a tool call. Registered tools take precedence over builtins
         # only when both share a name; otherwise each path is exclusive.
         #
+        # A registered handler is wrapped in `with_timeout(sym)` so its declared
+        # `timeout:` (default DEFAULT_TIMEOUT, 30s) is actually enforced —
+        # without this, a custom handler that blocks or loops forever has no
+        # wall-clock bound and (over the MCP streaming transport) can hold a
+        # dispatcher slot indefinitely after a client disconnect. Built-in tools
+        # are NOT wrapped here: each built-in already applies `with_timeout`
+        # inside its own body, so wrapping the `else` branch would double-wrap.
+        # `register` rejects a non-positive `timeout:`, so the budget here is
+        # always >= 1s (Timeout.timeout(0) would otherwise mean "no timeout").
+        #
         # @param agent [Parse::Agent] the agent instance
         # @param name [Symbol, String] tool name
         # @param kwargs [Hash] keyword arguments forwarded to handler or builtin
+        # @raise [Parse::Agent::ToolTimeoutError] if a registered handler exceeds
+        #   its declared timeout (handled by Agent#execute and the approval
+        #   preview, which both rescue it).
         def invoke(agent, name, **kwargs)
           sym = name.to_sym
           entry = REGISTRY_MUTEX.synchronize { @registry[sym] }
 
           if entry
-            entry[:handler].call(agent, **kwargs)
+            with_timeout(sym) { entry[:handler].call(agent, **kwargs) }
           else
             Tools.send(sym, agent, **kwargs)
           end
@@ -4901,6 +4933,14 @@ module Parse
         response = agent.client.find_objects(class_name, query, **agent.request_opts)
 
         unless response.success?
+          # Parse Server 9.0+ defaults `allowPublicExplain` to false, so a
+          # non-master agent's explain is rejected. Surface that as actionable
+          # guidance instead of a bare permission error.
+          if response.respond_to?(:permission_denied?) && response.permission_denied?
+            raise "Explain failed: #{response.error} — Parse Server 9.0+ defaults " \
+                  "allowPublicExplain to false; query explain requires a master-key agent " \
+                  "or `allowPublicExplain: true` in the server's databaseOptions."
+          end
           raise "Explain failed: #{response.error}"
         end
 

@@ -508,7 +508,21 @@ class MCPStreamingTest < Minitest::Test
     end
   end
 
-  def test_constructor_warns_when_streaming_without_concurrency_cap
+  def test_constructor_warns_when_streaming_with_explicitly_unbounded_cap
+    # The cap now defaults to a finite value, so the orphan-DoS warning only
+    # fires when the operator EXPLICITLY opts into the unbounded surface.
+    warns = capture_warns do
+      Parse::Agent::MCPRackApp.new(
+        agent_factory:              permissive_factory,
+        streaming:                  true,
+        heartbeat_interval:         1,
+        max_concurrent_dispatchers: nil,
+      )
+    end
+    assert_match(/unbounded dispatcher cap/, warns)
+  end
+
+  def test_constructor_does_not_warn_when_streaming_with_default_finite_cap
     warns = capture_warns do
       Parse::Agent::MCPRackApp.new(
         agent_factory:      permissive_factory,
@@ -516,7 +530,13 @@ class MCPStreamingTest < Minitest::Test
         heartbeat_interval: 1,
       )
     end
-    assert_match(/max_concurrent_dispatchers: nil \(unlimited\)/, warns)
+    assert_equal "", warns, "finite default cap must not trip the orphan-DoS warning"
+  end
+
+  def test_streaming_default_finite_cap_value
+    app = Parse::Agent::MCPRackApp.new(agent_factory: permissive_factory, streaming: true)
+    assert_equal Parse::Agent::MCPRackApp::DEFAULT_MAX_CONCURRENT_DISPATCHERS,
+                 app.instance_variable_get(:@max_concurrent_dispatchers)
   end
 
   def test_constructor_streaming_defaults_to_false
@@ -748,17 +768,94 @@ class MCPStreamingTest < Minitest::Test
 
     drain_thread.join(2)
 
-    # After close, the worker should be killed. The dispatcher_thread is
-    # orphaned (cancellation is a separate deferred item) but will run to
-    # completion naturally. Poll with a generous deadline — Thread#kill
-    # propagation timing varies across Ruby versions and CI runners; the
-    # contract is "eventually," not a tight wall-clock bound.
+    # After close, the worker should be killed. The dispatcher thread is
+    # cooperatively cancelled (its token is tripped) and bounded by the
+    # per-tool Timeout + clean I/O deadlines; it is intentionally not
+    # force-killed (would risk connection-pool corruption). Poll with a
+    # generous deadline — Thread#kill propagation timing varies across Ruby
+    # versions and CI runners; the contract is "eventually," not a tight
+    # wall-clock bound.
     deadline = Time.now + 10.0
     sleep 0.01 while Thread.list.any? { |t| t[:parse_mcp_sse_worker] && t.alive? } &&
                      Time.now < deadline
 
     assert Thread.list.none? { |t| t[:parse_mcp_sse_worker] && t.alive? },
            "Worker thread still alive 10s after client disconnect"
+  end
+
+  # ---------------------------------------------------------------------------
+  # 15b. Client disconnect is recorded as an abandonment (counter + notification)
+  # ---------------------------------------------------------------------------
+
+  def test_disconnect_increments_abandoned_dispatcher_counter_and_emits_event
+    StreamingDispatcherStub.delay = 1.5
+    app = streaming_app(heartbeat_interval: 0.1)
+    _status, _headers, body = app.call(rack_env(accept: "text/event-stream"))
+
+    before = Parse::Agent::MCPRackApp.abandoned_dispatcher_count
+    events = []
+    sub = ActiveSupport::Notifications.subscribe("parse.agent.mcp_dispatcher_abandoned") do |*args|
+      events << ActiveSupport::Notifications::Event.new(*args)
+    end
+
+    # Receive one event then disconnect — drives each's ensure → close with
+    # completed_normally == false.
+    drain_thread = Thread.new { body.each { |_chunk| break } }
+    drain_thread.join(2)
+
+    assert_equal before + 1, Parse::Agent::MCPRackApp.abandoned_dispatcher_count
+    refute_empty events, "expected a parse.agent.mcp_dispatcher_abandoned event"
+    assert_equal :client_disconnect, events.last.payload[:reason]
+    assert_equal true, events.last.payload[:dispatcher_alive]
+  ensure
+    ActiveSupport::Notifications.unsubscribe(sub) if sub
+  end
+
+  def test_normal_completion_does_not_record_abandonment
+    StreamingDispatcherStub.delay = 0
+    # Long heartbeat so the stream produces just the response + DONE.
+    app = streaming_app(heartbeat_interval: 5)
+    _status, _headers, body = app.call(rack_env(accept: "text/event-stream"))
+
+    before = Parse::Agent::MCPRackApp.abandoned_dispatcher_count
+    drain_body(body)  # consume through DONE → completed_normally == true
+
+    assert_equal before, Parse::Agent::MCPRackApp.abandoned_dispatcher_count,
+                 "normal completion must not be recorded as an abandonment"
+  end
+
+  # The discriminating branch: a premature close where the dispatcher has
+  # ALREADY finished (dispatcher_alive == false) but the client dropped before
+  # consuming DONE. This is a delivery miss, not an orphan: the counter is gated
+  # on dispatcher_alive so it must NOT move, while the notification still fires
+  # (carrying dispatcher_alive: false). Pins the gating contract that the two
+  # tests above leave vacuous (both would pass even if the gate were dropped).
+  def test_delivery_miss_emits_event_with_dispatcher_alive_false_but_does_not_count
+    StreamingDispatcherStub.delay = 0          # dispatcher finishes immediately
+    # Long heartbeat so no heartbeat is emitted; the worker pushes the response
+    # event ONLY after its `while dispatcher_thread.alive?` loop exits — i.e.
+    # after the dispatcher is deterministically dead.
+    app = streaming_app(heartbeat_interval: 5)
+    _status, _headers, body = app.call(rack_env(accept: "text/event-stream"))
+
+    before = Parse::Agent::MCPRackApp.abandoned_dispatcher_count
+    events = []
+    sub = ActiveSupport::Notifications.subscribe("parse.agent.mcp_dispatcher_abandoned") do |*args|
+      events << ActiveSupport::Notifications::Event.new(*args)
+    end
+
+    # Consume the response event (dispatcher already dead) but break before the
+    # DONE sentinel → completed_normally == false AND dispatcher_alive == false.
+    drain_thread = Thread.new { body.each { |_chunk| break } }
+    drain_thread.join(2)
+
+    assert_equal before, Parse::Agent::MCPRackApp.abandoned_dispatcher_count,
+                 "a delivery miss (dispatcher already finished) must NOT bump the genuine-orphan counter"
+    refute_empty events, "the notification must fire on every premature close"
+    assert_equal false, events.last.payload[:dispatcher_alive]
+    assert_equal :client_disconnect, events.last.payload[:reason]
+  ensure
+    ActiveSupport::Notifications.unsubscribe(sub) if sub
   end
 
   # ---------------------------------------------------------------------------

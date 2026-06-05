@@ -83,6 +83,26 @@ module ParseStackIntegrationTest
   def reset_database!
     Parse::Test::ServerHelper.reset_database!
   end
+
+  # Obtain a live session token for a freshly-created user by logging in.
+  #
+  # Parse Server 9.x does NOT return a session token from a master-key signup
+  # (`Parse::User.new(...).save` / `signup!` on the default master client) — it
+  # treats master-key user creation as admin provisioning. Tests that need an
+  # authenticated user session therefore log in right after signup. Pass the
+  # just-saved user and the plaintext password; the user's `#session_token` is
+  # populated on return. No-ops if a token is already present (e.g. a client-mode
+  # signup that already issued one).
+  #
+  # @param user [Parse::User] a user that has already been saved/signed up.
+  # @param password [String] the plaintext password used at signup.
+  # @return [Parse::User] the same user, now carrying a live `#session_token`.
+  def login_after_signup!(user, password)
+    return user if user.session_token.present?
+    assert user.login!(password),
+           "login after signup must succeed to obtain a session token for #{user.username.inspect}"
+    user
+  end
 end
 
 # Example usage in tests:

@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require_relative "../../test_helper"
+require "cgi" # CGI.unescape in the provisioning-URI assertions; not guaranteed transitively
 
 class MFATest < Minitest::Test
   def setup
@@ -122,7 +123,9 @@ class MFATest < Minitest::Test
     assert_kind_of String, uri
     assert uri.start_with?("otpauth://totp/"), "Should be otpauth URI"
     assert uri.include?("secret="), "Should include secret"
-    assert uri.include?("test@example.com"), "Should include account name"
+    # The account label is URL-encoded in a valid otpauth URI ("@" -> "%40"),
+    # so decode before asserting the address is present.
+    assert CGI.unescape(uri).include?("test@example.com"), "Should include account name"
   end
 
   def test_provisioning_uri_with_issuer

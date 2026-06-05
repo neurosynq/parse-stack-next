@@ -1,4 +1,8 @@
-FROM parseplatform/parse-server:9
+# Pinned to a specific patch release (was the floating `:9` tag, which had
+# cached to a pre-patch 8.4.0 build). 9.9.0 includes the MFA / authData security
+# fixes — GHSA-pfj7-wv7c-22pr (auth-provider validation bypass on login) and
+# GHSA-37mj-c2wf-cx96 / CVE-2026-33627 (TOTP secret leak via /users/me).
+FROM parseplatform/parse-server:9.9.0
 
 # Switch to root to copy and set permissions
 USER root

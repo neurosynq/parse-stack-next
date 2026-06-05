@@ -17,6 +17,7 @@ require_relative "model/object"
 require_relative "webhooks/payload"
 require_relative "webhooks/registration"
 require_relative "webhooks/replay_protection"
+require_relative "webhooks/trigger_audit"
 
 module Parse
   class Object
@@ -83,6 +84,36 @@ module Parse
     # will trigger the Parse::Webhooks application to return the proper error response.
     class ResponseError < StandardError; end
 
+    # The authentication-side triggers (local underscore form). These carry a
+    # +_User+ / +_Session+ as the payload object but are NOT object save/delete
+    # triggers: the router runs no ActiveModel save/create/destroy callbacks for
+    # them, and Parse Server ignores their response body.
+    AUTH_TRIGGERS = %i[
+      before_login after_login after_logout before_password_reset_request
+    ].freeze
+
+    # The LiveQuery triggers (local underscore form). Connection-global or
+    # event-scoped; Parse Server ignores their response body. Delivered over an
+    # HTTP webhook only in a co-located single-process LiveQuery setup.
+    LIVE_QUERY_TRIGGERS = %i[before_connect before_subscribe after_event].freeze
+
+    # Every trigger whose payload is not an object save/delete/find shape.
+    # Parse Server's webhook response handler resolves +{}+ for all of these
+    # (the body is ignored), so the router normalizes their handler result to a
+    # success no-op rather than serializing a returned object into the response.
+    NON_OBJECT_TRIGGERS = (AUTH_TRIGGERS + LIVE_QUERY_TRIGGERS).freeze
+
+    # The +before*+ subset of {NON_OBJECT_TRIGGERS} for which a handler can DENY
+    # the operation. Parse Server only treats an +{error}+ response as a
+    # rejection -- a +{success:false}+ body resolves and lets the login /
+    # connect / subscribe / reset proceed. So, mirroring the +before_save+
+    # convention, the router converts a +false+ return from one of these into a
+    # {ResponseError} (which serializes to +{error}+). +error!+ works for any
+    # trigger; the +after*+ variants fire after the fact and cannot undo it.
+    REJECTABLE_NON_OBJECT_TRIGGERS = %i[
+      before_login before_password_reset_request before_connect before_subscribe
+    ].freeze
+
     include Client::Connectable
     extend Parse::Webhooks::Registration
     # The name of the incoming env containing the webhook key.
@@ -135,6 +166,18 @@ module Parse
           className = className.parse_class
         end
         className = className.to_s
+        # Parse Server has no beforeCreate/afterCreate webhook trigger; the
+        # create variants are ActiveModel callbacks that run inside the
+        # beforeSave/afterSave handler for new objects. Point callers there
+        # rather than registering a route that can never fire.
+        if type == :before_create || type == :after_create
+          save = type == :before_create ? :before_save : :after_save
+          raise ArgumentError,
+                "There is no #{type} webhook. Register `webhook :#{save}` instead — " \
+                "your #{type} ActiveModel callbacks run inside the #{save} handler " \
+                "for new objects (registering #{save} enables BOTH the #{save} and " \
+                "#{type} callbacks)."
+        end
         if routes[type].nil? || block.respond_to?(:call) == false
           raise ArgumentError, "Invalid Webhook registration trigger #{type} #{className}"
         end
@@ -157,6 +200,104 @@ module Parse
         payload.function_name = name
         payload.params = params
         call_route(:function, name, payload)
+      end
+
+      # Evaluate a single registered handler block in the scope of the payload.
+      #
+      # The block runs with `self` bound to the {Parse::Webhooks::Payload}, so a
+      # handler can call `parse_object`, `params`, `error!`, etc. directly --
+      # exactly as it could under the historical `payload.instance_exec(payload,
+      # &block)` invocation. The difference is the return semantics:
+      #
+      # - `return value` returns `value` as the handler result (instead of the
+      #   `LocalJumpError: unexpected return` that bare `instance_exec` raised
+      #   when the block was defined inside a method).
+      # - The legacy idioms still work unchanged: the last expression's value,
+      #   `next value`, and `break value` all return `value`, and `raise`
+      #   propagates untouched (so `error!` / before_save rejections behave the
+      #   same).
+      #
+      # This is achieved by attaching the block as a singleton method on the
+      # per-request payload (so `return` gets method semantics) and removing it
+      # afterward. The payload is a per-request instance, so this neither leaks
+      # nor mutates shared state across threads.
+      #
+      # Arity is matched to the old `instance_exec(payload, ...)` contract: a
+      # zero-arity block (`do ... end` / `proc { }`) is called with no args; a
+      # block that declares a parameter (`do |payload| ... end`) or a splat
+      # receives the payload.
+      #
+      # @param payload [Parse::Webhooks::Payload] the request payload (becomes `self`).
+      # @param block [Proc] the registered handler block.
+      # @return [Object] the handler's result value.
+      def invoke_handler(payload, block)
+        name = :"__parse_webhook_handler_#{block.object_id}__"
+        payload.define_singleton_method(name, &block)
+        handler = payload.method(name)
+        begin
+          # Match the old `payload.instance_exec(payload, &block)` arity
+          # leniency: a zero-arity block is called bare; otherwise it receives
+          # the payload, plus a nil for each additional REQUIRED positional so a
+          # block declaring `|payload, extra|` (or more) does not raise — under
+          # instance_exec those surplus params were silently nil. `arity` is
+          # negative for optional/splat params (e.g. -1 for `|*a|`, -2 for
+          # `|a, *b|`); `~arity` gives the required count in that case.
+          if handler.arity == 0
+            handler.call
+          else
+            required = handler.arity.negative? ? ~handler.arity : handler.arity
+            handler.call(payload, *Array.new([required - 1, 0].max))
+          end
+        ensure
+          singleton = payload.singleton_class
+          if singleton.method_defined?(name) || singleton.private_method_defined?(name)
+            singleton.send(:remove_method, name)
+          end
+        end
+      end
+
+      # Run any {Parse::Webhooks::Payload#after_response} callbacks a handler
+      # registered, AFTER the response has been produced. Prefers the server's
+      # `rack.after_reply` hook (Puma / Unicorn), which fires once the response
+      # is flushed to the socket on the same worker thread; falls back to a
+      # detached thread when the server does not provide it (e.g. WEBrick). Each
+      # callback is isolated so one raising neither aborts the others nor reaches
+      # the client. No-op when nothing was deferred.
+      #
+      # @param env [Hash] the Rack environment (for `rack.after_reply`).
+      # @param payload [Parse::Webhooks::Payload, nil] the request payload.
+      # @return [void]
+      def dispatch_deferred(env, payload)
+        return if payload.nil? || !payload.respond_to?(:deferred_callbacks)
+        callbacks = payload.deferred_callbacks
+        return if callbacks.blank?
+
+        runner = proc do
+          callbacks.each do |cb|
+            begin
+              cb.call
+            rescue => e
+              warn "[Webhooks::after_response] deferred callback raised: #{e.class}: #{e.message}"
+            end
+          end
+        end
+
+        # Enqueueing must never break an otherwise-successful response: this runs
+        # just before `response.finish`, so a raise here (a frozen after_reply
+        # array, thread exhaustion) would discard the buffered reply and surface
+        # as a 500. Failing to schedule deferred work degrades to "not run",
+        # never to a failed response.
+        begin
+          after_reply = env.is_a?(Hash) ? env["rack.after_reply"] : nil
+          if after_reply.respond_to?(:<<)
+            after_reply << runner
+          else
+            Thread.new(&runner)
+          end
+        rescue => e
+          warn "[Webhooks::after_response] could not schedule deferred work: #{e.class}: #{e.message}"
+        end
+        nil
       end
 
       # Calls the set of registered webhook trigger blocks or the specific function block.
@@ -219,9 +360,9 @@ module Parse
         end
 
         if registry.is_a?(Array)
-          result = registry.map { |hook| payload.instance_exec(payload, &hook) }.last
+          result = registry.map { |hook| invoke_handler(payload, hook) }.last
         else
-          result = payload.instance_exec(payload, &registry)
+          result = invoke_handler(payload, registry)
         end
 
         if result.is_a?(Parse::Object)
@@ -263,6 +404,30 @@ module Parse
         elsif type == :before_save && (result == true || result.nil?)
           # Open Source Parse server does not accept true results on before_save hooks.
           result = {}
+        end
+
+        # Auth- and LiveQuery-trigger dispatch (beforeLogin/afterLogin/
+        # afterLogout/beforePasswordResetRequest, beforeConnect/beforeSubscribe/
+        # afterEvent). Parse Server IGNORES the response body for all of these --
+        # its webhook response handler resolves {} regardless -- so the ONLY way
+        # a handler can affect the operation is the error path, and only for the
+        # "before" variants (a login/connect/subscribe/reset can be denied; an
+        # after_* fires after the fact and cannot be undone).
+        #
+        # Crucially, Parse Server treats only an {error} response as a rejection:
+        # a {success:false} body RESOLVES and lets the operation proceed. So a
+        # handler that returns `false` to "deny login" would silently allow it.
+        # We mirror the before_save convention and convert that false into a
+        # ResponseError (=> {error} => Parse Server denies). `error!` works for
+        # any of them (the call! rescue converts it). Every other return value --
+        # including a Parse::Object a handler happened to return (e.g. the _User
+        # from beforeLogin) -- is normalized to a success no-op so we never
+        # serialize an object into the response or the redacted request log.
+        if NON_OBJECT_TRIGGERS.include?(type)
+          if result == false && REJECTABLE_NON_OBJECT_TRIGGERS.include?(type)
+            raise Parse::Webhooks::ResponseError, "#{type} rejected by webhook handler"
+          end
+          result = true
         end
 
         # Guard-injection: when a handler returns a Hash (or true/nil normalized
@@ -380,6 +545,40 @@ module Parse
         dup.call!(env)
       end
 
+      # Extract the Parse class name from a webhook request path. Parse Server
+      # registers each trigger at `<endpoint>/<triggerName>/<className>`
+      # (functions at `<endpoint>/<functionName>`), so for a trigger the class
+      # is the last segment and the second-to-last is a known trigger name.
+      # Returns nil for a function path, a path with no recognizable trigger
+      # segment, or a className that fails the conservative charset check
+      # (Parse class names are `[A-Za-z0-9_]`, built-ins prefixed with `_`).
+      # The charset gate keeps an attacker-supplied path (reachable when
+      # `allow_unauthenticated` is set) from injecting an arbitrary routing /
+      # scrub key.
+      #
+      # @param path [String] the request PATH_INFO.
+      # @return [String, nil] the sanitized class name, or nil.
+      def trigger_class_from_path(path)
+        segments = path.to_s.split("/").reject(&:empty?)
+        return nil if segments.size < 2
+        trigger, klass = segments[-2], segments[-1]
+        # register_triggers! builds the URL with the LOCAL snake_case trigger
+        # name (`after_find`), while Parse Server sends the camelCase form in the
+        # body — accept both so the path segment is recognized either way.
+        known = (Parse::API::Hooks::TRIGGER_NAMES + Parse::API::Hooks::TRIGGER_NAMES_LOCAL).map(&:to_s)
+        return nil unless known.include?(trigger)
+        # Allow a leading `@` for the Parse pseudo-classes (`@Connect` for the
+        # connection-global LiveQuery trigger, `@File` for file triggers): the
+        # SDK encodes the className in the per-trigger URL, so beforeConnect
+        # would not route without it. Mirrors the trigger-className validator
+        # (Parse::API::PathSegment.trigger_class_name!). Still anchored and
+        # charset-limited -- this gate keeps an attacker-supplied path (reachable
+        # only under allow_unauthenticated) from injecting an arbitrary routing
+        # / scrub key.
+        return nil unless /\A@?_?[A-Za-z][A-Za-z0-9_]*\z/.match?(klass)
+        klass
+      end
+
       # @!visibility private
       def call!(env)
         request = Rack::Request.new env
@@ -440,8 +639,17 @@ module Parse
           return response.finish
         end
 
+        # Parse Server registers each trigger at
+        # `<endpoint>/<triggerName>/<className>`. For beforeFind/afterFind the
+        # payload body carries NO className anywhere, so the request PATH is the
+        # only authoritative source of the class — without it, find triggers
+        # don't route (parse_class is nil) and afterFind `objects` can't have
+        # their :vector columns stripped. Thread it into the payload here, before
+        # construction, so it is available for both routing and the scrub. Nil
+        # for function requests and for malformed paths.
+        webhook_class = Parse::Webhooks.trigger_class_from_path(request.path)
         begin
-          payload = Parse::Webhooks::Payload.new body_str
+          payload = Parse::Webhooks::Payload.new(body_str, webhook_class)
         rescue => e
           warn "Invalid webhook payload format: #{e}"
           response.write error("Invalid payload format. Should be valid JSON.")
@@ -486,6 +694,10 @@ module Parse
             puts "----------------------------------------------------\n"
           end
           response.write success(result)
+          # Schedule any after_response work to run once this reply is flushed,
+          # off the client's critical path. Registered on the success path so the
+          # deferred work overlaps a response Parse Server will act on.
+          dispatch_deferred(env, payload)
           return response.finish
         rescue Parse::Webhooks::ResponseError, ActiveModel::ValidationError => e
           if payload.trigger?

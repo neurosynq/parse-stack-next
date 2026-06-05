@@ -7,7 +7,7 @@ The Model Context Protocol (MCP) is a standardized JSON-RPC 2.0-based interface 
 Three deployment modes are available:
 
 - **Standalone HTTP server (`MCPServer`)** — a WEBrick process for dedicated MCP deployments.
-- **Rack-mountable adapter (`MCPRackApp`)** — embeds inside an existing Sinatra or Rails application.
+- **Rack-mountable adapter (`MCPRackApp`)** — embeds inside an existing Sinatra or Rails application. This is the primary deployment for the MCP 2025-06-18 Streamable HTTP transport; enable it with `transport: :streamable_http` (see [Streamable HTTP transport](#streamable-http-transport-primary)).
 - **Direct in-process dispatcher (`MCPDispatcher`)** — a pure function for in-process usage, custom transports, and testing.
 
 ---
@@ -190,6 +190,42 @@ end
 map("/mcp") { run mcp_app }
 map("/")    { run ->(env) { [200, {"Content-Type" => "text/plain"}, ["ok"]] } }
 ```
+
+#### Streamable HTTP transport (primary)
+
+The MCP 2025-06-18 **Streamable HTTP** transport is the recommended transport for `MCPRackApp`. It is a single connection model in which the client `POST`s JSON-RPC requests (receiving either a buffered JSON reply or, with `Accept: text/event-stream`, a streamed SSE reply) and holds open a long-lived `GET` request to receive server-initiated notifications. Session termination is signalled with `DELETE` carrying the `Mcp-Session-Id`.
+
+Enable the whole transport with one switch:
+
+```ruby
+mcp_app = Parse::Agent.rack_app(transport: :streamable_http) do |env|
+  # ... auth factory ...
+end
+```
+
+`transport: :streamable_http` is exactly equivalent to `streaming: true, notifications: true` — it turns on POST→SSE streaming and the server→client `GET /` notification stream together. Add `resource_subscriptions: true` alongside it to upgrade the server→client bus from the plain notification posture to the LiveQuery-backed resource-subscription posture:
+
+```ruby
+mcp_app = Parse::Agent.rack_app(
+  transport: :streamable_http,
+  resource_subscriptions: true,   # optional: bridge LiveQuery resource updates
+) do |env|
+  # ...
+end
+```
+
+`transport:` is a closed enum:
+
+| Value | Effect |
+|-------|--------|
+| `:streamable_http` | Full Streamable HTTP transport (`streaming: true` + `notifications: true`). |
+| `:legacy` / `nil` (default) | Historical behavior: buffered JSON responses, no server→client stream. The standalone SSE/JSON path below remains a supported fallback. |
+
+Passing `transport: :streamable_http` together with an explicit `streaming:` or `notifications:` raises `ArgumentError` (the switch already owns those toggles); any value other than the two above also raises. The default is unchanged, so an existing `Parse::Agent.rack_app { ... }` keeps its non-streaming JSON behavior until you opt in.
+
+**WEBrick cannot deliver Streamable HTTP.** The switch — like `streaming:` — has no effect under the WEBrick-backed standalone `MCPServer`, which buffers responses and cannot hold the `GET` stream open. Use Puma, Falcon, or Unicorn for a real Streamable HTTP deployment.
+
+The remaining subsections document the individual toggles `transport: :streamable_http` consolidates, for operators who need finer control or are reading older configurations.
 
 #### MCP progress notifications via SSE (opt-in)
 
@@ -537,10 +573,29 @@ Parse Server version and its `masterKeyIps` configuration.)
   soft cap *equal to* `max_concurrent_dispatchers`. So the effective steady-state
   ceiling across both surfaces is up to **2× `max_concurrent_dispatchers`** (up
   to N request-scoped SSE dispatchers plus N listening streams). Size the value
-  with that 2× factor in mind (e.g. relative to your Puma `max_threads`). Leaving
-  it unset (the default `nil`) leaves both surfaces uncapped; the app logs a
+  with that 2× factor in mind (e.g. relative to your Puma `max_threads`).
+  `max_concurrent_dispatchers:` defaults to a finite **100**
+  (`Parse::Agent::MCPRackApp::DEFAULT_MAX_CONCURRENT_DISPATCHERS`), so a
+  streaming surface is bounded out of the box — once the cap is reached a new
+  SSE request or listening stream is refused with a `503` JSON-RPC `-32000`
+  ("server busy"). Pass an explicit positive integer to resize it, or
+  `max_concurrent_dispatchers: nil` to knowingly run uncapped (the app logs a
   one-time warning at construction when a streaming or subscription/notification
-  surface is enabled without a cap.
+  surface is enabled with `nil`). A non-positive or non-integer value raises
+  `ArgumentError`.
+- **Client disconnect mid-tool-call.** When a client drops the connection while
+  a tool is still running, the SSE worker is torn down and the dispatcher's
+  cancellation token is tripped, so a cooperative tool (one that checks
+  `agent.cancelled?` at a checkpoint) exits promptly. A tool blocked inside a
+  Mongo/REST roundtrip cannot observe the token, but its slot is reclaimed when
+  the per-tool `Timeout` or the clean MongoDB `socket_timeout` (10s) / REST
+  `timeout` (30s) deadline fires — through the driver's clean error path. The
+  orphaned dispatcher is **intentionally not force-killed**: a `Thread#kill`
+  would bypass the driver's connection-invalidation and could return a half-used
+  pooled connection to a later request. To observe how often disconnects abandon
+  in-flight work, watch the cumulative
+  `Parse::Agent::MCPRackApp.abandoned_dispatcher_count` or subscribe to the
+  `parse.agent.mcp_dispatcher_abandoned` `ActiveSupport::Notifications` event.
 
 ### Listening-stream ownership
 

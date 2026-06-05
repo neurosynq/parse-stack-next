@@ -940,6 +940,23 @@ module Parse
       end
       Parse.client.send_analytics(event_name, dimensions, **opts)
     end
+
+    # Capability probe against the connected Parse Server, delegated to the
+    # default client. Builds on the memoized `serverInfo` fetch — see
+    # {Parse::API::Server#server_supports?} for the capability table and the
+    # fail-open-to-modern semantics.
+    # @param feature [Symbol] a capability key.
+    # @return [Boolean] whether the connected server supports the feature.
+    def server_supports?(feature)
+      Parse.client.server_supports?(feature)
+    end
+
+    # The coarse `features` block advertised by `GET /serverInfo`, delegated
+    # to the default client. @see Parse::API::Server#server_features
+    # @return [Hash] the advertised features block, or `{}` if unavailable.
+    def server_features
+      Parse.client.server_features
+    end
   end
 
   # Error raised when {Parse::CreateLock#synchronize} cannot acquire the

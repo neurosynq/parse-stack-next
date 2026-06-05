@@ -91,8 +91,10 @@ module Parse
   #  artist.save
   #
   # You may also set default ACLs for your subclasses by using {Parse::Object.set_default_acl}.
-  # These will be get applied for newly created instances. All subclasses have
-  # public read and write enabled by default.
+  # These will get applied for newly created instances. Unless overridden, subclasses
+  # inherit the shipped `:owner_else_private` policy — records are private
+  # (master-only) until an owner is resolved at save time. Use {Parse::Object.set_default_acl}
+  # or {Parse::Object.acl_policy} to grant broader access.
   #
   #  class AdminData < Parse::Object
   #

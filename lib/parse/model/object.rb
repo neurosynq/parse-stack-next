@@ -182,6 +182,14 @@ module Parse
     # @return [Hash, nil] Atlas Search highlights blob.
     def search_highlights; @_search_highlights; end
 
+    # @return [Float, nil] fused reciprocal-rank-fusion score from
+    #   `Class.hybrid_search`.
+    def hybrid_score; @_hybrid_score; end
+
+    # @return [Hash, nil] per-branch 1-based ranks from
+    #   `Class.hybrid_search` (`{ lexical:, vector: }`).
+    def hybrid_ranks; @_hybrid_ranks; end
+
     # @return [Model::TYPE_OBJECT]
     def __type; Parse::Model::TYPE_OBJECT; end
 
@@ -384,7 +392,12 @@ module Parse
       end
 
       # The set of default ACLs to be applied on newly created instances of this class.
-      # By default, public read and write are enabled unless {default_acl_private} is true.
+      # The result follows the class's {acl_policy_setting}: the shipped default
+      # policy is `:owner_else_private`, whose fallback half is {Parse::ACL.private}
+      # (an empty ACL — readable only by the master key until an owner is resolved
+      # at save time). Classes that opt into a `:public*` policy, or set
+      # {default_acl_private} / {set_default_acl}, get the corresponding permissions
+      # instead.
       # @see Parse::ACL.everyone
       # @see Parse::ACL.private
       # @return [Parse::ACL] the current default ACLs for this class.
@@ -398,8 +411,10 @@ module Parse
       end
 
       # A method to set default ACLs to be applied for newly created
-      # instances of this class. All subclasses have public read and write enabled
-      # by default.
+      # instances of this class. Unless overridden, subclasses inherit the
+      # shipped `:owner_else_private` policy (records are private/master-only
+      # until an owner is resolved at save time); use this method (or
+      # {acl_policy}) to grant broader access.
       # @example
       #  class AdminData < Parse::Object
       #
@@ -1223,8 +1238,16 @@ module Parse
       # signal to clients, and they round-trip through the dedicated
       # embed/find_similar pipelines rather than the standard REST
       # save/find. Pass `include_vectors: true` to opt back in (e.g.,
-      # for tests or internal mongo-direct bulk writes).
-      unless opts[:include_vectors] == true
+      # for tests or internal mongo-direct bulk writes). A class may flip
+      # the per-class default with `vector_visibility :public`; an explicit
+      # `include_vectors:` in the call always wins over the class default.
+      include_vectors =
+        if opts.key?(:include_vectors)
+          opts[:include_vectors] == true
+        else
+          self.class.respond_to?(:vectors_public_by_default?) && self.class.vectors_public_by_default?
+        end
+      unless include_vectors
         vector_fields = self.class.respond_to?(:fields) ? self.class.fields(:vector).keys.map(&:to_s) : []
         if vector_fields.any?
           except = Array(opts[:except]).map(&:to_s) | vector_fields

@@ -31,6 +31,10 @@ module Parse
     # The request header field for MongoDB read preference.
     # Supported values: PRIMARY, PRIMARY_PREFERRED, SECONDARY, SECONDARY_PREFERRED, NEAREST
     READ_PREFERENCE = "X-Parse-Read-Preference"
+    # The request header field for threading a caller-supplied context object
+    # through a write or cloud-function call. Parse Server maps this header to
+    # +req.info.context+ and flows it through beforeSave/afterSave triggers.
+    CLOUD_CONTEXT = "X-Parse-Cloud-Context"
 
     # Valid read preference values for MongoDB
     READ_PREFERENCES = %w[PRIMARY PRIMARY_PREFERRED SECONDARY SECONDARY_PREFERRED NEAREST].freeze

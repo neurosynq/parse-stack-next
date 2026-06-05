@@ -554,7 +554,7 @@ module Parse
       # @return [Parse::LiveQuery::Subscription] the subscription object
       # @see Parse::LiveQuery::Subscription
       # @see Parse::Query#subscribe
-      def subscribe(where: {}, fields: nil, session_token: nil, client: nil,
+      def subscribe(where: {}, fields: nil, keys: nil, watch: nil, session_token: nil, client: nil,
                     use_master_key: false, &block)
         # Fall through to the ambient set by `Parse.with_session` / `Parse.login`
         # so a caller wrapping a region with `with_session(user) { Klass.subscribe ... }`
@@ -565,6 +565,8 @@ module Parse
         end
         query(where).subscribe(
           fields: fields,
+          keys: keys,
+          watch: watch,
           session_token: session_token,
           client: client,
           use_master_key: use_master_key,

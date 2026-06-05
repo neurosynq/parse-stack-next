@@ -80,6 +80,42 @@ class TestLiveQuerySubscription < Minitest::Test
 
     refute message.key?(:sessionToken)
     refute message[:query].key?(:fields)
+    refute message[:query].key?(:keys)
+  end
+
+  # Parse Server 7.0 renamed the subscription field-projection option from
+  # `fields` to `keys`. On PS 7+ a frame carrying only `fields` is ignored
+  # and events return ALL columns — a silent projection break. The subscribe
+  # frame must emit `keys` (and keep `fields` for pre-7 servers).
+  def test_to_subscribe_message_emits_keys_for_projection
+    message = @subscription.to_subscribe_message
+    assert_equal ["title", "plays"], message[:query][:keys],
+                 "subscribe frame must emit the PS 7+ `keys` projection option"
+    assert_equal ["title", "plays"], message[:query][:fields],
+                 "subscribe frame keeps `fields` for pre-7.0 server compatibility"
+  end
+
+  def test_keys_constructor_alias
+    subscription = Parse::LiveQuery::Subscription.new(
+      client: @mock_client,
+      class_name: "Song",
+      keys: ["title"],
+    )
+    assert_equal ["title"], subscription.fields
+    assert_equal ["title"], subscription.keys
+    message = subscription.to_subscribe_message
+    assert_equal ["title"], message[:query][:keys]
+    assert_equal ["title"], message[:query][:fields]
+  end
+
+  def test_keys_takes_precedence_over_fields_when_both_given
+    subscription = Parse::LiveQuery::Subscription.new(
+      client: @mock_client,
+      class_name: "Song",
+      fields: ["legacy"],
+      keys: ["canonical"],
+    )
+    assert_equal ["canonical"], subscription.fields
   end
 
   def test_to_unsubscribe_message

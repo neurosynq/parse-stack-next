@@ -34,9 +34,12 @@ class ClientRestCloudJobIntegrationTest < Minitest::Test
 
   # --------------------------------------------------------------------
   # Client-mode: trigger_job must NOT silently succeed. The SDK's
-  # response middleware translates the Parse Server 403 "master key is
-  # required" into +Parse::Error::AuthenticationError+, so the
-  # rejection surfaces as a raise — pin that exact translation.
+  # response middleware translates the Parse Server 403 into
+  # +Parse::Error::AuthenticationError+, so the rejection surfaces as a
+  # raise — pin that translation. We do not pin the server's exact prose:
+  # older Parse Server said "master key is required", 9.x returns a
+  # generic "Permission denied (403)". The invariant is the authorization
+  # refusal, not its wording.
   # --------------------------------------------------------------------
   def test_trigger_job_under_client_mode_does_not_silently_succeed
     err = nil
@@ -47,8 +50,8 @@ class ClientRestCloudJobIntegrationTest < Minitest::Test
       end
     end
 
-    assert_match(/master key/i, err.message,
-                 "rejection must cite the missing master key (got: #{err.message})")
+    assert_match(/master key|permission denied|forbidden|\b403\b/i, err.message,
+                 "rejection must surface an authorization failure (got: #{err.message})")
   end
 
   # --------------------------------------------------------------------

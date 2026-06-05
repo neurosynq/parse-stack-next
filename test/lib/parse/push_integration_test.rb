@@ -1,23 +1,90 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-require_relative "../../test_helper"
+require_relative "../../test_helper_integration"
 
-# Integration tests for Parse::Push functionality
-# These tests require Parse Server to be running
+# Integration tests for Parse::Push functionality.
+#
+# These exercise the SDK-side push surface (payload construction, badge ops,
+# localization, and the Push/PushStatus/Audience/Installation model APIs).
+# They need a configured Parse client but do not push to a real device
+# gateway, so a running Parse Server is sufficient.
 #
 # Run with: PARSE_TEST_USE_DOCKER=true ruby -Itest test/lib/parse/push_integration_test.rb
 class PushIntegrationTest < Minitest::Test
   def setup
-    skip "Integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"]
+    skip "Integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
-    # Ensure we have a valid connection
-    begin
-      response = Parse.client.request(:get, "health")
-      skip "Parse Server not responding" unless response
-    rescue StandardError => e
-      skip "Parse Server not available: #{e.message}"
+    # Configure the default Parse client (server URL, app id, keys). The
+    # previous health-check ran before any client was set up, so `Parse.client`
+    # raised and silently skipped every test in this file.
+    Parse::Test::ServerHelper.setup
+    @created = []
+  end
+
+  # The server-backed tests below create real _Installation / _PushStatus rows
+  # on the shared integration database. Destroy them so they don't skew counts
+  # or queries other files run (e.g. Installation.subscribers_count,
+  # PushStatus.recent).
+  def teardown
+    Array(@created).reverse_each { |obj| obj.destroy rescue nil }
+  end
+
+  # Register a saved object for teardown cleanup.
+  def track(obj)
+    (@created ||= []) << obj
+    obj
+  end
+
+  # Poll for the _PushStatus belonging to THIS test to reach a terminal
+  # state. Parse Server processes `POST /push` asynchronously, so the row's
+  # counts are not populated the instant the request returns.
+  #
+  # `channel:` scopes the lookup to the push under test (every test uses a
+  # unique channel). Without it, a concurrent or prior test's terminal row
+  # is the globally-newest one and can both false-fail (wrong counts) and
+  # false-pass (assertions check the wrong row). For non-channel targeting
+  # (e.g. `to_query`), pass `since:` to accept only rows newer than a
+  # snapshot taken before `.send`.
+  def latest_push_status_time
+    Parse::PushStatus.query(order: :createdAt.desc).first&.created_at
+  end
+
+  def wait_for_terminal_push_status(timeout: 10, channel: nil, since: nil)
+    matches = lambda do |status|
+      return false unless status
+      return false unless %w[succeeded failed].include?(status.status)
+      return false if since && !(status.created_at && status.created_at > since)
+      return false if channel && !push_status_targets_channel?(status, channel)
+      true
     end
+
+    deadline = Time.now + timeout
+    candidate = nil
+    loop do
+      candidate = recent_push_status(channel)
+      return candidate if matches.call(candidate)
+      break if Time.now > deadline
+      sleep 0.25
+    end
+    candidate
+  end
+
+  # Newest _PushStatus, narrowed server-side to the channel when possible
+  # (the `query` column stores the target as a JSON string, so an exact
+  # server-side filter isn't reliable — fall back to a client-side scan of
+  # recent rows).
+  def recent_push_status(channel)
+    rows = Parse::PushStatus.query(order: :createdAt.desc, limit: 25).results
+    return rows.first if channel.nil?
+    rows.find { |s| push_status_targets_channel?(s, channel) } || rows.first
+  end
+
+  # True if the _PushStatus row's stored target query references `channel`.
+  def push_status_targets_channel?(status, channel)
+    q = status.query
+    q = (JSON.parse(q) rescue nil) if q.is_a?(String)
+    q.to_s.include?(channel)
   end
 
   # ==========================================================================
@@ -528,5 +595,260 @@ class PushIntegrationTest < Minitest::Test
     assert_equal "INTERNATIONAL", payload["data"]["category"]
 
     puts "Full push with all new features works correctly!"
+  end
+
+  # ==========================================================================
+  # Server-backed integration: real _Installation round-trips
+  # ==========================================================================
+
+  # Test 24: Installation saves and is queryable by channel
+  def test_installation_save_and_query_by_channel
+    channel = "news_#{SecureRandom.hex(4)}"
+    token = SecureRandom.hex(32)
+
+    installation = Parse::Installation.new(
+      device_type: "ios",
+      device_token: token,
+      installation_id: SecureRandom.uuid,
+      channels: [channel],
+    )
+    assert installation.save, "installation should save to the server"
+    refute_nil installation.id
+    track(installation)
+
+    # Round-trip: query the channel back from the server.
+    found = Parse::Installation.query(:channels.in => [channel]).first
+    refute_nil found, "installation should be findable by its channel"
+    assert_equal installation.id, found.id
+    assert_includes found.channels.to_a, channel
+  end
+
+  # Test 25: subscribe / unsubscribe persist to the server
+  def test_installation_subscribe_unsubscribe_round_trip
+    installation = Parse::Installation.new(
+      device_type: "android",
+      device_token: SecureRandom.hex(32),
+      installation_id: SecureRandom.uuid,
+      channels: [],
+    )
+    installation.save
+    track(installation)
+
+    a = "alpha_#{SecureRandom.hex(3)}"
+    b = "beta_#{SecureRandom.hex(3)}"
+
+    installation.subscribe(a, b)
+    reloaded = Parse::Installation.find(installation.id)
+    assert_includes reloaded.channels.to_a, a
+    assert_includes reloaded.channels.to_a, b
+
+    installation.unsubscribe(a)
+    reloaded = Parse::Installation.find(installation.id)
+    refute_includes reloaded.channels.to_a, a
+    assert_includes reloaded.channels.to_a, b
+  end
+
+  # ==========================================================================
+  # Server-backed integration: push send + _PushStatus lifecycle
+  #
+  # The test stack configures a no-op push adapter (test/cloud/
+  # dummy-push-adapter.js, wired via PARSE_SERVER_PUSH). It reports a
+  # successful transmission without contacting any device gateway, so Parse
+  # Server creates and completes a real _PushStatus we can assert against.
+  # ==========================================================================
+
+  # Test 26: sending to a channel creates a succeeded _PushStatus
+  def test_push_send_to_channel_creates_succeeded_status
+    channel = "push_#{SecureRandom.hex(4)}"
+
+    # A subscriber must exist for the push to have a recipient.
+    installation = Parse::Installation.new(
+      device_type: "ios",
+      device_token: SecureRandom.hex(32),
+      installation_id: SecureRandom.uuid,
+      channels: [channel],
+    )
+    installation.save
+    track(installation)
+
+    response = Parse::Push.new
+      .to_channel(channel)
+      .with_alert("Integration ping")
+      .send
+
+    assert response.success?, "POST /push should succeed with a push adapter configured"
+    assert_equal true, response.result["result"]
+
+    status = wait_for_terminal_push_status(channel: channel)
+    refute_nil status, "a _PushStatus row should be created"
+    track(status)
+    assert_equal "succeeded", status.status
+    assert_operator status.num_sent.to_i, :>=, 1, "at least the one subscriber should be counted as sent"
+    assert_equal 1, status.sent_per_type["ios"], "the iOS subscriber should be tallied under sent_per_type"
+  end
+
+  # Test 27: sending without a push adapter would fail closed — here we assert
+  # the SDK's master-key guard on the send path (no master key => raise, never
+  # an unauthenticated POST).
+  def test_push_send_requires_master_key
+    no_master = Parse::Client.new(
+      server_url: ENV["PARSE_TEST_SERVER_URL"] || "http://localhost:29337/parse",
+      application_id: ENV["PARSE_TEST_APP_ID"] || "psnextItAppId",
+      api_key: ENV["PARSE_TEST_API_KEY"] || "psnext-it-rest-key",
+    )
+
+    assert_raises(Parse::Error::AuthenticationError) do
+      no_master.push(channels: ["anything"], data: { alert: "nope" })
+    end
+  end
+
+  # ==========================================================================
+  # Server-backed integration: real _Audience round-trip
+  #
+  # Parse Server's `_Audience.query` column is typed String (JSON), so a hash
+  # query must be persisted as a JSON string. This exercises that the SDK
+  # serializes/deserializes correctly and that the audience drives a real
+  # Installation count.
+  # ==========================================================================
+
+  # Test 28: audience saves a hash query, is findable, and counts installations
+  def test_audience_save_find_and_installation_count
+    channel = "aud_#{SecureRandom.hex(4)}"
+    name = "Audience #{SecureRandom.hex(4)}"
+
+    # An installation that matches the audience's query.
+    installation = Parse::Installation.new(
+      device_type: "ios",
+      device_token: SecureRandom.hex(32),
+      installation_id: SecureRandom.uuid,
+      channels: [channel],
+    )
+    installation.save
+    track(installation)
+
+    audience = Parse::Audience.new(name: name, query: { "channels" => channel })
+    assert audience.save,
+      "audience with a hash query should save (query persists as a JSON string)"
+    track(audience)
+
+    found = Parse::Audience.find_by_name(name, cache: false)
+    refute_nil found, "audience should be findable by name"
+    assert_equal channel, found.query["channels"], "query should round-trip back to a hash"
+
+    assert_equal 1, Parse::Audience.installation_count(name),
+      "the one matching installation should be counted"
+  end
+
+  # ==========================================================================
+  # Server-backed integration: _PushStatus failure + multi-type lifecycle
+  #
+  # The no-op adapter simulates a failed transmission for any installation whose
+  # device token begins with "fail-", which exercises numFailed / failedPerType
+  # without a real device gateway.
+  # ==========================================================================
+
+  # Helper: save an installation subscribed to a channel.
+  def save_installation(device_type:, token:, channel:)
+    inst = Parse::Installation.new(
+      device_type: device_type,
+      device_token: token,
+      installation_id: SecureRandom.uuid,
+      channels: [channel],
+    )
+    inst.save
+    track(inst)
+  end
+
+  # Test 29: a failed transmission is tracked under num_failed / failed_per_type
+  def test_push_failed_delivery_is_tracked
+    channel = "fail_#{SecureRandom.hex(4)}"
+    save_installation(device_type: "ios", token: "fail-#{SecureRandom.hex(8)}", channel: channel)
+
+    Parse::Push.new.to_channel(channel).with_alert("will fail").send
+
+    status = wait_for_terminal_push_status(channel: channel)
+    refute_nil status
+    track(status)
+    assert_equal 0, status.num_sent.to_i
+    assert_operator status.num_failed.to_i, :>=, 1
+    assert_equal 1, status.failed_per_type["ios"]
+  end
+
+  # Test 30: a single push with one good and one failing recipient tallies both
+  def test_push_mixed_sent_and_failed
+    channel = "mix_#{SecureRandom.hex(4)}"
+    save_installation(device_type: "ios", token: SecureRandom.hex(16), channel: channel)
+    save_installation(device_type: "ios", token: "fail-#{SecureRandom.hex(8)}", channel: channel)
+
+    Parse::Push.new.to_channel(channel).with_alert("mixed").send
+
+    status = wait_for_terminal_push_status(channel: channel)
+    refute_nil status
+    track(status)
+    assert_operator status.num_sent.to_i, :>=, 1, "the good recipient should be counted as sent"
+    assert_operator status.num_failed.to_i, :>=, 1, "the fail- recipient should be counted as failed"
+  end
+
+  # Test 31: sent_per_type tallies each device type
+  def test_push_sent_per_type_for_multiple_device_types
+    channel = "multi_#{SecureRandom.hex(4)}"
+    save_installation(device_type: "ios", token: SecureRandom.hex(16), channel: channel)
+    save_installation(device_type: "android", token: SecureRandom.hex(16), channel: channel)
+
+    Parse::Push.new.to_channel(channel).with_alert("multi-type").send
+
+    status = wait_for_terminal_push_status(channel: channel)
+    refute_nil status
+    track(status)
+    assert_equal "succeeded", status.status
+    assert_equal 1, status.sent_per_type["ios"], "iOS recipient should be tallied"
+    assert_equal 1, status.sent_per_type["android"], "Android recipient should be tallied"
+  end
+
+  # ==========================================================================
+  # Server-backed integration: alternate targeting paths
+  # ==========================================================================
+
+  # Test 32: query-based targeting (to_query) sends to matching installations
+  def test_push_to_query_creates_succeeded_status
+    token = SecureRandom.hex(16)
+    save_installation(device_type: "ios", token: token, channel: "q_#{SecureRandom.hex(4)}")
+
+    # Query-based targeting has no channel to scope on; snapshot the newest
+    # terminal row before sending and accept only a row created after it.
+    since = latest_push_status_time
+
+    Parse::Push.new
+      .to_query { |q| q.where(device_token: token) }
+      .with_alert("query target")
+      .send
+
+    status = wait_for_terminal_push_status(since: since)
+    refute_nil status
+    track(status)
+    assert_equal "succeeded", status.status
+    assert_operator status.num_sent.to_i, :>=, 1
+  end
+
+  # Test 33: audience-based targeting (to_audience) resolves the saved query
+  def test_push_to_audience_sends_to_matching_installations
+    channel = "ta_#{SecureRandom.hex(4)}"
+    name = "PushAudience #{SecureRandom.hex(4)}"
+    save_installation(device_type: "ios", token: SecureRandom.hex(16), channel: channel)
+
+    audience = Parse::Audience.new(name: name, query: { "channels" => channel })
+    audience.save
+    track(audience)
+
+    Parse::Push.new
+      .to_audience(name)
+      .with_alert("audience target")
+      .send
+
+    status = wait_for_terminal_push_status(channel: channel)
+    refute_nil status
+    track(status)
+    assert_equal "succeeded", status.status
+    assert_operator status.num_sent.to_i, :>=, 1
   end
 end

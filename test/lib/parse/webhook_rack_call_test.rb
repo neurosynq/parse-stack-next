@@ -5,6 +5,12 @@ require_relative "../../test_helper"
 class WebhookRackCallTest < Minitest::Test
   WEBHOOK_HEADER = "HTTP_X_PARSE_WEBHOOK_KEY"
 
+  # Real model so an after_save route's call_route can build the parse object.
+  class SaveProbe < Parse::Object
+    parse_class "SaveProbe"
+    property :title, :string
+  end
+
   def setup
     @saved_key = Parse::Webhooks.instance_variable_get(:@key)
     @saved_allow = Parse::Webhooks.instance_variable_get(:@allow_unauthenticated)
@@ -37,13 +43,14 @@ class WebhookRackCallTest < Minitest::Test
     Parse::Webhooks.instance_variable_set(:@routes, nil)
   end
 
-  def build_env(body: '{"functionName":"test"}', key_header: nil)
+  def build_env(body: '{"functionName":"test"}', key_header: nil, path: nil)
     env = {
       "REQUEST_METHOD" => "POST",
       "CONTENT_TYPE" => "application/json",
       "rack.input" => StringIO.new(body),
       "CONTENT_LENGTH" => body.bytesize.to_s,
     }
+    env["PATH_INFO"] = path if path
     env[WEBHOOK_HEADER] = key_header if key_header
     env
   end
@@ -69,6 +76,77 @@ class WebhookRackCallTest < Minitest::Test
     end
     occurrences = err.scan(/no webhook key configured/).size
     assert_equal 1, occurrences, "expected the missing-key warning to fire once across multiple requests"
+  end
+
+  # ----- find-trigger routing via the real call! dispatch -----
+  #
+  # afterFind/beforeFind payloads carry NO className in the body, so the class
+  # is derived from the request PATH (`/afterFind/<Class>`) and threaded into
+  # the Payload. Before this was wired, parse_class was nil for find triggers
+  # and the dispatch at call! never invoked the registered handler. These tests
+  # exercise the full call! path (not call_route directly) to guard the fix.
+
+  def test_after_find_handler_routes_via_path_className
+    Parse::Webhooks.allow_unauthenticated = true
+    fired = false
+    seen_class = nil
+    Parse::Webhooks.route(:after_find, "RoutingProbe") do
+      fired = true
+      seen_class = parse_class
+      objects
+    end
+    body = JSON.generate("triggerName" => "afterFind",
+                         "objects" => [{ "objectId" => "a", "title" => "x" }])
+    capture_io do
+      status, _h, _b = Parse::Webhooks.call(build_env(body: body, path: "/after_find/RoutingProbe"))
+      assert_equal 200, status
+    end
+    assert fired, "afterFind handler must fire when the class comes from the request path"
+    assert_equal "RoutingProbe", seen_class
+  end
+
+  def test_before_find_handler_routes_via_path_className
+    Parse::Webhooks.allow_unauthenticated = true
+    fired = false
+    Parse::Webhooks.route(:before_find, "RoutingProbe") { fired = true; true }
+    body = JSON.generate("triggerName" => "beforeFind", "query" => { "where" => {} })
+    capture_io do
+      Parse::Webhooks.call(build_env(body: body, path: "/before_find/RoutingProbe"))
+    end
+    assert fired, "beforeFind handler must fire when the class comes from the request path"
+  end
+
+  def test_save_trigger_still_routes_with_path_className
+    # Guard the precedence change: setting webhook_class from the path must not
+    # break save triggers, whose body DOES carry className (path == body class).
+    Parse::Webhooks.allow_unauthenticated = true
+    seen_class = nil
+    Parse::Webhooks.route(:after_save, "SaveProbe") { seen_class = parse_class; true }
+    body = JSON.generate("triggerName" => "afterSave",
+                         "object" => { "className" => "SaveProbe", "objectId" => "a" })
+    capture_io do
+      Parse::Webhooks.call(build_env(body: body, path: "/after_save/SaveProbe"))
+    end
+    assert_equal "SaveProbe", seen_class
+  end
+
+  def test_trigger_class_from_path
+    # camelCase (Parse Server body form) and snake_case (the form register_triggers!
+    # actually builds the URL with) must both be recognized.
+    assert_equal "Post", Parse::Webhooks.trigger_class_from_path("/afterFind/Post")
+    assert_equal "Post", Parse::Webhooks.trigger_class_from_path("/after_find/Post")
+    assert_equal "_User", Parse::Webhooks.trigger_class_from_path("/before_save/_User")
+    assert_equal "Post", Parse::Webhooks.trigger_class_from_path("/mcp/hooks/after_save/Post")
+    # Parse pseudo-classes (file / connection triggers) are allowed.
+    assert_equal "@File", Parse::Webhooks.trigger_class_from_path("/after_save/@File")
+    assert_equal "@Connect", Parse::Webhooks.trigger_class_from_path("/before_connect/@Connect")
+    # Function path (single trailing segment, no trigger) -> nil
+    assert_nil Parse::Webhooks.trigger_class_from_path("/myFunction")
+    # Unknown trigger segment -> nil
+    assert_nil Parse::Webhooks.trigger_class_from_path("/bogusTrigger/Post")
+    # Malicious / malformed class segment -> nil (charset gate)
+    assert_nil Parse::Webhooks.trigger_class_from_path("/afterFind/..%2Fetc")
+    assert_nil Parse::Webhooks.trigger_class_from_path("/afterFind/has space")
   end
 
   def test_permissive_mode_via_setter_allows_request_without_key
