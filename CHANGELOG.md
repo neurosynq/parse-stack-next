@@ -1,5 +1,23 @@
 ## parse-stack-next Changelog
 
+### 5.4.1
+
+#### Webhook after_save callback fix
+
+- **FIXED**: an `afterSave` webhook handler that returns a `Parse::Object`
+  (instead of `true` or `nil`) no longer suppresses the model's `after_create`
+  and `after_save` callbacks on client-initiated saves. Parse Server discards
+  the `afterSave` response body entirely — it resolves the request as a success
+  even when the handler raises — so the handler's return value must not gate
+  callback dispatch. The decision now depends only on the request origin: a
+  trusted Ruby-initiated save still skips the webhook-side callbacks (the local
+  `run_callbacks :save` fires them, avoiding a double-run), while a
+  client-initiated save always fires them. Returning the object — the
+  recommended `beforeSave` pattern, easy to copy into an `afterSave` by mistake
+  — previously skipped an `after_save :send_email` and similar side effects
+  silently. The result is also normalized to `true`, so a returned object can
+  no longer leak into the response body or the debug log.
+
 ### 5.4.0
 
 #### Parse Server 8.x / 9.x compatibility fixes
