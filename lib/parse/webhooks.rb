@@ -454,7 +454,7 @@ module Parse
           end
         end
 
-        if type == :after_save && (result == true || result.nil?) && payload&.parse_object.present? && payload.parse_object.is_a?(Parse::Object)
+        if type == :after_save && payload&.parse_object.present? && payload.parse_object.is_a?(Parse::Object)
           # Handle after_save callbacks intelligently based on request origin.
           # For trusted-Ruby-initiated saves (both `_RB_` header AND master
           # key), Parse Stack's local `run_callbacks :save` will fire
@@ -464,6 +464,14 @@ module Parse
           # per save). For everything else -- client-initiated saves, or a
           # spoofed `_RB_` from a non-master client -- Parse Stack never had
           # a chance to run callbacks, so we fire them here.
+          #
+          # The decision depends ONLY on request origin, never on what the
+          # handler returned. Parse Server discards the afterSave response
+          # body entirely (it resolves {success} even if the handler throws),
+          # so a handler that returns the parse_object -- the recommended
+          # before_save pattern, easy to copy by mistake -- must NOT silently
+          # suppress these callbacks. We normalize the result to `true` below
+          # so a returned object never leaks into the response or the log.
           is_new = payload.original.nil?
           unless trusted_ruby_initiated
             payload.parse_object.run_after_create_callbacks if is_new

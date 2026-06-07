@@ -278,6 +278,71 @@ class WebhookCallbacksTest < Minitest::Test
     puts "✅ Client-initiated existing object calls after_save"
   end
 
+  def test_after_save_handler_returning_object_still_fires_callbacks
+    puts "\n=== Testing After Save Callback Handling (handler returns object) ==="
+
+    # Regression: Parse Server discards the afterSave response body, so the
+    # handler's return value must NOT gate callback dispatch. A handler that
+    # returns the parse_object (the recommended before_save pattern, easy to
+    # copy by mistake) must still fire the model's after_create/after_save
+    # callbacks for client-initiated saves, and the result must normalize to
+    # `true` so the object never leaks into the response/log.
+    after_create_called = false
+    after_save_called = false
+
+    test_object = Object.new
+    test_object.define_singleton_method(:run_after_create_callbacks) { after_create_called = true }
+    test_object.define_singleton_method(:run_after_save_callbacks) { after_save_called = true }
+    test_object.define_singleton_method(:is_a?) { |klass| klass == Parse::Object }
+
+    # Handler returns the object instead of true/nil (the mistake we now tolerate).
+    Parse::Webhooks.route(:after_save, "TestObject") do |payload|
+      payload.parse_object
+    end
+
+    # Client-initiated new object: both callbacks must fire despite the object return.
+    client_new_payload_data = {
+      "triggerName" => "afterSave",
+      "object" => { "className" => "TestObject", "objectId" => "obj_return_new" },
+      "original" => nil,
+      "headers" => { "x-parse-request-id" => "client_obj_return_new" },
+    }
+    client_new_payload = Parse::Webhooks::Payload.new(client_new_payload_data)
+    client_new_payload.define_singleton_method(:parse_object) { test_object }
+    client_new_payload.define_singleton_method(:original) { nil }
+
+    result = Parse::Webhooks.call_route(:after_save, "TestObject", client_new_payload)
+
+    assert after_create_called, "after_create must fire even when handler returns the object"
+    assert after_save_called, "after_save must fire even when handler returns the object"
+    assert_equal true, result, "Result must normalize to true so the object never leaks into the response"
+    refute_kind_of Parse::Object, result, "Returned object must not leak into the response body"
+    puts "✅ Object-returning handler still fires client-initiated callbacks and normalizes result"
+
+    # Trusted-ruby-initiated object: still skips webhook callbacks (Ruby fires them locally),
+    # and still normalizes the result regardless of the object return.
+    after_create_called = false
+    after_save_called = false
+
+    ruby_payload_data = {
+      "triggerName" => "afterSave",
+      "master" => true,
+      "object" => { "className" => "TestObject", "objectId" => "obj_return_ruby" },
+      "original" => nil,
+      "headers" => { "x-parse-request-id" => "_RB_obj_return_ruby" },
+    }
+    ruby_payload = Parse::Webhooks::Payload.new(ruby_payload_data)
+    ruby_payload.define_singleton_method(:parse_object) { test_object }
+    ruby_payload.define_singleton_method(:original) { nil }
+
+    result = Parse::Webhooks.call_route(:after_save, "TestObject", ruby_payload)
+
+    refute after_create_called, "after_create must stay suppressed for trusted-ruby-initiated saves"
+    refute after_save_called, "after_save must stay suppressed for trusted-ruby-initiated saves"
+    assert_equal true, result, "Result must normalize to true even for the trusted-ruby path"
+    puts "✅ Trusted-ruby-initiated handler keeps suppression and normalizes result"
+  end
+
   def test_webhook_integration_with_request_idempotency
     puts "\n=== Testing Webhook Integration with Request Idempotency ==="
 
