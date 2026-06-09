@@ -246,6 +246,7 @@ module Parse
         CONFIG_MUTEX.synchronize do
           @configuration = nil
           @allowed_image_hosts = nil
+          @allowed_image_types = nil
           @trust_provider_url_fetch = nil
         end
       end
@@ -296,6 +297,30 @@ module Parse
       # @return [Array<String>] currently-configured image-host allowlist (frozen).
       def allowed_image_hosts
         @allowed_image_hosts ||= [].freeze
+      end
+
+      # Configure the MIME types the bytes-fetch path accepts after
+      # magic-byte sniffing (see {ImageFetch.verify!}). Defaults to
+      # {ImageFetch::DEFAULT_ALLOWED_IMAGE_TYPES} (JPEG / PNG / GIF /
+      # WebP). The sniffed type — never the `Content-Type` header — is
+      # checked against this list, so adding a type here only matters
+      # when {ImageFetch.sniff_mime} can recognize its magic bytes.
+      #
+      # @param types [Array<String>] MIME type strings.
+      # @return [Array<String>]
+      def allowed_image_types=(types)
+        unless types.is_a?(Array) && !types.empty? &&
+               types.all? { |t| t.is_a?(String) && t.include?("/") }
+          raise ArgumentError,
+                "Parse::Embeddings.allowed_image_types= expects a non-empty Array of " \
+                "MIME type Strings (got #{types.inspect})."
+        end
+        CONFIG_MUTEX.synchronize { @allowed_image_types = types.dup.freeze }
+      end
+
+      # @return [Array<String>] MIME allowlist for the bytes-fetch path (frozen).
+      def allowed_image_types
+        @allowed_image_types ||= ImageFetch::DEFAULT_ALLOWED_IMAGE_TYPES
       end
 
       # Sentinel-gated opt-in for forwarding image URLs to embedding
@@ -357,11 +382,20 @@ module Parse
       # @param allow_insecure [Boolean] permit `http://` (default
       #   false). Only meaningful for local development / container-
       #   internal CDN proxies.
+      # @param mode [Symbol] `:forward` (default) validates for
+      #   URL-forwarding to a provider and requires the
+      #   {.trust_provider_url_fetch=} sentinel. `:fetch` validates for
+      #   the SDK's OWN download through {Parse::File.safe_open_url}
+      #   (the v5.5 bytes path) and skips the sentinel — no URL is
+      #   forwarded to a third party, so the provider-egress
+      #   acknowledgment doesn't apply. Every other layer (host
+      #   allowlist deny-by-default, obfuscated-IP screen, port
+      #   allowlist, CIDR resolution check) is identical in both modes.
       # @return [String] canonicalized URL (`URI.parse(url).to_s`).
-      # @raise [ConfirmationRequired] when the sentinel is unset.
+      # @raise [ConfirmationRequired] when the sentinel is unset (`:forward` mode).
       # @raise [InvalidImageURL] on any other validation failure.
-      def validate_image_url!(url, allow_insecure: false)
-        unless trust_provider_url_fetch?
+      def validate_image_url!(url, allow_insecure: false, mode: :forward)
+        unless mode == :fetch || trust_provider_url_fetch?
           hint =
             if allowed_image_hosts.empty?
               " First populate Parse::Embeddings.allowed_image_hosts with the CDN " \
@@ -555,3 +589,6 @@ require_relative "embeddings/jina"
 require_relative "embeddings/qwen"
 require_relative "embeddings/local_http"
 require_relative "embeddings/spend_cap"
+require_relative "embeddings/image_fetch"
+require_relative "embeddings/cache"
+require_relative "embeddings/batch_embedder"

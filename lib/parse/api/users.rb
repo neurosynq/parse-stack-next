@@ -223,15 +223,25 @@ module Parse
       # - code 205 (+ERROR_EMAIL_NOT_FOUND+) when +preventLoginWithUnverifiedEmail+
       #   is enabled and the account's email has not been verified.
       #
+      # Client-side rate limited per username using the SAME bucket as {#login}
+      # (bare username, no namespace) — failures across both credential oracles
+      # accumulate, so an attacker cannot bypass a +login+ lockout by pivoting to
+      # this endpoint. The trade-off: a run of failed step-up re-auth calls counts
+      # toward (and can trigger) the primary login lockout for that username.
+      # Client-side limiting is a convenience, not a boundary — the server is the
+      # real control.
+      #
       # @param username [String] the Parse user username.
       # @param password [String] the Parse user's associated password.
       # @param headers [Hash] additional HTTP headers to send with the request.
       # @param opts [Hash] additional options to pass to the {Parse::Client} request.
       # @return [Parse::Response]
       def verify_password(username, password, headers: {}, **opts)
+        check_login_rate_limit!(username)
         body = { username: username, password: password }
         response = request :post, VERIFY_PASSWORD_PATH, body: body, headers: headers, opts: opts
         response.parse_class = Parse::Model::CLASS_USER
+        track_login_attempt(username, response.success?)
         response
       end
 

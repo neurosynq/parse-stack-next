@@ -541,12 +541,17 @@ class WebhookAfterSavePayloadFidelityTest < Minitest::Test
   end
 
   # Dispatch a payload through the real webhook router with a route block.
+  # The chained after_save/after_create callbacks fire in run_after_save_chain
+  # (which call! invokes once per delivery), not in call_route, so we drive it
+  # here too. It is a no-op for the before_save triggers, whose before_* chain
+  # still fires inside call_route.
   def dispatch_lifecycle(trigger, payload_hash, &route)
     LifecyclePost.seen = []
     Parse::Webhooks.instance_variable_set(:@routes, nil)
     Parse::Webhooks.route(trigger, "LifecyclePost", &route)
-    Parse::Webhooks.call_route(trigger, "LifecyclePost",
-                               Parse::Webhooks::Payload.new(payload_hash))
+    payload = Parse::Webhooks::Payload.new(payload_hash)
+    Parse::Webhooks.call_route(trigger, "LifecyclePost", payload)
+    Parse::Webhooks.run_after_save_chain(payload)
     LifecyclePost.seen.map { |s| s[:hook] }
   end
 

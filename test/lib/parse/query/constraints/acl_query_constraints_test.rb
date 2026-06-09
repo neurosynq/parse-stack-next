@@ -6,8 +6,11 @@ require_relative "../../../../test_helper"
 class TestAclQueryConstraints < Minitest::Test
   extend Minitest::Spec::DSL
 
-  # Test ReadableByConstraint
-  describe "ReadableByConstraint" do
+  # ReadableByConstraint is now a thin alias of ACLReadableByConstraint
+  # (its full behavior is covered by acl_readable_by_test.rb). These tests
+  # pin that the alias resolves to the unified, public-inclusive,
+  # role-expanding implementation — NOT the removed standalone shape.
+  describe "ReadableByConstraint (alias of ACLReadableByConstraint)" do
     it "registers :readable_by operator" do
       assert_includes Parse::Operation.operators.keys, :readable_by
     end
@@ -19,138 +22,110 @@ class TestAclQueryConstraints < Minitest::Test
       assert_equal :readable_by, op.operator
     end
 
-    it "builds empty array constraint for no read permissions" do
-      constraint = Parse::Constraint::ReadableByConstraint.new(:acl.readable_by, [])
-      result = constraint.build
-
-      assert result.key?("__aggregation_pipeline")
-      pipeline = result["__aggregation_pipeline"]
-      assert_instance_of Array, pipeline
-      assert_equal 1, pipeline.length
-
-      match_stage = pipeline.first["$match"]
-      assert match_stage.key?("$or")
-      # Should match empty _rperm or missing _rperm
-      or_conditions = match_stage["$or"]
-      assert_equal 2, or_conditions.length
+    it "is a subclass of ACLReadableByConstraint" do
+      assert Parse::Constraint::ReadableByConstraint < Parse::Constraint::ACLReadableByConstraint
     end
 
-    it "builds empty array constraint for 'none' string" do
-      constraint = Parse::Constraint::ReadableByConstraint.new(:acl.readable_by, "none")
-      result = constraint.build
-
-      assert result.key?("__aggregation_pipeline")
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      assert match_stage.key?("$or")
+    # Empty intent ([] / "none" / :none / nil) -> explicit-empty _rperm match
+    # (NOT missing, which Parse Server treats as public). Single $match, no $or.
+    [[], "none", :none, nil].each do |empty_value|
+      it "builds explicit-empty match for #{empty_value.inspect}" do
+        constraint = Parse::Constraint::ReadableByConstraint.new(:acl.readable_by, empty_value)
+        result = constraint.build
+        assert_equal(
+          [{ "$match" => { "_rperm" => { "$exists" => true, "$eq" => [] } } }],
+          result["__aggregation_pipeline"],
+        )
+      end
     end
 
-    it "builds empty array constraint for :none symbol" do
-      constraint = Parse::Constraint::ReadableByConstraint.new(:acl.readable_by, :none)
-      result = constraint.build
-
-      assert result.key?("__aggregation_pipeline")
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      assert match_stage.key?("$or")
-    end
-
-    it "builds $in constraint for user ID string" do
+    it "builds public-inclusive $or for a user ID string" do
       constraint = Parse::Constraint::ReadableByConstraint.new(:acl.readable_by, "user123")
-      result = constraint.build
-
-      assert result.key?("__aggregation_pipeline")
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      assert_equal({ "$in" => ["user123"] }, match_stage["_rperm"])
+      match = constraint.build["__aggregation_pipeline"].first["$match"]
+      assert_equal(
+        { "$or" => [
+          { "_rperm" => { "$in" => ["user123", "*"] } },
+          { "_rperm" => { "$exists" => false } },
+        ] },
+        match,
+      )
     end
 
-    it "builds $in constraint for role string" do
-      constraint = Parse::Constraint::ReadableByConstraint.new(:acl.readable_by, "role:Admin")
-      result = constraint.build
-
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      assert_equal({ "$in" => ["role:Admin"] }, match_stage["_rperm"])
+    [:public, "public", "*"].each do |pub|
+      it "maps #{pub.inspect} to the public wildcard" do
+        constraint = Parse::Constraint::ReadableByConstraint.new(:acl.readable_by, pub)
+        match = constraint.build["__aggregation_pipeline"].first["$match"]
+        assert_equal(
+          { "$or" => [
+            { "_rperm" => { "$in" => ["*"] } },
+            { "_rperm" => { "$exists" => false } },
+          ] },
+          match,
+        )
+      end
     end
 
-    it "converts :public to *" do
-      constraint = Parse::Constraint::ReadableByConstraint.new(:acl.readable_by, :public)
-      result = constraint.build
-
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      assert_equal({ "$in" => ["*"] }, match_stage["_rperm"])
-    end
-
-    it "converts 'public' string to *" do
-      constraint = Parse::Constraint::ReadableByConstraint.new(:acl.readable_by, "public")
-      result = constraint.build
-
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      assert_equal({ "$in" => ["*"] }, match_stage["_rperm"])
-    end
-
-    it "handles array of mixed permissions" do
+    it "handles an array of mixed permissions (public deduped)" do
       constraint = Parse::Constraint::ReadableByConstraint.new(:acl.readable_by, ["user123", "role:Admin", "*"])
-      result = constraint.build
-
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      in_array = match_stage["_rperm"]["$in"]
-      assert_includes in_array, "user123"
-      assert_includes in_array, "role:Admin"
-      assert_includes in_array, "*"
+      in_array = constraint.build["__aggregation_pipeline"].first["$match"]["$or"].first["_rperm"]["$in"]
+      assert_equal(["user123", "role:Admin", "*"], in_array)
     end
 
-    it "extracts user ID from Parse::User" do
+    it "extracts user ID from Parse::User (role expansion best-effort)" do
       user = Parse::User.new
       user.id = "abc123"
       constraint = Parse::Constraint::ReadableByConstraint.new(:acl.readable_by, user)
-      result = constraint.build
-
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      assert_equal({ "$in" => ["abc123"] }, match_stage["_rperm"])
+      in_array = constraint.build["__aggregation_pipeline"].first["$match"]["$or"].first["_rperm"]["$in"]
+      assert_includes in_array, "abc123"
+      assert_includes in_array, "*"
     end
 
-    it "extracts role name from Parse::Role" do
+    it "extracts role name from Parse::Role (self always included)" do
       role = Parse::Role.new
       role.name = "Editor"
       constraint = Parse::Constraint::ReadableByConstraint.new(:acl.readable_by, role)
-      result = constraint.build
+      in_array = constraint.build["__aggregation_pipeline"].first["$match"]["$or"].first["_rperm"]["$in"]
+      assert_includes in_array, "role:Editor"
+      assert_includes in_array, "*"
+    end
 
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      assert_equal({ "$in" => ["role:Editor"] }, match_stage["_rperm"])
+    it "strict mode (readable_by_exact) suppresses public and missing-field branches" do
+      constraint = Parse::Constraint::ACLReadableByExactConstraint.new(:acl.readable_by_exact, "role:Admin")
+      match = constraint.build["__aggregation_pipeline"].first["$match"]
+      assert_equal({ "_rperm" => { "$in" => ["role:Admin"] } }, match)
     end
   end
 
-  # Test WriteableByConstraint
-  describe "WriteableByConstraint" do
+  # WriteableByConstraint (British spelling) is now an alias of
+  # ACLWritableByConstraint — the previous strict, non-expanding fork is gone.
+  describe "WriteableByConstraint (alias of ACLWritableByConstraint)" do
     it "registers :writeable_by and :writable_by operators" do
       assert_includes Parse::Operation.operators.keys, :writeable_by
       assert_includes Parse::Operation.operators.keys, :writable_by
     end
 
-    it "builds empty array constraint for no write permissions" do
-      constraint = Parse::Constraint::WriteableByConstraint.new(:acl.writeable_by, [])
-      result = constraint.build
-
-      assert result.key?("__aggregation_pipeline")
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      assert match_stage.key?("$or")
+    it ":writeable_by resolves to the same implementation as :writable_by" do
+      assert Parse::Constraint::WriteableByConstraint < Parse::Constraint::ACLWritableByConstraint
     end
 
-    it "builds $in constraint for user ID" do
-      constraint = Parse::Constraint::WriteableByConstraint.new(:acl.writeable_by, "user456")
-      result = constraint.build
+    it "builds explicit-empty match for []" do
+      constraint = Parse::Constraint::WriteableByConstraint.new(:acl.writeable_by, [])
+      assert_equal(
+        [{ "$match" => { "_wperm" => { "$exists" => true, "$eq" => [] } } }],
+        constraint.build["__aggregation_pipeline"],
+      )
+    end
 
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      assert_equal({ "$in" => ["user456"] }, match_stage["_wperm"])
+    it "builds public-inclusive $or for a user ID (writeable == writable now)" do
+      constraint = Parse::Constraint::WriteableByConstraint.new(:acl.writeable_by, "user456")
+      match = constraint.build["__aggregation_pipeline"].first["$match"]
+      assert_equal(
+        { "$or" => [
+          { "_wperm" => { "$in" => ["user456", "*"] } },
+          { "_wperm" => { "$exists" => false } },
+        ] },
+        match,
+      )
     end
   end
 
@@ -160,19 +135,24 @@ class TestAclQueryConstraints < Minitest::Test
       assert_includes Parse::Operation.operators.keys, :not_readable_by
     end
 
-    it "builds $nin constraint" do
+    it "builds $nin constraint including public, with $exists guard" do
       constraint = Parse::Constraint::NotReadableByConstraint.new(:acl.not_readable_by, "user123")
-      result = constraint.build
+      match = constraint.build["__aggregation_pipeline"].first["$match"]
+      # "not readable by user" must also exclude publicly-readable rows, so
+      # "*" is added; the $exists:true guard excludes missing-_rperm (public)
+      # rows that $nin would otherwise match.
+      assert_equal({ "$exists" => true, "$nin" => ["user123", "*"] }, match["_rperm"])
+    end
 
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      assert_equal({ "$nin" => ["user123"] }, match_stage["_rperm"])
+    it "for '*' (not_publicly_readable) excludes only public + missing" do
+      constraint = Parse::Constraint::NotReadableByConstraint.new(:acl.not_readable_by, "*")
+      match = constraint.build["__aggregation_pipeline"].first["$match"]
+      assert_equal({ "$exists" => true, "$nin" => ["*"] }, match["_rperm"])
     end
 
     it "returns empty pipeline for empty array" do
       constraint = Parse::Constraint::NotReadableByConstraint.new(:acl.not_readable_by, [])
       result = constraint.build
-
       assert result.key?("__aggregation_pipeline")
       assert_empty result["__aggregation_pipeline"]
     end
@@ -185,13 +165,10 @@ class TestAclQueryConstraints < Minitest::Test
       assert_includes Parse::Operation.operators.keys, :not_writable_by
     end
 
-    it "builds $nin constraint" do
+    it "builds $nin constraint including public, with $exists guard" do
       constraint = Parse::Constraint::NotWriteableByConstraint.new(:acl.not_writeable_by, "user123")
-      result = constraint.build
-
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      assert_equal({ "$nin" => ["user123"] }, match_stage["_wperm"])
+      match = constraint.build["__aggregation_pipeline"].first["$match"]
+      assert_equal({ "$exists" => true, "$nin" => ["user123", "*"] }, match["_wperm"])
     end
   end
 
@@ -202,25 +179,31 @@ class TestAclQueryConstraints < Minitest::Test
       assert_includes Parse::Operation.operators.keys, :master_key_only
     end
 
-    it "builds constraint for private ACL (true)" do
+    it "private (true) matches explicit-empty _rperm AND _wperm, excluding missing" do
       constraint = Parse::Constraint::PrivateAclConstraint.new(:acl.private_acl, true)
-      result = constraint.build
-
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      # Should have $and with conditions for both _rperm and _wperm being empty
-      assert match_stage.key?("$and")
-      assert_equal 2, match_stage["$and"].length
+      match = constraint.build["__aggregation_pipeline"].first["$match"]
+      assert_equal(
+        { "$and" => [
+          { "_rperm" => { "$exists" => true, "$eq" => [] } },
+          { "_wperm" => { "$exists" => true, "$eq" => [] } },
+        ] },
+        match,
+      )
+      # A missing _rperm is PUBLIC, not private — must NOT appear here.
+      refute_includes match.to_json, '"$exists":false'
     end
 
-    it "builds constraint for non-private ACL (false)" do
+    it "non-private (false) is the exact complement ($nor of the private match)" do
       constraint = Parse::Constraint::PrivateAclConstraint.new(:acl.private_acl, false)
-      result = constraint.build
-
-      pipeline = result["__aggregation_pipeline"]
-      match_stage = pipeline.first["$match"]
-      # Should have $or to match objects with some permissions
-      assert match_stage.key?("$or")
+      match = constraint.build["__aggregation_pipeline"].first["$match"]
+      assert match.key?("$nor")
+      assert_equal(
+        [{ "$and" => [
+          { "_rperm" => { "$exists" => true, "$eq" => [] } },
+          { "_wperm" => { "$exists" => true, "$eq" => [] } },
+        ] }],
+        match["$nor"],
+      )
     end
   end
 

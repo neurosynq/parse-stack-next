@@ -211,8 +211,8 @@ module Parse
     # @example
     #   permissions = ["*", user.id] + user.acl_roles.to_a.map { |n| "role:#{n}" }
     #   pipeline << { "$match" => Parse::ACL.read_predicate(permissions) }
-    def self.read_predicate(permissions, include_public: true)
-      permission_predicate("_rperm", permissions, include_public: include_public)
+    def self.read_predicate(permissions, include_public: true, include_missing: true)
+      permission_predicate("_rperm", permissions, include_public: include_public, include_missing: include_missing)
     end
 
     # Build a MongoDB +$match+-shaped predicate that matches documents
@@ -222,8 +222,8 @@ module Parse
     # @param permissions [Array<String>] permission strings.
     # @param include_public [Boolean] whether to append +"*"+.
     # @return [Hash] a MongoDB +$or+ subexpression.
-    def self.write_predicate(permissions, include_public: true)
-      permission_predicate("_wperm", permissions, include_public: include_public)
+    def self.write_predicate(permissions, include_public: true, include_missing: true)
+      permission_predicate("_wperm", permissions, include_public: include_public, include_missing: include_missing)
     end
 
     # @!visibility private
@@ -231,15 +231,19 @@ module Parse
     # Normalizes the permissions array (string-coerced, deduplicated,
     # +"*"+ appended when +include_public+) and returns the +$or+
     # subexpression.
-    def self.permission_predicate(field, permissions, include_public: true)
+    # @param include_missing [Boolean] when true (default), append the
+    #   +{ field => { "$exists" => false } }+ branch so a missing
+    #   +_rperm+/+_wperm+ (treated as public by Parse Server) also matches.
+    #   Set false for an EXACT match that requires the column to be present
+    #   and to contain one of +permissions+ (the strict/`readable_by_exact`
+    #   surface). When false and only the +$in+ branch remains, the +$or+
+    #   wrapper is dropped for a cleaner +{ field => { "$in" => perms } }+.
+    def self.permission_predicate(field, permissions, include_public: true, include_missing: true)
       perms = Array(permissions).map(&:to_s).reject(&:empty?).uniq
       perms << "*" if include_public && !perms.include?("*")
-      {
-        "$or" => [
-          { field => { "$in" => perms } },
-          { field => { "$exists" => false } },
-        ],
-      }
+      branches = [{ field => { "$in" => perms } }]
+      branches << { field => { "$exists" => false } } if include_missing
+      branches.length == 1 ? branches.first : { "$or" => branches }
     end
     # Determines whether two ACLs or a Parse-ACL hash is equivalent to this object.
     # @example

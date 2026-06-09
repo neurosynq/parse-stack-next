@@ -1,5 +1,349 @@
 ## parse-stack-next Changelog
 
+### 5.5.0
+
+#### Multimodal bytes-fetch path with magic-byte MIME verification
+
+- **NEW**: `Parse::Embeddings::ImageFetch` — the SDK-side image download
+  layer for image embeddings. Downloads through the existing
+  `Parse::File.safe_open_url` SSRF primitive (CIDR blocks, port allowlist,
+  DNS-rebinding re-check, size caps, timeouts — no parallel fetch mechanism),
+  determines the MIME type **exclusively by magic-byte sniffing** of the
+  leading bytes (JPEG / PNG / GIF / WebP), cross-checks the URL extension
+  against the sniffed type, and enforces a configurable
+  `Parse::Embeddings.allowed_image_types` allowlist. The HTTP `Content-Type`
+  header is never consulted, closing the file MIME-laundering gap: a `.jpg`
+  URL serving HTML (or PNG bytes behind a JPEG extension) is refused outright.
+- **NEW**: `embed_image ..., source: :bytes` declaration mode. Where the
+  default `source: :url` forwards a validated URL for the provider to fetch
+  itself (and therefore requires the `trust_provider_url_fetch` sentinel),
+  `:bytes` mode has the SDK download, verify, and metadata-strip the image,
+  then forward it to the provider as a base64 data URI. No third-party URL
+  egress occurs, so the sentinel is not required — but the file's host must
+  still be in `Parse::Embeddings.allowed_image_hosts` (deny-all when empty).
+
+  ```ruby
+  class Post < Parse::Object
+    property :cover_image, :file
+    property :cover_embedding, :vector, dimensions: 1024, provider: :voyage
+    embed_image :cover_image, into: :cover_embedding, source: :bytes
+  end
+  ```
+- **NEW**: EXIF/XMP metadata stripping, **default ON** for the bytes path.
+  User-uploaded photos commonly carry GPS coordinates and device serial
+  numbers; forwarding them to an embedding provider is a PII egress. JPEG
+  APP1 segments (Exif and XMP), PNG `eXIf` chunks, and WebP `EXIF`/`XMP `
+  RIFF chunks (with the VP8X flag bits cleared) are removed before the bytes
+  leave the process. Opt out per declaration with `exif_strip: false` when
+  orientation metadata must be preserved.
+- **NEW**: `Voyage#embed_image` and `Cohere#embed_image` accept
+  `Parse::Embeddings::ImageFetch::FetchedImage` sources alongside URL
+  Strings (forms may be mixed in one batch). Fetched bytes ride Voyage's
+  `image_base64` content row and Cohere's `image_url` data-URI form.
+- **NEW**: `Parse::Embeddings.allowed_image_types=` — MIME allowlist for the
+  bytes path (default JPEG/PNG/GIF/WebP; SVG deliberately excluded as
+  script-capable active content).
+- **ENHANCED**: `Parse::Embeddings.validate_image_url!` accepts
+  `mode: :fetch` for SDK-side downloads — same host allowlist,
+  obfuscated-IP screen, port and CIDR checks as the default `:forward`
+  mode, minus the provider-egress sentinel that doesn't apply when no URL
+  is forwarded.
+
+#### Embedding-model migration tooling
+
+- **NEW**: `Class.reembed!(field:, batch_size:, limit:, where:, only_stale:,
+  save_opts:)` — bulk re-embed for provider/model migrations. Unlike
+  `embed_pending!` (which only fills null vectors), `reembed!` walks every
+  row with objectId-cursor pagination, clears the digest sibling so the
+  save-path recompute cannot elide the provider call, and saves. With
+  `only_stale: true` the walk skips rows whose recorded provenance already
+  matches the current provider, model, and dimensions — making a partially
+  failed migration resumable.
+- **NEW**: `embed` / `embed_image` auto-declare an `<into>_meta` `:object`
+  sibling property recording `{ provider, model, dimensions, modality,
+  embedded_at }` on every recompute (cleared when the source clears).
+  This is the provenance record `reembed!(only_stale: true)` reads, and it
+  tells operational tooling which model produced any stored vector.
+  Override the name with `meta_field:`.
+
+#### Bulk embedding and query-embed caching
+
+- **NEW**: `Parse::Embeddings::BatchEmbedder` — batch-level orchestration
+  for bulk embedding jobs. Wraps any registered provider with batch slicing
+  (defaulting to the provider's own batch-size hint), requests-per-minute
+  pacing between calls, and batch-level exponential backoff with jitter on
+  rate-limit / transient errors (previously backoff lived only inside each
+  provider's single HTTP call). A batch that exhausts its attempts raises
+  `BatchEmbedder::BatchFailed` carrying `batch_index` and `completed_count`
+  so a resumable job knows where to pick up. Supports `retry_on:` exception
+  overrides and an `on_progress:` callback.
+- **NEW**: `Parse::Embeddings::Cache` — process-local embedding cache keyed
+  by `(provider, model, dimensions, input_type, SHA-256(input))`, disabled by
+  default. Dimensions participate in the key so two registrations of the
+  same Matryoshka-capable model at different output widths never serve each
+  other's vectors.
+  `Parse::Embeddings::Cache.enable!(max_entries:, ttl:)` activates an LRU +
+  TTL store (or pass `store:` for a custom backend); repeated identical
+  query embeds through `find_similar(text:)`, `hybrid_search(text:)`, and
+  `Parse::Retrieval.retrieve` then skip the provider round-trip. Cache hits
+  emit the standard `parse.embeddings.embed` notification with
+  `cached: true`, so existing spend subscribers see hits and misses on one
+  stream. The input text is hashed before keying — plaintext queries never
+  land in a shared store.
+
+#### Vector index drift detection
+
+- **NEW**: first-query verification of deployed Atlas vectorSearch indexes.
+  When `find_similar` / `hybrid_search` auto-discovers an index, the SDK now
+  compares the index's `numDimensions` and `similarity` against the
+  `:vector` property declaration, and — when the class registers an
+  `agent_tenant_scope` — confirms the scope field is declared as a
+  `type: "filter"` path (without it, every tenant-scoped
+  `$vectorSearch.filter` fails Atlas-side). Findings are computed once per
+  (class, field, index) per process and governed by
+  `Parse::VectorSearch.index_drift_policy`: `:warn` (default) emits a
+  `[Parse::VectorSearch:DRIFT]` warning on the first check; `:raise` raises
+  `Parse::Core::VectorSearchable::IndexDriftError` on **every** query
+  against the drifted index, so strict deployments never serve degraded
+  results after the first failure; `:ignore` skips verification. An
+  explicit `index:` kwarg is verified best-effort when the catalog's
+  covering index carries the same name (lookup failures never fail the
+  query).
+
+#### Hybrid search hardening
+
+- **FIXED**: on the opt-in native `$rankFusion` path, a scoped (non-master)
+  caller's `_hybrid_score` is now recomputed from the post-ACL visible
+  ordering instead of surfacing the raw fused score. The raw score is
+  materialized before the ACL `$match`, so it encoded a surviving row's
+  rank among rows the caller cannot read — a cross-tenant/cross-ACL
+  inference channel for callers probing with crafted queries. The
+  recomputed score is monotone with the true fused order but is a function
+  of visible rows only. Master-key results and the default client-side RRF
+  path (which ranks from already-filtered rows) are unchanged.
+- **FIXED**: the `$rankFusion` support probe no longer classifies MongoDB
+  authorization errors as "stage unsupported". The probe's
+  unrecognized-stage matching included the broad phrase "is not allowed",
+  which also appears in auth failures ("not allowed to execute command
+  aggregate") and could cache the wrong verdict for the probe TTL. Matching
+  is narrowed to unambiguous unknown-stage phrases; any other failure is
+  treated as supported and the real query surfaces the real error, with
+  the client-side path as the standing fallback.
+
+#### Retrieval spend-cap and filter hardening
+
+- **NEW**: `Parse::Embeddings::SpendCap.configure(..., warn_at: 0.8)` —
+  soft-cap alerting. When a charge pushes a tenant's in-window usage across
+  the given fraction of its hard limit, a
+  `parse.embeddings.spend_cap_warning` ActiveSupport::Notifications event
+  is emitted (`tenant_id`, `used`, `limit`, `window`, `warn_at`,
+  `threshold`), once per crossing and re-arming as the window rolls off —
+  an operator alerting hook that fires BEFORE the hard refuse trips.
+  Disabled unless configured. Note the cap deliberately charges before the
+  query-embed cache lookup, so cache hits bill at full price: it bounds
+  query volume (an abuse control), not just provider spend.
+- **NEW**: `Parse::Embeddings::Cache::MonetaStore` — persistent-L2 adapter
+  for the embedding cache. Wraps any Moneta-compatible store (`[]`/`[]=`,
+  optional `store(key, value, expires:)`) behind the cache's `get`/`set`
+  duck, with key namespacing and TTL forwarding, so
+  `Cache.enable!(store: MonetaStore.new(moneta, ttl: 30 * 24 * 3600))`
+  shares query-embed entries across processes and restarts. Fail-open: a
+  backend error degrades to a cache miss / dropped write, never a failed
+  embed. Cache keys are input hashes — plaintext queries never land in the
+  shared store.
+- **NEW**: embedding spend-cap coverage on every query-embed path. The
+  per-tenant `Parse::Embeddings::SpendCap` was previously charged only at
+  the `semantic_search` agent-tool boundary; direct `find_similar(text:)`,
+  `hybrid_search(text:)`, and `Parse::Retrieval.retrieve` callers bypassed
+  it. The shared query-embed path now charges via
+  `SpendCap.charge_query!` — tenant identity resolves to the ambient
+  `Parse.with_cache_tenant` scope when set, else the shared default bucket.
+  The agent tool wraps its retrieval in the new `SpendCap.with_precharged`
+  block so a query it already charged with per-tenant identity is not
+  double-billed (and admin-exempt queries are not billed to the shared
+  bucket). As before, the cap is a no-op until configured.
+- **NEW**: pointer-value translation for caller-supplied retrieval filters.
+  `Parse::Retrieval.retrieve` (and through it the `semantic_search` agent
+  tool) now rewrites Parse pointer values — `Parse::Pointer` /
+  `Parse::Object` instances and wire-form `{"__type": "Pointer"}` hashes,
+  including inside `$in` / `$eq` / `$ne` operator hashes — into their
+  MongoDB storage form, so `{ owner: some_user }` becomes
+  `{ "_p_owner" => "_User$abc123" }` and actually matches rows. Previously
+  a pointer-valued filter silently matched nothing. Translation runs after
+  the underscore-key gate and filter-field allowlist (callers still cannot
+  name `_p_*` columns directly) and before the tenant-scope fold. The
+  standalone helper is `Parse::Retrieval.translate_pointer_filter_values`.
+- **IMPROVED**: `Parse::Schema::SearchIndexMigrator` auto-includes the
+  model's registered `agent_tenant_scope` field as a `type: "filter"` path
+  when planning or applying `vectorSearch` index declarations. Newly created
+  indexes support tenant-scoped pre-filtering out of the box; existing
+  indexes missing the path surface as `drifted:` in the plan instead of
+  failing at query time.
+
+#### Opt-in Unicode regex matching for text constraints
+
+- **NEW**: `starts_with`, `contains`, `ends_with`, and `like`/`regex` now accept
+  an opt-in `{ value:, unicode: true }` form that appends the `u` (Unicode) flag
+  to the compiled `$options`, enabling correct multibyte case-insensitive
+  matching for accented and non-Latin text (for example `café` matching
+  `CAFÉ`, or CJK characters).
+
+  ```ruby
+  Post.where(:title.starts_with => { value: "café", unicode: true })
+  # => "title": { "$regex": "^café", "$options": "iu" }
+
+  Post.where(:title.like => { value: /café/i, unicode: true })
+  # => "title": { "$regex": "café", "$options": "iu" }
+  ```
+
+  The flag is strictly opt-in: the bare-value forms
+  (`:title.starts_with => "café"`) compile exactly as before with `$options: "i"`,
+  so existing queries are unchanged. The `u` flag is honored by Parse Server
+  8.3.0+ over the REST query interface and by MongoDB 6.1+ on the mongo-direct
+  query path; older Parse Servers reject it, which is why it is never emitted
+  unless requested.
+
+#### ACL permission query hardening
+
+- **FIXED**: `readable_by`, `writable_by`, `readable_by_role`,
+  `writable_by_role`, `publicly_readable`, and `publicly_writable` no longer
+  raise a pipeline-security error when they auto-route through the direct
+  MongoDB path. These constraints compile to an aggregation `$match` on the
+  internal `_rperm` / `_wperm` permission columns, and the internal-fields
+  denylist that protects user-supplied pipelines from referencing
+  server-internal columns was also rejecting these SDK-generated references.
+  The aggregation runner now forwards the `allow_internal_fields` sanction for
+  pipelines built entirely from SDK constraint translation — matching the
+  parity already held by the `results_direct` / `count_direct` /
+  `distinct_direct` helpers — so public-read detection (`publicly_readable`,
+  `readable_by("*")`) and role/user permission filtering work again. The
+  sanction is scoped to SDK-built ACL pipelines only; caller-supplied
+  aggregation pipelines remain subject to the full denylist, so they still
+  cannot reference password hashes, session tokens, or other internal columns.
+- **FIXED**: `Query#count` now routes ACL permission filters
+  (`publicly_readable.count`, `readable_by(...).count`, and friends) through
+  the direct MongoDB path, mirroring `Query#results`. Previously `count` only
+  switched to the direct path for subquery `$lookup` stages, so an ACL count
+  was sent to Parse Server's REST aggregate endpoint, which cannot express a
+  `$match` on `_rperm` / `_wperm`.
+- **FIXED**: the scalar aggregation terminals — `Query#sum`, `#average`,
+  `#min`, `#max`, `#distinct`, and `#count_distinct` — now honor ACL
+  permission filters and scoped queries. They funnel through `Query#aggregate`,
+  which previously only switched to the direct MongoDB path for subquery
+  `$lookup` stages. An ACL filter (`readable_by(...).sum(:plays)`) was sent to
+  Parse Server's REST aggregate endpoint, which cannot express a `$match` on
+  `_rperm` / `_wperm`. More seriously, a **scoped** terminal
+  (`scope_to_user(u).sum(:plays)`, `scope_to_role`, or a `session_token`)
+  reached the same REST endpoint, which is master-key-only and enforces
+  neither ACL nor CLP — so the aggregate ran unscoped as the master key,
+  computing the result over rows the caller cannot read. `Query#aggregate` now
+  routes to mongo-direct whenever the query is scoped or the pipeline
+  references the ACL columns, and **fails closed** (raises
+  `Parse::Query::MongoDirectRequired`) for a scoped terminal when mongo-direct
+  is unavailable, rather than silently bypassing enforcement. The same
+  contract covers the inline-pipeline terminals: a scoped `Query#count` or
+  `Query#results` whose constraints compile to an aggregation pipeline
+  (e.g. `:field.size`) promotes to mongo-direct and fails closed identically
+  instead of falling back to REST `/aggregate`.
+- **FIXED**: `not_publicly_readable` / `not_publicly_writable` (and the
+  `:ACL.not_readable_by` / `:ACL.not_writable_by` constraints) no longer return
+  the rows they are meant to exclude. They compiled to `{ _rperm: { $nin:
+  [...] } }`, and MongoDB's `$nin` matches documents where the field is
+  **absent** — and a missing `_rperm` is treated by Parse Server as public.
+  A security audit using `not_publicly_writable` to find safe objects silently
+  excluded write-exposed (public-by-absence) objects. The constraints now carry
+  an `$exists: true` guard. "Not readable by X" additionally expands the
+  principal's roles and excludes publicly-readable rows (a public row is
+  readable by everyone, so it cannot be "not readable by X").
+- **FIXED**: `readable_by([])` / `writable_by([])` and the `:none` / `nil`
+  forms no longer raise `ArgumentError`; they now compile to the documented
+  "no permissions" match (an explicit empty `_rperm` / `_wperm`). Symbol
+  principals (`:public`, `:everyone`, `:world`) are accepted and map to the
+  public wildcard, matching the String forms.
+- **FIXED**: `PrivateAclConstraint` (`:ACL.private_acl` / `master_key_only`)
+  no longer classifies public-by-absence rows as private. A truly master-key-
+  only object has an explicit empty `_rperm` **and** `_wperm`; a missing
+  column is public, the opposite of private, so the missing-field branch was
+  removed. `private_acl => false` is now the exact complement.
+- **FIXED**: role expansion for `readable_by` / `writable_by` /
+  `readable_by_role` / `writable_by_role` now always includes the role's own
+  name in the permission set. The upward-inheritance walk yields nothing for
+  an unpersisted role (objectId still nil), which previously dropped the role
+  entirely and raised "no valid permissions"; the role's own `role:<name>`
+  entry is now appended idempotently, so persisted roles compile unchanged.
+- **CHANGED**: a mistyped ACL permission no longer vanishes silently. An
+  unrecognized element in a `readable_by` / `writable_by` array (or an
+  unsupported Symbol) now raises `ArgumentError` instead of being dropped from
+  the permission set, which would silently weaken the intended filter.
+- **NEW**: `strict:` option on `readable_by` / `writable_by` /
+  `readable_by_role` / `writable_by_role` (and the `:ACL.readable_by_exact` /
+  `writable_by_exact` / `*_by_role_exact` operators) for an **exact** match —
+  only rows whose `_rperm` / `_wperm` literally contains one of the resolved
+  permissions, with no implicit public `"*"` and no missing-field rows. The
+  default remains inclusive (access-simulation) semantics; `strict: true` is
+  the right choice for ownership and security audits.
+- **NEW**: `Query#not_readable_by` / `#not_writable_by` chained methods, the
+  fluent counterparts to the existing `:ACL.not_readable_by` symbol operators.
+- **BREAKING**: the British-spelled `:ACL.writeable_by` operator now resolves
+  to the same public-inclusive, role-expanding implementation as
+  `:ACL.writable_by`. Previously the one-letter spelling difference selected a
+  separate, strict, non-role-expanding constraint, so `writeable_by` and
+  `writable_by` silently produced different result sets. Code that relied on
+  the old strict behavior of `writeable_by` should pass `strict: true` (or use
+  the `:writable_by_exact` operator).
+
+#### Webhook after_save callback hardening
+
+- **FIXED**: the model's chained `after_save` / `after_create` callbacks now
+  fire exactly once per `afterSave` delivery, even when an app registers both a
+  class-specific handler (`webhook :after_save, MyClass`) and a catch-all
+  handler (`webhook :after_save, "*"`). The webhook endpoint dispatches every
+  trigger to both the class route and the `"*"` route, and the callback chain
+  previously ran inside each route — so an app with both handlers fired its
+  model `after_save` twice (e.g. two emails per save). The chain now runs once,
+  after both routes are dispatched. The existing behavior is otherwise
+  preserved: an `afterSave` for a class with no registered handler never fires
+  model callbacks, and trusted Ruby-initiated saves still skip the webhook-side
+  callbacks so the local `run_callbacks :save` is the single fire.
+- **FIXED**: a chained `after_save` or `after_create` callback that raises
+  during an `afterSave` webhook no longer crashes the webhook endpoint or
+  suppresses the other phase's side effects. Because `afterSave` fires after the
+  object is already persisted and Parse Server discards the response body, the
+  `after_create` and `after_save` phases now run independently and any
+  `StandardError` they raise is logged and swallowed (mirroring Parse Server's
+  own afterSave semantics). A raising `after_create :send_welcome_email` no
+  longer silently skips an unrelated `after_save :reindex`, and an uncaught
+  callback error can no longer return a 500 to Parse Server.
+- **FIXED**: `Parse::Webhooks::Payload#ruby_initiated?` now memoizes a `false`
+  result stably instead of re-deriving it on every call. The prior `||=`
+  memoization recomputed whenever the cached value was `false`, so a stamped
+  `false` could be re-derived inconsistently; the detection result is now cached
+  exactly once.
+
+#### `verify_password` client-side rate-limit parity
+
+- **CHANGED**: `verify_password` now participates in the same client-side login
+  rate-limit as `login`. It calls the rate-limit guard before issuing the
+  request and records the result afterward, keyed on the bare username so
+  failures share a bucket with `login` — an attacker cannot sidestep a `login`
+  lockout by pivoting to the `verify_password` credential oracle. Because the
+  bucket is shared, a run of failed step-up / re-authentication calls counts
+  toward (and can trigger) the primary login lockout for that username. As with
+  `login`, this is a convenience guard, not a security boundary — server-side
+  rate limiting remains the real control.
+
+#### Cloud function results are server-authoritative
+
+- **IMPROVED**: Documented that decoded cloud function results are treated as
+  server-authoritative. A cloud function that returns a Parse object decodes
+  through the same trusted path as every query and `fetch` result, so
+  server-set fields on the returned object (including `sessionToken` on a
+  returned user) are preserved rather than stripped — consistent with how the
+  rest of the SDK hydrates server responses. If a cloud function is expected to
+  echo back third-party-influenced data that you want to sanitize yourself,
+  call it with `raw: true` (`Parse.call_function(name, body, raw: true)`) to
+  receive the undecoded response before any object is built.
+
 ### 5.4.1
 
 #### Webhook after_save callback fix

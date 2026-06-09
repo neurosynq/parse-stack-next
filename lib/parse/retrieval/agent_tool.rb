@@ -108,20 +108,27 @@ module Parse
         score_quantize = (agent.permissions != :admin)
         vector_field = Parse::Agent::MetadataRegistry.searchable_field(cname)
 
-        chunks = Parse::Retrieval.retrieve(
-          query: query,
-          klass: klass,
-          field: vector_field,
-          text_field: resolved_text_field,
-          k: clamp_k(k),
-          filter: filter,
-          vector_filter: vector_filter,
-          chunker: build_chunker(chunk_size, chunk_overlap, chunk_by, max_chunks_per_document),
-          tenant_scope: scope,
-          score_quantize: score_quantize,
-          source_transform: source_projector(agent, cname, scope),
-          **agent.acl_scope_kwargs,
-        )
+        # with_precharged: the cap was charged above with per-tenant
+        # identity (or deliberately skipped for trusted admin agents) —
+        # suppress the generic query-embed charge inside
+        # find_similar/embed_query_text! so the query isn't double-billed
+        # (or admin queries billed to the shared default bucket).
+        chunks = Parse::Embeddings::SpendCap.with_precharged do
+          Parse::Retrieval.retrieve(
+            query: query,
+            klass: klass,
+            field: vector_field,
+            text_field: resolved_text_field,
+            k: clamp_k(k),
+            filter: filter,
+            vector_filter: vector_filter,
+            chunker: build_chunker(chunk_size, chunk_overlap, chunk_by, max_chunks_per_document),
+            tenant_scope: scope,
+            score_quantize: score_quantize,
+            source_transform: source_projector(agent, cname, scope),
+            **agent.acl_scope_kwargs,
+          )
+        end
 
         # Token budget (B4): trim the score-ordered chunk list before
         # building the envelope so `documents` only carries parents whose

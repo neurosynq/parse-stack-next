@@ -73,8 +73,8 @@ class EmbeddingsCohereImageTest < Minitest::Test
     err = assert_raises(ArgumentError) do
       provider.embed_image(["https://1.1.1.1/img.jpg", 12345])
     end
-    assert_match(/sources\[1\] is not a String/, err.message)
-    assert_match(/URL-only/, err.message)
+    assert_match(/sources\[1\] must be a URL String/, err.message)
+    assert_match(/FetchedImage/, err.message)
   end
 
   def test_embed_image_rejects_unknown_input_type

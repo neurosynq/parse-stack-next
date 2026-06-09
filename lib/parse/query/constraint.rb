@@ -191,6 +191,28 @@ module Parse
       self.class.formatted_value(@value)
     end
 
+    # Supports the opt-in `{ value:, unicode: true }` form accepted by the
+    # regex-based constraints ({RegularExpressionConstraint},
+    # {StartsWithConstraint}, {ContainsConstraint}, {EndsWithConstraint}).
+    # When the `unicode` flag is set, the constraint adds the `u` flag to the
+    # compiled `$options`, asking the backend to treat the pattern and subject
+    # as UTF-8 for correct multibyte (e.g. accented or CJK) case-insensitive
+    # matching.
+    #
+    # The `u` flag is only honored by Parse Server 8.3.0+ over REST (older
+    # servers reject it) and by MongoDB 6.1+ on the mongo-direct path; it is
+    # therefore strictly opt-in and never emitted for the bare-value form.
+    #
+    # @param raw [Object] the raw constraint value (`@value`).
+    # @return [Array(Object, Boolean)] the unwrapped value and the unicode flag.
+    # @api private
+    def regex_unicode_option(raw)
+      return [raw, false] unless raw.is_a?(Hash)
+
+      opts = raw.symbolize_keys
+      [opts[:value], opts[:unicode] ? true : false]
+    end
+
     # Registers the default constraint of equality
     register :eq, Constraint
     precedence 100

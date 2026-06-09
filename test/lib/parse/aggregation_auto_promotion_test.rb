@@ -55,14 +55,15 @@ class AggregationAutoPromotionTest < Minitest::Test
     assert_stays_on_rest(gb, :count)
   end
 
-  def test_group_by_stays_on_rest_when_mongodb_disabled
+  def test_group_by_fails_closed_when_scoped_and_mongodb_disabled
     stub_mongodb_enabled!(false)
     @query.session_token = "r:test-session"
     gb = @query.group_by(:artist)
-    # Fail-closed: stays on REST rather than raising NotEnabled at run
-    # time. The integrator gets the (unscoped, master-key-only) REST
-    # response Parse Server would normally serve.
-    assert_stays_on_rest(gb, :count)
+    # Security: a SCOPED aggregation must NOT silently fall back to Parse
+    # Server's REST /aggregate endpoint, which is master-key-only and
+    # enforces neither ACL nor CLP — that would run the query unscoped as
+    # the master key. With mongo-direct unavailable it fails closed.
+    assert_raises(Parse::Query::MongoDirectRequired) { gb.count }
   end
 
   # ---- GroupByDate auto-promotion ---------------------------------------
@@ -98,10 +99,76 @@ class AggregationAutoPromotionTest < Minitest::Test
     assert_distinct_stays_on_rest
   end
 
-  def test_distinct_stays_on_rest_when_mongodb_disabled
+  def test_distinct_fails_closed_when_scoped_and_mongodb_disabled
     stub_mongodb_enabled!(false)
     @query.session_token = "r:test-session"
-    assert_distinct_stays_on_rest
+    # Security: see test_group_by_fails_closed_when_scoped_and_mongodb_disabled.
+    # A scoped distinct cannot fall back to REST /aggregate (unscoped master).
+    assert_raises(Parse::Query::MongoDirectRequired) { @query.distinct(:artist) }
+  end
+
+  # ---- Query#count (aggregation-pipeline branch) -------------------------
+  # `:field.size` compiles to an __aggregation_pipeline marker, forcing
+  # #count and #results through the inline-Aggregation terminals that the
+  # other tests above never reach.
+
+  def test_count_aggregation_promotes_when_session_token_set
+    stub_mongodb_enabled!(true)
+    @query.session_token = "r:test-session"
+    @query.where :tags.size => 2
+    direct_called = false
+    Parse::MongoDB.define_singleton_method(:aggregate) do |_class_name, _pipeline, **_kw|
+      direct_called = true
+      []
+    end
+    @query.count
+    assert direct_called, "expected scoped #count (aggregation branch) to route through mongo-direct"
+  ensure
+    Parse::MongoDB.singleton_class.remove_method(:aggregate) if Parse::MongoDB.singleton_class.method_defined?(:aggregate)
+  end
+
+  def test_count_aggregation_stays_on_rest_when_no_scope
+    stub_mongodb_enabled!(true)
+    @query.where :tags.size => 2
+    response = stub_response([])
+    @mock_client.expect :aggregate_pipeline, response do |_table, _pipeline, **_kw|
+      true
+    end
+    @query.count
+    @mock_client.verify
+  end
+
+  def test_count_aggregation_fails_closed_when_scoped_and_mongodb_disabled
+    stub_mongodb_enabled!(false)
+    @query.session_token = "r:test-session"
+    @query.where :tags.size => 2
+    # Security: same contract as #aggregate / #distinct — a scoped count
+    # must not fall back to REST /aggregate (master-key-only, unenforced).
+    assert_raises(Parse::Query::MongoDirectRequired) { @query.count }
+  end
+
+  # ---- Query#results via execute_aggregation_pipeline --------------------
+
+  def test_results_pipeline_promotes_when_session_token_set
+    stub_mongodb_enabled!(true)
+    @query.session_token = "r:test-session"
+    @query.where :tags.size => 2
+    direct_called = false
+    Parse::MongoDB.define_singleton_method(:aggregate) do |_class_name, _pipeline, **_kw|
+      direct_called = true
+      []
+    end
+    @query.results
+    assert direct_called, "expected scoped #results (pipeline branch) to route through mongo-direct"
+  ensure
+    Parse::MongoDB.singleton_class.remove_method(:aggregate) if Parse::MongoDB.singleton_class.method_defined?(:aggregate)
+  end
+
+  def test_results_pipeline_fails_closed_when_scoped_and_mongodb_disabled
+    stub_mongodb_enabled!(false)
+    @query.session_token = "r:test-session"
+    @query.where :tags.size => 2
+    assert_raises(Parse::Query::MongoDirectRequired) { @query.results }
   end
 
   private

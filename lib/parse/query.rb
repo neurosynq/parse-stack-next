@@ -1252,14 +1252,32 @@ module Parse
         pipeline, has_lookup_stages = build_aggregation_pipeline
         pipeline << { "$count" => "count" }
 
-        # Auto-detect if MongoDB direct is needed
+        # Auto-detect if MongoDB direct is needed. Mirror the routing in
+        # #execute_aggregation_pipeline: a pipeline that references internal
+        # ACL columns (_rperm/_wperm via readable_by/publicly_readable and
+        # friends) MUST run mongo-direct — Parse Server's REST aggregate
+        # endpoint cannot express a $match on those columns — and the
+        # mongo-direct sink must be told the references are sanctioned so
+        # the PipelineSecurity internal-fields denylist lets them through.
+        uses_internal_fields = pipeline_uses_internal_fields?(pipeline)
+        scoped = distinct_query_is_scoped?
         use_mongo_direct = false
-        if has_lookup_stages && defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
+        if defined?(@acl_query_mongo_direct) && !@acl_query_mongo_direct.nil?
+          use_mongo_direct = @acl_query_mongo_direct
+        elsif (scoped || has_lookup_stages || uses_internal_fields) &&
+              defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
           use_mongo_direct = true
+        elsif scoped
+          # Same fail-closed contract as #aggregate / #aggregate_from_query:
+          # a scoped count must not fall back to REST /aggregate, which
+          # would drop the scope and count rows the caller cannot read.
+          raise_scoped_aggregation_requires_mongo_direct!
         end
 
         # Execute aggregation
-        aggregation = Aggregation.new(self, pipeline, verbose: @verbose_aggregate, mongo_direct: use_mongo_direct)
+        aggregation = Aggregation.new(self, pipeline, verbose: @verbose_aggregate,
+                                      mongo_direct: use_mongo_direct,
+                                      allow_internal_fields: uses_internal_fields)
         response = aggregation.execute!
 
         # Extract count from aggregation result
@@ -1801,6 +1819,25 @@ module Parse
       return true if @acl_user
       return true if @acl_role
       false
+    end
+
+    # Fail closed for a scoped aggregation that would otherwise fall back
+    # to REST /aggregate. That endpoint is master-key-only and enforces
+    # neither ACL nor CLP, so letting a scoped query through would silently
+    # run it unscoped as the master key. Every aggregation terminal that
+    # routes a scoped query (aggregate, aggregate_from_query, count,
+    # execute_aggregation_pipeline) raises through here.
+    # @raise [MongoDirectRequired]
+    # @api private
+    def raise_scoped_aggregation_requires_mongo_direct!
+      raise MongoDirectRequired,
+        "[Parse::Query] This scoped aggregation (session_token / " \
+        "scope_to_user / scope_to_role) requires mongo-direct so the " \
+        "SDK can enforce ACL/CLP. Parse Server's REST /aggregate " \
+        "endpoint is master-key-only and enforces neither, so routing " \
+        "it there would silently run unscoped as the master key. " \
+        "Enable mongo-direct via Parse::MongoDB.configure(...), or " \
+        "rewrite without the aggregation terminal."
     end
 
     # Scope a query to a specific user's row-level ACL when it auto-routes
@@ -3464,14 +3501,50 @@ module Parse
         complete_pipeline << { "$limit" => @limit }
       end
 
-      # Auto-detect if mongo_direct is needed (when $inQuery constraints are present and MongoDB is available)
-      use_mongo_direct = mongo_direct
-      if use_mongo_direct.nil? && lookup_stages && lookup_stages.any? && defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
-        use_mongo_direct = true
-      end
-
       # Optimize pipeline by merging consecutive $match stages
       complete_pipeline = deduplicate_consecutive_match_stages(complete_pipeline)
+
+      # Auto-detect whether this aggregation must run via the direct-MongoDB
+      # path instead of Parse Server's REST /aggregate endpoint. Three
+      # independent triggers, each of which REST /aggregate cannot serve:
+      #
+      #   * $inQuery / $notInQuery → $lookup stages (the original trigger).
+      #   * An SDK-injected ACL $match on the internal _rperm / _wperm columns
+      #     (readable_by / publicly_readable / writable_by and friends). Parse
+      #     Server's REST aggregate rejects a $match on those columns.
+      #   * A scoped query (session_token / scope_to_user / scope_to_role).
+      #     REST /aggregate is master-key-only and enforces NEITHER ACL NOR
+      #     CLP, so a scoped aggregate sent over REST silently runs unscoped
+      #     as the master key — leaking sums/min/max/distinct over rows the
+      #     caller cannot read. This is the same enforcement asymmetry the
+      #     #distinct / #count / #results auto-routes already guard against;
+      #     the scalar terminals (sum/average/min/max/count_distinct) all
+      #     funnel through here, so routing them here fixes every one.
+      #
+      # `allow_internal_fields` is forwarded for internal-field pipelines: the
+      # caller-supplied `pipeline` arg was validated above (line ~3343) with
+      # the internal-fields denylist active, so any _rperm/_wperm reference in
+      # the merged pipeline is provably SDK-injected, never user input.
+      uses_internal_fields = pipeline_uses_internal_fields?(complete_pipeline)
+      scoped = distinct_query_is_scoped?
+      use_mongo_direct = mongo_direct
+      if use_mongo_direct.nil?
+        mongo_ready = defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
+        if lookup_stages && lookup_stages.any?
+          use_mongo_direct = true if mongo_ready
+        elsif scoped || uses_internal_fields
+          if mongo_ready
+            use_mongo_direct = true
+          elsif scoped
+            # Fail closed: a scoped aggregation cannot fall back to REST
+            # /aggregate without silently bypassing ACL/CLP (master-key-only
+            # endpoint). Refuse rather than leak unscoped results. Unscoped
+            # internal-field pipelines keep the REST fallback (a master-key
+            # correctness edge, not an enforcement bypass).
+            raise_scoped_aggregation_requires_mongo_direct!
+          end
+        end
+      end
 
       # When the pipeline is bound for direct MongoDB, translate every stage
       # through the direct-MongoDB field rewriter so user-supplied stages
@@ -3484,6 +3557,7 @@ module Parse
       end
 
       Aggregation.new(self, complete_pipeline, verbose: verbose, mongo_direct: use_mongo_direct || false,
+                      allow_internal_fields: uses_internal_fields,
                       raw_values: raw_values, raw_field_names: raw_field_names)
     end
 
@@ -3550,17 +3624,40 @@ module Parse
       # Build pipeline from current query constraints
       pipeline, has_lookup_stages = build_query_aggregate_pipeline
 
+      # `allow_internal_fields` is computed from the SDK-built portion ONLY
+      # (before appending caller stages): build_query_aggregate_pipeline emits
+      # the _rperm/_wperm $match for readable_by/etc., but `additional_stages`
+      # is caller-supplied and NOT validated here, so we must not sanction an
+      # internal-field reference the caller smuggled in. A scoped query still
+      # routes to mongo-direct regardless (so ACL/CLP enforcement runs).
+      uses_internal_fields = pipeline_uses_internal_fields?(pipeline)
+
       # Append any additional stages
       pipeline.concat(additional_stages) if additional_stages.any?
 
-      # Auto-detect if mongo_direct is needed (when $inQuery constraints are present and MongoDB is available)
+      # Same routing contract as #aggregate: $lookup subqueries, an SDK ACL
+      # $match, or a scoped query each require the direct-MongoDB path (REST
+      # /aggregate cannot express _rperm/_wperm and is master-key-only/
+      # unenforced). A scoped query fails closed when mongo-direct is
+      # unavailable rather than silently running unscoped as master.
+      scoped = distinct_query_is_scoped?
       use_mongo_direct = mongo_direct
-      if use_mongo_direct.nil? && has_lookup_stages && defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
-        use_mongo_direct = true
+      if use_mongo_direct.nil?
+        mongo_ready = defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
+        if has_lookup_stages
+          use_mongo_direct = true if mongo_ready
+        elsif scoped || uses_internal_fields
+          if mongo_ready
+            use_mongo_direct = true
+          elsif scoped
+            raise_scoped_aggregation_requires_mongo_direct!
+          end
+        end
       end
 
       # Create Aggregation directly to avoid double-applying constraints
-      Aggregation.new(self, pipeline, verbose: verbose, mongo_direct: use_mongo_direct || false)
+      Aggregation.new(self, pipeline, verbose: verbose, mongo_direct: use_mongo_direct || false,
+                      allow_internal_fields: uses_internal_fields)
     end
 
     private
@@ -3605,6 +3702,16 @@ module Parse
             pipeline << { "$match" => match_stage }
           end
         end
+      end
+
+      # Fold in SDK-built aggregation-pipeline marker stages (the _rperm/_wperm
+      # $match emitted by readable_by/publicly_readable/etc., plus set-equality
+      # and empty_or_nil markers). `compile_where` strips these markers, so
+      # without this extraction an ACL filter on `aggregate_from_query` would
+      # be silently dropped — the same omission that affected `Query#count`.
+      markers = compile_markers
+      if markers.key?("__aggregation_pipeline")
+        markers["__aggregation_pipeline"].each { |stage| pipeline << stage }
       end
 
       # Add $sort stage from order constraints
@@ -3702,19 +3809,35 @@ module Parse
       #    Parse Server blocks these for security - must use MongoDB direct
       use_mongo_direct = false
 
+      # When the SDK-built pipeline references internal ACL columns
+      # (_rperm/_wperm via readable_by/writable_by/publicly_readable and
+      # friends, or _acl), the mongo-direct sink must be told these
+      # references are sanctioned so the PipelineSecurity internal-fields
+      # denylist lets them through. The pipeline here is built entirely
+      # from SDK constraint translation (no caller-supplied stages), so
+      # this is safe — same posture as results_direct/count_direct.
+      uses_internal_fields = pipeline_uses_internal_fields?(pipeline)
+      scoped = distinct_query_is_scoped?
+
       # Check for explicit mongo_direct preference first
       if defined?(@acl_query_mongo_direct) && !@acl_query_mongo_direct.nil?
         use_mongo_direct = @acl_query_mongo_direct
       elsif defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
-        # Auto-detect based on pipeline contents
-        if has_lookup_stages || pipeline_uses_internal_fields?(pipeline)
+        # Auto-detect based on pipeline contents and query scope
+        if scoped || has_lookup_stages || uses_internal_fields
           use_mongo_direct = true
         end
+      elsif scoped
+        # Same fail-closed contract as #aggregate / #aggregate_from_query:
+        # a scoped pipeline must not fall back to REST /aggregate, which
+        # would drop the scope and return rows the caller cannot read.
+        raise_scoped_aggregation_requires_mongo_direct!
       end
 
       # Create Aggregation directly to avoid double-applying constraints
       # The aggregate() method would redundantly add where constraints again
-      Aggregation.new(self, pipeline, verbose: @verbose_aggregate, mongo_direct: use_mongo_direct)
+      Aggregation.new(self, pipeline, verbose: @verbose_aggregate, mongo_direct: use_mongo_direct,
+                      allow_internal_fields: uses_internal_fields)
     end
 
     # Check if the pipeline references internal Parse fields that require MongoDB direct access
@@ -5454,23 +5577,38 @@ module Parse
     # Strings are used as-is (user IDs or "role:RoleName" format).
     # Use "public" for public access, "none" or [] for no read permissions.
     #
-    # @param permission [Parse::User, Parse::Role, String, Array] the permission to check
+    # @param permission [Parse::User, Parse::Role, Parse::Pointer, String, Symbol, Array]
+    #   the permission to check. A `Parse::User` (or User pointer) expands to
+    #   the user's objectId plus every role they inherit; a `Parse::Role` (or
+    #   role name String / `:ACL.readable_by_role` form) expands up the role
+    #   hierarchy. `"public"` / `:public` / `:everyone` / `:world` map to the
+    #   `"*"` wildcard. `"none"` / `:none` / `[]` / `nil` match objects with no
+    #   read permissions (explicit empty `_rperm`).
     # @param mongo_direct [Boolean] if true, forces MongoDB direct query. If nil (default),
     #   auto-detects based on query complexity. Set to false to force Parse Server aggregation.
+    # @param strict [Boolean] when false (default), the match is **inclusive**:
+    #   it ALSO returns publicly-readable rows (`_rperm` contains `"*"`) and
+    #   rows with a missing `_rperm` (public by absence), because those are
+    #   genuinely readable by the principal. This is access-simulation
+    #   semantics ("what can this principal read"). Pass `strict: true` for an
+    #   **exact** match — only rows whose `_rperm` literally contains one of
+    #   the resolved permissions, with no public/missing rows — which is what
+    #   an ownership or security audit wants ("which rows explicitly grant
+    #   this principal"). Equivalent to the `:ACL.readable_by_exact` operator.
     # @return [Parse::Query] returns self for method chaining
     # @note This uses MongoDB aggregation pipeline because Parse Server restricts
     #   direct queries on internal ACL fields (_rperm/_wperm).
     # @example
-    #   Song.query.readable_by("user123")           # Objects readable by user ID
-    #   Song.query.readable_by("role:Admin")        # Objects readable by Admin role
-    #   Song.query.readable_by(current_user)        # Objects readable by user object
-    #   Song.query.readable_by("public")            # Publicly readable objects
-    #   Song.query.readable_by("none")              # Objects with no read permissions
-    #   Song.query.readable_by([])                  # Objects with no read permissions (empty ACL)
-    #   Song.query.readable_by([], mongo_direct: true)  # Force MongoDB direct query
-    def readable_by(permission, mongo_direct: nil)
+    #   Song.query.readable_by("user123")               # readable by user ID (+ public)
+    #   Song.query.readable_by("role:Admin")            # readable by Admin role (+ public)
+    #   Song.query.readable_by(current_user)            # by user object, roles expanded (+ public)
+    #   Song.query.readable_by(:public)                 # publicly readable objects
+    #   Song.query.readable_by("none")                  # objects with no read permissions
+    #   Song.query.readable_by([])                      # objects with no read permissions (empty ACL)
+    #   Song.query.readable_by("role:Admin", strict: true)  # ONLY rows that explicitly grant Admin
+    def readable_by(permission, mongo_direct: nil, strict: false)
       @acl_query_mongo_direct = mongo_direct unless mongo_direct.nil?
-      where(:ACL.readable_by => permission)
+      where((strict ? :ACL.readable_by_exact : :ACL.readable_by) => permission)
       self
     end
 
@@ -5478,14 +5616,16 @@ module Parse
     #
     # @param role_name [Parse::Role, String, Array] the role name(s) to check
     # @param mongo_direct [Boolean] if true, forces MongoDB direct query.
+    # @param strict [Boolean] when true, exact match only — no implicit public
+    #   `"*"` and no missing-`_rperm` rows. See {#readable_by}.
     # @return [Parse::Query] returns self for method chaining
     # @example
     #   Song.query.readable_by_role("Admin")              # Objects readable by Admin role
     #   Song.query.readable_by_role(["Admin", "Editor"])  # Objects readable by Admin or Editor
     #   Song.query.readable_by_role(admin_role)           # Objects readable by Role object
-    def readable_by_role(role_name, mongo_direct: nil)
+    def readable_by_role(role_name, mongo_direct: nil, strict: false)
       @acl_query_mongo_direct = mongo_direct unless mongo_direct.nil?
-      where(:ACL.readable_by_role => role_name)
+      where((strict ? :ACL.readable_by_role_exact : :ACL.readable_by_role) => role_name)
       self
     end
 
@@ -5493,23 +5633,27 @@ module Parse
     # Strings are used as-is (user IDs or "role:RoleName" format).
     # Use "public" for public access, "none" or [] for no write permissions.
     #
-    # @param permission [Parse::User, Parse::Role, String, Array] the permission to check
+    # @param permission [Parse::User, Parse::Role, Parse::Pointer, String, Symbol, Array]
+    #   the permission to check. See {#readable_by} for value coercion and
+    #   role expansion.
     # @param mongo_direct [Boolean] if true, forces MongoDB direct query. If nil (default),
     #   auto-detects based on query complexity. Set to false to force Parse Server aggregation.
+    # @param strict [Boolean] when true, exact match only — no implicit public
+    #   `"*"` and no missing-`_wperm` rows. See {#readable_by}.
     # @return [Parse::Query] returns self for method chaining
     # @note This uses MongoDB aggregation pipeline because Parse Server restricts
     #   direct queries on internal ACL fields (_rperm/_wperm).
     # @example
-    #   Song.query.writable_by("user123")           # Objects writable by user ID
-    #   Song.query.writable_by("role:Admin")        # Objects writable by Admin role
-    #   Song.query.writable_by(current_user)        # Objects writable by user object
-    #   Song.query.writable_by("public")            # Publicly writable objects
-    #   Song.query.writable_by("none")              # Objects with no write permissions
-    #   Song.query.writable_by([])                  # Objects with no write permissions (empty ACL)
-    #   Song.query.writable_by([], mongo_direct: true)  # Force MongoDB direct query
-    def writable_by(permission, mongo_direct: nil)
+    #   Song.query.writable_by("user123")               # writable by user ID (+ public)
+    #   Song.query.writable_by("role:Admin")            # writable by Admin role (+ public)
+    #   Song.query.writable_by(current_user)            # by user object, roles expanded (+ public)
+    #   Song.query.writable_by(:public)                 # Publicly writable objects
+    #   Song.query.writable_by("none")                  # objects with no write permissions
+    #   Song.query.writable_by([])                      # objects with no write permissions (empty ACL)
+    #   Song.query.writable_by("role:Admin", strict: true)  # ONLY rows that explicitly grant Admin
+    def writable_by(permission, mongo_direct: nil, strict: false)
       @acl_query_mongo_direct = mongo_direct unless mongo_direct.nil?
-      where(:ACL.writable_by => permission)
+      where((strict ? :ACL.writable_by_exact : :ACL.writable_by) => permission)
       self
     end
 
@@ -5517,14 +5661,16 @@ module Parse
     #
     # @param role_name [Parse::Role, String, Array] the role name(s) to check
     # @param mongo_direct [Boolean] if true, forces MongoDB direct query.
+    # @param strict [Boolean] when true, exact match only — no implicit public
+    #   `"*"` and no missing-`_wperm` rows. See {#readable_by}.
     # @return [Parse::Query] returns self for method chaining
     # @example
     #   Song.query.writable_by_role("Admin")              # Objects writable by Admin role
     #   Song.query.writable_by_role(["Admin", "Editor"])  # Objects writable by Admin or Editor
     #   Song.query.writable_by_role(admin_role)           # Objects writable by Role object
-    def writable_by_role(role_name, mongo_direct: nil)
+    def writable_by_role(role_name, mongo_direct: nil, strict: false)
       @acl_query_mongo_direct = mongo_direct unless mongo_direct.nil?
-      where(:ACL.writable_by_role => role_name)
+      where((strict ? :ACL.writable_by_role_exact : :ACL.writable_by_role) => role_name)
       self
     end
 
@@ -5598,6 +5744,38 @@ module Parse
     end
 
     alias_method :master_key_only, :private_acl
+
+    # Find objects that are NOT readable by the given principal — i.e. hidden
+    # from them. Excludes rows readable by the principal directly, via any role
+    # they inherit, OR publicly (a public row is readable by everyone), and
+    # excludes rows with a missing `_rperm` (public by absence).
+    #
+    # @param permission [Parse::User, Parse::Role, Parse::Pointer, String, Symbol, Array]
+    #   the principal to hide from. See {#readable_by} for value coercion.
+    # @param mongo_direct [Boolean] if true, forces MongoDB direct query.
+    # @return [Parse::Query] returns self for method chaining
+    # @example
+    #   Song.query.not_readable_by(current_user).results   # hidden from this user
+    def not_readable_by(permission, mongo_direct: nil)
+      @acl_query_mongo_direct = mongo_direct unless mongo_direct.nil?
+      where(:ACL.not_readable_by => permission)
+      self
+    end
+
+    # Find objects that are NOT writable by the given principal. See
+    # {#not_readable_by} for the exclusion semantics (direct, role, public).
+    #
+    # @param permission [Parse::User, Parse::Role, Parse::Pointer, String, Symbol, Array]
+    #   the principal to exclude. See {#readable_by} for value coercion.
+    # @param mongo_direct [Boolean] if true, forces MongoDB direct query.
+    # @return [Parse::Query] returns self for method chaining
+    # @example
+    #   Song.query.not_writable_by("role:Admin").results
+    def not_writable_by(permission, mongo_direct: nil)
+      @acl_query_mongo_direct = mongo_direct unless mongo_direct.nil?
+      where(:ACL.not_writable_by => permission)
+      self
+    end
 
     # Find objects that are NOT publicly readable.
     # Matches objects where _rperm does NOT contain "*".
@@ -5728,8 +5906,19 @@ module Parse
     #   aggregate endpoint (PS 9.9.0+). Has no effect on the mongo-direct path.
     # @param raw_field_names [Boolean] when true, passes +rawFieldNames: true+ to the Parse Server
     #   REST aggregate endpoint (PS 9.9.0+). Has no effect on the mongo-direct path.
+    # @param allow_internal_fields [Boolean] when true, the mongo-direct path
+    #   forwards +allow_internal_fields: true+ to {Parse::MongoDB.aggregate} so
+    #   SDK-built ACL `$match` stages that legitimately reference +_rperm+ /
+    #   +_wperm+ (emitted by {Parse::Query#readable_by}, +#publicly_readable+,
+    #   and friends) pass the pipeline-security internal-fields denylist —
+    #   matching the parity already held by +results_direct+ / +count_direct+ /
+    #   +distinct_direct+. Set +true+ ONLY when this Aggregation's pipeline was
+    #   built entirely from SDK constraint translation (no caller-supplied
+    #   stages); the credential-field guard (`_hashed_password`, session tokens,
+    #   auth data) is what +allow_internal_fields+ relaxes, so it must never be
+    #   set on a pipeline that interpolates user input. Defaults to +false+.
     def initialize(query, pipeline, verbose: nil, mongo_direct: false, max_time_ms: nil,
-                   raw_values: false, raw_field_names: false)
+                   raw_values: false, raw_field_names: false, allow_internal_fields: false)
       @query = query
       @pipeline = pipeline
       @cached_response = nil
@@ -5737,6 +5926,7 @@ module Parse
       @max_time_ms = max_time_ms
       @raw_values = raw_values
       @raw_field_names = raw_field_names
+      @allow_internal_fields = allow_internal_fields
       # Use provided verbose setting, or fall back to query's verbose_aggregate setting
       @verbose = verbose.nil? ? @query.instance_variable_get(:@verbose_aggregate) : verbose
     end
@@ -5789,7 +5979,8 @@ module Parse
       # honors it on the mongo-direct path too (parity with results_direct /
       # count_direct / distinct_direct).
       hint = @query.instance_variable_get(:@hint)
-      Parse::MongoDB.aggregate(table, @pipeline, max_time_ms: max_time_ms, hint: hint, **auth_kwargs)
+      Parse::MongoDB.aggregate(table, @pipeline, max_time_ms: max_time_ms, hint: hint,
+                               allow_internal_fields: @allow_internal_fields, **auth_kwargs)
     end
 
     # Returns processed results from the aggregation.

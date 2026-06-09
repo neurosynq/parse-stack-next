@@ -39,17 +39,23 @@ module Parse
         raise NotImplementedError, "#{self.class}#embed_text must be implemented"
       end
 
-      # @param sources [Array<URI, IO, String>] image sources — URI for
-      #   remote, IO for streamed bytes, String for base64. Concrete
-      #   providers document which forms they accept. In v5.1 (URL-only
-      #   path), every source is a raw `String` URL forwarded unchanged
-      #   from the managed path: {Parse::Core::EmbedManaged} deliberately
-      #   does NOT validate before calling the provider (validating there
-      #   would double-resolve every URL). The concrete `embed_image`
-      #   override is therefore responsible for calling
-      #   {Parse::Embeddings.validate_image_url!} (passing `allow_insecure:`
-      #   through) before egress — see the bundled Voyage/Cohere providers,
-      #   which validate internally.
+      # @param sources [Array<String, Parse::Embeddings::ImageFetch::FetchedImage>]
+      #   image sources. Two supported forms (mixable within a batch):
+      #
+      #   * `String` URL (v5.1 URL-forwarding path) — forwarded
+      #     unchanged from the managed path: {Parse::Core::EmbedManaged}
+      #     deliberately does NOT validate before calling the provider
+      #     (validating there would double-resolve every URL). The
+      #     concrete `embed_image` override is therefore responsible for
+      #     calling {Parse::Embeddings.validate_image_url!} (passing
+      #     `allow_insecure:` through) before egress — see the bundled
+      #     Voyage/Cohere providers, which validate internally.
+      #   * {Parse::Embeddings::ImageFetch::FetchedImage} (v5.5 bytes
+      #     path) — bytes the SDK already downloaded via
+      #     {Parse::File.safe_open_url}, magic-byte-verified, and
+      #     EXIF-stripped. Concrete overrides forward
+      #     `fetched.to_data_uri` in their wire body's base64 slot and
+      #     skip URL validation (there is no provider-side fetch).
       # @param input_type [Symbol] `:search_query` or `:search_document`,
       #   parallel to {#embed_text}.
       # @param allow_insecure [Boolean] **contract kwarg** —

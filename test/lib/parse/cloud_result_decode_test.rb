@@ -101,4 +101,42 @@ class TestCloudResultDecode < Minitest::Test
     resp = Resp.new("raw-string-body")
     assert_equal "raw-string-body", Parse._extract_cloud_result(resp)
   end
+
+  # ---------------------------------------------------------------------------
+  # Server-authoritative decode: a cloud __type:"Object" envelope hydrates
+  # through the SAME trusted path as every query / fetch result, so server-set
+  # credential-shaped keys are PRESERVED rather than stripped. Filtering them
+  # here would make cloud results stricter than the rest of the SDK.
+  # ---------------------------------------------------------------------------
+
+  def test_user_envelope_preserves_session_token
+    # Mirrors a cloud function that returns `request.user`: the resulting
+    # Parse::User must keep its server-set sessionToken (trusted-init does not
+    # filter PROTECTED_INITIALIZE_KEYS), exactly as a query/fetch would.
+    enc = { "__type" => "Object", "className" => "_User",
+            "objectId" => "u1", "username" => "alice", "sessionToken" => "r:tok123" }
+    user = decode(enc)
+    assert_kind_of Parse::User, user
+    assert_equal "u1", user.id
+    assert_equal "alice", user.username
+    assert_equal "r:tok123", user.session_token,
+                 "cloud-decoded user must retain its server-set sessionToken (trusted-init)"
+  end
+
+  def test_untrusted_new_strips_session_token_unlike_cloud_decode
+    # The contrast that justifies leaving cloud decode on the trusted path:
+    # untrusted mass-assignment (Klass.new) DROPS the same protected key, so
+    # filtering cloud results would diverge from query/fetch hydration.
+    user = Parse::User.new("username" => "bob", "sessionToken" => "r:should_strip")
+    assert_nil user.session_token,
+               "untrusted Parse::User.new must NOT accept a mass-assigned sessionToken"
+  end
+
+  def test_extract_cloud_result_preserves_session_token_through_unwrap
+    enc = { "__type" => "Object", "className" => "_User",
+            "objectId" => "u1", "username" => "alice", "sessionToken" => "r:tok123" }
+    user = Parse._extract_cloud_result(Resp.new({ "result" => enc }))
+    assert_kind_of Parse::User, user
+    assert_equal "r:tok123", user.session_token
+  end
 end

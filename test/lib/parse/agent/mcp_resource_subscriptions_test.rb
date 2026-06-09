@@ -120,6 +120,39 @@ class SubAgentStub
   end
 end
 
+# Scoped variant of SubAgentStub that ALSO exposes the two surfaces the CLP
+# and agent_hidden(except:) branches of Tools.assert_class_accessible! read:
+# `acl_permission_strings` and `auth_context`. Kept as a SEPARATE class on
+# purpose — the base SubAgentStub must NOT respond to `acl_permission_strings`,
+# or every existing manager/dispatcher test would enter the CLP branch, hit an
+# unseeded CLPScope cache (`:unresolvable` -> fail-closed), and turn red. Only
+# the gate tests that seed the CLP cache use this variant.
+class ScopedSubAgentStub < SubAgentStub
+  # @param permission_strings [Array<String>, nil] the agent's ACL claim set
+  #   ("*", a userObjectId, "role:Name", ...). nil models a master-key posture
+  #   (CLPScope.permits? short-circuits to true before any lookup).
+  # @param using_master_key [Boolean] the value auth_context[:using_master_key]
+  #   reports — the only axis the agent_hidden(except: :master_key) gate keys on.
+  def initialize(permission_strings: ["*"], using_master_key: false, **kwargs)
+    super(**kwargs)
+    @permission_strings = permission_strings
+    @using_master_key   = using_master_key
+  end
+
+  # Mirrors Parse::Agent#acl_permission_strings: nil for a master-key posture
+  # (the CLP gate's bypass), else the claim set checked against the class CLP.
+  def acl_permission_strings
+    @permission_strings
+  end
+
+  # Mirrors Parse::Agent#auth_context. Only :using_master_key is consulted by
+  # the hidden gate; the rest of the hash is filler for shape parity.
+  def auth_context
+    { type: @using_master_key ? :master_key : :session_token,
+      using_master_key: @using_master_key, identity: nil }
+  end
+end
+
 # ---------------------------------------------------------------------------
 # MCPSubscriptions module-function tests (URI + credential derivation)
 # ---------------------------------------------------------------------------
@@ -435,6 +468,140 @@ class MCPSubscriptionsManagerTest < Minitest::Test
 end
 
 # ---------------------------------------------------------------------------
+# Authorization-gate parity tests: the subscribe path must run the SAME
+# Tools.assert_class_accessible! gate as the read path — agent_hidden (via
+# MetadataRegistry.hidden?), the per-agent `classes:` allowlist (covered by the
+# Manager tests above), AND the class-level-permissions (CLP) branch. These
+# tests drive the REAL gate (no stub on assert_class_accessible!) so the CLP
+# branch and the agent_hidden(except: :master_key) axis actually execute, and
+# assert the security invariant that NO LiveQuery socket opens on a denial.
+# ---------------------------------------------------------------------------
+class MCPSubscriptionsAuthorizationGateTest < Minitest::Test
+  M = Parse::Agent::MCPSubscriptions
+
+  def setup
+    @lq  = FakeLQClient.new
+    @mgr = M::Manager.new(supported: true, live_query_client: @lq, debounce_interval: 0)
+    # The CLP gate reads Parse::CLPScope's process-global cache. Reset it so a
+    # seeded fixture here never leaks into (or inherits from) another test.
+    Parse::CLPScope.reset_cache!
+    Parse::CLPScope.reset_warning_state!
+  end
+
+  def teardown
+    Parse::CLPScope.reset_cache!
+    Parse::CLPScope.reset_warning_state!
+  end
+
+  # --- CLP branch of assert_class_accessible! (scoped agent) --------------
+
+  def test_subscribe_refused_when_clp_denies_op_for_scope
+    # CLP grants `count` only to role:Admin. A Reader-scoped agent's claim set
+    # ("*", "role:Reader") doesn't satisfy it, so the gate raises AccessDenied
+    # (kind: :clp_denied) BEFORE any credential derivation or socket open.
+    Parse::CLPScope.__cache_put("Post", clp: { "count" => { "role:Admin" => true } })
+    agent = ScopedSubAgentStub.new(session_token: "r:tok",
+                                   permission_strings: ["*", "role:Reader"])
+    err = assert_raises(Parse::Agent::AccessDenied) do
+      @mgr.subscribe(session_id: "s1", uri: "parse://Post/count", agent: agent)
+    end
+    assert_equal :clp_denied, err.kind
+    assert_equal 0, @lq.subscriptions.size, "no socket opens when CLP refuses the op"
+    assert_equal 0, @mgr.subscription_count
+  end
+
+  def test_subscribe_allowed_when_clp_permits_op_for_scope
+    # Same denying CLP, but the agent's claim set now includes role:Admin, so
+    # CLP permits, the gate passes, and the socket opens with session creds.
+    Parse::CLPScope.__cache_put("Post", clp: { "count" => { "role:Admin" => true } })
+    agent = ScopedSubAgentStub.new(session_token: "r:tok",
+                                   permission_strings: ["role:Admin"])
+    assert @mgr.subscribe(session_id: "s1", uri: "parse://Post/count", agent: agent)
+    assert_equal 1, @lq.subscriptions.size
+    assert_equal({ session_token: "r:tok" }, @lq.last.creds)
+  end
+
+  def test_subscribe_clp_op_is_derived_from_uri_verb
+    # The CLP op mirrors the read path: `count` gates on :count, `samples` on
+    # :find. A CLP that makes count public but find Admin-only proves the op
+    # comes from the URI verb — the same public-only scope is admitted for
+    # count and refused for samples.
+    Parse::CLPScope.__cache_put("Post",
+                                clp: { "count" => { "*" => true },
+                                       "find"  => { "role:Admin" => true } })
+    public_agent = ScopedSubAgentStub.new(session_token: "r:tok", permission_strings: ["*"])
+    assert @mgr.subscribe(session_id: "s1", uri: "parse://Post/count", agent: public_agent)
+    err = assert_raises(Parse::Agent::AccessDenied) do
+      @mgr.subscribe(session_id: "s1", uri: "parse://Post/samples", agent: public_agent)
+    end
+    assert_equal :clp_denied, err.kind
+    assert_equal 1, @lq.subscriptions.size, "only the permitted (count) subscribe opened a socket"
+  end
+
+  def test_subscribe_master_posture_bypasses_clp
+    # A CLP locked to nobody-but-master (`count: {}`) is in cache, but a
+    # master-key posture reports acl_permission_strings => nil, which
+    # CLPScope.permits? short-circuits to true before any lookup — the same
+    # bypass contract as the read path. The socket opens with master creds.
+    Parse::CLPScope.__cache_put("Post", clp: { "count" => {} })
+    master = ScopedSubAgentStub.new(permission_strings: nil, using_master_key: true)
+    assert @mgr.subscribe(session_id: "s1", uri: "parse://Post/count", agent: master)
+    assert_equal({ use_master_key: true }, @lq.last.creds)
+  end
+
+  # --- agent_hidden gate via MetadataRegistry.hidden? ---------------------
+
+  def test_subscribe_refused_for_globally_hidden_session_class
+    # The marquee scenario: parse://_Session/count. _Session is agent_hidden by
+    # default (the session-token store — PII). It must be refused through
+    # MetadataRegistry.hidden? before any socket opens, even for a master-key
+    # agent, since plain agent_hidden (no `except:`) admits no one — otherwise
+    # subscribe becomes a session change/timing oracle on a class the tool
+    # surface refuses to even list.
+    assert Parse::Agent::MetadataRegistry.hidden?("_Session"),
+           "_Session must be registered agent_hidden for this test to be meaningful"
+    assert_raises(Parse::Agent::AccessDenied) do
+      @mgr.subscribe(session_id: "s1", uri: "parse://_Session/count", agent: SubAgentStub.new)
+    end
+    assert_equal 0, @lq.subscriptions.size, "no socket opens for a hidden class"
+    assert_equal 0, @mgr.subscription_count
+  end
+
+  def test_subscribe_hidden_except_master_key_refuses_session_but_permits_master
+    # agent_hidden(except: :master_key) is the "user-facing MCP never sees it,
+    # dev-MCP can" axis — the ONLY place auth_context[:using_master_key] flips
+    # the gate's outcome. Register a throwaway hidden-except-master class and
+    # assert both sides of the axis.
+    hidden = Object.new
+    def hidden.parse_class; "VaultDoc"; end
+    def hidden.name; "VaultDoc"; end
+    Parse::Agent::MetadataRegistry.register_hidden_class(hidden, except: :master_key)
+    begin
+      assert Parse::Agent::MetadataRegistry.hidden?("VaultDoc")
+
+      # Session-bound (non-master) agent: refused — using_master_key is false,
+      # so the master-key exception does not apply.
+      session_agent = ScopedSubAgentStub.new(session_token: "r:tok",
+                                             permission_strings: ["*"],
+                                             using_master_key: false)
+      assert_raises(Parse::Agent::AccessDenied) do
+        @mgr.subscribe(session_id: "s1", uri: "parse://VaultDoc/count", agent: session_agent)
+      end
+      assert_equal 0, @lq.subscriptions.size, "session agent opens no socket on a hidden class"
+
+      # Master-key agent: the except: :master_key bypass admits it; the socket
+      # opens with master creds.
+      master_agent = ScopedSubAgentStub.new(permission_strings: nil, using_master_key: true)
+      assert @mgr.subscribe(session_id: "s2", uri: "parse://VaultDoc/count", agent: master_agent)
+      assert_equal 1, @lq.subscriptions.size
+      assert_equal({ use_master_key: true }, @lq.last.creds)
+    ensure
+      Parse::Agent::MetadataRegistry.unregister_hidden_class(hidden)
+    end
+  end
+end
+
+# ---------------------------------------------------------------------------
 # Dispatcher integration: capability negotiation + subscribe/unsubscribe routing
 # ---------------------------------------------------------------------------
 class MCPSubscriptionsDispatcherTest < Minitest::Test
@@ -546,6 +713,17 @@ class MCPSubscriptionsDispatcherTest < Minitest::Test
     # Manager-level test asserts the raise, this asserts the wire error code.
     @agent = SubAgentStub.new(correlation_id: "sess-1", permitted: false)
     res = call_method("resources/subscribe", { "uri" => "parse://Post/count" })
+    assert_equal(-32_602, res[:body]["error"]["code"])
+    assert_equal 0, @manager.subscription_count
+    assert_equal 0, @lq.subscriptions.size
+  end
+
+  def test_resources_subscribe_hidden_class_is_invalid_params
+    # parse://_Session/count routes through the REAL dispatcher; the
+    # agent_hidden gate (MetadataRegistry.hidden?) refuses it and the dispatcher
+    # maps AccessDenied -> JSON-RPC -32602, opening no socket. Locks the wire
+    # error code for a hidden class — the Manager-level test asserts the raise.
+    res = call_method("resources/subscribe", { "uri" => "parse://_Session/count" })
     assert_equal(-32_602, res[:body]["error"]["code"])
     assert_equal 0, @manager.subscription_count
     assert_equal 0, @lq.subscriptions.size

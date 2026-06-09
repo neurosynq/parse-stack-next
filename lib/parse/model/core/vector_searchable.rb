@@ -55,6 +55,22 @@ module Parse
       # field and the caller didn't pass an explicit `index:` kwarg.
       class IndexNotResolved < ArgumentError; end
 
+      # Raised (under `Parse::VectorSearch.index_drift_policy = :raise`)
+      # when first-query verification finds the deployed vectorSearch
+      # index disagreeing with the model declaration — wrong
+      # `numDimensions`, wrong `similarity`, or a registered
+      # tenant-scope field missing from the index's `filter` paths.
+      # Under the default `:warn` policy the same findings emit a
+      # single `[Parse::VectorSearch:DRIFT]` warning instead.
+      class IndexDriftError < StandardError
+        # @return [Array<String>] human-readable drift findings.
+        attr_reader :findings
+        def initialize(message, findings: [])
+          @findings = findings
+          super(message)
+        end
+      end
+
       # Raised by the `find_similar(text:)` overload when the resolved
       # `:vector` property has no `provider:` (and therefore no way to
       # turn `text:` into a query vector). Distinct from
@@ -367,13 +383,23 @@ module Parse
                 "on the property, or pass an explicit `vector:`."
         end
         provider = Parse::Embeddings.provider(provider_name)
-        vectors = provider.embed_text([text], input_type: :search_query)
-        unless vectors.is_a?(Array) && vectors.length == 1 && vectors.first.is_a?(Array)
-          raise Parse::Embeddings::InvalidResponseError,
-                "#{self}.find_similar: provider #{provider_name.inspect} did not return " \
-                "a single vector for `text:` (got #{vectors.inspect[0, 80]})."
-        end
-        vectors.first
+        # Spend cap: every query-embed path (find_similar(text:),
+        # hybrid_search(text:), Retrieval.retrieve) funnels through this
+        # method, so charging here closes the "direct callers bypass the
+        # cap" gap. No-op when no limit is configured, or when an
+        # upstream caller (the semantic_search agent tool) has already
+        # charged with per-tenant identity (SpendCap.with_precharged).
+        #
+        # Deliberate: the charge runs BEFORE the cache lookup, so cache
+        # hits bill at full price. The cap bounds query *volume* (an
+        # abuse/probing control), not just provider spend — a caller
+        # replaying one cached query must not get unlimited throughput.
+        Parse::Embeddings::SpendCap.charge_query!(text)
+        # Query-embed cache: repeated identical queries skip the
+        # provider round-trip when Parse::Embeddings::Cache.enable! has
+        # been called; pass-through (with the provider's own response
+        # validation preserved) when disabled.
+        Parse::Embeddings::Cache.fetch_vector(provider, text, input_type: :search_query)
       end
 
       def coerce_query_vector(vector)
@@ -387,7 +413,10 @@ module Parse
       end
 
       def resolve_vector_index!(field, explicit_index)
-        return explicit_index if explicit_index && !explicit_index.to_s.empty?
+        if explicit_index && !explicit_index.to_s.empty?
+          verify_explicit_vector_index(field, explicit_index.to_s)
+          return explicit_index
+        end
         begin
           require_relative "../../atlas_search"
         rescue LoadError
@@ -402,7 +431,127 @@ module Parse
                 "#{parse_class}.#{field}; pass index: explicitly or create one " \
                 "via Parse::AtlasSearch::IndexCatalog.create_index."
         end
+        verify_vector_index!(field, idx)
         (idx["name"] || idx[:name]).to_s
+      end
+
+      # Best-effort drift verification for an explicitly named `index:`.
+      # The auto-discovery path verifies the index it resolves; an
+      # explicit kwarg would otherwise skip verification entirely. Look
+      # the field's covering index up in the catalog and verify it when
+      # its name matches the explicit one. Lookup failures (catalog
+      # unavailable, index not discoverable, name targeting a different
+      # index) skip verification rather than failing the query — the
+      # explicit kwarg is an override, not a discovery request.
+      def verify_explicit_vector_index(field, index_name)
+        return if Parse::VectorSearch.index_drift_policy == :ignore
+        begin
+          require_relative "../../atlas_search"
+          idx = Parse::AtlasSearch::IndexCatalog.find_vector_index(parse_class, field: field)
+        rescue StandardError, LoadError
+          return
+        end
+        return if idx.nil?
+        return unless (idx["name"] || idx[:name]).to_s == index_name
+        verify_vector_index!(field, idx)
+      end
+
+      # First-query drift verification: compare the deployed index's
+      # `latestDefinition` against the model declaration. The drift
+      # findings are computed once per (field, index name) per class per
+      # process and cached; the policy check runs on EVERY query, so
+      # under `:raise` a drifted index keeps failing instead of failing
+      # once and then silently serving results. Under `:warn` the
+      # warning is emitted only on the first check to avoid log spam.
+      # Honors {Parse::VectorSearch.index_drift_policy} (`:warn` default
+      # / `:raise` / `:ignore`).
+      #
+      # Checks:
+      # 1. `numDimensions` on the covering `type: "vector"` entry vs the
+      #    property's declared `dimensions:`.
+      # 2. `similarity` vs the property's declared `similarity:` (only
+      #    when both sides declare one).
+      # 3. When the class registers an `agent_tenant_scope`, the scope
+      #    field must appear among the index's `type: "filter"` paths —
+      #    otherwise the tenant pre-filter that
+      #    {Parse::Retrieval.retrieve} folds into `$vectorSearch.filter`
+      #    fails Atlas-side at query time.
+      def verify_vector_index!(field, idx)
+        return if Parse::VectorSearch.index_drift_policy == :ignore
+        index_name = (idx["name"] || idx[:name]).to_s
+        @_verified_vector_indexes ||= {}
+        cache_key = "#{field}|#{index_name}"
+        findings = @_verified_vector_indexes[cache_key]
+        first_check = findings.nil?
+        if first_check
+          findings = vector_index_drift_findings(field, idx).freeze
+          @_verified_vector_indexes[cache_key] = findings
+        end
+        return if findings.empty?
+
+        message = "#{self} vectorSearch index #{index_name.inspect} drifts from the " \
+                  "model declaration for :#{field}: #{findings.join("; ")}"
+        if Parse::VectorSearch.index_drift_policy == :raise
+          # Raise on every query, not just the first: strict mode means a
+          # drifted index must never serve results.
+          raise IndexDriftError.new(message, findings: findings)
+        end
+        warn "[Parse::VectorSearch:DRIFT] #{message}" if first_check
+      end
+
+      # @!visibility private
+      # @return [Array<String>] drift findings (empty when in sync).
+      def vector_index_drift_findings(field, idx)
+        defn = idx["latestDefinition"] || idx[:latestDefinition] || {}
+        entries = defn["fields"] || defn[:fields] || []
+        field_str = field.to_s
+        vector_entry = entries.find do |f|
+          (f["type"] || f[:type]).to_s == "vector" && (f["path"] || f[:path]).to_s == field_str
+        end
+        findings = []
+        return findings if vector_entry.nil? # find_vector_index matched on it; defensive
+
+        declared_dims = vector_properties.dig(field.to_sym, :dimensions)
+        index_dims = vector_entry["numDimensions"] || vector_entry[:numDimensions]
+        if declared_dims && index_dims && Integer(index_dims) != Integer(declared_dims)
+          findings << "index numDimensions=#{index_dims} but property declares " \
+                      "dimensions: #{declared_dims} (every query will mismatch — " \
+                      "rebuild the index or run #{self}.reembed! after fixing the declaration)"
+        end
+
+        declared_sim = vector_properties.dig(field.to_sym, :similarity)
+        index_sim = vector_entry["similarity"] || vector_entry[:similarity]
+        if declared_sim && index_sim && index_sim.to_s != declared_sim.to_s
+          findings << "index similarity=#{index_sim.inspect} but property declares " \
+                      "similarity: #{declared_sim.inspect}"
+        end
+
+        scope_field = registered_tenant_scope_field
+        if scope_field
+          filter_paths = entries.select { |f| (f["type"] || f[:type]).to_s == "filter" }
+                                .map { |f| (f["path"] || f[:path]).to_s }
+          unless filter_paths.include?(scope_field)
+            findings << "agent_tenant_scope field #{scope_field.inspect} is not declared " \
+                        "as a type: \"filter\" path in the index — tenant-scoped " \
+                        "$vectorSearch.filter will fail Atlas-side"
+          end
+        end
+        findings
+      end
+
+      # @!visibility private
+      # Wire/storage name of the class's registered tenant-scope field,
+      # or nil. Mirrors the resolution Parse::Retrieval#wire_name uses
+      # when folding the scope into $vectorSearch.filter.
+      def registered_tenant_scope_field
+        return nil unless defined?(Parse::Agent::MetadataRegistry)
+        rule = Parse::Agent::MetadataRegistry.tenant_scope_rule(parse_class)
+        return nil unless rule
+        sym = rule[:field].to_sym
+        fmap = respond_to?(:field_map) ? field_map : {}
+        (fmap[sym] || sym.to_s.columnize).to_s
+      rescue StandardError
+        nil
       end
 
       def build_vector_hits(raw_hits)

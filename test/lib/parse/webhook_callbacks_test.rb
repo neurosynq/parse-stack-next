@@ -1,5 +1,84 @@
 require_relative "../../test_helper"
 require "minitest/autorun"
+require "stringio"
+
+# Real Parse::Object model for the run_after_save_chain tests. A class-level
+# counter records how many times the chained ActiveModel after_save callback
+# fired, so a double-fire (or a fire when no route is registered) is visible.
+class WebhookChainModel < Parse::Object
+  parse_class "WebhookChainModel"
+
+  class << self
+    attr_accessor :after_save_count
+  end
+  self.after_save_count = 0
+
+  after_save :bump_after_save
+  def bump_after_save
+    self.class.after_save_count += 1
+  end
+end
+
+# Real model whose chained after_create / after_save callbacks can be made to
+# raise, to exercise the throw-mid-chain containment in run_after_save_chain.
+# Each callback increments its counter BEFORE (optionally) raising, so a test
+# can assert the callback actually ran.
+class WebhookRaisingModel < Parse::Object
+  parse_class "WebhookRaisingModel"
+
+  class << self
+    attr_accessor :after_create_count, :after_save_count, :raise_on
+  end
+  self.after_create_count = 0
+  self.after_save_count = 0
+  self.raise_on = nil # nil, :after_create, or :after_save
+
+  after_create :on_after_create
+  after_save :on_after_save
+
+  def on_after_create
+    self.class.after_create_count += 1
+    raise "boom in after_create" if self.class.raise_on == :after_create
+  end
+
+  def on_after_save
+    self.class.after_save_count += 1
+    raise "boom in after_save" if self.class.raise_on == :after_save
+  end
+end
+
+# Real model with TWO after_save callbacks that BOTH raise, plus an after_create
+# probe. Used to prove the containment is at the *chain* level (ActiveModel halts
+# the rest of the phase once a callback raises) rather than a per-callback wrap:
+# exactly one of the two after_save callbacks should run, not both. Order-agnostic
+# (whichever ActiveModel runs first raises and halts the other).
+class WebhookHaltModel < Parse::Object
+  parse_class "WebhookHaltModel"
+
+  class << self
+    attr_accessor :after_save_ran, :after_create_ran
+  end
+  self.after_save_ran = []
+  self.after_create_ran = 0
+
+  after_create :note_create
+  after_save :cb_one
+  after_save :cb_two
+
+  def note_create
+    self.class.after_create_ran += 1
+  end
+
+  def cb_one
+    self.class.after_save_ran << :one
+    raise "boom in cb_one"
+  end
+
+  def cb_two
+    self.class.after_save_ran << :two
+    raise "boom in cb_two"
+  end
+end
 
 class WebhookCallbacksTest < Minitest::Test
   def setup
@@ -155,6 +234,11 @@ class WebhookCallbacksTest < Minitest::Test
     puts "✅ Client-initiated before_save on update skips before_create"
   end
 
+  # The chained ActiveModel after_save/after_create callbacks no longer fire
+  # inside call_route -- the dispatch moved to Parse::Webhooks.run_after_save_chain,
+  # which call! invokes exactly once per delivery (after both the class route and
+  # the "*" route). So callback-firing assertions drive run_after_save_chain
+  # directly; result-normalization assertions still drive call_route.
   def test_after_save_callback_handling
     puts "\n=== Testing After Save Callback Handling ==="
 
@@ -189,6 +273,7 @@ class WebhookCallbacksTest < Minitest::Test
     ruby_new_payload.define_singleton_method(:original) { nil }
 
     result = Parse::Webhooks.call_route(:after_save, "TestObject", ruby_new_payload)
+    Parse::Webhooks.run_after_save_chain(ruby_new_payload)
 
     refute after_create_called, "after_create should not be called for Ruby-initiated new objects"
     refute after_save_called, "after_save should not be called for Ruby-initiated new objects"
@@ -214,6 +299,7 @@ class WebhookCallbacksTest < Minitest::Test
     client_new_payload.define_singleton_method(:original) { nil }
 
     result = Parse::Webhooks.call_route(:after_save, "TestObject", client_new_payload)
+    Parse::Webhooks.run_after_save_chain(client_new_payload)
 
     assert after_create_called, "after_create should be called for client-initiated new objects"
     assert after_save_called, "after_save should be called for client-initiated new objects"
@@ -240,6 +326,7 @@ class WebhookCallbacksTest < Minitest::Test
     ruby_existing_payload.define_singleton_method(:original) { { "name" => "old" } }
 
     result = Parse::Webhooks.call_route(:after_save, "TestObject", ruby_existing_payload)
+    Parse::Webhooks.run_after_save_chain(ruby_existing_payload)
 
     refute after_create_called, "after_create should not be called for existing objects"
     # Previously this asserted after_save WAS called, which was a bug: a
@@ -271,6 +358,7 @@ class WebhookCallbacksTest < Minitest::Test
     client_existing_payload.define_singleton_method(:original) { { "name" => "old" } }
 
     result = Parse::Webhooks.call_route(:after_save, "TestObject", client_existing_payload)
+    Parse::Webhooks.run_after_save_chain(client_existing_payload)
 
     refute after_create_called, "after_create should not be called for existing objects"
     assert after_save_called, "after_save should be called for client-initiated existing objects"
@@ -312,6 +400,7 @@ class WebhookCallbacksTest < Minitest::Test
     client_new_payload.define_singleton_method(:original) { nil }
 
     result = Parse::Webhooks.call_route(:after_save, "TestObject", client_new_payload)
+    Parse::Webhooks.run_after_save_chain(client_new_payload)
 
     assert after_create_called, "after_create must fire even when handler returns the object"
     assert after_save_called, "after_save must fire even when handler returns the object"
@@ -336,6 +425,7 @@ class WebhookCallbacksTest < Minitest::Test
     ruby_payload.define_singleton_method(:original) { nil }
 
     result = Parse::Webhooks.call_route(:after_save, "TestObject", ruby_payload)
+    Parse::Webhooks.run_after_save_chain(ruby_payload)
 
     refute after_create_called, "after_create must stay suppressed for trusted-ruby-initiated saves"
     refute after_save_called, "after_save must stay suppressed for trusted-ruby-initiated saves"
@@ -388,6 +478,7 @@ class WebhookCallbacksTest < Minitest::Test
     webhook_payload.define_singleton_method(:original) { nil }
 
     result = Parse::Webhooks.call_route(:after_save, "TestObject", webhook_payload)
+    Parse::Webhooks.run_after_save_chain(webhook_payload)
 
     refute callback_called, "Ruby callbacks should not be called for Ruby-initiated webhook"
     assert_equal true, result, "Webhook should still return success"
@@ -407,6 +498,7 @@ class WebhookCallbacksTest < Minitest::Test
 
     callback_called = false
     result = Parse::Webhooks.call_route(:after_save, "TestObject", client_webhook_payload)
+    Parse::Webhooks.run_after_save_chain(client_webhook_payload)
 
     assert callback_called, "Ruby callbacks should be called for client-initiated webhook"
     assert_equal true, result, "Webhook should return success"
@@ -509,5 +601,302 @@ class WebhookCallbacksTest < Minitest::Test
     assert_equal ["handler1_client", "handler2_client"], call_order, "Both handlers should execute with correct client flag"
     assert_equal true, result, "Should return result from last handler"
     puts "✓ Multiple handlers execute with correct client_initiated flag"
+  end
+
+  # The chain must honor the "unregistered afterSave trigger never fires model
+  # callbacks" contract that call_route's early `return unless routes[...]`
+  # provided. With the firing moved into run_after_save_chain, this guard is
+  # the load-bearing correctness check: without it, every afterSave delivery
+  # for a class with no registered handler would start firing the model's
+  # callbacks.
+  def test_run_after_save_chain_does_not_fire_without_a_registered_route
+    puts "\n=== Testing run_after_save_chain route-present guard ==="
+
+    WebhookChainModel.after_save_count = 0
+
+    # No after_save route registered for WebhookChainModel (or "*").
+    payload = Parse::Webhooks::Payload.new(
+      "triggerName" => "afterSave",
+      "object" => { "className" => "WebhookChainModel", "objectId" => "noroute1" },
+    )
+    assert_kind_of Parse::Object, payload.parse_object, "sanity: payload builds a real object"
+
+    Parse::Webhooks.run_after_save_chain(payload)
+
+    assert_equal 0, WebhookChainModel.after_save_count,
+                 "model after_save must NOT fire when no afterSave route is registered"
+    puts "✓ No registered route => no model callbacks"
+
+    # Registering a "*" route is enough to satisfy the guard (client-initiated,
+    # so not suppressed) and the chain fires exactly once.
+    Parse::Webhooks.route(:after_save, "*") { true }
+    Parse::Webhooks.run_after_save_chain(payload)
+    assert_equal 1, WebhookChainModel.after_save_count,
+                 'a registered "*" route lets the chain fire once'
+    puts '✓ Registered "*" route => chain fires once'
+  end
+
+  # Marquee regression: call! dispatches every trigger twice (the specific class
+  # route AND the generic "*" route). When the chained callbacks fired inside
+  # call_route, an app that registered BOTH routes ran the model's after_save
+  # twice per delivery (e.g. two emails). With the dispatch moved into
+  # run_after_save_chain -- invoked once by call! after both route calls -- the
+  # model callback fires exactly once regardless of how many routes match.
+  def test_call_fires_after_save_chain_once_with_both_class_and_wildcard_routes
+    puts "\n=== Testing call! fires after_save chain once (class + wildcard) ==="
+
+    WebhookChainModel.after_save_count = 0
+
+    class_fires = 0
+    wildcard_fires = 0
+    Parse::Webhooks.route(:after_save, "WebhookChainModel") { class_fires += 1; true }
+    Parse::Webhooks.route(:after_save, "*") { wildcard_fires += 1; true }
+
+    body = JSON.generate(
+      "triggerName" => "afterSave",
+      "object" => { "className" => "WebhookChainModel", "objectId" => "bothroutes1" },
+    )
+
+    with_rack_webhook_env do
+      status, _headers, resp = Parse::Webhooks.call(
+        rack_env(body: body, path: "/webhooks/afterSave/WebhookChainModel")
+      )
+      assert_equal 200, status, "afterSave delivery should succeed"
+      assert_equal({ "success" => true }, JSON.parse(resp.join))
+    end
+
+    # Both route handlers run (specific + wildcard) ...
+    assert_equal 1, class_fires, "class-route handler should run once"
+    assert_equal 1, wildcard_fires, "wildcard-route handler should run once"
+    # ... but the chained model callback fires EXACTLY once across both.
+    assert_equal 1, WebhookChainModel.after_save_count,
+                 "model after_save must fire exactly once even with both routes registered"
+    puts "✓ Model after_save fired exactly once across class + wildcard routes"
+  end
+
+  # The suppression decision (trusted-Ruby-initiated => skip the webhook-side
+  # callbacks, local run_callbacks :save already fired them) must still hold
+  # end-to-end through call! AND under the dual class+"*" dispatch -- the exact
+  # intersection this change touches. Both route handlers run, but the model
+  # callback fires ZERO times webhook-side.
+  def test_call_suppresses_trusted_ruby_callbacks_even_with_both_routes
+    puts "\n=== Testing call! suppresses trusted-ruby callbacks (both routes) ==="
+
+    WebhookChainModel.after_save_count = 0
+
+    class_fires = 0
+    wildcard_fires = 0
+    Parse::Webhooks.route(:after_save, "WebhookChainModel") { class_fires += 1; true }
+    Parse::Webhooks.route(:after_save, "*") { wildcard_fires += 1; true }
+
+    # Trusted-Ruby-initiated: _RB_ request id (nested, as Parse Server sends it)
+    # AND master:true.
+    body = JSON.generate(
+      "triggerName" => "afterSave",
+      "master" => true,
+      "object" => { "className" => "WebhookChainModel", "objectId" => "trusted1" },
+      "headers" => { "x-parse-request-id" => "_RB_trusted_both_routes" },
+    )
+
+    with_rack_webhook_env do
+      status, _headers, resp = Parse::Webhooks.call(
+        rack_env(body: body, path: "/webhooks/afterSave/WebhookChainModel")
+      )
+      assert_equal 200, status
+      assert_equal({ "success" => true }, JSON.parse(resp.join))
+    end
+
+    assert_equal 1, class_fires, "class-route handler still runs"
+    assert_equal 1, wildcard_fires, "wildcard-route handler still runs"
+    assert_equal 0, WebhookChainModel.after_save_count,
+                 "trusted-ruby-initiated save must NOT fire webhook-side callbacks " \
+                 "(the local run_callbacks :save is the single fire)"
+    puts "✓ Trusted-ruby suppression holds through call! with both routes"
+  end
+
+  # An afterSave UPDATE (original present) with both routes must also fire the
+  # after_save chain exactly once -- the create-only marquee test doesn't cover
+  # the update path.
+  def test_call_fires_after_save_chain_once_on_update_with_both_routes
+    puts "\n=== Testing call! fires after_save once on update (both routes) ==="
+
+    WebhookChainModel.after_save_count = 0
+    Parse::Webhooks.route(:after_save, "WebhookChainModel") { true }
+    Parse::Webhooks.route(:after_save, "*") { true }
+
+    body = JSON.generate(
+      "triggerName" => "afterSave",
+      "object" => { "className" => "WebhookChainModel", "objectId" => "upd1" },
+      "original" => { "className" => "WebhookChainModel", "objectId" => "upd1" },
+    )
+
+    with_rack_webhook_env do
+      status, _headers, _resp = Parse::Webhooks.call(
+        rack_env(body: body, path: "/webhooks/afterSave/WebhookChainModel")
+      )
+      assert_equal 200, status
+    end
+
+    assert_equal 1, WebhookChainModel.after_save_count,
+                 "after_save fires exactly once on an update with both routes"
+    puts "✓ Update fires after_save exactly once across both routes"
+  end
+
+  # The containment is chain-level, not per-callback: when a callback raises, the
+  # REST of that phase's chain is halted (ActiveModel semantics). With two
+  # raising after_save callbacks, exactly ONE runs (not both) -- a per-callback
+  # rescue refactor would let both run and would fail this. The sibling
+  # after_create phase still runs, and the endpoint stays 200.
+  def test_call_halts_rest_of_phase_chain_when_a_callback_raises
+    puts "\n=== Testing chain-level halt when an after_save callback raises ==="
+
+    WebhookHaltModel.after_save_ran = []
+    WebhookHaltModel.after_create_ran = 0
+
+    Parse::Webhooks.route(:after_save, "WebhookHaltModel") { true }
+    body = JSON.generate(
+      "triggerName" => "afterSave",
+      "object" => { "className" => "WebhookHaltModel", "objectId" => "halt1" },
+      # no "original" => a create, so after_create runs as the sibling phase
+    )
+
+    with_rack_webhook_env do
+      status, _headers, resp = Parse::Webhooks.call(
+        rack_env(body: body, path: "/webhooks/afterSave/WebhookHaltModel")
+      )
+      assert_equal 200, status, "endpoint stays 200 despite the raising callback"
+      assert_equal({ "success" => true }, JSON.parse(resp.join))
+    end
+
+    assert_equal 1, WebhookHaltModel.after_create_ran,
+                 "the sibling after_create phase still ran"
+    assert_equal 1, WebhookHaltModel.after_save_ran.size,
+                 "exactly ONE after_save callback ran -- the raise halted the rest " \
+                 "of the chain (a per-callback wrap would let both run)"
+    puts "✓ A raising callback halts the rest of its phase; sibling phase + 200 intact"
+  end
+
+  # Symmetric to the after_create log assertion: a raising after_save is also
+  # contained-but-logged (not silently swallowed).
+  def test_run_after_save_chain_logs_a_raising_after_save
+    puts "\n=== Testing a raising after_save is logged, not silent ==="
+
+    WebhookRaisingModel.after_create_count = 0
+    WebhookRaisingModel.after_save_count = 0
+    WebhookRaisingModel.raise_on = :after_save
+
+    Parse::Webhooks.route(:after_save, "WebhookRaisingModel") { true }
+    payload = Parse::Webhooks::Payload.new(
+      "triggerName" => "afterSave",
+      "object" => { "className" => "WebhookRaisingModel", "objectId" => "raise3" },
+    )
+
+    _out, err = capture_io { Parse::Webhooks.run_after_save_chain(payload) }
+
+    assert_equal 1, WebhookRaisingModel.after_save_count, "after_save ran (and raised)"
+    assert_match(/after_save callback raised/, err,
+                 "the contained after_save failure must be logged")
+    puts "✓ Raising after_save is logged"
+  ensure
+    WebhookRaisingModel.raise_on = nil
+  end
+
+  # afterSave fires AFTER the object is already persisted, and Parse Server
+  # discards the response body. So a chained after_create callback that raises
+  # must not (a) propagate out and skip the unrelated after_save side effects,
+  # nor (b) crash the dispatcher. run_after_save_chain runs the two phases
+  # independently, swallowing+logging the raise.
+  def test_run_after_save_chain_contains_a_raising_after_create_and_still_fires_after_save
+    puts "\n=== Testing run_after_save_chain contains a raising after_create ==="
+
+    WebhookRaisingModel.after_create_count = 0
+    WebhookRaisingModel.after_save_count = 0
+    WebhookRaisingModel.raise_on = :after_create
+
+    Parse::Webhooks.route(:after_save, "WebhookRaisingModel") { true }
+    payload = Parse::Webhooks::Payload.new(
+      "triggerName" => "afterSave",
+      "object" => { "className" => "WebhookRaisingModel", "objectId" => "raise1" },
+      # no "original" => a create, so after_create runs first
+    )
+
+    # Must not raise out of the dispatcher.
+    _out, err = capture_io { Parse::Webhooks.run_after_save_chain(payload) }
+
+    assert_equal 1, WebhookRaisingModel.after_create_count,
+                 "after_create ran (and raised) once"
+    assert_equal 1, WebhookRaisingModel.after_save_count,
+                 "after_save still fired even though after_create raised"
+    # The failure is contained, but NOT silent -- it is logged so the unrelated
+    # work isn't dropped without a trace.
+    assert_match(/after_create callback raised/, err,
+                 "the contained after_create failure must be logged, not swallowed silently")
+    puts "✓ Raising after_create is contained (and logged); after_save still fires"
+  ensure
+    WebhookRaisingModel.raise_on = nil
+  end
+
+  # End-to-end through call!: a chained callback raising must NOT 500 the
+  # webhook endpoint. call!'s rescue only catches ResponseError /
+  # ValidationError, so an unguarded StandardError from a callback would escape
+  # and crash the response. The phase guard keeps the delivery a 200 success
+  # (the object is already saved; the response is discarded by Parse Server).
+  def test_call_returns_success_when_a_chained_after_save_callback_raises
+    puts "\n=== Testing call! survives a raising after_save callback ==="
+
+    WebhookRaisingModel.after_create_count = 0
+    WebhookRaisingModel.after_save_count = 0
+    WebhookRaisingModel.raise_on = :after_save
+
+    Parse::Webhooks.route(:after_save, "WebhookRaisingModel") { true }
+    body = JSON.generate(
+      "triggerName" => "afterSave",
+      "object" => { "className" => "WebhookRaisingModel", "objectId" => "raise2" },
+    )
+
+    status = nil
+    resp = nil
+    with_rack_webhook_env do
+      status, _headers, resp = Parse::Webhooks.call(
+        rack_env(body: body, path: "/webhooks/afterSave/WebhookRaisingModel")
+      )
+    end
+
+    assert_equal 200, status, "endpoint must stay 200 when a chained callback raises"
+    assert_equal({ "success" => true }, JSON.parse(resp.join))
+    assert_equal 1, WebhookRaisingModel.after_save_count,
+                 "after_save callback actually ran (and raised)"
+    puts "✓ call! returns success despite a raising chained callback"
+  ensure
+    WebhookRaisingModel.raise_on = nil
+  end
+
+  # ==========================================================================
+  # Rack entry-point (#call!) harness -- drives the real production path on a
+  # raw body. Mirrors the helper in webhook_non_object_triggers_test.rb.
+  # ==========================================================================
+  def with_rack_webhook_env
+    saved_key = Parse::Webhooks.instance_variable_get(:@key)
+    saved_allow = Parse::Webhooks.instance_variable_get(:@allow_unauthenticated)
+    saved_logging = Parse::Webhooks.logging
+    Parse::Webhooks.instance_variable_set(:@key, nil)
+    Parse::Webhooks.instance_variable_set(:@allow_unauthenticated, true)
+    Parse::Webhooks.logging = false
+    Parse::Webhooks::ReplayProtection.reset!
+    capture_io { yield }
+  ensure
+    Parse::Webhooks.instance_variable_set(:@key, saved_key)
+    Parse::Webhooks.instance_variable_set(:@allow_unauthenticated, saved_allow)
+    Parse::Webhooks.logging = saved_logging
+  end
+
+  def rack_env(body:, path:)
+    {
+      "REQUEST_METHOD" => "POST",
+      "CONTENT_TYPE" => "application/json",
+      "PATH_INFO" => path,
+      "rack.input" => StringIO.new(body),
+      "CONTENT_LENGTH" => body.bytesize.to_s,
+    }
   end
 end

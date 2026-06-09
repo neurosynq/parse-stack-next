@@ -288,6 +288,85 @@ declared `dimensions:` before sending the pipeline. A mismatch raises
 it — callers get "expected 1536, got 768" instead of a server-side
 error after a round-trip.
 
+### Index drift verification (v5.5)
+
+On the first auto-discovered use of a vectorSearch index per
+(class, field, index) per process, the SDK compares the deployed
+index's `latestDefinition` against the model declaration:
+
+* `numDimensions` vs the property's declared `dimensions:` — a
+  mismatch means every query will be rejected or return nonsense
+  (usually an index that predates a model change).
+* `similarity` vs the property's declared `similarity:` (checked only
+  when both sides declare one).
+* When the class registers an `agent_tenant_scope`, the scope field
+  must appear among the index's `type: "filter"` paths — without it,
+  every tenant-scoped `$vectorSearch.filter` fails Atlas-side at
+  query time.
+
+Findings are computed once per (class, field, index) per process and
+governed by `Parse::VectorSearch.index_drift_policy`:
+
+```ruby
+Parse::VectorSearch.index_drift_policy = :warn   # default — [Parse::VectorSearch:DRIFT] warning on first check
+Parse::VectorSearch.index_drift_policy = :raise  # IndexDriftError on EVERY query against a drifted index
+Parse::VectorSearch.index_drift_policy = :ignore # skip verification
+```
+
+Under `:raise` the cached findings keep raising — strict mode means a
+drifted index never serves results, not "fails once, then passes".
+Auto-discovery verification costs no extra round-trip (the definition
+is already in hand from index discovery). An explicit `index:` kwarg
+is verified best-effort: when the catalog's covering index for the
+field carries the same name, its definition is checked too; catalog
+lookup failures never fail the query.
+
+### Query-embed caching and spend caps (v5.5)
+
+Every `text:`-overload query funnels through one embed path
+(`find_similar(text:)`, `hybrid_search(text:)`,
+`Parse::Retrieval.retrieve` all share it), which gives two controls:
+
+```ruby
+# Opt-in query-embed cache: repeated identical queries skip the
+# provider round-trip. Keyed by (provider, model, dimensions,
+# input_type, SHA-256(input)) — plaintext never lands in the store.
+Parse::Embeddings::Cache.enable!(max_entries: 2048, ttl: 600)
+Parse::Embeddings::Cache.stats   # => { enabled:, hits:, misses:, size: }
+
+# Per-tenant spend cap now covers DIRECT callers too, not just the
+# semantic_search agent tool. Tenant identity resolves to the ambient
+# Parse.with_cache_tenant scope when set, else a shared default bucket.
+# warn_at: adds a soft cap — crossing 80% of the limit emits a
+# parse.embeddings.spend_cap_warning AS::N event (alert, never refuse).
+Parse::Embeddings::SpendCap.configure(limit_tokens: 1_000_000, window: 3600,
+                                      warn_at: 0.8)
+Parse.with_cache_tenant("tenant_abc") do
+  Document.find_similar(text: query)   # charged against tenant_abc
+end
+```
+
+Cache hits emit the standard `parse.embeddings.embed` notification
+with `cached: true`, so existing spend subscribers see hits and misses
+on one stream. The cache is in-process by default; for a persistent
+layer shared across processes, wrap any Moneta-compatible backend in
+the bundled adapter:
+
+```ruby
+moneta = Moneta.new(:Redis, url: ENV["REDIS_URL"])
+Parse::Embeddings::Cache.enable!(
+  store: Parse::Embeddings::Cache::MonetaStore.new(moneta, ttl: 30 * 24 * 3600),
+)
+```
+
+`MonetaStore` namespaces keys, forwards TTL via Moneta's `expires:`,
+and fails open (a backend error is a cache miss, never a failed
+embed). Keys are input hashes — plaintext queries never land in the
+shared store; the VALUES are embeddings, so give the store the same
+access controls as the database. A query the agent tool already
+charged per-tenant is not double-billed (`SpendCap.with_precharged`
+wraps the tool's retrieval).
+
 ### ACL/CLP inheritance
 
 Vector search routes through `Parse::MongoDB.aggregate`. Every layer
@@ -404,6 +483,18 @@ branch — see [Hybrid search](#hybrid-search-vector--lexical) below) and
 `rerank:` (reorder retrieved documents with a cross-encoder before
 chunking — see [Reranking](#reranking)). Both were reserved in earlier
 releases and now ship in 5.4.0.
+
+**Pointer values in filters translate automatically (v5.5).** A filter
+like `{ owner: some_user }` (a `Parse::Pointer` / `Parse::Object`, or a
+wire-form `{"__type" => "Pointer", ...}` hash — including inside `$in`
+/ `$eq` / `$ne` operator hashes) is rewritten to its MongoDB storage
+form `{ "_p_owner" => "_User$abc123" }` before the `$match` /
+`$vectorSearch.filter` is built, so pointer filters match rows instead
+of silently matching nothing. Translation runs after the
+underscore-key gate (callers still cannot name `_p_*` columns
+directly) and before the tenant-scope fold; the `semantic_search`
+agent tool inherits it. For `vector_filter:` use, the pointer column
+(`_p_owner`) must be declared `type: "filter"` in the index.
 
 ### Hybrid search (vector + lexical)
 
@@ -556,12 +647,25 @@ envelope. See the [MCP guide's Token Economy section](./mcp_guide.md#token-econo
 
 ---
 
-## Image embedding: `embed_image` macro (v5.1)
+## Image embedding: `embed_image` macro (v5.1 URL mode, v5.5 bytes mode)
 
 `embed_image` is the image-source counterpart to `embed`. The source
 property must be `:file`-typed; the target must be a `:vector` property
 whose declared `provider:` supports multimodal input (currently
 `:voyage` with `voyage-multimodal-3`, or `:cohere` with `embed-v4.0`).
+
+Two fetch modes, selected per declaration with `source:`:
+
+* **`source: :url`** (default) — the SDK validates the file's URL and
+  forwards it; the **provider** performs the fetch from its own
+  network. Requires the `trust_provider_url_fetch` sentinel (see
+  operator setup below).
+* **`source: :bytes`** (v5.5) — the **SDK** downloads the image
+  through `Parse::File.safe_open_url`, verifies the content by
+  magic-byte sniff, strips EXIF/XMP metadata, and forwards the bytes
+  to the provider as a base64 data URI. No provider-side URL fetch
+  occurs, so the sentinel is NOT required — the
+  `allowed_image_hosts` allowlist still is.
 
 ```ruby
 class Post < Parse::Object
@@ -621,6 +725,57 @@ with `Parse::File`, not parallelized). Failures raise
 (`:scheme`, `:port`, `:userinfo`, `:host_blocked`,
 `:host_not_allowlisted`, `:parse`).
 
+### Bytes mode (`source: :bytes`, v5.5)
+
+```ruby
+# Operator setup — only the host allowlist is required (the sentinel
+# applies to URL forwarding, not SDK-side fetches):
+Parse::Embeddings.allowed_image_hosts = [".cloudfront.net"]
+
+class Post < Parse::Object
+  property :cover_image,           :file
+  property :cover_image_embedding, :vector,
+           dimensions: 1024, provider: :voyage, model: "voyage-multimodal-3"
+
+  embed_image :cover_image, into: :cover_image_embedding,
+              source: :bytes            # exif_strip: true is the default
+end
+```
+
+What happens on each (digest-miss) save:
+
+1. The file URL is validated through
+   `Parse::Embeddings.validate_image_url!(url, mode: :fetch)` — the
+   same host allowlist (deny-all when empty), obfuscated-IP screen,
+   port allowlist, and CIDR resolution check as URL mode, minus the
+   provider-egress sentinel.
+2. `Parse::File.safe_open_url` downloads the bytes — CIDR blocks,
+   DNS-rebinding re-check, port allowlist, `max_remote_size` cap,
+   timeouts. No parallel fetch mechanism exists.
+3. **Magic-byte verification** (`Parse::Embeddings::ImageFetch`):
+   the MIME type is determined exclusively from the leading bytes
+   (JPEG / PNG / GIF / WebP). The HTTP `Content-Type` header is never
+   consulted. The sniffed type must be in
+   `Parse::Embeddings.allowed_image_types` (default those four; SVG is
+   deliberately excluded as script-capable active content), and when
+   the URL carries a recognized image extension, the extension must
+   AGREE with the magic bytes — a `.jpg` URL serving PNG bytes (or
+   HTML) is refused as MIME laundering
+   (`ImageFetch::InvalidImageType`, with a `:reason` tag).
+4. **EXIF/XMP stripping, default ON.** JPEG APP1 segments (Exif and
+   XMP), PNG `eXIf` chunks, and WebP `EXIF`/`XMP ` RIFF chunks (with
+   the VP8X flag bits cleared) are removed before the bytes leave the
+   process — user photos commonly carry GPS coordinates and device
+   serials. Opt out per declaration with `exif_strip: false` when
+   orientation metadata must survive.
+5. The verified bytes ride to the provider as a base64 data URI
+   (Voyage `image_base64` content row; Cohere `image_url` data-URI
+   form).
+
+Direct provider calls accept the same shape:
+`provider.embed_image([Parse::Embeddings::ImageFetch.fetch!(url)])` —
+`FetchedImage` sources and URL Strings may be mixed in one batch.
+
 ### Save-side semantics
 
 * Digest is the **SHA-256 of the URL String**, not the file bytes.
@@ -641,24 +796,102 @@ with `Parse::File`, not parallelized). Failures raise
 
 ## Re-embedding existing rows
 
-Changing `model:`, `dimensions:`, or `provider:` on an existing
-`:vector` property is a migration regardless of whether the source is
-text or images. Workflow:
+### Provenance: the `<into>_meta` sibling (v5.5)
+
+Every `embed` / `embed_image` declaration auto-declares an
+`<into>_meta` `:object` sibling (override with `meta_field:`) stamped
+on each recompute and cleared with the vector:
+
+```ruby
+doc.body_embedding_meta
+# => { "provider"    => "openai",
+#      "model"       => "text-embedding-3-small",
+#      "dimensions"  => 1536,
+#      "modality"    => "text",
+#      "embedded_at" => "2026-06-09T17:32:11Z" }
+```
+
+This is the record migration tooling reads to know which model
+produced any stored vector.
+
+### Same-shape migrations: `Class.reembed!` (v5.5)
+
+When the new model has the **same dimensions** (e.g. swapping
+`text-embedding-3-small` for a same-width replacement, or a provider
+change at equal width), re-embed in place:
+
+```ruby
+# Re-embed every row through the CURRENT provider/model declaration.
+Document.reembed!(batch_size: 100)
+
+# Resumable: skip rows whose <into>_meta already matches the current
+# provider + model + dimensions (rows with no meta count as stale).
+Document.reembed!(only_stale: true)
+
+# Scope it
+Document.reembed!(field: :body_embedding, where: { published: true }, limit: 10_000)
+```
+
+`reembed!` walks the class with objectId-cursor pagination, clears
+each row's digest sibling (so the save-path recompute cannot elide the
+provider call), and saves. Unlike `embed_pending!` — which only fills
+NULL vectors — `reembed!` recomputes populated rows too. Run it with a
+master-key client (or pass `save_opts:` with a session token that can
+write every row). Each row's save makes one provider call; pace bulk
+runs against provider rate limits (see `BatchEmbedder` below for the
+pattern, or just throttle the loop).
+
+### Changed-width migrations: dual-field workflow
+
+Changing `dimensions:` is a different beast — the existing
+vectorSearch index can't serve the new width. Use the shadow-field
+workflow:
 
 1. Add the new property alongside the old one
    (`property :body_embedding_v2, :vector, ...`) and an `embed` or
    `embed_image` block targeting it.
-2. Backfill: iterate existing rows, force a save (or null+save) to
-   trigger the new directive. The old field stays valid for reads.
-3. Once backfill completes, deploy a new vectorSearch index covering
-   the new field and migrate `find_similar` callers.
-4. Drop the old property.
+2. Backfill with `embed_pending!(field: :body_embedding_v2)` — the new
+   field is null everywhere, so the null-filling walk is exactly right.
+3. Deploy a new vectorSearch index covering the new field and migrate
+   `find_similar` callers.
+4. Drop the old property and index.
 
-Do NOT mutate the model in place — the digest mechanism will see
-unchanged source text / unchanged source URL and skip recompute,
-leaving stale vectors. For `embed_image`, also remember the digest is
-over the URL String: if you replace bytes at the same URL (PUT-replace
-on S3 without renaming), null the digest field to force re-embed.
+Do NOT mutate a model's `dimensions:` in place — the digest mechanism
+will see unchanged source text and skip recompute, leaving stale
+vectors, and the drift verifier will flag every query against the old
+index (`index numDimensions=1536 but property declares ...`). For
+`embed_image`, also remember the digest is over the URL String: if you
+replace bytes at the same URL (PUT-replace on S3 without renaming),
+null the digest field — or run `reembed!` — to force re-embed.
+
+---
+
+## Bulk embedding: `BatchEmbedder` (v5.5)
+
+`Provider#embed_text_batched` only slices input into provider-sized
+chunks; retry lives inside each provider's single HTTP call. For bulk
+jobs (ingest pipelines, chunk-corpus embedding) use
+`Parse::Embeddings::BatchEmbedder`, which adds batch-level pacing and
+backoff:
+
+```ruby
+embedder = Parse::Embeddings::BatchEmbedder.new(
+  Parse::Embeddings.provider(:openai),
+  requests_per_minute: 60,        # inter-batch pacing
+  max_attempts: 5,                # per-batch tries (exponential backoff + jitter)
+  on_progress: ->(done:, total:, batch_index:, batch_count:) {
+    puts "#{done}/#{total}"
+  },
+)
+vectors = embedder.embed_text(texts, input_type: :search_document)
+```
+
+Rate-limit and transient errors (any provider error class ending in
+`RateLimitError` / `TransientError`; override with `retry_on:`) retry
+with exponential backoff; other errors propagate immediately. A batch
+that exhausts its attempts raises `BatchEmbedder::BatchFailed`
+carrying `batch_index` and `completed_count`, so a resumable job knows
+exactly where to pick up.
 
 ---
 
@@ -728,6 +961,54 @@ floats out). Vectors only flow through the Parse↔Mongo path, where
 the body builder's `<vector dims=N>` compaction prevents them from
 landing in stdout / error trackers.
 
+### When the embedded source is PII: deployment checklist
+
+An embedding of PII is PII-equivalent. Inversion attacks reconstruct
+substantial source text from dense embeddings, and a vector's nearest
+neighbors leak the source's meaning even without reconstruction. If
+the fields you `embed` contain personal data (names, addresses, health
+or financial details, free-text user messages), treat the vector
+column with the same handling as the source column:
+
+1. **Provider contract.** You are sending the raw source text (and in
+   bytes mode, image content) to the embedding provider on every
+   recompute. Confirm the provider's data-retention and training-use
+   terms cover PII, and that a DPA is in place where required.
+   Self-hosting via `LocalHTTP` (Ollama / vLLM / TEI) keeps the text
+   in your network.
+2. **Keep vectors off the wire.** Leave `vector_visibility` at its
+   `:owner_only` default so vectors are omitted from `as_json` and
+   webhook payloads. Do not flip a PII class to `:public`.
+3. **Row ACL still governs.** Vector hits route mongo-direct with
+   `_rperm` enforcement — verify your rows carry real ACLs and that
+   callers use scoped credentials (`session_token:` / `acl_user:`),
+   not blanket master key.
+4. **Tenant isolation.** Multi-tenant deployments must declare
+   `agent_tenant_scope` on searchable classes; the scope folds into
+   `$vectorSearch.filter` (and v5.5's drift verification confirms the
+   index covers it). Without it, similarity scores leak cross-tenant
+   document existence.
+5. **Score exposure.** Keep score quantization on for non-admin agent
+   contexts (the default) — full-precision scores enable
+   membership-inference probing.
+6. **EXIF stays stripped.** For image embedding, keep the bytes-mode
+   default `exif_strip: true`; user photos carry GPS coordinates and
+   device serials that would otherwise reach the provider.
+7. **Log and cache hygiene.** Redact query text at the Faraday layer
+   (above); if you enable the persistent L2 cache, note that cache
+   KEYS are hashes (no plaintext) but cache VALUES are the embeddings
+   themselves — point `MonetaStore` at a store with the same access
+   controls as the database.
+8. **Deletion propagation.** When a user exercises erasure rights,
+   the vector, its `<field>_digest`, and its `<field>_meta` siblings
+   live on the same row and delete with it — but check external
+   copies: provider-side logs (their retention policy), your L2
+   embedding cache (TTL or explicit flush), and any analytics sink
+   subscribed to embedding events.
+9. **Migration hygiene.** `reembed!` re-sends every row's source text
+   to the provider — schedule PII-class migrations under the same
+   approvals as a data export.
+
 ---
 
 ## Troubleshooting
@@ -775,10 +1056,20 @@ on every poll) rather than a `until index_ready?; sleep` loop.
 Key files:
 
 * `lib/parse/embeddings.rb` — registry, `Configuration`, `register`,
-  `provider`, `configure`, `validate_image_url!`,
-  `trust_provider_url_fetch=`, `allowed_image_hosts=`.
+  `provider`, `configure`, `validate_image_url!` (`mode: :forward | :fetch`),
+  `trust_provider_url_fetch=`, `allowed_image_hosts=`,
+  `allowed_image_types=`.
 * `lib/parse/embeddings/provider.rb` — abstract base, `validate_response!`,
   `instrument_embed`, AS::N payload contract.
+* `lib/parse/embeddings/image_fetch.rb` — bytes-fetch path:
+  `ImageFetch.fetch!`, magic-byte `sniff_mime`/`verify!`, EXIF/XMP
+  stripping, `FetchedImage`.
+* `lib/parse/embeddings/batch_embedder.rb` — `BatchEmbedder` bulk
+  orchestration (pacing, batch-level backoff, `BatchFailed`).
+* `lib/parse/embeddings/cache.rb` — opt-in query-embed cache
+  (`Cache.enable!` / `fetch_vector` / `stats`).
+* `lib/parse/embeddings/spend_cap.rb` — per-tenant token cap
+  (`charge!`, `charge_query!`, `with_precharged`).
 * `lib/parse/embeddings/openai.rb` — OpenAI provider.
 * `lib/parse/embeddings/cohere.rb` — Cohere v3 + v4.0 text-mode provider.
 * `lib/parse/embeddings/voyage.rb` — Voyage text + multimodal-3
@@ -788,9 +1079,13 @@ Key files:
 * `lib/parse/embeddings/local_http.rb` — generic OpenAI-compatible
   local-gateway client.
 * `lib/parse/embeddings/fixture.rb` — deterministic test provider.
-* `lib/parse/model/core/vector_searchable.rb` — `find_similar`.
+* `lib/parse/model/core/vector_searchable.rb` — `find_similar`,
+  `hybrid_search`, index drift verification
+  (`Parse::VectorSearch.index_drift_policy`).
 * `lib/parse/model/core/embed_managed.rb` — `embed` and `embed_image`
-  macros, `EmbedDirective` (carries `modality:`, `allow_insecure:`).
+  macros, `EmbedDirective` (carries `modality:`, `allow_insecure:`,
+  `source_mode:`, `exif_strip:`, `meta_field:`), `embed_pending!`,
+  `reembed!`.
 * `lib/parse/vector_search.rb` — low-level `Parse::VectorSearch.search`.
 * `lib/parse/atlas_search/index_manager.rb` — `IndexCatalog.create_index`,
   `find_vector_index`, `wait_for_ready`.

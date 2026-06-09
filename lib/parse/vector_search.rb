@@ -95,7 +95,41 @@ module Parse
     # one. Atlas's guidance: numCandidates ≥ 10 × limit, ≤ 10_000.
     DEFAULT_NUM_CANDIDATES_MULTIPLIER = 20
 
+    # Accepted {.index_drift_policy} values.
+    INDEX_DRIFT_POLICIES = %i[warn raise ignore].freeze
+
     class << self
+      # Policy applied when first-query index verification (see
+      # {Parse::Core::VectorSearchable}) finds the deployed Atlas
+      # vectorSearch index disagreeing with the model declaration —
+      # wrong `numDimensions`, wrong `similarity`, or a tenant-scope
+      # field missing from the index's `filter` paths.
+      #
+      # * `:warn` (default) — emit a `[Parse::VectorSearch:DRIFT]`
+      #   warning once per (class, field, index) and continue. Drift
+      #   usually means the index predates a model change; queries
+      #   still run but return degraded or wrongly-scoped results.
+      # * `:raise` — fail the query with
+      #   {Parse::Core::VectorSearchable::IndexDriftError}. Strict mode
+      #   for deployments that treat drift as a release blocker.
+      # * `:ignore` — skip verification entirely.
+      #
+      # @param value [Symbol]
+      # @return [Symbol]
+      def index_drift_policy=(value)
+        v = value.respond_to?(:to_sym) ? value.to_sym : nil
+        unless v && INDEX_DRIFT_POLICIES.include?(v)
+          raise ArgumentError,
+                "Parse::VectorSearch.index_drift_policy must be one of " \
+                "#{INDEX_DRIFT_POLICIES.inspect} (got #{value.inspect})."
+        end
+        @index_drift_policy = v
+      end
+
+      # @return [Symbol] current drift policy (default `:warn`).
+      def index_drift_policy
+        @index_drift_policy ||= :warn
+      end
       # Low-level `$vectorSearch` entry point.
       #
       # @param collection_name [String] Parse class name / Mongo

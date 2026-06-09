@@ -260,14 +260,23 @@ module Parse
         MULTIMODAL_MODELS.include?(@model) ? %i[text image] : [:text]
       end
 
-      # Embed a batch of image URLs through Cohere's `/v2/embed`
-      # multimodal endpoint. v5.1 ships URL-only — the provider
-      # receives a public URL and issues its own fetch. The SDK does
-      # NOT download the image; it validates the URL through
-      # {Parse::Embeddings.validate_image_url!} (sentinel-gated egress
-      # opt-in, CIDR / port / host allowlist) and forwards the
-      # canonicalized URL string in the `{ type: "image_url",
-      # image_url: { url: ... } }` content row.
+      # Embed a batch of images through Cohere's `/v2/embed`
+      # multimodal endpoint. Two source forms:
+      #
+      # * **String URL** (v5.1 path) — the provider receives a public
+      #   URL and issues its own fetch. The SDK does NOT download the
+      #   image; it validates the URL through
+      #   {Parse::Embeddings.validate_image_url!} (sentinel-gated
+      #   egress opt-in, CIDR / port / host allowlist) and forwards
+      #   the canonicalized URL string in the `{ type: "image_url",
+      #   image_url: { url: ... } }` content row.
+      # * **{Parse::Embeddings::ImageFetch::FetchedImage}** (v5.5 bytes
+      #   path) — bytes the SDK already downloaded through
+      #   {Parse::File.safe_open_url}, magic-byte-verified, and
+      #   EXIF-stripped. Forwarded as a base64 data URI in the same
+      #   `image_url` content row (Cohere v2 accepts data URIs). No
+      #   URL validation runs and the `trust_provider_url_fetch`
+      #   sentinel is NOT required.
       #
       # **Multimodal model required.** Cohere's v3 models do not accept
       # image inputs; calling `embed_image` on a v3-configured provider
@@ -321,24 +330,28 @@ module Parse
 
         # Validate every URL up-front so a malformed entry in slot N
         # does not slip through after slots 0..N-1 are already in the
-        # wire body. Forward the canonicalized URL the validator
-        # returned — not the caller's raw input.
-        canonical_urls = sources.each_with_index.map do |url, i|
-          unless url.is_a?(String)
+        # wire body. URL entries forward the validator's canonicalized
+        # URL — not the caller's raw input; fetched-bytes entries skip
+        # URL validation (already downloaded + verified by ImageFetch)
+        # and forward as a base64 data URI.
+        content_rows = sources.each_with_index.map do |src, i|
+          if src.is_a?(Parse::Embeddings::ImageFetch::FetchedImage)
+            { content: [{ type: "image_url", image_url: { url: src.to_data_uri } }] }
+          elsif src.is_a?(String)
+            canonical = Parse::Embeddings.validate_image_url!(src, allow_insecure: allow_insecure)
+            { content: [{ type: "image_url", image_url: { url: canonical } }] }
+          else
             raise ArgumentError,
-                  "Parse::Embeddings::Cohere#embed_image sources[#{i}] is not a String " \
-                  "(#{url.class}). v5.1 ships URL-only — bytes/IO support is v5.3."
+                  "Parse::Embeddings::Cohere#embed_image sources[#{i}] must be a URL String " \
+                  "or Parse::Embeddings::ImageFetch::FetchedImage (got #{src.class})."
           end
-          Parse::Embeddings.validate_image_url!(url, allow_insecure: allow_insecure)
         end
 
         body = {
           model: @model,
           input_type: wire_input_type,
           embedding_types: ["float"],
-          inputs: canonical_urls.map { |u|
-            { content: [{ type: "image_url", image_url: { url: u } }] }
-          },
+          inputs: content_rows,
         }
 
         instrument_embed(sources.length, input_type, modality: :image) do |emit_payload|

@@ -121,6 +121,10 @@ class WebhookTriggersTest < Minitest::Test
     ruby_payload.define_singleton_method(:original) { { "name" => "old" } }
 
     result = Parse::Webhooks.call_route(:after_save, "TestObject", ruby_payload)
+    # The chained model callbacks fire in run_after_save_chain (call! invokes it
+    # once per delivery), not in call_route. This request carries _RB_ but NOT
+    # master, so it is not trusted-Ruby-initiated and the callbacks still fire.
+    Parse::Webhooks.run_after_save_chain(ruby_payload)
 
     assert hook_called, "after_save hook should be called"
     assert hook_payload.after_save?, "Payload should identify as after_save"
@@ -150,6 +154,7 @@ class WebhookTriggersTest < Minitest::Test
     test_object.define_singleton_method(:run_after_create_callbacks) { callback_executed = true }
 
     result = Parse::Webhooks.call_route(:after_save, "TestObject", client_payload)
+    Parse::Webhooks.run_after_save_chain(client_payload)
 
     assert hook_called, "after_save hook should be called for client"
     assert hook_payload.after_save?, "Payload should identify as after_save"
