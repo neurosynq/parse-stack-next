@@ -70,6 +70,84 @@ module Parse
       obj
     end
 
+    # Translate Parse pointer VALUES in a caller-supplied filter into
+    # their MongoDB storage form so they actually match raw documents.
+    # `{ owner: <Parse::Pointer User/abc> }` becomes
+    # `{ "_p_owner" => "_User$abc" }` — pointer columns are stored under
+    # a `_p_` prefix with `"<className>$<objectId>"` string values, so a
+    # Parse-side pointer (a `{__type: "Pointer", ...}` hash on the wire,
+    # or a `Parse::Pointer` / `Parse::Object` instance from Ruby
+    # callers) in a `$match` / `$vectorSearch.filter` would otherwise
+    # never match anything.
+    #
+    # Recognized pointer values:
+    # * `Parse::Pointer` / `Parse::Object` instances,
+    # * `{ "__type" => "Pointer", "className" => ..., "objectId" => ... }`
+    #   hashes (symbol or string keys).
+    #
+    # Translation applies to direct values, and to pointer values inside
+    # one level of operator hashes (`{ owner: { "$in" => [ptr, ptr] } }`,
+    # `$eq` / `$ne` / `$nin`). Non-pointer values and unrecognized keys
+    # pass through untouched, so the call is idempotent.
+    #
+    # SECURITY ORDERING: run this AFTER {.assert_no_underscore_keys!} /
+    # the agent filter-field allowlist (callers may not name `_p_*`
+    # columns directly) and BEFORE the tenant-scope fold.
+    #
+    # @param klass [Class] the Parse::Object subclass (for field_map
+    #   wire-name resolution).
+    # @param filter [Hash, nil] caller filter.
+    # @return [Hash, nil] translated copy (or the input when nothing
+    #   needed translation / input was nil).
+    def translate_pointer_filter_values(klass, filter)
+      return filter unless filter.is_a?(Hash)
+      out = {}
+      filter.each do |key, value|
+        if (storage = pointer_storage_value(value))
+          out["_p_#{wire_name(klass, key)}"] = storage
+        elsif value.is_a?(Hash) && value.keys.any? { |op| op.to_s.start_with?("$") }
+          translated = value.transform_values do |opval|
+            if (s = pointer_storage_value(opval))
+              s
+            elsif opval.is_a?(Array)
+              opval.map { |el| pointer_storage_value(el) || el }
+            else
+              opval
+            end
+          end
+          if translated == value
+            out[key] = value
+          else
+            out["_p_#{wire_name(klass, key)}"] = translated
+          end
+        else
+          out[key] = value
+        end
+      end
+      out
+    end
+
+    # @!visibility private
+    # `"<className>$<objectId>"` storage string for a pointer-shaped
+    # value, or nil when the value is not a pointer.
+    def pointer_storage_value(value)
+      if defined?(Parse::Pointer) && value.is_a?(Parse::Pointer)
+        cname = value.parse_class
+        oid = value.id
+        return nil if cname.to_s.empty? || oid.to_s.empty?
+        return "#{cname}$#{oid}"
+      end
+      if value.is_a?(Hash)
+        type = value["__type"] || value[:__type]
+        return nil unless type.to_s == "Pointer"
+        cname = value["className"] || value[:className]
+        oid = value["objectId"] || value[:objectId]
+        return nil if cname.to_s.empty? || oid.to_s.empty?
+        return "#{cname}$#{oid}"
+      end
+      nil
+    end
+
     # Retrieve and chunk documents semantically similar to `query`.
     #
     # @param query [String] natural-language query.
@@ -136,6 +214,12 @@ module Parse
       end
 
       resolved_text_field = (text_field || infer_text_field!(klass)).to_sym
+      # Pointer-value translation runs BEFORE the tenant-scope fold (the
+      # fold's conflict check must see final storage-form keys) and after
+      # any caller-side underscore-key gate (the agent tool walks the raw
+      # filter before calling retrieve).
+      filter = translate_pointer_filter_values(klass, filter)
+      vector_filter = translate_pointer_filter_values(klass, vector_filter)
       merged_vector_filter = fold_tenant_scope(klass, vector_filter, tenant_scope)
       chunker ||= default_chunker
       text_wire = wire_name(klass, resolved_text_field)

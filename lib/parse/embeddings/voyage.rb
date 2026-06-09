@@ -278,27 +278,32 @@ module Parse
         MULTIMODAL_MODELS.include?(@model) ? %i[text image] : [:text]
       end
 
-      # Embed a batch of image URLs through Voyage's
-      # `/v1/multimodalembeddings` endpoint. v5.1 ships URL-only — the
-      # provider receives a public URL and issues its own fetch. The
-      # SDK does NOT download the image; it validates the URL through
-      # {Parse::Embeddings.validate_image_url!} (CIDR / port / host
-      # allowlist, sentinel-gated egress opt-in) and forwards the
-      # canonicalized URL string in the `{ type: "image_url",
-      # image_url: ... }` content row.
+      # Embed a batch of images through Voyage's
+      # `/v1/multimodalembeddings` endpoint. Two source forms:
+      #
+      # * **String URL** (v5.1 path) — the provider receives a public
+      #   URL and issues its own fetch. The SDK does NOT download the
+      #   image; it validates the URL through
+      #   {Parse::Embeddings.validate_image_url!} (CIDR / port / host
+      #   allowlist, sentinel-gated egress opt-in) and forwards the
+      #   canonicalized URL string in a `{ type: "image_url",
+      #   image_url: ... }` content row.
+      # * **{Parse::Embeddings::ImageFetch::FetchedImage}** (v5.5 bytes
+      #   path) — bytes the SDK already downloaded through
+      #   {Parse::File.safe_open_url}, magic-byte-verified, and
+      #   EXIF-stripped. Forwarded as a `{ type: "image_base64",
+      #   image_base64: "data:<mime>;base64,..." }` content row. No URL
+      #   validation runs (there is no provider-side fetch) and the
+      #   `trust_provider_url_fetch` sentinel is NOT required.
       #
       # **Multimodal model required.** Voyage's text-only models
       # (`voyage-3`, `voyage-4`, etc.) do not accept image inputs;
       # calling `embed_image` on a provider configured with one of
       # those raises {BadRequestError} before any network call.
       #
-      # **Bytes-fetch path is v5.3.** A future `bytes:` option will
-      # download via {Parse::File.safe_open_url}, MIME-sniff the
-      # leading bytes, optionally EXIF-strip, and forward as
-      # base64. URL-only ships first because it sidesteps EXIF /
-      # MIME-confusion class issues entirely.
-      #
-      # @param sources [Array<String>] image URLs. Each must satisfy
+      # @param sources [Array<String, Parse::Embeddings::ImageFetch::FetchedImage>]
+      #   image URLs and/or fetched-bytes wrappers (forms may be
+      #   mixed). Each URL must satisfy
       #   {Parse::Embeddings.validate_image_url!} — failing entries
       #   raise the corresponding {Parse::Embeddings::InvalidImageURL}
       #   / {Parse::Embeddings::ConfirmationRequired} and ABORT the
@@ -342,22 +347,26 @@ module Parse
 
         # Validate every URL up-front so a malformed entry in slot N
         # does not get past validation while slots 0..N-1 are already
-        # in the wire body. The validator returns the canonicalized
-        # URL — we forward exactly that, not the caller's raw input.
-        canonical_urls = sources.each_with_index.map do |url, i|
-          unless url.is_a?(String)
+        # in the wire body. URL entries forward the validator's
+        # canonicalized URL (never the caller's raw input); fetched-
+        # bytes entries skip URL validation (the bytes were already
+        # downloaded + verified by ImageFetch) and forward as base64.
+        content_rows = sources.each_with_index.map do |src, i|
+          if src.is_a?(Parse::Embeddings::ImageFetch::FetchedImage)
+            { content: [{ type: "image_base64", image_base64: src.to_data_uri }] }
+          elsif src.is_a?(String)
+            canonical = Parse::Embeddings.validate_image_url!(src, allow_insecure: allow_insecure)
+            { content: [{ type: "image_url", image_url: canonical }] }
+          else
             raise ArgumentError,
-                  "Parse::Embeddings::Voyage#embed_image sources[#{i}] is not a String " \
-                  "(#{url.class}). v5.1 ships URL-only — bytes/IO support is v5.3."
+                  "Parse::Embeddings::Voyage#embed_image sources[#{i}] must be a URL String " \
+                  "or Parse::Embeddings::ImageFetch::FetchedImage (got #{src.class})."
           end
-          Parse::Embeddings.validate_image_url!(url, allow_insecure: allow_insecure)
         end
 
         wire_input_type = INPUT_TYPE_WIRE_VALUES[input_type]
         body = {
-          inputs: canonical_urls.map { |u|
-            { content: [{ type: "image_url", image_url: u }] }
-          },
+          inputs: content_rows,
           model: @model,
           truncation: @truncation,
         }

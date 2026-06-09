@@ -67,7 +67,7 @@ module Parse
       def plan
         coll = collection_name
         existing, available = fetch_existing_indexes(coll)
-        declared = @model_class.mongo_search_index_declarations
+        declared = @model_class.mongo_search_index_declarations.map { |d| effective_declaration(d) }
 
         existing_by_name = existing.each_with_object({}) do |idx, h|
           name = (idx["name"] || idx[:name]).to_s
@@ -188,6 +188,53 @@ module Parse
       end
 
       private
+
+      # Augment a `vectorSearch` declaration with the model's registered
+      # `agent_tenant_scope` field as a `type: "filter"` path when the
+      # declaration doesn't already carry it. Tenant-scoped retrieval
+      # folds `{ <scope field> => <value> }` into `$vectorSearch.filter`
+      # (see Parse::Retrieval.retrieve) — Atlas rejects a pre-filter on
+      # any path not declared `type: "filter"` in the index, so an index
+      # created without the scope path fails every scoped query at
+      # runtime. Auto-including it here means `apply!` creates correct
+      # indexes by default, and pre-existing indexes lacking the path
+      # surface as `drifted:` in the plan instead of failing silently.
+      #
+      # Lexical (`type: "search"`) declarations pass through untouched.
+      def effective_declaration(decl)
+        return decl unless decl[:type] == "vectorSearch"
+        scope_path = tenant_scope_filter_path
+        return decl if scope_path.nil?
+        defn = decl[:definition]
+        return decl unless defn.is_a?(Hash)
+        fields_key = defn.key?("fields") ? "fields" : :fields
+        fields = defn[fields_key]
+        return decl unless fields.is_a?(Array)
+        covered = fields.any? do |f|
+          next false unless f.is_a?(Hash)
+          (f["type"] || f[:type]).to_s == "filter" &&
+            (f["path"] || f[:path]).to_s == scope_path
+        end
+        return decl if covered
+        augmented = defn.dup
+        augmented[fields_key] = fields + [{ "type" => "filter", "path" => scope_path }]
+        decl.merge(definition: augmented)
+      end
+
+      # Wire/storage path of the model's registered tenant-scope field,
+      # or nil when no `agent_tenant_scope` is declared (or the agent
+      # layer isn't loaded). Mirrors the wire-name resolution
+      # Parse::Retrieval uses when folding the scope into the filter.
+      def tenant_scope_filter_path
+        return nil unless defined?(Parse::Agent::MetadataRegistry)
+        rule = Parse::Agent::MetadataRegistry.tenant_scope_rule(collection_name)
+        return nil unless rule
+        sym = rule[:field].to_sym
+        fmap = @model_class.respond_to?(:field_map) ? @model_class.field_map : {}
+        (fmap[sym] || sym.to_s.columnize).to_s
+      rescue StandardError
+        nil
+      end
 
       # Read existing search indexes via the IndexManager's cached path.
       # Returns `[indexes, available]`. `available` is false when Atlas

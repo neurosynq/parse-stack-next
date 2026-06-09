@@ -294,6 +294,65 @@ class TestCloudFunctionsModule < Minitest::Test
     @mock_client.verify
   end
 
+  # The documented opt-out for sanitizing third-party-influenced cloud output:
+  # `raw: true` returns the undecoded Response BEFORE `_extract_cloud_result`,
+  # so a `__type:"Object"` envelope is NOT built into a Parse object and its
+  # server-set keys remain inspectable on the raw body.
+  def test_parse_call_function_raw_returns_undecoded_response
+    enc = { "__type" => "Object", "className" => "_User",
+            "objectId" => "u1", "sessionToken" => "r:tok" }
+    raw_response = Parse::Response.new("result" => enc)
+
+    @mock_client.expect :call_function, raw_response, ["fn", {}], opts: {}
+
+    result = nil
+    Parse::Client.stub :client, @mock_client do
+      result = Parse.call_function("fn", {}, raw: true)
+    end
+
+    assert_same raw_response, result, "raw: true must return the Response object itself"
+    refute_kind_of Parse::User, result, "raw: true must not decode the envelope into an object"
+    @mock_client.verify
+  end
+
+  # The complement: without `raw`, the same envelope decodes through the trusted
+  # path into a Parse::User that retains its server-set sessionToken — this is
+  # the server-authoritative behavior the SECURITY doc describes.
+  def test_parse_call_function_without_raw_decodes_envelope_to_object
+    enc = { "__type" => "Object", "className" => "_User",
+            "objectId" => "u1", "username" => "alice", "sessionToken" => "r:tok" }
+    ok_response = Parse::Response.new("result" => enc)
+
+    @mock_client.expect :call_function, ok_response, ["fn", {}], opts: {}
+
+    result = nil
+    Parse::Client.stub :client, @mock_client do
+      result = Parse.call_function("fn", {})
+    end
+
+    assert_kind_of Parse::User, result
+    assert_equal "r:tok", result.session_token
+    @mock_client.verify
+  end
+
+  # `call_function!` always decodes on success — `:raw` has no effect, so a
+  # caller cannot get the undecoded response through the bang variant.
+  def test_parse_call_function_bang_decodes_on_success_even_with_raw_true
+    enc = { "__type" => "Object", "className" => "_User",
+            "objectId" => "u1", "sessionToken" => "r:tok" }
+    ok_response = Parse::Response.new("result" => enc)
+
+    @mock_client.expect :call_function, ok_response, ["fn", {}], opts: {}
+
+    result = nil
+    Parse::Client.stub :client, @mock_client do
+      result = Parse.call_function!("fn", {}, raw: true)
+    end
+
+    assert_kind_of Parse::User, result, "the bang variant always decodes; :raw is a no-op"
+    @mock_client.verify
+  end
+
   def test_parse_call_function_handles_non_hash_response_body
     # Guard against TypeError when Parse Server returns a non-Hash body for a
     # "successful" response. Should return the raw result rather than indexing

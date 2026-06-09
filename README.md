@@ -4,6 +4,13 @@
 
 A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [parse-stack-next](https://github.com/neurosynq/parse-stack-next) is a Ruby client SDK, REST client, and Active Model ORM for [Parse Server](http://parseplatform.org/), combining a low-level API client, a query engine, an object-relational mapper (ORM), and a Cloud Code Webhooks rack application in a single gem.
 
+### What's new in 5.5
+
+- **5.5.0 — Multimodal bytes-fetch with magic-byte MIME verification** — `embed_image ..., source: :bytes` has the SDK download an image itself through the `Parse::File.safe_open_url` SSRF primitive, verify the content by **magic-byte sniff** (the `Content-Type` header is never consulted — a `.jpg` URL serving HTML is refused), cross-check the URL extension, enforce a `Parse::Embeddings.allowed_image_types` allowlist, strip EXIF/XMP metadata **by default** (JPEG APP1, PNG `eXIf`, WebP `EXIF`/`XMP ` chunks; opt out with `exif_strip: false`), and forward the verified bytes to Voyage/Cohere as a base64 data URI. No provider-side URL fetch occurs, so the `trust_provider_url_fetch` sentinel is not required — the host allowlist still applies. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.5.0 — Embedding-model migration tooling** — `Class.reembed!(only_stale: true)` bulk re-embeds rows through the current provider/model (resumable; skips rows already current), driven by the new auto-declared `<into>_meta` provenance sibling (`{provider, model, dimensions, modality, embedded_at}`, stamped on every recompute). `Parse::Embeddings::BatchEmbedder` adds batch-level requests-per-minute pacing and exponential backoff for bulk jobs; `Parse::Embeddings::Cache.enable!` adds an opt-in query-embed cache keyed by `(provider, model, input_type, input-hash)` so repeated identical queries skip the provider round-trip. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.5.0 — Vector index drift detection** — on first auto-discovered use of an Atlas vectorSearch index, the SDK verifies the deployed index's `numDimensions`/`similarity` against the `:vector` property declaration and confirms a registered `agent_tenant_scope` field is covered as a `type: "filter"` path. Policy via `Parse::VectorSearch.index_drift_policy` (`:warn` default / `:raise` / `:ignore`). `Parse::Schema::SearchIndexMigrator` now auto-includes the tenant-scope field in `vectorSearch` declarations, so newly created indexes support tenant-scoped pre-filtering out of the box. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.5.0 — Retrieval spend-cap and filter hardening** — the per-tenant embedding spend cap now covers every query-embed path (`find_similar(text:)`, `hybrid_search(text:)`, `Parse::Retrieval.retrieve`), not just the `semantic_search` agent tool; tenant identity resolves through the ambient `Parse.with_cache_tenant` scope. Caller-supplied retrieval filters now translate Parse pointer values to storage form (`{ owner: user }` → `{ "_p_owner" => "_User$id" }`), so pointer filters match rows instead of silently matching nothing. See [CHANGELOG.md](./CHANGELOG.md)
+
 ### What's new in 5.4
 
 - **5.4.0 — Hybrid search + reranking for RAG** — `Class.hybrid_search(text:, lexical:, vector:, k:, fusion:)` fuses a lexical Atlas Search branch with a `$vectorSearch` branch using reciprocal-rank fusion (RRF): lexical search nails exact tokens (codes, proper nouns), vector search nails paraphrase, and fusing the two beats either alone. Each branch enforces ACL/CLP independently before fusion (no separate hydration fetch to secure); results carry `#hybrid_score` / `#hybrid_ranks`. `Parse::VectorSearch::Hybrid.rank_fusion_supported?` detects Atlas 8.0+ native `$rankFusion` by a cached behavioural probe (native execution is opt-in; client-side RRF is the always-enforced default). `Parse::Retrieval::Reranker` adds cross-encoder reranking (`Reranker::Cohere` over `/v2/rerank`, plus a deterministic `Reranker::Fixture`), wired into `Parse::Retrieval.retrieve(hybrid:, rerank:)`. `Parse::Embeddings::SpendCap` adds an opt-in per-tenant embedding token cap (hard-refuse) at the `semantic_search` agent-tool boundary. See [CHANGELOG.md](./CHANGELOG.md) and [`docs/atlas_vector_search_guide.md`](./docs/atlas_vector_search_guide.md)
@@ -38,7 +45,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full 5.2 entry.
 - **`Parse::File` URL normalization + presigned-URL stash** — `Parse::File#url=` and `attributes=` now strip signed-URL query parameters (`X-Amz-Signature`, `AWSAccessKeyId`, `Key-Pair-Id`, etc.) before storage; the bare canonical URL lands in `@url`, and the original signed URL is stashed in `file.presigned_url` with a data-driven expiry in `file.presigned_url_expires_at`. New `file.presigned_url_valid?(buffer: 60)` predicate, configurable `Parse::File.signed_url_policy = :strip | :raise`, and `Parse::File.log_filter` / `log_filter_strict` regexes for `lograge` / Sentry / Honeybadger scrubbers. `Parse::File#inspect` no longer emits the URL — see CHANGELOG for the error-reporter payload migration callout
 - **`Parse::Lock` — public TTL-bounded mutual-exclusion primitive** — `Parse::Lock.acquire(key, ttl:, wait:) { … }` exposes the Redis-backed lock previously hidden inside `first_or_create!` as a first-class API. In-process `Mutex` fallback for memory-backed caches, fails closed on backend errors, HMAC-keyed via `PARSE_STACK_LOCK_SECRET`, namespace-separated from `first_or_create!` so the two cannot collide
 - **LiveQuery ergonomics** — autoloaded (no explicit `require 'parse/live_query'`); connections are **ACL-scoped by default** (build an admin, ACL-bypassing connection explicitly with `Parse::LiveQuery::Client.new(use_master_key: true)` — master-key authorization is per-connection, not per-subscription); `Query#subscribe` / `Klass.subscribe` accept a block yielded the `Subscription` *before* the subscribe frame is sent so `sub.on(:create) { … }` callbacks are wired before any server event can arrive; `Parse::LiveQuery.run_until_signal!(client:) { … }` is a signal-safe shutdown helper for long-running consumers
-- **Image embeddings** — new `embed_image` class macro for `:file`-typed source properties plus `Voyage#embed_image` (`voyage-multimodal-3`, 1024-dim) and `Cohere#embed_image` (`embed-v4.0`, 1536-dim). URL-only routing in v5.1 (bytes-fetch with MIME-sniff lands later); operator-gated via the `Parse::Embeddings.trust_provider_url_fetch = "PROVIDER_EGRESS_VERIFIED"` sentinel plus a `Parse::Embeddings.allowed_image_hosts` CDN allowlist
+- **Image embeddings** — new `embed_image` class macro for `:file`-typed source properties plus `Voyage#embed_image` (`voyage-multimodal-3`, 1024-dim) and `Cohere#embed_image` (`embed-v4.0`, 1536-dim). URL-only routing in v5.1 (the bytes-fetch path with MIME-sniff shipped in v5.5 as `source: :bytes`); operator-gated via the `Parse::Embeddings.trust_provider_url_fetch = "PROVIDER_EGRESS_VERIFIED"` sentinel plus a `Parse::Embeddings.allowed_image_hosts` CDN allowlist
 - **Tenant-aware cache namespacing** — `Parse.with_cache_tenant(scope) { … }` composes the tenant into the response-cache key as `<base>:T:<tenant>:…` so a multi-tenant app sharing one Redis gets per-tenant key isolation and per-tenant SCAN-delete eviction without per-tenant `Parse::Client.new` plumbing. Fiber-local, restored on block exit, AS::N payloads carry `:cache_tenant`
 - **`_User` field-visibility DSL** — `Parse::User.master_only_fields(*fields)` and `Parse::User.self_visible_fields(*fields, via: :self)` declare admin-only and owner-only field protections on `_User`. Requires Parse Server's `protectedFieldsOwnerExempt: false` server option (the SDK emits a one-time advisory at class declaration so the dependency is surfaced before deploy). Parse Server's default for this option is changing to `false` in a future version; until your server adopts that default, set it explicitly
 - **`Parse::Installation` `belongs_to :user`** — read `installation.user` to find which user a device is currently signed in as. Symmetric `Parse::User#has_many :installations` for targeted-push grouping (master-key-only by Parse Server design; see the YARD for the owner-identity caveat)
@@ -63,6 +70,16 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full 5.1 entry, including breaking ch
 See [CHANGELOG.md](./CHANGELOG.md) for the full 5.0 entry, including security-hardening notes and Ruby 3.x cleanup.
 
 ### Core capabilities
+
+> **Vector search requires MongoDB Atlas (or Atlas Local).** The `:vector`
+> property, `find_similar`, `hybrid_search`, and `Parse::Retrieval` all
+> execute Atlas `$vectorSearch` / `$search` aggregation stages, which exist
+> only on Atlas clusters and the Atlas Local container — community/self-hosted
+> MongoDB is not supported and there is no in-process fallback (a pure-Ruby
+> cosine scan over a real collection is a silent performance cliff, so the
+> SDK refuses rather than degrades). This is a closed design decision.
+> Everything else in this list works against any MongoDB that Parse Server
+> supports.
 
 - MongoDB Aggregation Framework support
 - **MongoDB Atlas Search** — full-text search, autocomplete, faceted search with direct MongoDB access
@@ -5533,13 +5550,24 @@ pipeline = [
 
 Filter objects by ACL permissions using MongoDB's `_rperm` and `_wperm` fields:
 
-**`readable_by` / `writable_by`** - Exact permission strings:
+**`readable_by` / `writable_by`** - filter by principal:
 ```ruby
 Song.query.readable_by("user123").results(mongo_direct: true)       # User ID
 Song.query.readable_by("role:Admin").results(mongo_direct: true)    # Role (explicit prefix)
-Song.query.readable_by(current_user).results(mongo_direct: true)    # User object
-Song.query.readable_by("public").results(mongo_direct: true)        # Public access (alias for "*")
-Song.query.readable_by("none").results(mongo_direct: true)          # Empty _rperm (master key only)
+Song.query.readable_by(current_user).results(mongo_direct: true)    # User object (roles expanded)
+Song.query.readable_by(:public).results(mongo_direct: true)         # Public access (maps to "*")
+Song.query.readable_by([]).results(mongo_direct: true)              # No read perms (empty _rperm)
+```
+
+By default the match is **inclusive** — it ALSO returns publicly-readable rows
+(`_rperm` contains `"*"`) and rows with a missing `_rperm` (public by absence),
+because those are genuinely readable by the principal (access-simulation
+semantics). For an **exact** match — only rows whose `_rperm` literally grants
+the principal, with no public/missing rows — pass `strict: true`. This is what
+an ownership or security audit wants:
+
+```ruby
+Song.query.readable_by("role:Admin", strict: true).results   # ONLY rows that explicitly grant Admin
 ```
 
 **`readable_by_role` / `writable_by_role`** - Adds "role:" prefix automatically:
@@ -5549,7 +5577,18 @@ Song.query.readable_by_role(admin_role).results(mongo_direct: true)           # 
 Song.query.writable_by_role(["Admin", "Editor"]).results(mongo_direct: true)  # Multiple roles
 ```
 
-**Note:** Requires the `mongo` gem. Add `gem 'mongo'` to your Gemfile.
+**Convenience and negation:** `publicly_readable` / `publicly_writable`,
+`privately_readable` / `private_acl` (master-key-only), `not_readable_by` /
+`not_writable_by`, and `not_publicly_readable` / `not_publicly_writable`.
+"Not readable by X" excludes rows readable by X directly, via any role X
+inherits, or publicly.
+
+**Note:** These constraints compile to an aggregation `$match` on the internal
+`_rperm` / `_wperm` columns, so they auto-route to the direct-MongoDB path
+(requires the `mongo` gem and `Parse::MongoDB.configure(...)`). For a scoped
+query (`scope_to_user` / `scope_to_role` / `session_token`) the SDK enforces
+ACL/CLP on that path; a scoped aggregate fails closed if mongo-direct is not
+configured rather than running unscoped.
 
 ### ACL Dirty Tracking
 

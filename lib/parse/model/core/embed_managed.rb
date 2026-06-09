@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "digest"
+require "time"
 require_relative "../../embeddings"
 require_relative "../vector"
 
@@ -108,9 +109,21 @@ module Parse
       #
       # `allow_insecure` is forwarded to {.validate_image_url!} for
       # image directives only; ignored for text.
+      #
+      # `source_mode` (image directives only) is `:url` (forward the
+      # validated URL to the provider — v5.1 behavior, requires the
+      # `trust_provider_url_fetch` sentinel) or `:bytes` (the SDK
+      # downloads via {Parse::File.safe_open_url}, magic-byte-verifies,
+      # EXIF-strips, and forwards base64 — v5.5). `exif_strip`
+      # (default true) applies to `:bytes` mode only.
+      #
+      # `meta_field` names the `:object` sibling that records
+      # provider/model/dimensions provenance on every recompute — the
+      # input {ClassMethods#reembed!} uses to find stale rows after a
+      # model migration.
       EmbedDirective = Struct.new(
         :sources, :into, :digest_field, :input_type, :provider_name,
-        :modality, :allow_insecure,
+        :modality, :allow_insecure, :source_mode, :exif_strip, :meta_field,
         keyword_init: true,
       ) do
         def freeze
@@ -120,6 +133,10 @@ module Parse
 
         def image?
           modality == :image
+        end
+
+        def bytes_mode?
+          source_mode == :bytes
         end
       end
 
@@ -184,9 +201,17 @@ module Parse
         # @param digest_field [Symbol, nil] override for the digest
         #   sibling property. Defaults to `:"#{into}_digest"`. Auto-
         #   declared as `:string` if not already declared.
+        # @param meta_field [Symbol, nil] override for the provenance
+        #   sibling property. Defaults to `:"#{into}_meta"`. Auto-
+        #   declared as `:object` if not already declared; populated
+        #   with `{ provider:, model:, dimensions:, modality:,
+        #   embedded_at: }` on every recompute. Read by
+        #   {ClassMethods#reembed!} to skip rows already embedded by
+        #   the current provider/model.
         # @return [Symbol] the target vector field name.
         # @raise [InvalidEmbedDeclaration] on declaration-time misuse.
-        def embed(*source_fields, into:, input_type: :search_document, digest_field: nil)
+        def embed(*source_fields, into:, input_type: :search_document, digest_field: nil,
+                  meta_field: nil)
           if source_fields.empty?
             raise InvalidEmbedDeclaration,
                   "#{self}.embed: at least one source field is required."
@@ -215,6 +240,10 @@ module Parse
           unless fields.key?(digest_field)
             property digest_field, :string
           end
+          meta_field = (meta_field || :"#{into}_meta").to_sym
+          unless fields.key?(meta_field)
+            property meta_field, :object
+          end
 
           directive = EmbedDirective.new(
             sources: sources,
@@ -222,6 +251,7 @@ module Parse
             digest_field: digest_field,
             input_type: input_type,
             provider_name: provider_name,
+            meta_field: meta_field,
           ).freeze
           embed_directives[into] = directive
 
@@ -243,12 +273,25 @@ module Parse
         # Declare a managed image embedding. Mirrors {.embed} but the
         # source field is a `:file` property (Parse::File) and the
         # provider call routes through {Parse::Embeddings::Provider#embed_image}
-        # rather than `#embed_text`. v5.1 ships URL-only: the SDK
-        # extracts the file's URL, validates it through
-        # {Parse::Embeddings.validate_image_url!} (sentinel-gated egress
-        # opt-in, CIDR / port / host allowlist), and forwards the
-        # canonicalized URL to the provider. The SDK does NOT download
-        # image bytes — bytes-fetch is the v5.3 path.
+        # rather than `#embed_text`. Two fetch modes (`source:`):
+        #
+        # * `:url` (default, v5.1 behavior) — the SDK extracts the
+        #   file's URL, validates it through
+        #   {Parse::Embeddings.validate_image_url!} (sentinel-gated
+        #   egress opt-in, CIDR / port / host allowlist), and forwards
+        #   the canonicalized URL to the provider, which performs its
+        #   own fetch. The SDK does NOT download image bytes.
+        # * `:bytes` (v5.5) — the SDK downloads the image itself via
+        #   {Parse::File.safe_open_url} (through
+        #   {Parse::Embeddings::ImageFetch.fetch!}), verifies the
+        #   content by magic-byte sniff against
+        #   {Parse::Embeddings.allowed_image_types} (the Content-Type
+        #   header is never trusted), strips EXIF/XMP metadata by
+        #   default, and forwards the bytes to the provider as a
+        #   base64 data URI. Does NOT require the
+        #   `trust_provider_url_fetch` sentinel (no third-party URL
+        #   egress), but the file's host must still be in
+        #   {Parse::Embeddings.allowed_image_hosts}.
         #
         # **Digest is the URL string, not the file contents.** Replacing
         # the Parse::File with one pointing to a different URL re-embeds;
@@ -272,10 +315,21 @@ module Parse
         # @param allow_insecure [Boolean] forwarded to
         #   {Parse::Embeddings.validate_image_url!}; permit `http://`
         #   for local-dev CDN proxies. Default false.
+        # @param source [Symbol] `:url` (provider fetches; default) or
+        #   `:bytes` (SDK fetches, verifies, strips, forwards base64).
+        # @param exif_strip [Boolean] strip EXIF/XMP metadata before
+        #   forwarding bytes (default true; `:bytes` mode only —
+        #   ignored for `:url`, where the SDK never sees the bytes).
+        # @param meta_field [Symbol, nil] override for the provenance
+        #   sibling property. Defaults to `:"#{into}_meta"`; see {.embed}.
         # @return [Symbol] the target vector field name.
         # @raise [InvalidEmbedDeclaration] on declaration-time misuse.
         def embed_image(source_field, into:, input_type: :search_document,
-                        digest_field: nil, allow_insecure: false)
+                        digest_field: nil, allow_insecure: false,
+                        source: :url, exif_strip: true, meta_field: nil)
+          # Capture the fetch mode immediately — the legacy local
+          # `source = source_field.to_sym` below shadows the kwarg.
+          source_mode = source_mode_for_embed_image!(source)
           into = into.to_sym
           unless vector_properties.key?(into)
             raise InvalidEmbedDeclaration,
@@ -306,6 +360,10 @@ module Parse
           unless fields.key?(digest_field)
             property digest_field, :string
           end
+          meta_field = (meta_field || :"#{into}_meta").to_sym
+          unless fields.key?(meta_field)
+            property meta_field, :object
+          end
 
           directive = EmbedDirective.new(
             sources: [source],
@@ -315,6 +373,9 @@ module Parse
             provider_name: provider_name,
             modality: :image,
             allow_insecure: allow_insecure,
+            source_mode: source_mode,
+            exif_strip: exif_strip ? true : false,
+            meta_field: meta_field,
           ).freeze
           embed_directives[into] = directive
 
@@ -331,6 +392,126 @@ module Parse
           install_embed_writer_guard!(into, [source])
 
           into
+        end
+
+        # @!visibility private
+        # Validate the `source:` kwarg of {.embed_image}.
+        def source_mode_for_embed_image!(source)
+          mode = source.to_sym
+          unless %i[url bytes].include?(mode)
+            raise InvalidEmbedDeclaration,
+                  "#{self}.embed_image: source: must be :url or :bytes (got #{source.inspect})."
+          end
+          mode
+        end
+
+        # Re-embed records through the CURRENT provider/model — the bulk
+        # migration counterpart to {#embed_pending!} (which only fills
+        # null vectors). Use after changing a `:vector` property's
+        # `provider:` / `model:` / `dimensions:` declaration: walks the
+        # class with objectId-cursor pagination, clears each record's
+        # digest sibling so the `before_save` recompute cannot elide the
+        # provider call, and saves.
+        #
+        # With `only_stale: true`, rows whose `<into>_meta` provenance
+        # already matches the current provider name, model, and declared
+        # dimensions are skipped without a provider call — making the
+        # operation resumable: re-running after a partial failure only
+        # touches rows still carrying old-model vectors. Rows with no
+        # meta record (embedded before v5.5) always count as stale.
+        #
+        # Intended as an admin / maintenance operation: run it with a
+        # master-key client (or pass `save_opts:` carrying a
+        # `session_token:` that can write every row). Combine with
+        # {Parse::Embeddings::BatchEmbedder}-style pacing externally if
+        # the provider rate-limits — each record's save makes one
+        # provider call.
+        #
+        # @param field [Symbol, nil] limit to one embed target; nil
+        #   processes every declared directive.
+        # @param batch_size [Integer] rows fetched per round (default 100).
+        # @param limit [Integer, nil] stop after re-embedding at most
+        #   this many records across all directives; nil = no cap.
+        # @param where [Hash, nil] extra query constraints (e.g.
+        #   `{ published: true }`).
+        # @param only_stale [Boolean] skip rows whose meta provenance
+        #   matches the current provider/model/dimensions (default false
+        #   — re-embed everything).
+        # @param save_opts [Hash] options forwarded to each `record.save`.
+        # @return [Integer] number of records re-embedded (saved).
+        # @raise [ArgumentError] when `field:` names no embed target, or
+        #   the class declares no `embed` directives.
+        def reembed!(field: nil, batch_size: 100, limit: nil, where: nil,
+                     only_stale: false, save_opts: {})
+          bs = Integer(batch_size)
+          raise ArgumentError, "#{self}.reembed!: batch_size must be positive." if bs <= 0
+          directives = resolve_embed_directives_for_backfill(field, caller_label: "reembed!")
+
+          processed = 0
+          directives.each do |directive|
+            remaining = limit ? (limit - processed) : nil
+            break if remaining && remaining <= 0
+            processed += reembed_directive!(directive, bs, where, remaining, only_stale, save_opts)
+          end
+          processed
+        end
+
+        # @!visibility private
+        # objectId-cursor walk over ALL rows (subject to `where:`),
+        # clearing the digest so the save-path recompute re-embeds.
+        def reembed_directive!(directive, batch_size, where, remaining, only_stale, save_opts)
+          count = 0
+          cursor = nil
+          current = only_stale ? current_embed_identity(directive) : nil
+          loop do
+            q = query
+            q = q.where(where) if where.is_a?(Hash) && !where.empty?
+            q = q.where(:objectId.gt => cursor) if cursor
+            q.order(:objectId.asc)
+            q.limit(batch_size)
+            batch = q.results
+            break if batch.nil? || batch.empty?
+
+            batch.each do |record|
+              cursor = record.id
+              next if current && embed_meta_current?(record, directive, current)
+              record.public_send(:"#{directive.digest_field}=", nil)
+              record.save(**save_opts)
+              count += 1
+              return count if remaining && count >= remaining
+            end
+            break if batch.length < batch_size
+          end
+          count
+        end
+
+        # @!visibility private
+        # The provenance tuple a freshly-embedded row would carry today.
+        def current_embed_identity(directive)
+          model = begin
+            Parse::Embeddings.provider(directive.provider_name).model_name
+          rescue Parse::Embeddings::ProviderNotRegistered
+            raise
+          rescue NotImplementedError
+            nil
+          end
+          {
+            "provider" => directive.provider_name.to_s,
+            "model" => model,
+            "dimensions" => vector_properties.dig(directive.into, :dimensions),
+          }
+        end
+
+        # @!visibility private
+        # True when the record's meta sibling matches `current` (so
+        # `only_stale: true` can skip it). Missing/foreign-shaped meta
+        # counts as stale.
+        def embed_meta_current?(record, directive, current)
+          meta = directive.meta_field && record.public_send(directive.meta_field)
+          return false unless meta.is_a?(Hash)
+          %w[provider model dimensions].all? do |key|
+            current[key].nil? || meta[key] == current[key] || meta[key.to_sym] == current[key]
+          end
         end
 
         # Backfill embeddings for records whose managed vector field is
@@ -372,18 +553,20 @@ module Parse
         end
 
         # @!visibility private
-        def resolve_embed_directives_for_backfill(field)
+        # `caller_label` names the public entry point in error messages so
+        # a reembed! misuse is not reported as an embed_pending! one.
+        def resolve_embed_directives_for_backfill(field, caller_label: "embed_pending!")
           if field
             d = embed_directives[field.to_sym]
             unless d
               raise ArgumentError,
-                    "#{self}.embed_pending!: :#{field} is not an embed target " \
+                    "#{self}.#{caller_label}: :#{field} is not an embed target " \
                     "(have #{embed_directives.keys.inspect})."
             end
             [d]
           else
             ds = embed_directives.values
-            raise ArgumentError, "#{self}.embed_pending!: no `embed` directives declared." if ds.empty?
+            raise ArgumentError, "#{self}.#{caller_label}: no `embed` directives declared." if ds.empty?
             ds
           end
         end
@@ -470,6 +653,7 @@ module Parse
               record.public_send(:"#{directive.into}=", nil)
             end
             record.public_send(:"#{directive.digest_field}=", nil)
+            clear_embed_meta(record, directive)
           end
           return
         end
@@ -498,6 +682,36 @@ module Parse
           record.public_send(:"#{directive.into}=", vector)
         end
         record.public_send(:"#{directive.digest_field}=", digest)
+        stamp_embed_meta(record, directive, provider, vector)
+      end
+
+      # @!visibility private
+      # Record provider/model provenance on the `<into>_meta` sibling so
+      # migration tooling ({ClassMethods#reembed!} `only_stale:`) can
+      # tell which model produced the stored vector. String keys —
+      # `:object` properties round-trip through JSON.
+      def self.stamp_embed_meta(record, directive, provider, vector)
+        return if directive.meta_field.nil?
+        return unless record.respond_to?(:"#{directive.meta_field}=")
+        model = begin
+          provider.model_name
+        rescue NotImplementedError
+          nil
+        end
+        record.public_send(:"#{directive.meta_field}=", {
+          "provider" => directive.provider_name.to_s,
+          "model" => model,
+          "dimensions" => vector.dimensions,
+          "modality" => directive.image? ? "image" : "text",
+          "embedded_at" => Time.now.utc.iso8601,
+        })
+      end
+
+      # @!visibility private
+      def self.clear_embed_meta(record, directive)
+        return if directive.meta_field.nil?
+        return unless record.respond_to?(:"#{directive.meta_field}=")
+        record.public_send(:"#{directive.meta_field}=", nil)
       end
 
       # @!visibility private
@@ -529,10 +743,25 @@ module Parse
       end
 
       # @!visibility private
-      # Dispatch the provider call based on directive modality.
+      # Dispatch the provider call based on directive modality and (for
+      # images) fetch mode. `:bytes` mode downloads + verifies + strips
+      # through {Parse::Embeddings::ImageFetch.fetch!} and hands the
+      # provider a {Parse::Embeddings::ImageFetch::FetchedImage}; `:url`
+      # mode forwards the raw URL String (the provider validates and
+      # fetches it itself).
       def self.call_provider(provider, directive, input)
         if directive.image?
-          provider.embed_image([input],
+          source =
+            if directive.bytes_mode?
+              Parse::Embeddings::ImageFetch.fetch!(
+                input,
+                allow_insecure: directive.allow_insecure ? true : false,
+                exif_strip: directive.exif_strip != false,
+              )
+            else
+              input
+            end
+          provider.embed_image([source],
             input_type: directive.input_type,
             allow_insecure: directive.allow_insecure ? true : false)
         else

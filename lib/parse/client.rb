@@ -1425,6 +1425,22 @@ module Parse
   # Object/Pointer envelope is converted, and an Object of an UNregistered class
   # is left as a raw Hash (building it would degrade to a field-less Pointer).
   # Plain Hashes and arbitrary `__type` app data pass through untouched.
+  #
+  # SECURITY — cloud results are treated as server-authoritative. The
+  # `__type:"Object"` decode in {._decode_cloud_value} routes through
+  # +Parse::Object.build+, which hydrates with trusted-init — the SAME path
+  # used to decode every query / +.fetch+ result. Trusted-init skips the
+  # +PROTECTED_INITIALIZE_KEYS+ filter, so credential-shaped keys
+  # (+sessionToken+, +authData+, +_rperm+, +_wperm+, +roles+, …) present in a
+  # cloud function's return value populate the in-memory object, exactly as they
+  # do for any other server response. This is by design: the payload is authored
+  # by your Cloud Code and the request is caller-authenticated, and making cloud
+  # results filter these keys would make them inconsistent with (and stricter
+  # than) query/+.fetch+ hydration — e.g. a cloud function returning
+  # +request.user+ would come back missing its +sessionToken+. If a cloud
+  # function is expected to echo back third-party-influenced data, call it with
+  # +raw: true+ (+Parse.call_function(name, body, raw: true)+) to receive the
+  # undecoded response and sanitize it yourself before building objects.
   def self._extract_cloud_result(response)
     r = response.result
     value = r.is_a?(Hash) ? r["result"] : r
@@ -1568,7 +1584,9 @@ module Parse
   # specific {Parse::Error} subclasses as the underlying client does.
   # @param name (see Parse.call_function)
   # @param body (see Parse.call_function)
-  # @param opts (see Parse.call_function) — :raw is ignored.
+  # @param opts (see Parse.call_function) — +:raw+ has no effect; this method
+  #   always decodes the result. Use {Parse.call_function} with +raw: true+ if
+  #   you need the undecoded response.
   # @raise [Parse::Error::CloudCodeError] when the response indicates a cloud-code error.
   # @return [Object] the result data of the response.
   def self.call_function!(name, body = {}, **opts)

@@ -372,6 +372,17 @@ module Parse
             if pointer_fields
               rows = Parse::CLPScope.filter_by_pointer_fields(rows, pointer_fields, resolution.user_id)
             end
+            # NEW-VEC-1: the `$rankFusion` meta score is materialized
+            # BEFORE the ACL `$match`, so a surviving row's raw
+            # `_hybrid_score` encodes its rank among rows the caller
+            # cannot read — a cross-ACL inference channel for scoped
+            # callers probing with crafted queries. Recompute the
+            # surfaced score from the POST-filter ordering (the rows are
+            # already sorted by the true fused score, so relative order
+            # is preserved); the new value is a function of visible rows
+            # only. The client-side RRF path is unaffected — it ranks
+            # from already-filtered branch results.
+            recompute_scores_from_visible_order!(rows, k_constant: k_constant, weights: weights)
           end
           rows.map! { |doc| Parse::PipelineSecurity.strip_internal_fields(doc) }
           rows
@@ -443,16 +454,43 @@ module Parse
         # recognized-but-misused `$rankFusion` (or an unrelated auth/parse
         # error) is treated as supported and surfaces its real error on the
         # actual query rather than silently disabling native fusion.
+        #
+        # Deliberately narrow (NEW-VEC-2): a broad phrase like
+        # "is not allowed" also appears in MongoDB authorization errors
+        # ("not allowed to execute command aggregate"), which combined
+        # with the stage name in the message would misclassify an
+        # auth-failing cluster and cache the wrong probe verdict for
+        # PROBE_CACHE_TTL. Only phrases that unambiguously mean
+        # "this stage name is unknown to the parser" belong here; any
+        # other failure falls through to "supported" and the real query
+        # surfaces the real error (with the client path as fallback).
         UNSUPPORTED_STAGE_FRAGMENTS = [
           "unrecognized pipeline stage name",
           "unknown aggregation stage",
-          "is not allowed",
+          "unknown stage",
         ].freeze
         private_constant :UNSUPPORTED_STAGE_FRAGMENTS
 
         def unsupported_stage_error?(err)
           msg = err.message.to_s.downcase
           msg.include?("rankfusion") && UNSUPPORTED_STAGE_FRAGMENTS.any? { |f| msg.include?(f) }
+        end
+
+        # @!visibility private
+        # Replace each visible row's `_hybrid_score` with an RRF-shaped
+        # score derived from its position AMONG VISIBLE ROWS:
+        # `Σ_b weight_b / (k_constant + visible_rank)`. Monotone with the
+        # original fused order (input is already score-sorted), but
+        # carries no information about how many hidden rows ranked above
+        # or between the visible ones. See NEW-VEC-1.
+        def recompute_scores_from_visible_order!(rows, k_constant:, weights:)
+          w = weights ? symbolize(weights) : nil
+          total_weight = weight_for(w, :lexical).to_f + weight_for(w, :vector).to_f
+          rows.each_with_index do |doc, i|
+            next unless doc.is_a?(Hash)
+            doc["_hybrid_score"] = total_weight / (k_constant + i + 1)
+          end
+          rows
         end
 
         # -- probe cache -------------------------------------------------

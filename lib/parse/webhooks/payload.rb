@@ -740,7 +740,13 @@ module Parse
       # callback handling based on the request origin.
       # @return [Boolean] true if the request originated from Ruby Parse Stack
       def ruby_initiated?
-        @ruby_initiated ||= begin
+        # Stable memoization: a plain `||=` re-derives whenever the stored value
+        # is `false`, so a previously-computed (or externally-stamped, e.g. by
+        # Parse::Webhooks.call_route) `false` would be recomputed on every call
+        # and could disagree with the stamping caller. Cache on `defined?` so a
+        # `false` result is memoized exactly once and never silently re-derived.
+        return @ruby_initiated if defined?(@ruby_initiated) && !@ruby_initiated.nil?
+        @ruby_initiated = begin
             request_id = nil
 
             if @raw.respond_to?(:[])

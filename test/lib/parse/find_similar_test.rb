@@ -157,12 +157,28 @@ class FindSimilarTest < Minitest::Test
     end
   end
 
-  def test_explicit_index_skips_discovery
+  def test_explicit_index_used_verbatim
     captured = {}
-    # Catalog should not be called at all; stub it to fail loudly if it is.
-    catalog = lambda do |_coll, field:|
-      flunk "IndexCatalog.find_vector_index must not be called when index: is explicit"
+    # An explicit index: is the resolved name — discovery never overrides
+    # it. The catalog IS still consulted for best-effort drift
+    # verification, but only an index whose name matches the explicit one
+    # is verified; here the covering index has a different name, so the
+    # explicit name passes through untouched.
+    stub_index_catalog(@catalog_stub) do
+      stub_vector_search(captured) do
+        SingleVecDoc.find_similar(vector: [0.1, 0.2, 0.3],
+                                  index: "explicit_idx", raw: true)
+      end
     end
+    assert_equal "explicit_idx", captured[:index]
+  end
+
+  def test_explicit_index_tolerates_catalog_failure
+    captured = {}
+    # Drift verification for an explicit index: is best-effort — a
+    # catalog lookup failure (Atlas unreachable, listSearchIndexes
+    # unsupported) must not fail the query.
+    catalog = lambda { |_coll, field:| raise "catalog unavailable" }
     stub_index_catalog(catalog) do
       stub_vector_search(captured) do
         SingleVecDoc.find_similar(vector: [0.1, 0.2, 0.3],
@@ -170,6 +186,28 @@ class FindSimilarTest < Minitest::Test
       end
     end
     assert_equal "explicit_idx", captured[:index]
+  end
+
+  def test_explicit_index_matching_catalog_entry_is_drift_verified
+    Parse::VectorSearch.index_drift_policy = :raise
+    # The catalog's covering index has the SAME name as the explicit
+    # kwarg and a drifted dimension count — strict mode must refuse.
+    drifted = {
+      "name" => "explicit_idx",
+      "latestDefinition" => {
+        "fields" => [{ "type" => "vector", "path" => "embedding",
+                       "numDimensions" => 1536, "similarity" => "cosine" }],
+      },
+    }
+    stub_index_catalog(->(_coll, field:) { drifted }) do
+      assert_raises(Parse::Core::VectorSearchable::IndexDriftError) do
+        SingleVecDoc.find_similar(vector: [0.1, 0.2, 0.3],
+                                  index: "explicit_idx", raw: true)
+      end
+    end
+  ensure
+    Parse::VectorSearch.index_drift_policy = :warn
+    SingleVecDoc.instance_variable_set(:@_verified_vector_indexes, nil)
   end
 
   # ---- pass-through arguments ------------------------------------------

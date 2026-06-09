@@ -455,32 +455,112 @@ module Parse
         end
 
         if type == :after_save && payload&.parse_object.present? && payload.parse_object.is_a?(Parse::Object)
-          # Handle after_save callbacks intelligently based on request origin.
-          # For trusted-Ruby-initiated saves (both `_RB_` header AND master
-          # key), Parse Stack's local `run_callbacks :save` will fire
-          # after_create and after_save callbacks after the REST response
-          # returns; firing them again here would double-fire any side
-          # effect (e.g. an `after_save :send_email` would send two emails
-          # per save). For everything else -- client-initiated saves, or a
-          # spoofed `_RB_` from a non-master client -- Parse Stack never had
-          # a chance to run callbacks, so we fire them here.
+          # The chained ActiveModel after_save/after_create callbacks are NOT
+          # fired here. `call!` dispatches every trigger twice -- once for the
+          # specific class route and once for the generic `"*"` route -- so
+          # firing the model callbacks inside this per-route block double-fired
+          # them for any app that registered BOTH a class route and a `"*"`
+          # route (e.g. an `after_save :send_email` would send two emails per
+          # save). The dispatch now lives in `run_after_save_chain`, which
+          # `call!` invokes exactly once per delivery after both route calls.
           #
-          # The decision depends ONLY on request origin, never on what the
-          # handler returned. Parse Server discards the afterSave response
-          # body entirely (it resolves {success} even if the handler throws),
-          # so a handler that returns the parse_object -- the recommended
-          # before_save pattern, easy to copy by mistake -- must NOT silently
-          # suppress these callbacks. We normalize the result to `true` below
-          # so a returned object never leaks into the response or the log.
-          is_new = payload.original.nil?
-          unless trusted_ruby_initiated
-            payload.parse_object.run_after_create_callbacks if is_new
-            payload.parse_object.run_after_save_callbacks
-          end
+          # We still normalize the result to `true` so a handler that returned
+          # the parse_object (the recommended before_save pattern, easy to copy
+          # by mistake) never leaks an object into the response or the log.
           result = true
         end
 
         result
+      end
+
+      # Fires the chained ActiveModel after_save (and after_create, for a new
+      # object) callbacks for an afterSave delivery -- exactly once per request.
+      #
+      # This lives in `call!` rather than `call_route` because `call!` dispatches
+      # every trigger twice (the specific class route AND the generic `"*"`
+      # route). Firing the model callbacks per-route would double-fire any side
+      # effect for an app that registered both routes. Calling this once, after
+      # both route calls, fires the chain exactly once regardless of how many
+      # routes matched.
+      #
+      # The decision to fire depends ONLY on request origin, never on what a
+      # handler returned: Parse Server discards the afterSave response body
+      # entirely, so a handler returning the parse_object must not suppress the
+      # callbacks. For trusted-Ruby-initiated saves (both the `_RB_` request-id
+      # header AND the master key) Parse Stack's local `run_callbacks :save`
+      # already fires these after the REST response returns, so we skip them
+      # here to avoid the double-fire. The route-present guard preserves the
+      # "an unregistered afterSave trigger never fires model callbacks" contract
+      # that `call_route`'s early return used to provide.
+      #
+      # @param payload [Parse::Webhooks::Payload] the afterSave payload.
+      # @return [void]
+      def run_after_save_chain(payload)
+        return unless payload&.after_save?
+        return unless payload.parse_object.is_a?(Parse::Object)
+
+        # Preserve the "no registered route => no model callbacks" behavior that
+        # call_route's `return unless routes[type][className].present?` enforced.
+        # Mirror that guard exactly: key on parse_class.to_s (as call_route does)
+        # and use `.present?` on the value -- registration stores an Array, and an
+        # empty/absent registration must NOT fire (matching the original).
+        after_save_routes = routes[:after_save]
+        return unless after_save_routes &&
+                      (after_save_routes[payload.parse_class.to_s].present? ||
+                       after_save_routes["*"].present?)
+
+        # Trusted-Ruby-initiated saves run their callbacks locally; firing again
+        # here would double them. This must match call_route's trusted_ruby_initiated
+        # EXACTLY. call_route runs (and stamps @ruby_initiated) before this for any
+        # matched route, so read that stamped value rather than recomputing via
+        # `ruby_initiated?` -- whose `||=` memoization re-derives on a stamped
+        # `false` and could disagree with call_route's header lookup.
+        return if payload.ruby_initiated? && payload.master? == true
+
+        # By the time afterSave fires the object is ALREADY persisted in Parse
+        # Server, and Parse Server discards the afterSave response body entirely
+        # (it resolves success even if the handler throws). So a chained callback
+        # that raises must not (a) 500 the webhook endpoint -- `call!`'s rescue
+        # only catches ResponseError / ValidationError, so a bare StandardError
+        # would escape -- nor (b) take out the OTHER phase's unrelated side
+        # effects. Run the after_create and after_save phases independently, each
+        # guarded, logging and swallowing any StandardError. This mirrors Parse's
+        # own afterSave semantics (log-and-continue on a post-persist failure):
+        # a raising `after_create :send_welcome_email` no longer silently skips
+        # an unrelated `after_save :reindex`, and neither can crash the endpoint.
+        obj = payload.parse_object
+        run_after_save_phase(obj, :after_create) if payload.original.nil?
+        run_after_save_phase(obj, :after_save)
+        nil
+      end
+
+      # Runs one phase (:after_create or :after_save) of an afterSave object's
+      # chained ActiveModel callbacks, swallowing and logging any StandardError
+      # so a post-persist callback failure can't crash the webhook endpoint or
+      # suppress the sibling phase. ActiveModel still halts the rest of *this*
+      # phase's chain on a raise -- only the cross-phase / endpoint blast radius
+      # is contained here. Note this also swallows a ResponseError/ValidationError
+      # raised from inside an after_save callback: afterSave is post-persist and
+      # Parse Server discards the response body, so an `error!` there cannot deny
+      # the (already-committed) write -- it is logged, not propagated.
+      # @param obj [Parse::Object] the persisted afterSave object.
+      # @param phase [Symbol] :after_create or :after_save.
+      # @return [void]
+      def run_after_save_phase(obj, phase)
+        case phase
+        when :after_create then obj.run_after_create_callbacks
+        when :after_save then obj.run_after_save_callbacks
+        end
+        nil
+      rescue => e
+        # Redact the exception message before logging: a callback error can echo
+        # record contents/tokens, and the rest of this file routes log output
+        # through the same redactor.
+        warn "[Parse::Webhooks] afterSave #{phase} callback raised for " \
+             "#{obj.class}##{obj.id} -- the object is already persisted; " \
+             "logging and continuing: #{e.class}: " \
+             "#{Parse::Middleware::BodyBuilder.redact(e.message)}"
+        nil
       end
 
       # Generates a success response for Parse Server.
@@ -688,6 +768,12 @@ module Parse
             # call hooks subscribed to any class route
             generic_result = Parse::Webhooks.call_route(payload.trigger_name, "*", payload)
             result = generic_result if generic_result.present? && result.nil?
+
+            # Fire the chained ActiveModel after_save/after_create callbacks
+            # exactly once per delivery -- after BOTH route calls above -- so an
+            # app that registers both a class route and a `"*"` route doesn't
+            # double-fire them. No-op for every non-afterSave trigger.
+            Parse::Webhooks.run_after_save_chain(payload)
           else
             if self.logging.present?
               puts "[Webhooks] --> Could not find mapping route for " \

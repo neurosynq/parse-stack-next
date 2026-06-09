@@ -287,7 +287,7 @@ class ACLConstraintsUnitTest < Minitest::Test
     expected_pipeline = [
       {
         "$match" => {
-          "_rperm" => { "$eq" => [] },
+          "_rperm" => { "$exists" => true, "$eq" => [] },
         },
       },
     ]
@@ -307,7 +307,7 @@ class ACLConstraintsUnitTest < Minitest::Test
     expected_pipeline = [
       {
         "$match" => {
-          "_wperm" => { "$eq" => [] },
+          "_wperm" => { "$exists" => true, "$eq" => [] },
         },
       },
     ]
@@ -326,7 +326,7 @@ class ACLConstraintsUnitTest < Minitest::Test
     expected_pipeline = [
       {
         "$match" => {
-          "_rperm" => { "$eq" => [] },
+          "_rperm" => { "$exists" => true, "$eq" => [] },
         },
       },
     ]
@@ -345,7 +345,7 @@ class ACLConstraintsUnitTest < Minitest::Test
     expected_pipeline = [
       {
         "$match" => {
-          "_wperm" => { "$eq" => [] },
+          "_wperm" => { "$exists" => true, "$eq" => [] },
         },
       },
     ]
@@ -395,15 +395,18 @@ class ACLConstraintsUnitTest < Minitest::Test
     query.not_publicly_readable
 
     pipeline = query.pipeline
+    # The `$exists: true` guard is required: a missing `_rperm` is public per
+    # Parse Server, and `$nin` matches missing-field docs, so without the
+    # guard not_publicly_readable would return the public rows it must exclude.
     expected_pipeline = [
       {
         "$match" => {
-          "_rperm" => { "$nin" => ["*"] },
+          "_rperm" => { "$exists" => true, "$nin" => ["*"] },
         },
       },
     ]
 
-    assert_equal expected_pipeline, pipeline, "not_publicly_readable should query for '*' NOT in _rperm"
+    assert_equal expected_pipeline, pipeline, "not_publicly_readable should query for '*' NOT in _rperm and exclude missing-_rperm (public) rows"
     puts "✅ not_publicly_readable generates correct pipeline"
   end
 
@@ -417,12 +420,12 @@ class ACLConstraintsUnitTest < Minitest::Test
     expected_pipeline = [
       {
         "$match" => {
-          "_wperm" => { "$nin" => ["*"] },
+          "_wperm" => { "$exists" => true, "$nin" => ["*"] },
         },
       },
     ]
 
-    assert_equal expected_pipeline, pipeline, "not_publicly_writable should query for '*' NOT in _wperm"
+    assert_equal expected_pipeline, pipeline, "not_publicly_writable should query for '*' NOT in _wperm and exclude missing-_wperm (public) rows"
     puts "✅ not_publicly_writable generates correct pipeline"
   end
 
@@ -550,7 +553,7 @@ class ACLConstraintsUnitTest < Minitest::Test
     expected_pipeline = [
       {
         "$match" => {
-          "_rperm" => { "$eq" => [] },
+          "_rperm" => { "$exists" => true, "$eq" => [] },
         },
       },
     ]
@@ -661,5 +664,208 @@ class ACLConstraintsUnitTest < Minitest::Test
     assert wperm_stage, "Should have not writable constraint"
 
     puts "✅ Multiple ACL convenience methods work together"
+  end
+
+  # Regression guard for the mongo-direct ACL routing fix: the Aggregation
+  # built for an ACL filter (readable_by/publicly_readable/etc.) must carry
+  # +allow_internal_fields: true+ so the SDK-built `_rperm`/`_wperm` $match
+  # passes Parse::PipelineSecurity's internal-fields denylist. Without the
+  # flag, every readable_by/publicly_readable query that auto-routes through
+  # mongo-direct raises Parse::PipelineSecurity::Error on the _rperm reference.
+  def test_acl_aggregation_marks_internal_fields_allowed
+    puts "\n=== Testing ACL aggregation forwards allow_internal_fields ==="
+    require "parse/pipeline_security"
+
+    %i[publicly_readable publicly_writable].each do |method|
+      query = Parse::Query.new("Post").public_send(method)
+      agg = query.send(:execute_aggregation_pipeline)
+
+      assert agg.instance_variable_get(:@allow_internal_fields),
+        "#{method} aggregation must forward allow_internal_fields: true"
+
+      # The pipeline must survive the exact security check the mongo-direct
+      # sink runs (allow_internal_fields equal to the forwarded flag).
+      Parse::PipelineSecurity.validate_filter!(
+        agg.pipeline,
+        allow_internal_fields: agg.instance_variable_get(:@allow_internal_fields),
+      )
+    end
+
+    # readable_by with an explicit permission string routes the same way.
+    agg = Parse::Query.new("Post").readable_by("role:Admin").send(:execute_aggregation_pipeline)
+    assert agg.instance_variable_get(:@allow_internal_fields),
+      "readable_by aggregation must forward allow_internal_fields: true"
+
+    puts "✅ ACL aggregations forward allow_internal_fields and pass the security validator"
+  end
+
+  # Guard the credential-field boundary: a plain (non-ACL) aggregation must
+  # NOT relax the internal-fields denylist, so user-supplied pipelines can't
+  # smuggle references to password hashes / session tokens through the
+  # mongo-direct sink.
+  def test_non_acl_aggregation_keeps_internal_fields_guard
+    puts "\n=== Testing non-ACL aggregation keeps internal-fields guard ==="
+
+    agg = Parse::Query.new("Post").where(title: "x")
+                      .aggregate([{ "$group" => { "_id" => "$title" } }])
+
+    refute agg.instance_variable_get(:@allow_internal_fields),
+      "non-ACL aggregate must keep allow_internal_fields: false (credential guard intact)"
+
+    puts "✅ Non-ACL aggregation keeps the internal-fields guard"
+  end
+
+  # #1 regression: the scalar aggregation terminals (sum/average/min/max/
+  # count_distinct/distinct) and the user-facing #aggregate all funnel through
+  # Query#aggregate. An ACL filter there must mark the pipeline so the
+  # mongo-direct sink allows the SDK-built _rperm/_wperm reference.
+  def test_aggregate_with_acl_filter_forwards_allow_internal_fields
+    puts "\n=== Testing #aggregate with ACL filter forwards allow_internal_fields ==="
+
+    agg = Parse::Query.new("Post").publicly_readable
+                      .aggregate([{ "$group" => { "_id" => "$genre" } }])
+
+    assert agg.instance_variable_get(:@allow_internal_fields),
+      "ACL-filtered aggregate must forward allow_internal_fields: true"
+    # The compiled pipeline must still carry the _rperm $match (it is not
+    # dropped) so the filter actually applies on whichever engine runs it.
+    assert agg.pipeline.to_json.include?("_rperm"),
+      "ACL $match must survive into the aggregate() pipeline"
+
+    puts "✅ ACL-filtered aggregate forwards the flag and keeps the _rperm match"
+  end
+
+  # #1 security regression: a scoped (scope_to_user / scope_to_role /
+  # session_token) aggregation terminal must NOT silently fall back to Parse
+  # Server's REST /aggregate endpoint, which is master-key-only and enforces
+  # neither ACL nor CLP. When mongo-direct is unavailable it must fail closed.
+  def test_scoped_aggregation_terminal_fails_closed_without_mongo_direct
+    puts "\n=== Testing scoped aggregation fails closed without mongo-direct ==="
+
+    skip "requires Parse::MongoDB NOT enabled for this assertion" if defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
+
+    user = Parse::User.new(objectId: "scopedUser1")
+
+    # A scoped query with NO internal fields (pure scope bypass) must refuse
+    # to run a scalar aggregation over REST-as-master.
+    err = assert_raises(Parse::Query::MongoDirectRequired) do
+      Parse::Query.new("Post").where(genre: "rock").scope_to_user(user)
+                  .aggregate([{ "$group" => { "_id" => nil, "t" => { "$sum" => "$plays" } } }])
+    end
+    assert_match(/scoped aggregation/i, err.message)
+
+    # An UNSCOPED ACL aggregate keeps the REST fallback (master-key correctness
+    # edge, not an enforcement bypass) — it must NOT raise.
+    Parse::Query.new("Post").publicly_readable
+                .aggregate([{ "$group" => { "_id" => "$genre" } }])
+
+    puts "✅ Scoped aggregation fails closed; unscoped keeps REST fallback"
+  end
+
+  # #3/#4: empty intent ([] / nil / "none" / :none) and Symbol values must
+  # COMPILE at the Query level (they previously raised ArgumentError despite
+  # being documented), and map to the right shapes.
+  def test_readable_by_accepts_empty_and_symbol_values
+    puts "\n=== Testing readable_by accepts [] / nil / :none / :public ==="
+
+    empty = [{ "$match" => { "_rperm" => { "$exists" => true, "$eq" => [] } } }]
+    [[], nil, "none", :none].each do |v|
+      assert_equal empty, Parse::Query.new("Post").readable_by(v).pipeline,
+        "readable_by(#{v.inspect}) should compile to the explicit-empty match"
+    end
+
+    public_shape = [{ "$match" => { "$or" => [
+      { "_rperm" => { "$in" => ["*"] } },
+      { "_rperm" => { "$exists" => false } },
+    ] } }]
+    [:public, :everyone, :world, "public", "*"].each do |v|
+      assert_equal public_shape, Parse::Query.new("Post").readable_by(v).pipeline,
+        "readable_by(#{v.inspect}) should map to the public wildcard"
+    end
+
+    puts "✅ readable_by accepts empty + symbol values"
+  end
+
+  # #6: strict: true compiles an exact match — no implicit public, no
+  # missing-field branch.
+  def test_readable_by_strict_kwarg
+    puts "\n=== Testing readable_by(strict: true) ==="
+
+    inclusive = Parse::Query.new("Post").readable_by("role:Admin").pipeline
+    assert inclusive.first["$match"].key?("$or"), "default is public-inclusive ($or)"
+
+    strict = Parse::Query.new("Post").readable_by("role:Admin", strict: true).pipeline
+    assert_equal [{ "$match" => { "_rperm" => { "$in" => ["role:Admin"] } } }], strict,
+      "strict: true should be an exact $in with no public/missing branches"
+
+    puts "✅ readable_by strict mode produces an exact match"
+  end
+
+  # #5: the British :writeable_by spelling now resolves to the SAME
+  # public-inclusive, role-expanding implementation as :writable_by.
+  def test_writeable_by_is_alias_of_writable_by
+    puts "\n=== Testing writeable_by == writable_by ==="
+
+    american = Parse::Query.new("Post").where(:ACL.writable_by => "role:Admin").pipeline
+    british  = Parse::Query.new("Post").where(:ACL.writeable_by => "role:Admin").pipeline
+    assert_equal american, british, "writeable_by must compile identically to writable_by"
+    assert american.first["$match"].key?("$or"), "both are public-inclusive"
+
+    puts "✅ writeable_by is a true alias of writable_by"
+  end
+
+  # #8/#9: the new chained negation methods exist, and a mistyped permission
+  # is NOT silently swallowed.
+  def test_negation_methods_and_no_silent_swallow
+    puts "\n=== Testing not_readable_by/not_writable_by + no silent swallow ==="
+
+    q = Parse::Query.new("Post").not_readable_by("role:Admin")
+    match = q.pipeline.first["$match"]["_rperm"]
+    # not readable by Admin also excludes publicly-readable rows -> "*" added.
+    assert_equal({ "$exists" => true, "$nin" => ["role:Admin", "*"] }, match)
+
+    assert_respond_to Parse::Query.new("Post"), :not_writable_by
+
+    # An unrecognized array element must RAISE, not vanish from the filter.
+    assert_raises(ArgumentError) do
+      Parse::Query.new("Post").readable_by(["role:Admin", 12345]).pipeline
+    end
+    # An unsupported Symbol must RAISE too.
+    assert_raises(ArgumentError) do
+      Parse::Query.new("Post").readable_by(:bogus).pipeline
+    end
+
+    puts "✅ negation methods present; bad permissions raise instead of vanishing"
+  end
+
+  # #1 (second sink): aggregate_from_query is a separate public pipeline sink.
+  # It must (a) fold the SDK ACL $match into the pipeline rather than dropping
+  # it, and (b) fail closed for a scoped query when mongo-direct is disabled.
+  def test_aggregate_from_query_applies_acl_and_fails_closed_when_scoped
+    puts "\n=== Testing aggregate_from_query ACL retention + scoped fail-closed ==="
+
+    agg = Parse::Query.new("Post").publicly_readable
+                      .aggregate_from_query([{ "$group" => { "_id" => "$genre" } }])
+    assert agg.instance_variable_get(:@allow_internal_fields),
+      "aggregate_from_query must forward allow_internal_fields for an ACL filter"
+    assert agg.pipeline.to_json.include?("_rperm"),
+      "aggregate_from_query must fold the ACL $match into the pipeline (not drop it)"
+
+    if !(defined?(Parse::MongoDB) && Parse::MongoDB.enabled?)
+      user = Parse::User.new(objectId: "scopedU")
+      assert_raises(Parse::Query::MongoDirectRequired) do
+        Parse::Query.new("Post").scope_to_user(user)
+                    .aggregate_from_query([{ "$group" => { "_id" => nil } }])
+      end
+    end
+
+    # A caller-supplied stage that smuggles an internal field must NOT flip the
+    # sanction (only the SDK-built portion counts).
+    sneaky = Parse::Query.new("Post").where(title: "x")
+                         .aggregate_from_query([{ "$match" => { "_rperm" => { "$in" => ["x"] } } }])
+    refute sneaky.instance_variable_get(:@allow_internal_fields),
+      "additional_stages must not be able to sanction internal-field references"
+
+    puts "✅ aggregate_from_query applies ACL filters and fails closed when scoped"
   end
 end

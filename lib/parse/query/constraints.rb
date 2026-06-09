@@ -1638,6 +1638,12 @@ module Parse
     #  q.where :field.like => /ruby_regex/i
     #  :name.like => /Bob/i
     #
+    #  # Opt into Unicode-aware matching (Parse Server 8.3.0+ over REST,
+    #  # MongoDB 6.1+ mongo-direct). The hash form compiles to the explicit
+    #  # $regex/$options shape and adds the `u` flag:
+    #  q.where :name.like => { value: /café/i, unicode: true }
+    #  # Generates: "name": { "$regex": "café", "$options": "iu" }
+    #
     class RegularExpressionConstraint < Constraint
       # Requires that a key's value match a regular expression.
       # Includes security validation to prevent ReDoS attacks.
@@ -1659,6 +1665,24 @@ module Parse
       # @raise [ArgumentError] if the pattern is potentially dangerous (ReDoS)
       # @return [Hash] the compiled constraint
       def build
+        # Opt-in `{ value:, unicode: true }` form. Unlike the bare form (which
+        # stringifies a Ruby Regexp to its inline-flag source, e.g.
+        # "(?i-mx:Bob)"), this compiles to the explicit $regex/$options shape so
+        # the `u` flag can be appended for Unicode-aware matching.
+        if @value.is_a?(Hash)
+          raw, unicode = regex_unicode_option(@value)
+          pattern_str = raw.is_a?(Regexp) ? raw.source : raw.to_s
+          options = +""
+          options << "i" if raw.is_a?(Regexp) && raw.casefold?
+          options << "u" if unicode
+
+          Parse::RegexSecurity.validate!(pattern_str)
+
+          return options.empty? ?
+            { @operation.operand => { key => pattern_str } } :
+            { @operation.operand => { key => pattern_str, :$options => options } }
+        end
+
         value = formatted_value
         pattern_str = value.is_a?(Regexp) ? value.source : value.to_s
         options = value.is_a?(Regexp) && value.casefold? ? "i" : nil
@@ -2322,6 +2346,11 @@ module Parse
     #  User.where(:name.starts_with => "John")
     #  # Generates: "name": { "$regex": "^John", "$options": "i" }
     #
+    #  # Opt into Unicode-aware case-insensitive matching (Parse Server 8.3.0+
+    #  # over REST, MongoDB 6.1+ mongo-direct):
+    #  User.where(:name.starts_with => { value: "café", unicode: true })
+    #  # Generates: "name": { "$regex": "^café", "$options": "iu" }
+    #
     class StartsWithConstraint < Constraint
       # @!method starts_with
       # A registered method on a symbol to create the constraint. Maps to Parse operator "$regex".
@@ -2333,7 +2362,8 @@ module Parse
 
       # @return [Hash] the compiled constraint.
       def build
-        value = formatted_value
+        raw, unicode = regex_unicode_option(@value)
+        value = self.class.formatted_value(raw)
         unless value.is_a?(String)
           raise ArgumentError, "#{self.class}: Value must be a string for starts_with constraint"
         end
@@ -2347,7 +2377,7 @@ module Parse
         escaped_value = Regexp.escape(value)
         regex_pattern = "^#{escaped_value}"
 
-        { @operation.operand => { :$regex => regex_pattern, :$options => "i" } }
+        { @operation.operand => { :$regex => regex_pattern, :$options => (unicode ? "iu" : "i") } }
       end
     end
 
@@ -2357,6 +2387,11 @@ module Parse
     #  # Find posts whose title contains "parse"
     #  Post.where(:title.contains => "parse")
     #  # Generates: "title": { "$regex": ".*parse.*", "$options": "i" }
+    #
+    #  # Opt into Unicode-aware case-insensitive matching (Parse Server 8.3.0+
+    #  # over REST, MongoDB 6.1+ mongo-direct):
+    #  Post.where(:title.contains => { value: "café", unicode: true })
+    #  # Generates: "title": { "$regex": ".*café.*", "$options": "iu" }
     #
     class ContainsConstraint < Constraint
       # @!method contains
@@ -2369,7 +2404,8 @@ module Parse
 
       # @return [Hash] the compiled constraint.
       def build
-        value = formatted_value
+        raw, unicode = regex_unicode_option(@value)
+        value = self.class.formatted_value(raw)
         unless value.is_a?(String)
           raise ArgumentError, "#{self.class}: Value must be a string for contains constraint"
         end
@@ -2383,7 +2419,7 @@ module Parse
         escaped_value = Regexp.escape(value)
         regex_pattern = ".*#{escaped_value}.*"
 
-        { @operation.operand => { :$regex => regex_pattern, :$options => "i" } }
+        { @operation.operand => { :$regex => regex_pattern, :$options => (unicode ? "iu" : "i") } }
       end
     end
 
@@ -2393,6 +2429,11 @@ module Parse
     #  # Find files whose name ends with ".pdf"
     #  File.where(:name.ends_with => ".pdf")
     #  # Generates: "name": { "$regex": "\\.pdf$", "$options": "i" }
+    #
+    #  # Opt into Unicode-aware case-insensitive matching (Parse Server 8.3.0+
+    #  # over REST, MongoDB 6.1+ mongo-direct):
+    #  Post.where(:title.ends_with => { value: "café", unicode: true })
+    #  # Generates: "title": { "$regex": "café$", "$options": "iu" }
     #
     class EndsWithConstraint < Constraint
       # @!method ends_with
@@ -2405,7 +2446,8 @@ module Parse
 
       # @return [Hash] the compiled constraint.
       def build
-        value = formatted_value
+        raw, unicode = regex_unicode_option(@value)
+        value = self.class.formatted_value(raw)
         unless value.is_a?(String)
           raise ArgumentError, "#{self.class}: Value must be a string for ends_with constraint"
         end
@@ -2419,7 +2461,7 @@ module Parse
         escaped_value = Regexp.escape(value)
         regex_pattern = "#{escaped_value}$"
 
-        { @operation.operand => { :$regex => regex_pattern, :$options => "i" } }
+        { @operation.operand => { :$regex => regex_pattern, :$options => (unicode ? "iu" : "i") } }
       end
     end
 
@@ -2535,13 +2577,39 @@ module Parse
           permissions_for_pointer(value)
         elsif value.is_a?(Array)
           value.flat_map { |item| collect_array_item(item) }
+        elsif value.is_a?(Symbol)
+          [symbol_permission(value)]
         elsif value.is_a?(String)
-          [value == "public" ? "*" : value]
+          [normalize_string_permission(value)]
         else
           raise ArgumentError,
                 "ACL permission value must be a Parse::User, Parse::Role, " \
-                "Parse::Pointer, String, or Array of these (got #{value.class})"
+                "Parse::Pointer, String, Symbol (:public/:everyone/:world), or " \
+                "Array of these (got #{value.class})"
         end
+      end
+
+      # @!visibility private
+      # Map a Symbol permission (:public / :everyone / :world) to the "*"
+      # wildcard. Any other Symbol RAISES rather than silently mapping to a
+      # bogus key — a mistyped permission must not quietly weaken the filter.
+      def symbol_permission(sym)
+        case sym
+        when :public, :everyone, :world then "*"
+        else
+          raise ArgumentError,
+                "Unsupported ACL permission Symbol #{sym.inspect}. Use " \
+                ":public / :everyone / :world for public access, or pass a " \
+                "role name as a String or a Parse::Role."
+        end
+      end
+
+      # @!visibility private
+      # Normalize a String permission: the sentinel "public" maps to the
+      # "*" wildcard; every other String is an exact permission key
+      # (user objectId or "role:<Name>") used verbatim.
+      def normalize_string_permission(str)
+        str == "public" ? "*" : str
       end
 
       # Expand a +:ACL.readable_by_role+ / +:ACL.writable_by_role+ value
@@ -2573,10 +2641,11 @@ module Parse
       end
 
       # @!visibility private
-      # Array-element variant that silently skips unrecognized entries
-      # rather than raising, matching the pre-refactor behavior where
-      # the array branch tolerated a mixed bag of types and ignored
-      # anything it didn't understand.
+      # Array-element variant. An unrecognized element RAISES rather than
+      # being silently dropped: a mistyped permission that vanished from
+      # the key set would silently weaken the intended ACL filter (a
+      # security footgun). The Symbol :none contributes nothing (it is the
+      # array-element spelling of "no extra grant").
       def collect_array_item(item)
         if item.is_a?(Parse::User)
           permissions_for_user(item)
@@ -2584,10 +2653,15 @@ module Parse
           permissions_for_role(item)
         elsif item.is_a?(Parse::Pointer)
           permissions_for_pointer(item)
+        elsif item.is_a?(Symbol)
+          item == :none ? [] : [symbol_permission(item)]
         elsif item.is_a?(String)
-          [item == "public" ? "*" : item]
+          [normalize_string_permission(item)]
         else
-          []
+          raise ArgumentError,
+                "Unsupported ACL permission element #{item.inspect} " \
+                "(#{item.class}) in array. Expected a Parse::User / Parse::Role / " \
+                "Parse::Pointer, a permission String, or :public/:everyone/:world."
         end
       end
 
@@ -2619,17 +2693,59 @@ module Parse
       # @param field [String] +"_rperm"+ or +"_wperm"+.
       # @return [Hash] aggregation-pipeline wrapper compatible with
       #   {Parse::Query}'s constraint-build contract.
-      def pipeline(permissions, field:)
+      # @param strict [Boolean] when true, build an EXACT match: suppress
+      #   both the implicit public +"*"+ grant AND the missing-field
+      #   (+$exists: false+) branch, so only rows whose +_rperm+/+_wperm+
+      #   literally contains one of +permissions+ match. Used by the
+      #   +readable_by(..., strict: true)+ / +readable_by_exact+ surface.
+      def pipeline(permissions, field:, strict: false)
         deduped = permissions.compact.reject(&:empty?).uniq
         if deduped.empty?
           raise ArgumentError, "no valid permissions found in provided value"
         end
         predicate = if field == "_rperm"
-            Parse::ACL.read_predicate(deduped)
+            Parse::ACL.read_predicate(deduped, include_public: !strict, include_missing: !strict)
           else
-            Parse::ACL.write_predicate(deduped)
+            Parse::ACL.write_predicate(deduped, include_public: !strict, include_missing: !strict)
           end
         { "__aggregation_pipeline" => [{ "$match" => predicate }] }
+      end
+
+      # @!visibility private
+      # Whether a +readable_by+ / +writable_by+ value expresses "no
+      # permissions" (master-key-only): +nil+, an empty Array, the String
+      # +"none"+, or the Symbol +:none+. These map to {.empty_pipeline}.
+      def empty_intent?(value)
+        return true if value.nil?
+        return true if value == "none" || value == :none
+        return true if value.is_a?(Array) && value.empty?
+        false
+      end
+
+      # @!visibility private
+      # The match for "no permissions": an explicit empty array. A missing
+      # +_rperm+/+_wperm+ is treated by Parse Server as PUBLIC — the
+      # opposite of master-only — so it must NOT match here. +$eq: []+
+      # already excludes a missing field (missing != []); the +$exists:
+      # true+ guard documents that intent.
+      # @param field [String] +"_rperm"+ or +"_wperm"+.
+      def empty_pipeline(field:)
+        { "__aggregation_pipeline" => [
+          { "$match" => { field => { "$exists" => true, "$eq" => [] } } },
+        ] }
+      end
+
+      # @!visibility private
+      # Permission keys for a +not_readable_by+ / +not_writable_by+ value:
+      # the expanded grant set (user→roles, role→parent roles) PLUS the
+      # public +"*"+ wildcard. A public row is readable/writable by everyone,
+      # so it must be EXCLUDED from a "not readable/writable by X" result —
+      # hence +"*"+ is added to the +$nin+ set. Returns +[]+ for an
+      # empty-intent value (no negation constraint is applied).
+      # @return [Array<String>]
+      def collect_for_negation(value)
+        return [] if empty_intent?(value)
+        (collect(value) + ["*"]).compact.reject(&:empty?).uniq
       end
 
       # @!visibility private
@@ -2652,7 +2768,12 @@ module Parse
       def permissions_for_role(role)
         return [] unless role.respond_to?(:name) && role.name.present?
         begin
-          role.all_parent_role_names(max_depth: 5).map { |name| "role:#{name}" }
+          names = role.all_parent_role_names(max_depth: 5)
+          # The role's OWN name must always be present: an unpersisted role
+          # (id still nil) yields [] from the upward-inheritance walk, which
+          # would otherwise drop the role entirely and raise "no valid
+          # permissions". Self is included idempotently for persisted roles.
+          (Array(names) + [role.name]).uniq.map { |name| "role:#{name}" }
         rescue
           ["role:#{role.name}"]
         end
@@ -2709,23 +2830,41 @@ module Parse
       # @return [ACLReadableByConstraint]
       register :readable_by
 
+      # @return [Boolean] whether to compile an EXACT match (suppress the
+      #   implicit public +"*"+ grant and the missing-field branch).
+      #   Overridden by {ACLReadableByExactConstraint}.
+      def strict?
+        false
+      end
+
       # @return [Hash] the compiled constraint using _rperm field.
       def build
         # Use @value directly to preserve type information before
         # formatted_value converts to pointers.
         value = @value
 
-        # Special case: "none" matches objects whose _rperm is an empty
-        # array — master-key-only documents. Parse Server writes []
-        # when no read permission is set, and an absent _rperm is
-        # treated as public (handled by the default predicate path).
-        if value.is_a?(String) && value == "none"
-          pipeline = [{ "$match" => { "_rperm" => { "$eq" => [] } } }]
-          return { "__aggregation_pipeline" => pipeline }
-        end
+        # "No permissions" intent (nil / [] / "none" / :none) matches
+        # objects whose _rperm is an explicit empty array — master-key-only
+        # documents. A missing _rperm is public (the opposite of "none"), so
+        # {ACLPermissions.empty_pipeline} deliberately does NOT match it.
+        return ACLPermissions.empty_pipeline(field: "_rperm") if ACLPermissions.empty_intent?(value)
 
         permissions = ACLPermissions.collect(value)
-        ACLPermissions.pipeline(permissions, field: "_rperm")
+        ACLPermissions.pipeline(permissions, field: "_rperm", strict: strict?)
+      end
+    end
+
+    # Strict variant of {ACLReadableByConstraint}: matches ONLY rows whose
+    # +_rperm+ literally contains one of the resolved permissions — no
+    # implicit public +"*"+ and no missing-+_rperm+ (public-by-absence) rows.
+    # Reached via +Query#readable_by(value, strict: true)+ or the
+    # +:ACL.readable_by_exact+ symbol operator. Use this for ownership /
+    # security audits ("which rows explicitly grant this principal") rather
+    # than access simulation ("what can this principal read").
+    class ACLReadableByExactConstraint < ACLReadableByConstraint
+      register :readable_by_exact
+      def strict?
+        true
       end
     end
 
@@ -2748,10 +2887,25 @@ module Parse
       # @return [ACLReadableByRoleConstraint]
       register :readable_by_role
 
+      # @return [Boolean] whether to compile an EXACT match. Overridden by
+      #   {ACLReadableByRoleExactConstraint}.
+      def strict?
+        false
+      end
+
       # @return [Hash] the compiled constraint using _rperm field.
       def build
         permissions = ACLPermissions.collect_role_only(@value)
-        ACLPermissions.pipeline(permissions, field: "_rperm")
+        ACLPermissions.pipeline(permissions, field: "_rperm", strict: strict?)
+      end
+    end
+
+    # Strict variant of {ACLReadableByRoleConstraint}. See
+    # {ACLReadableByExactConstraint}.
+    class ACLReadableByRoleExactConstraint < ACLReadableByRoleConstraint
+      register :readable_by_role_exact
+      def strict?
+        true
       end
     end
 
@@ -2777,21 +2931,33 @@ module Parse
       # @return [ACLWritableByConstraint]
       register :writable_by
 
+      # @return [Boolean] whether to compile an EXACT match. Overridden by
+      #   {ACLWritableByExactConstraint}.
+      def strict?
+        false
+      end
+
       # @return [Hash] the compiled constraint using _wperm field.
       def build
         # Use @value directly to preserve type information before
         # formatted_value converts to pointers.
         value = @value
 
-        # Special case: "none" matches objects whose _wperm is an empty
-        # array — master-key-only documents. See {ACLReadableByConstraint#build}.
-        if value.is_a?(String) && value == "none"
-          pipeline = [{ "$match" => { "_wperm" => { "$eq" => [] } } }]
-          return { "__aggregation_pipeline" => pipeline }
-        end
+        # "No permissions" intent (nil / [] / "none" / :none) — see
+        # {ACLReadableByConstraint#build}.
+        return ACLPermissions.empty_pipeline(field: "_wperm") if ACLPermissions.empty_intent?(value)
 
         permissions = ACLPermissions.collect(value)
-        ACLPermissions.pipeline(permissions, field: "_wperm")
+        ACLPermissions.pipeline(permissions, field: "_wperm", strict: strict?)
+      end
+    end
+
+    # Strict variant of {ACLWritableByConstraint}. See
+    # {ACLReadableByExactConstraint}.
+    class ACLWritableByExactConstraint < ACLWritableByConstraint
+      register :writable_by_exact
+      def strict?
+        true
       end
     end
 
@@ -2814,10 +2980,25 @@ module Parse
       # @return [ACLWritableByRoleConstraint]
       register :writable_by_role
 
+      # @return [Boolean] whether to compile an EXACT match. Overridden by
+      #   {ACLWritableByRoleExactConstraint}.
+      def strict?
+        false
+      end
+
       # @return [Hash] the compiled constraint using _wperm field.
       def build
         permissions = ACLPermissions.collect_role_only(@value)
-        ACLPermissions.pipeline(permissions, field: "_wperm")
+        ACLPermissions.pipeline(permissions, field: "_wperm", strict: strict?)
+      end
+    end
+
+    # Strict variant of {ACLWritableByRoleConstraint}. See
+    # {ACLReadableByExactConstraint}.
+    class ACLWritableByRoleExactConstraint < ACLWritableByRoleConstraint
+      register :writable_by_role_exact
+      def strict?
+        true
       end
     end
 
@@ -3004,179 +3185,29 @@ module Parse
       end
     end
 
-    # Shared helper module for ACL constraint classes.
-    # Provides common normalization logic for converting various input types
-    # (User, Role, Pointer, symbols, strings) to ACL permission keys.
-    # @api private
-    module AclConstraintHelpers
-      private
-
-      # Normalize various input types to ACL permission keys.
-      # @param value [Array, String, Symbol, Parse::User, Parse::Role, nil]
-      # @return [Array<String>] normalized permission keys
-      # @note Returns empty array for nil, [], "none", or :none (indicating no permissions)
-      def normalize_acl_keys(value)
-        # Handle special "none" case for no permissions
-        return [] if value.nil?
-        return [] if value == "none" || value == :none
-        return [] if value.is_a?(Array) && value.empty?
-
-        Array(value).map do |item|
-          case item
-          when Parse::User
-            item.id
-          when Parse::Role
-            "role:#{item.name}"
-          when Parse::Pointer
-            item.id
-          when :public, :everyone, :world
-            "*"
-          when "public", "*"
-            "*"
-          when "none", :none
-            nil # Will be compacted out, but array will be non-empty so won't match "no permissions"
-          when String
-            item
-          when Symbol
-            item == :public ? "*" : item.to_s
-          else
-            item.respond_to?(:id) ? item.id : item.to_s
-          end
-        end.compact.uniq
-      end
+    # @deprecated Thin alias of {ACLReadableByConstraint}. The +:readable_by+
+    #   operator is registered by {ACLReadableByConstraint}; this constant is
+    #   retained only so any code referencing it keeps working. The previous
+    #   standalone implementation (no role expansion, no implicit public
+    #   +"*"+, divergent empty-ACL shape) has been removed — it never backed
+    #   the +:readable_by+ operator and silently disagreed with it.
+    class ReadableByConstraint < ACLReadableByConstraint
     end
 
-    # ACL Read Permission Query Constraint
-    # Query objects based on read permissions using MongoDB's internal _rperm field.
-    # Parse Server restricts direct queries on _rperm, so this uses aggregation pipeline.
-    #
-    # @example Find objects with NO read permissions (master key only / private)
-    #   Song.query.where(:acl.readable_by => [])
-    #
-    # @example Find objects readable by a specific user ID
-    #   Song.query.where(:acl.readable_by => "userId123")
-    #   Song.query.where(:acl.readable_by => current_user)
-    #
-    # @example Find objects readable by a role
-    #   Song.query.where(:acl.readable_by => "role:Admin")
-    #
-    # @example Find objects with public read access
-    #   Song.query.where(:acl.readable_by => "*")
-    #   Song.query.where(:acl.readable_by => :public)
-    #
-    # @example Find objects readable by ANY of the specified users/roles
-    #   Song.query.where(:acl.readable_by => [user1.id, "role:Admin", "*"])
-    #
-    # @note This constraint uses aggregation pipeline because Parse Server
-    #   restricts direct queries on the internal _rperm field.
-    class ReadableByConstraint < Constraint
-      include AclConstraintHelpers
-
-      # @!method readable_by
-      # A registered method on a symbol to create the constraint.
-      # @example
-      #  q.where :acl.readable_by => []
-      #  q.where :acl.readable_by => "userId"
-      #  q.where :acl.readable_by => ["userId", "role:Admin"]
-      # @return [ReadableByConstraint]
-      # NOTE: :readable_by is already registered by ACLReadableByConstraint above.
-      # This class provides simplified empty ACL queries and is used internally.
-
-      # @return [Hash] the compiled constraint using aggregation pipeline.
-      def build
-        keys = normalize_acl_keys(@value)
-
-        if keys.empty?
-          # Empty array = no read permissions (master key only)
-          # Match documents where _rperm is an empty array
-          pipeline = [
-            {
-              "$match" => {
-                "$or" => [
-                  { "_rperm" => { "$exists" => true, "$eq" => [] } },
-                  { "_rperm" => { "$exists" => false } },
-                ],
-              },
-            },
-          ]
-        else
-          # Find objects readable by ANY of the specified keys
-          # Use $in to match if _rperm contains any of the keys
-          pipeline = [
-            {
-              "$match" => {
-                "_rperm" => { "$in" => keys },
-              },
-            },
-          ]
-        end
-
-        { "__aggregation_pipeline" => pipeline }
-      end
-    end
-
-    # ACL Write Permission Query Constraint
-    # Query objects based on write permissions using MongoDB's internal _wperm field.
-    # Parse Server restricts direct queries on _wperm, so this uses aggregation pipeline.
-    #
-    # @example Find objects with NO write permissions (master key only / read-only)
-    #   Song.query.where(:acl.writeable_by => [])
-    #
-    # @example Find objects writable by a specific user ID
-    #   Song.query.where(:acl.writeable_by => "userId123")
-    #   Song.query.where(:acl.writeable_by => current_user)
-    #
-    # @example Find objects writable by a role
-    #   Song.query.where(:acl.writeable_by => "role:Admin")
-    #
-    # @note This constraint uses aggregation pipeline because Parse Server
-    #   restricts direct queries on the internal _wperm field.
-    class WriteableByConstraint < Constraint
-      include AclConstraintHelpers
-
-      # @!method writeable_by
-      # A registered method on a symbol to create the constraint.
-      # @example
-      #  q.where :acl.writeable_by => []
-      #  q.where :acl.writeable_by => "userId"
-      # @return [WriteableByConstraint]
+    # @deprecated Alias of {ACLWritableByConstraint}. The British-spelled
+    #   +:writeable_by+ operator now resolves to the SAME public-inclusive,
+    #   role-expanding implementation as +:writable_by+ — previously it was a
+    #   separate, strict, non-expanding constraint, so the one-letter spelling
+    #   difference silently changed query semantics. For the old exact-match
+    #   behavior (no implicit public, no role expansion, no missing-field),
+    #   use +readable_by(..., strict: true)+ / +writable_by(..., strict: true)+
+    #   or the +:writable_by_exact+ operator.
+    class WriteableByConstraint < ACLWritableByConstraint
       register :writeable_by
-
-      # @return [Hash] the compiled constraint using aggregation pipeline.
-      def build
-        keys = normalize_acl_keys(@value)
-
-        if keys.empty?
-          # Empty array = no write permissions (master key only)
-          pipeline = [
-            {
-              "$match" => {
-                "$or" => [
-                  { "_wperm" => { "$exists" => true, "$eq" => [] } },
-                  { "_wperm" => { "$exists" => false } },
-                ],
-              },
-            },
-          ]
-        else
-          # Find objects writable by ANY of the specified keys
-          pipeline = [
-            {
-              "$match" => {
-                "_wperm" => { "$in" => keys },
-              },
-            },
-          ]
-        end
-
-        { "__aggregation_pipeline" => pipeline }
-      end
     end
 
-    # Alias for writeable_by (American spelling)
-    # NOTE: :writable_by is already registered by ACLWritableByConstraint above.
-    # This class provides simplified empty ACL queries and is used internally.
-    class WritableByConstraint < WriteableByConstraint
+    # @deprecated Alias of {ACLWritableByConstraint}; see {WriteableByConstraint}.
+    class WritableByConstraint < ACLWritableByConstraint
     end
 
     # ACL NOT Readable By Constraint
@@ -3190,22 +3221,29 @@ module Parse
     #   Song.query.where(:acl.not_readable_by => "*")
     #   Song.query.where(:acl.not_readable_by => :public)
     #
+    # @note "Not readable by X" excludes rows readable by X *directly*, *via
+    #   any role X inherits*, AND *publicly* — so a User value expands its
+    #   roles and the public +"*"+ is always added to the exclusion set.
     # @note This constraint uses aggregation pipeline because Parse Server
     #   restricts direct queries on the internal _rperm field.
     class NotReadableByConstraint < Constraint
-      include AclConstraintHelpers
-
       register :not_readable_by
 
       def build
-        keys = normalize_acl_keys(@value)
+        keys = ACLPermissions.collect_for_negation(@value)
         return { "__aggregation_pipeline" => [] } if keys.empty?
 
-        # Find objects where _rperm does NOT contain any of the keys
+        # Find objects whose _rperm EXISTS and does NOT contain any of the
+        # keys. The `$exists: true` guard is essential: Parse Server treats a
+        # missing `_rperm` as publicly readable, and MongoDB's `$nin` matches
+        # documents where the field is absent. Without the guard,
+        # `not_readable_by("*")` (i.e. #not_publicly_readable) would MATCH the
+        # public-by-absence rows it is meant to exclude — inverting the result
+        # and giving a security audit a false sense of safety.
         pipeline = [
           {
             "$match" => {
-              "_rperm" => { "$nin" => keys },
+              "_rperm" => { "$exists" => true, "$nin" => keys },
             },
           },
         ]
@@ -3223,18 +3261,20 @@ module Parse
     # @note This constraint uses aggregation pipeline because Parse Server
     #   restricts direct queries on the internal _wperm field.
     class NotWriteableByConstraint < Constraint
-      include AclConstraintHelpers
-
       register :not_writeable_by
 
       def build
-        keys = normalize_acl_keys(@value)
+        keys = ACLPermissions.collect_for_negation(@value)
         return { "__aggregation_pipeline" => [] } if keys.empty?
 
+        # See {NotReadableByConstraint#build}: the `$exists: true` guard
+        # prevents a missing `_wperm` (publicly writable per Parse Server)
+        # from matching `$nin`, which would otherwise make
+        # #not_publicly_writable report write-exposed objects as safe.
         pipeline = [
           {
             "$match" => {
-              "_wperm" => { "$nin" => keys },
+              "_wperm" => { "$exists" => true, "$nin" => keys },
             },
           },
         ]
@@ -3265,45 +3305,26 @@ module Parse
       register :master_key_only
 
       def build
-        is_private = @value == true
+        # A truly private (master-key-only) object has an EXPLICIT empty
+        # _rperm AND an explicit empty _wperm. A MISSING _rperm/_wperm is
+        # treated by Parse Server as PUBLIC — the opposite of private — so
+        # the `$exists: true` guards are required and the missing-field
+        # branch must NOT be matched (this is the bug-fixed shape: the
+        # previous version OR'd in `{$exists: false}`, wrongly classifying
+        # the most-public rows as private).
+        private_match = {
+          "$and" => [
+            { "_rperm" => { "$exists" => true, "$eq" => [] } },
+            { "_wperm" => { "$exists" => true, "$eq" => [] } },
+          ],
+        }
 
-        if is_private
-          # Match objects with empty or missing _rperm AND _wperm
-          pipeline = [
-            {
-              "$match" => {
-                "$and" => [
-                  {
-                    "$or" => [
-                      { "_rperm" => { "$exists" => true, "$eq" => [] } },
-                      { "_rperm" => { "$exists" => false } },
-                    ],
-                  },
-                  {
-                    "$or" => [
-                      { "_wperm" => { "$exists" => true, "$eq" => [] } },
-                      { "_wperm" => { "$exists" => false } },
-                    ],
-                  },
-                ],
-              },
-            },
-          ]
-        else
-          # Match objects that have SOME permissions (either read or write)
-          pipeline = [
-            {
-              "$match" => {
-                "$or" => [
-                  { "_rperm" => { "$exists" => true, "$ne" => [] } },
-                  { "_wperm" => { "$exists" => true, "$ne" => [] } },
-                ],
-              },
-            },
-          ]
-        end
+        # `private_acl => false` is the exact complement: every object that
+        # is NOT fully master-key-only — those with any read/write grant AND
+        # those with a missing (public) _rperm/_wperm.
+        match = @value == true ? private_match : { "$nor" => [private_match] }
 
-        { "__aggregation_pipeline" => pipeline }
+        { "__aggregation_pipeline" => [{ "$match" => match }] }
       end
     end
   end
