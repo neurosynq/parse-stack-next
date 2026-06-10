@@ -1651,6 +1651,18 @@ module Parse
             collection_name, perms_for_clp,
           )
           Parse::CLPScope.redact_protected_fields!(results, strip_set) if strip_set.any?
+
+          # Process-level floor: recursively strip Parse-internal credential
+          # columns (_hashed_password, _session_token, _auth_data_*, _rperm,
+          # ...) from every row AND every embedded sub-document. The
+          # protectedFields strip above is keyed on the OUTER class, and the
+          # ACL sub-doc walk only DROPS ACL-failing sub-docs — neither covers
+          # a foreign class (e.g. _User / _Session) pulled in via $lookup /
+          # $graphLookup / $unionWith under an arbitrary alias. Runs last, for
+          # scoped (non-master) callers only; master is unredacted by design.
+          results.each do |row|
+            Parse::PipelineSecurity.redact_internal_fields_deep!(row)
+          end
         end
 
         payload[:result_count] = results.size

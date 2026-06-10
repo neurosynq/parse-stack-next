@@ -3,6 +3,7 @@
 
 require "digest"
 require "monitor"
+require "json"
 
 module Parse
   module Embeddings
@@ -89,14 +90,25 @@ module Parse
       # shared across processes:
       #
       #   require "moneta"
-      #   moneta = Moneta.new(:Redis, url: ENV["REDIS_URL"])
+      #   moneta = Moneta.new(:Redis, url: ENV["REDIS_URL"], value_serializer: nil)
       #   Parse::Embeddings::Cache.enable!(
       #     store: Parse::Embeddings::Cache::MonetaStore.new(moneta, ttl: 30 * 24 * 3600),
       #   )
       #
       # Keys are namespaced (`emb:` by default) so the entries are
-      # recognizable next to other application keys; values are the
-      # raw vector Arrays (Moneta's own serializer handles encoding).
+      # recognizable next to other application keys; values are
+      # JSON-encoded vector Arrays (see {#get}/{#set}).
+      #
+      # SECURITY — build the Moneta store with `value_serializer: nil`
+      # (as above). Moneta's default value serializer is Marshal, so a
+      # cache read would `Marshal.load` whatever bytes are in the backing
+      # store — an arbitrary-code-execution primitive if that store is
+      # shared, unauthenticated, or reachable over a plaintext `redis://`
+      # MITM, and the cache key is derived from (often user-supplied)
+      # embedded text. `MonetaStore` JSON-(de)serializes values itself, but
+      # that only closes the vector IF Moneta is not also Marshaling on top;
+      # `value_serializer: nil` ensures it is not. `MonetaStore` emits a
+      # one-time warning if it is handed a Marshal-serializing store.
       # TTL is forwarded via Moneta's `expires:` option when the
       # backend supports it, ignored otherwise.
       #
@@ -121,6 +133,13 @@ module Parse
                   "Parse::Embeddings::Cache::MonetaStore expects a Moneta-compatible " \
                   "store responding to #[] and #[]= (got #{moneta.class})."
           end
+          if marshaling_value_store?(moneta)
+            warn "[Parse::Embeddings::Cache::MonetaStore] SECURITY: the supplied Moneta " \
+                 "store deserializes values with Marshal. A cache read Marshal.loads bytes " \
+                 "from the backing store, which is a remote-code-execution vector when the " \
+                 "store is shared/untrusted. Rebuild it with value_serializer: nil, e.g. " \
+                 "Moneta.new(:Redis, url: ..., value_serializer: nil)."
+          end
           @moneta = moneta
           @ttl = ttl && Float(ttl)
           @namespace = namespace.to_s
@@ -128,8 +147,7 @@ module Parse
 
         # @return [Array<Float>, nil]
         def get(key)
-          value = @moneta[@namespace + key]
-          value.is_a?(Array) ? value : nil
+          decode_vector(@moneta[@namespace + key])
         rescue StandardError
           nil
         end
@@ -137,22 +155,56 @@ module Parse
         # @return [Array<Float>] the vector, unchanged.
         def set(key, vector)
           k = @namespace + key
+          encoded = encode_vector(vector)
           if @ttl && @moneta.respond_to?(:store)
             begin
-              @moneta.store(k, vector, expires: @ttl)
+              @moneta.store(k, encoded, expires: @ttl)
             rescue ArgumentError
               # Hash-like backends define #store(key, value) with no
               # options arg, so the expires: form raises ArgumentError.
               # Fall back to a plain write (no expiry) rather than letting
               # the fail-open rescue below silently drop every vector.
-              @moneta[k] = vector
+              @moneta[k] = encoded
             end
           else
-            @moneta[k] = vector
+            @moneta[k] = encoded
           end
           vector
         rescue StandardError
           vector
+        end
+
+        private
+
+        # Vectors are JSON-encoded here rather than left to the Moneta
+        # store's own (Marshal-by-default) value serializer. Combined with a
+        # store built with `value_serializer: nil`, this keeps Marshal off
+        # the read path entirely: a JSON parse of attacker-influenced backing-
+        # store bytes can at worst yield inert data or raise — never a
+        # deserialized Ruby gadget object graph (RCE-if-cache-compromised).
+        # Embedding vectors are Array<Float>, which round-trips losslessly
+        # through JSON.
+        def encode_vector(vector)
+          JSON.generate(vector)
+        end
+
+        def decode_vector(raw)
+          return raw if raw.is_a?(Array) # legacy/non-serializing store entry
+          return nil if raw.nil?
+          parsed = JSON.parse(raw)
+          parsed.is_a?(Array) ? parsed : nil
+        rescue JSON::ParserError, TypeError, EncodingError
+          nil
+        end
+
+        # Best-effort detection of a Moneta store that serializes VALUES with
+        # Marshal. Moneta names its transformer proxy after the active
+        # serializers (e.g. "...MarshalValue"); a store built with
+        # value_serializer: nil has no "...Value" segment. Used only to warn.
+        def marshaling_value_store?(moneta)
+          moneta.class.name.to_s.include?("MarshalValue")
+        rescue StandardError
+          false
         end
       end
 

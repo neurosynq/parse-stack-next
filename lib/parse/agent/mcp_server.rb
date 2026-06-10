@@ -162,11 +162,30 @@ module Parse
         # pre_auth_rate_limiter: closes NEW-MCP-6 — runs before the factory
         # is invoked so an empty or malformed body can't amplify into a
         # Parse Server round-trip.
+        # NEW-9: on an unauthenticated loopback dev bind with no explicit CSRF
+        # gate configured, enable a loopback-only Origin policy by default to
+        # mitigate browser DNS-rebinding (a malicious page resolving a hostname
+        # to 127.0.0.1 and POSTing to the agent). The attacker page always
+        # carries a non-loopback Origin and is refused; native (no-Origin)
+        # clients and real local browser UIs are unaffected. Skipped when an
+        # API key is set (auth already gates) or the operator configured the
+        # Origin/custom-header gates themselves.
+        loopback_csrf_default =
+          LOOPBACK_HOSTS.include?(host.to_s) && @api_key.to_s.empty? &&
+          allowed_origins.nil? && require_custom_header.nil?
+        if loopback_csrf_default
+          warn "[Parse::Agent::MCPServer] Binding #{host}:#{port} without an API key. " \
+               "Enabling a loopback-only Origin policy to mitigate browser DNS-rebinding. " \
+               "For anything beyond local single-user dev set MCP_API_KEY (or pass api_key:), " \
+               "and/or configure allowed_origins:/require_custom_header:."
+        end
+
         @rack_app = MCPRackApp.new(
           agent_factory: method(:agent_factory),
           pre_auth_rate_limiter: pre_auth_rate_limiter,
           allowed_origins: allowed_origins,
           require_custom_header: require_custom_header,
+          loopback_csrf_default: loopback_csrf_default,
         )
       end
 

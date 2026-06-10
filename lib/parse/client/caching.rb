@@ -190,8 +190,13 @@ module Parse
               body = cache_data.respond_to?(:body) ? cache_data.body : nil
               response_headers = cache_data.response_headers || {}
             elsif cache_data.is_a?(Hash)
-              body = cache_data[:body]
-              response_headers = cache_data[:headers] || {}
+              # New entries are stored with string keys so they survive a
+              # JSON round-trip (the Redis cache wrapper serializes values as
+              # JSON, not Marshal — see Parse::Cache::Redis). Fall back to
+              # symbol keys for legacy in-memory / Marshal-backed entries
+              # written before that switch.
+              body = cache_data["body"] || cache_data[:body]
+              response_headers = cache_data["headers"] || cache_data[:headers] || {}
             end
 
             if cache_data.present? && body.present?
@@ -244,8 +249,12 @@ module Parse
              response_env.body.present? && response_env.response_headers[CONTENT_LENGTH_KEY].to_i.between?(20, 1_250_000)
             store_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
             begin
+              # Store with string keys (and a plain Hash of headers) so the
+              # value round-trips losslessly through the Redis cache wrapper's
+              # JSON serialization. The read path above reads string keys first
+              # with a symbol-key fallback for legacy entries.
               @store.store(@cache_key,
-                           { headers: response_env.response_headers, body: response_env.body },
+                           { "headers" => response_env.response_headers.to_h, "body" => response_env.body },
                            expires: @expires)
               duration_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - store_start) * 1000.0).round(3)
               instrument_cache(:store, method: method, url_path: url_path, duration_ms: duration_ms)

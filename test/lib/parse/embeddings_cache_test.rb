@@ -225,7 +225,33 @@ class EmbeddingsCacheTest < Minitest::Test
     store = CACHE::MonetaStore.new(moneta, ttl: 60)
     store.set("k", [1.0, 2.0])
     assert_equal [1.0, 2.0], store.get("k")
-    assert_equal [1.0, 2.0], moneta["emb:k"]
+    # The value is written under emb:k via the plain []= fallback. MonetaStore
+    # JSON-encodes the vector (not Marshal), so the raw stored value is a JSON
+    # string, not the Array itself.
+    assert_equal JSON.generate([1.0, 2.0]), moneta["emb:k"]
+  end
+
+  # SECURITY: vectors must be JSON-encoded, never left to Moneta's default
+  # Marshal value serializer — a cache read must never Marshal.load backing-
+  # store bytes (RCE-if-cache-compromised). See lib/parse/embeddings/cache.rb.
+  def test_moneta_store_serializes_values_as_json_not_marshal
+    moneta = FakeMoneta.new
+    store = CACHE::MonetaStore.new(moneta)
+    store.set("k", [0.5, -1.5, 2.0])
+    raw = moneta.h["emb:k"]
+    assert_kind_of String, raw
+    refute raw.b.start_with?("\x04\b".b), "value must not be a Marshal stream"
+    assert_equal [0.5, -1.5, 2.0], JSON.parse(raw)
+    assert_equal [0.5, -1.5, 2.0], store.get("k"), "JSON value must round-trip"
+  end
+
+  def test_moneta_store_warns_on_marshal_serializing_store
+    require "moneta"
+    # Moneta's default value serializer is Marshal (class name "...MarshalValue").
+    marshaling = Moneta.new(:Memory)
+    assert_output(nil, /SECURITY.*Marshal|value_serializer: nil/m) do
+      CACHE::MonetaStore.new(marshaling)
+    end
   end
 
   def test_moneta_store_fails_open_on_backend_errors

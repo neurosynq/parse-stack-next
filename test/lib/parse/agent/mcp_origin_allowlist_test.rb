@@ -117,6 +117,47 @@ class TestMCPOriginAllowlist < Minitest::Test
     assert_equal 200, status
   end
 
+  # ---- NEW-9: loopback-only Origin default (DNS-rebinding mitigation) ------
+
+  def test_loopback_default_refuses_non_loopback_origin
+    # A browser DNS-rebinding attack against 127.0.0.1 carries the attacker
+    # page's Origin; the loopback default refuses it.
+    app = build_app(loopback_csrf_default: true)
+    status, _h, body = app.call(rack_env(origin: "http://evil.example"))
+    assert_equal 403, status
+    assert_includes body.first, "Origin not allowed"
+  end
+
+  def test_loopback_default_allows_loopback_origin
+    app = build_app(loopback_csrf_default: true)
+    %w[http://localhost:5173 http://127.0.0.1:9999 https://[::1]:8443].each do |origin|
+      status, _h, _b = app.call(rack_env(origin: origin))
+      assert_equal 200, status, "should accept loopback origin #{origin}"
+    end
+  end
+
+  def test_loopback_default_allows_missing_origin
+    # Native clients (curl, SDK-to-SDK) send no Origin and must not be broken.
+    app = build_app(loopback_csrf_default: true)
+    status, _h, _b = app.call(rack_env)
+    assert_equal 200, status
+  end
+
+  def test_explicit_allowlist_overrides_loopback_default
+    # When an operator configures allowed_origins, that policy governs and the
+    # loopback default is suppressed (loopback origin not in the list -> 403).
+    app = build_app(allowed_origins: ["https://app.example.com"], loopback_csrf_default: true)
+    status, _h, _b = app.call(rack_env(origin: "http://localhost:5173"))
+    assert_equal 403, status
+  end
+
+  def test_no_loopback_default_means_no_check
+    # Default off: behaves like before (no Origin gate without an allowlist).
+    app = build_app
+    status, _h, _b = app.call(rack_env(origin: "http://evil.example"))
+    assert_equal 200, status
+  end
+
   def test_empty_allowlist_array_is_treated_as_no_check
     app = build_app(allowed_origins: [])
     status, _h, _b = app.call(rack_env(origin: "https://attacker.example.com"))

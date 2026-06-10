@@ -628,12 +628,21 @@ If `faraday-net_http_persistent` is not available, Parse Stack automatically fal
 A caching adapter of type `Moneta::Transformer`. Caching queries and object fetches can help improve the performance of your application, even if it is for a few seconds. Only successful `GET` object fetches and queries (non-empty) will be cached. You may set the default expiration time with the `expires` option. See related: [Moneta](https://github.com/minad/moneta). At any point in time you may clear the cache by calling the `clear_cache!` method on the client connection.
 
 ```ruby
-  store = Moneta.new :Redis, url: 'redis://localhost:6379'
+  # Use the bundled Parse::Cache::Redis wrapper for a Redis-backed cache. It
+  # serializes cached responses as JSON (never Marshal): a raw
+  # `Moneta.new(:Redis, ...)` store Marshals values by default, so a cache
+  # read would `Marshal.load` bytes from Redis — an RCE vector if that Redis
+  # is shared, unauthenticated, or reachable over a plaintext `redis://` MITM.
+  store = Parse::Cache::Redis.new(url: 'redis://localhost:6379')
    # use a Redis cache store with an automatic expire of 10 seconds.
   Parse.setup(cache: store, expires: 10, ...)
 ```
 
-As a shortcut, if you are planning on using REDIS and have configured the use of `redis` in your `Gemfile`, you can just pass the REDIS connection string directly to the cache option.
+If you supply your own raw `Moneta.new(:Redis, ...)` store instead of the
+wrapper, build it with `value_serializer: nil` to keep Marshal off the cache
+read path.
+
+As a shortcut, if you are planning on using REDIS and have configured the use of `redis` in your `Gemfile`, you can just pass the REDIS connection string directly to the cache option. The string form builds a `Parse::Cache::Redis` wrapper for you, so it is JSON-serialized and safe by default.
 
 ```ruby
   Parse.setup(cache: 'redis://localhost:6379', ...)
@@ -5342,7 +5351,11 @@ If you are already have setup a client that is being used by your defined models
 For high traffic applications that may be performing several server tasks on similar objects, you may utilize request caching. Caching is provided by a the `Parse::Middleware::Caching` class which utilizes a [Moneta store](https://github.com/minad/moneta) object to cache GET url requests that have allowable status codes (ex. HTTP 200, etc). The cache entry for the url will be removed when it is either considered expired (based on the `expires` option) or if a non-GET request is made with the same url. Using this feature appropriately can dramatically reduce your API request usage.
 
 ```ruby
-store = Moneta.new :Redis, url: 'redis://localhost:6379'
+# Parse::Cache::Redis serializes cached responses as JSON, not Marshal — a raw
+# Moneta.new(:Redis) store Marshals values by default and a cache read would
+# Marshal.load Redis bytes (RCE if the cache is shared/untrusted). Prefer the
+# wrapper; if you supply a raw Moneta-Redis store, pass value_serializer: nil.
+store = Parse::Cache::Redis.new(url: 'redis://localhost:6379')
  # use a Redis cache store with an automatic expire of 10 seconds.
 Parse.setup(cache: store, expires: 10, ...)
 

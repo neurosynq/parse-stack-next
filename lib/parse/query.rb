@@ -1965,11 +1965,21 @@ module Parse
     #     roles, injects the three-layer ACL simulation
     #     (top-level `$match`, `$lookup` rewriter, post-fetch
     #     redactor) via {Parse::MongoDB.aggregate}.
+    #   * an active `Parse.with_session` block — the fiber-local ambient
+    #     session token scopes the read the same way an explicit
+    #     `session_token=` would (see {#mongo_direct_auth_kwargs}).
     #
     # Raises a clear {MongoDirectRequired} otherwise.
     # @!visibility private
     def assert_mongo_direct_routable!
       has_session = @session_token.is_a?(String) && !@session_token.empty?
+      # An active `Parse.with_session` block scopes the read even on a
+      # non-master client (client_mode, or a user-scoped client with no
+      # master key), where `server_mode_master` is false. Without this the
+      # query would raise instead of running scoped — and on a master
+      # client the ambient is what `mongo_direct_auth_kwargs` forwards so
+      # the read is scoped rather than silently master.
+      has_ambient_session = !ambient_session_token.nil?
       # Mirror the request-layer auth resolution in Parse::Client#request:
       # when the process is in "server mode" — Parse.client_mode == false
       # AND the resolved Parse::Client has a master_key — and the caller
@@ -1985,7 +1995,7 @@ module Parse
         false
       end
       server_mode_master = (use_master_key != false) && !Parse.client_mode && client_has_master_key
-      unless use_master_key || server_mode_master || @acl_user || @acl_role || has_session
+      unless use_master_key || server_mode_master || @acl_user || @acl_role || has_session || has_ambient_session
         raise MongoDirectRequired,
           "[Parse::Query] This query uses a constraint that can only run " \
           "via mongo-direct. Mongo-direct bypasses Parse Server's enforcement, " \
@@ -2019,6 +2029,12 @@ module Parse
     #     double-inject).
     #   * `session_token` is set → forward `session_token:` so
     #     Parse::ACLScope runs the full three-layer simulation.
+    #   * Otherwise, the fiber-local ambient session set by
+    #     `Parse.with_session` is forwarded as `session_token:` (unless
+    #     the caller explicitly requested `use_master_key: true`), so a
+    #     query that auto-routes to mongo-direct inside a `with_session`
+    #     block is scoped to that user — matching what the REST path does
+    #     in {Parse::Client#request}.
     #   * Otherwise (master-key path) → forward `master: true`.
     # @!visibility private
     def mongo_direct_auth_kwargs
@@ -2036,9 +2052,30 @@ module Parse
         { acl_role: @acl_role }
       elsif @session_token.is_a?(String) && !@session_token.empty?
         { session_token: @session_token }
+      elsif use_master_key != true && (ambient = ambient_session_token)
+        # No explicit per-query scope, but a `Parse.with_session` block is
+        # active. Mirror Parse::Client#request's precedence (ambient
+        # session wins over the server-mode master default) so the read is
+        # scoped to that user instead of silently running as master with
+        # no ACL/CLP enforcement. An explicit `use_master_key: true` is a
+        # deliberate admin call and skips the ambient, exactly as the REST
+        # path does.
+        { session_token: ambient }
       else
         { master: true }
       end
+    end
+
+    # The fiber-local ambient session token set by `Parse.with_session`,
+    # or nil. A whitespace-only ambient is treated as absent so it cannot
+    # block the master fallback and then fail a later presence check —
+    # the same guard {Parse::Client#request} applies.
+    # @return [String, nil]
+    # @!visibility private
+    def ambient_session_token
+      return nil unless Parse.respond_to?(:current_session_token)
+      ambient = Parse.current_session_token
+      ambient if ambient.is_a?(String) && !ambient.strip.empty?
     end
 
     # Check if this query contains constraints that require aggregation pipeline processing
@@ -3527,22 +3564,31 @@ module Parse
       # the merged pipeline is provably SDK-injected, never user input.
       uses_internal_fields = pipeline_uses_internal_fields?(complete_pipeline)
       scoped = distinct_query_is_scoped?
+      mongo_ready = defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
       use_mongo_direct = mongo_direct
-      if use_mongo_direct.nil?
-        mongo_ready = defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
-        if lookup_stages && lookup_stages.any?
+
+      if scoped
+        # A scoped aggregation (session_token / scope_to_user / scope_to_role)
+        # must NEVER reach Parse Server's REST /aggregate endpoint — it is
+        # master-key-only and enforces NEITHER ACL NOR CLP, so it would run
+        # unscoped as the master key. This holds even when the caller
+        # explicitly passes `mongo_direct: false`: an explicit false cannot
+        # opt a scoped query out of ACL/CLP enforcement. Promote to mongo-
+        # direct, or fail closed when direct Mongo is unavailable (refuse
+        # rather than leak unscoped rows).
+        if mongo_ready
+          use_mongo_direct = true
+        else
+          raise_scoped_aggregation_requires_mongo_direct!
+        end
+      elsif use_mongo_direct.nil?
+        # Unscoped auto-routing: $inQuery/$notInQuery → $lookup pipelines and
+        # SDK-injected internal-field ($rperm/_wperm) pipelines can't be served
+        # by REST /aggregate, so prefer mongo-direct when available. An unscoped
+        # internal-field pipeline keeps the REST fallback (a master-key
+        # correctness edge, not an enforcement bypass).
+        if (lookup_stages && lookup_stages.any?) || uses_internal_fields
           use_mongo_direct = true if mongo_ready
-        elsif scoped || uses_internal_fields
-          if mongo_ready
-            use_mongo_direct = true
-          elsif scoped
-            # Fail closed: a scoped aggregation cannot fall back to REST
-            # /aggregate without silently bypassing ACL/CLP (master-key-only
-            # endpoint). Refuse rather than leak unscoped results. Unscoped
-            # internal-field pipelines keep the REST fallback (a master-key
-            # correctness edge, not an enforcement bypass).
-            raise_scoped_aggregation_requires_mongo_direct!
-          end
         end
       end
 
@@ -3641,17 +3687,21 @@ module Parse
       # unenforced). A scoped query fails closed when mongo-direct is
       # unavailable rather than silently running unscoped as master.
       scoped = distinct_query_is_scoped?
+      mongo_ready = defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
       use_mongo_direct = mongo_direct
-      if use_mongo_direct.nil?
-        mongo_ready = defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
-        if has_lookup_stages
+
+      if scoped
+        # A scoped aggregation must never reach REST /aggregate (master-key-
+        # only, unenforced) — not even when the caller explicitly passes
+        # mongo_direct: false. Promote to mongo-direct, or fail closed.
+        if mongo_ready
+          use_mongo_direct = true
+        else
+          raise_scoped_aggregation_requires_mongo_direct!
+        end
+      elsif use_mongo_direct.nil?
+        if has_lookup_stages || uses_internal_fields
           use_mongo_direct = true if mongo_ready
-        elsif scoped || uses_internal_fields
-          if mongo_ready
-            use_mongo_direct = true
-          elsif scoped
-            raise_scoped_aggregation_requires_mongo_direct!
-          end
         end
       end
 

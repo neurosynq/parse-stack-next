@@ -186,6 +186,15 @@ module Parse
             end
           end
 
+        # Scrub credentials before logging. At :debug level this method emits
+        # both the request body (login/signup carries a cleartext `password`)
+        # and the response body (auth responses carry a fresh `sessionToken`,
+        # `authData`, and MFA secrets). `log_headers` already redacts headers;
+        # the body path must use the same canonical scrubber or it leaks live
+        # credentials to anyone with log access. Redact BEFORE the length cap
+        # so truncation can't split a token across the boundary and slip past.
+        content = Parse::Middleware::BodyBuilder.redact(content)
+
         if content.length > max_length
           logger.debug "  [#{prefix} Body] #{content[0...max_length]}... (truncated, #{content.length} total)"
         elsif content.length > 0

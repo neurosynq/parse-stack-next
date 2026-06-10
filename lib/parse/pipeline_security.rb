@@ -105,6 +105,7 @@ module Parse
     DENIED_FIELD_REFS = %w[
       $_hashed_password $_password_history
       $_session_token $_sessionToken
+      $sessionToken $session_token
       $_email_verify_token $_perishable_token
       $_failed_login_count $_account_lockout_expires_at
       $_rperm $_wperm
@@ -160,6 +161,19 @@ module Parse
     # `_auth_data_google`, …). Used by strip_internal_fields and by the
     # walk_for_denied! field-name screen.
     INTERNAL_FIELDS_PREFIX_DENYLIST = %w[_auth_data_].freeze
+
+    # The credential / sensitive subset of {INTERNAL_FIELDS_DENYLIST}. These
+    # columns must NEVER appear as a user-influenced `$match` field name —
+    # even on a pipeline that runs with `allow_internal_fields: true` (which
+    # exists to permit SDK-emitted `_rperm`/`_wperm` references from
+    # `readable_by_role` / `publicly_readable`). A `$match`/`$count` on a
+    # password hash, session/reset token, or auth-data column is a credential-
+    # exfiltration oracle (bisect the value char-by-char), and these columns
+    # have NO legitimate SDK query use — so the `allow_internal_fields` escape
+    # hatch must not relax them. Derived from {INTERNAL_FIELDS_DENYLIST} minus
+    # the ACL/bookkeeping columns (`_rperm`/`_wperm`/`_tombstone`) the ACL DSL
+    # legitimately emits, so the two lists never drift.
+    CREDENTIAL_FIELDS_DENYLIST = (INTERNAL_FIELDS_DENYLIST - %w[_rperm _wperm _tombstone]).freeze
 
     # Forensic string-introspection operators. When any of these
     # appears INSIDE `$expr` with a field-reference input string, the
@@ -336,6 +350,48 @@ module Parse
       end
     end
 
+    # Depth bound for {redact_internal_fields_deep!}. `$lookup`/`$graphLookup`/
+    # `$unionWith` embed foreign documents at shallow alias depth, so this is
+    # generous; the bound exists only to fail safe on cyclic/pathological docs.
+    INTERNAL_REDACT_MAX_DEPTH = 32
+
+    # Recursively delete {INTERNAL_FIELDS_DENYLIST} / {INTERNAL_FIELDS_PREFIX_DENYLIST}
+    # keys from `node` AND every embedded sub-document/array element, in place.
+    #
+    # This is the process-level floor that stops Parse-Server-internal
+    # credential columns (`_hashed_password`, `_session_token`, `_auth_data_*`,
+    # `_rperm`/`_wperm`, ...) from reaching a scoped caller through ANY result
+    # shape — most importantly a foreign-class document pulled in via
+    # `$lookup`/`$graphLookup`/`$unionWith` under an arbitrary alias. Neither
+    # the per-class protectedFields strip (keyed on the OUTER class) nor the
+    # ACL sub-document walk (which only DROPS ACL-failing sub-docs, never
+    # strips field names) covers that alias. Unlike {strip_internal_fields}
+    # (one level, non-mutating), this walks the whole tree and mutates in
+    # place so it can run as the last step over a result set.
+    #
+    # Structural columns (`_id`, `_p_*`, `_created_at`, `_updated_at`, `_acl`)
+    # are intentionally NOT in the denylist, so object/ACL reconstruction is
+    # unaffected.
+    #
+    # @param node [Object] a result row (Hash), array, or scalar.
+    # @return [Object] the same node, mutated.
+    def redact_internal_fields_deep!(node, depth: INTERNAL_REDACT_MAX_DEPTH)
+      case node
+      when Hash
+        # Always clean the current level (even at the depth floor) so an
+        # embedded document sitting exactly at the bound is still scrubbed.
+        node.delete_if do |key, _value|
+          ks = key.to_s
+          INTERNAL_FIELDS_DENYLIST.include?(ks) ||
+            INTERNAL_FIELDS_PREFIX_DENYLIST.any? { |prefix| ks.start_with?(prefix) }
+        end
+        node.each_value { |v| redact_internal_fields_deep!(v, depth: depth - 1) } if depth > 0
+      when Array
+        node.each { |el| redact_internal_fields_deep!(el, depth: depth - 1) } if depth > 0
+      end
+      node
+    end
+
     # Wave-3 TRACK-CLP-4: refuse caller-supplied pipelines that
     # reference a protected field via `$<field>` on the RHS of a
     # `$project` / `$addFields` / `$set` / `$group` / `$bucket` /
@@ -510,21 +566,31 @@ module Parse
           # oracle as the where:-constraint path in ConstraintTranslator.
           # Operators ($-prefixed) are excluded because they are validated
           # separately by DENIED_OPERATORS.
-          if !allow_internal_fields &&
-             !key_str.start_with?("$") &&
-             (INTERNAL_FIELDS_DENYLIST.include?(key_str) ||
-              INTERNAL_FIELDS_PREFIX_DENYLIST.any? { |prefix| key_str.start_with?(prefix) })
-            raise Error.new(
-              "SECURITY: Pipeline references internal Parse Server field " \
-              "'#{key_str}' at nesting depth #{depth}" \
-              "#{stage_idx ? " inside stage #{stage_idx}" : ""}. " \
-              "This column (password hash, session token, auth data, or ACL " \
-              "pointer) must not appear in a user-influenced pipeline — " \
-              "it enables credential exfiltration via count/match oracles.",
-              stage: stage_idx,
-              operator: key_str,
-              reason: :denied_internal_field,
-            )
+          #
+          # CREDENTIAL columns (password hash, session/reset token, auth data)
+          # are refused UNCONDITIONALLY — `allow_internal_fields` (which exists
+          # so SDK-emitted `_rperm`/`_wperm` references survive on the mongo-
+          # direct path) must NOT relax them, or a `*_direct` terminal becomes
+          # a credential-bisection oracle. The remaining internal columns
+          # (`_rperm`/`_wperm`/`_tombstone`) stay gated by allow_internal_fields.
+          if !key_str.start_with?("$")
+            is_credential = CREDENTIAL_FIELDS_DENYLIST.include?(key_str) ||
+                            INTERNAL_FIELDS_PREFIX_DENYLIST.any? { |prefix| key_str.start_with?(prefix) }
+            is_internal = INTERNAL_FIELDS_DENYLIST.include?(key_str) ||
+                          INTERNAL_FIELDS_PREFIX_DENYLIST.any? { |prefix| key_str.start_with?(prefix) }
+            if is_credential || (is_internal && !allow_internal_fields)
+              raise Error.new(
+                "SECURITY: Pipeline references internal Parse Server field " \
+                "'#{key_str}' at nesting depth #{depth}" \
+                "#{stage_idx ? " inside stage #{stage_idx}" : ""}. " \
+                "This column (password hash, session token, auth data, or ACL " \
+                "pointer) must not appear in a user-influenced pipeline — " \
+                "it enables credential exfiltration via count/match oracles.",
+                stage: stage_idx,
+                operator: key_str,
+                reason: :denied_internal_field,
+              )
+            end
           end
           # Cap caller-supplied regex pattern length. Catches the two
           # shapes Mongo accepts: the find-form `{ field: { $regex: "..." } }`

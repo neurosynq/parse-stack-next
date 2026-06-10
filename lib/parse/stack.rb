@@ -582,8 +582,19 @@ module Parse
 
   # Optional dedicated Moneta store for the synchronize-create lock. When
   # nil, falls back to {Parse.cache}.
+  #
+  # SECURITY: if you pass a raw Moneta-Redis store, build it with
+  # +value_serializer: nil+. The lock release path reads the stored owner
+  # token back (+store[key]+) to compare-and-delete; with Moneta's default
+  # Marshal value serializer that read +Marshal.load+s bytes from Redis — an
+  # RCE vector on a shared/untrusted/MITM'd lock store. With
+  # +value_serializer: nil+ the owner token is a plain string and is never
+  # deserialized. Alternatively pass a {Parse::Cache::Redis} instance, which
+  # uses a raw-string acquire/release path and avoids Marshal entirely.
   # @example
-  #   Parse.synchronize_create_store = Moneta.new(:Redis, url: "redis://locks:6379/1")
+  #   Parse.synchronize_create_store = Moneta.new(:Redis, url: "redis://locks:6379/1", value_serializer: nil)
+  #   # or, preferred:
+  #   Parse.synchronize_create_store = Parse::Cache::Redis.new(url: "redis://locks:6379/1")
   @synchronize_create_store = nil
 
   # Optional allowlist of {Parse::Object} subclasses that may use the

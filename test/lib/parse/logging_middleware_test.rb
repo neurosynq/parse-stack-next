@@ -96,6 +96,29 @@ class LoggingMiddlewareTest < Minitest::Test
     puts "✅ Default logger format works correctly!"
   end
 
+  # NEW-2: at :debug level, log_body emits request bodies (login carries a
+  # cleartext password) and response bodies (sessionToken / authData). These
+  # must be scrubbed with the same canonical redactor used for headers.
+  def test_log_body_redacts_credentials
+    output = StringIO.new
+    logger = Logger.new(output)
+    logger.level = Logger::DEBUG
+    logger.formatter = proc { |_s, _d, _p, msg| "#{msg}\n" }
+    Parse::Middleware::Logging.logger = logger
+
+    mw = Parse::Middleware::Logging.new(->(env) { env })
+    body = '{"username":"alice","password":"hunter2secret","sessionToken":"r:LIVE-TOKEN-XYZ"}'
+    mw.send(:log_body, body, "Request")
+
+    output.rewind
+    log = output.read
+    refute_includes log, "hunter2secret", "password must be redacted from the body log"
+    refute_includes log, "r:LIVE-TOKEN-XYZ", "sessionToken must be redacted from the body log"
+    assert_includes log, "[FILTERED]", "redacted values should be marked [FILTERED]"
+  ensure
+    Parse::Middleware::Logging.logger = nil
+  end
+
   # ==========================================================================
   # Test 4: Log level filtering
   # ==========================================================================

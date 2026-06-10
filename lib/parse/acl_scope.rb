@@ -336,6 +336,17 @@ module Parse
         return if target.nil?
         target_str = target.to_s
         return if target_str.empty?
+        # RT-7 / NEW-4: hard internal-collection floor FIRST, independent of
+        # CLP. This must run on EVERY join target on the direct
+        # Parse::MongoDB.aggregate path. LookupRewriter.auto_rewrite (the other
+        # caller of assert_collection_allowed!) is skipped when rewrite_lookups
+        # is off or the root class can't be resolved, so relying on it alone
+        # leaves a gap: an internal collection (`_SCHEMA`/`_Hooks`/`_Audit`/
+        # `_GlobalConfig`/...) whose CLP fetch returns :no_clp would pass the
+        # permits? check below. The floor refuses those outright while still
+        # admitting the SDK data classes (`_User`/`_Role`/`_Installation`/
+        # `_Session`), which then face the per-scope CLP `find` gate.
+        Parse::PipelineSecurity.assert_collection_allowed!(target_str)
         return if Parse::CLPScope.permits?(target_str, :find, perms)
         raise Parse::CLPScope::Denied.new(
           target_str, :find,

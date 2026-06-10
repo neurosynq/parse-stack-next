@@ -1,5 +1,150 @@
 ## parse-stack-next Changelog
 
+### 5.5.1
+
+#### Mongo-direct reads inside `Parse.with_session` are now scoped, not master
+
+- **FIXED**: A query that auto-routes to the mongo-direct path because of a
+  direct-only constraint (for example a geo `$near` / `$geoIntersects` query)
+  now honors the ambient session token set by `Parse.with_session(token)`.
+  Previously the mongo-direct auth resolver consulted only the query's own
+  `session_token=` / `scope_to_user` / `scope_to_role` and ignored the
+  fiber-local ambient session, so in server mode it fell through to a
+  master-key read with no ACL/CLP enforcement — returning rows the session was
+  not permitted to see, even though every REST query in the same
+  `with_session` block was correctly scoped. The resolver now mirrors
+  `Parse::Client#request` precedence: an explicit per-query token wins, then
+  the ambient session, then the master-key fallback; an explicit
+  `use_master_key: true` is a deliberate admin call and still skips the
+  ambient. Routing also accepts the ambient on non-master clients
+  (`Parse.client_mode` or a user-scoped client), so such a query runs scoped
+  rather than raising.
+
+#### Boolean property coercion no longer treats the string "false" as true
+
+- **FIXED**: A `:boolean` property assigned a string now coerces via
+  ActiveModel's boolean caster instead of raw Ruby truthiness. Previously the
+  coercion was `val ? true : false`, so the strings `"false"`, `"0"`, and
+  `"off"` — exactly what arrives on a Rails-form or query-string ingestion
+  path — all coerced to `true`, silently flipping a boolean the wrong way (for
+  example an `archived` flag or an application-defined access gate). String
+  forms now map correctly (`"false"`/`"0"`/`"off"` to `false`), a blank string
+  is treated as unset (`nil`), and native booleans from Parse wire JSON pass
+  through unchanged.
+
+#### Deprecation warning for setting ACL via mass-assignment
+
+- **DEPRECATED**: Setting `acl`/`ACL` through mass-assignment
+  (`Parse::Object#attributes=`) now emits a one-time security warning. Mass-
+  assigning an ACL from a caller-supplied hash — for example a controller doing
+  `record.attributes = params` without StrongParameters — lets an attacker
+  grant unintended access by sending an `ACL` key
+  (`{"ACL" => {"*" => {"write" => true}}}`). The behavior is unchanged this
+  release (the ACL is still applied), but the supported path is the explicit
+  `record.acl = ...` setter, and a future release may block ACL mass-assignment.
+  The constructor form `Klass.new(acl: ...)` is unaffected and does not warn.
+
+#### Redis cache values serialized as JSON instead of Marshal
+
+- **FIXED**: `Parse::Cache::Redis` now serializes cached HTTP responses as
+  JSON rather than Marshal. The Moneta-Redis store Marshals values by default,
+  so every cache hit ran `Marshal.load` on the bytes returned by Redis. Against
+  a shared, unauthenticated, or plaintext-`redis://` cache, an attacker able to
+  write the cache could plant a crafted Marshal payload that executed code on
+  deserialization. The wrapper now disables Moneta's value serializer
+  (`value_serializer: nil`) and JSON-encodes/decodes values itself; an
+  undecodable value (including any legacy Marshal entry) is treated as a cache
+  miss rather than deserialized. Cache keys are unchanged. No application code
+  changes are required; existing cached entries are transparently refetched and
+  re-stored in the new format on first access.
+- **FIXED**: The `cache: "redis://..."` shorthand on `Parse::Client.new` /
+  `Parse.setup` now builds a `Parse::Cache::Redis` store instead of a bare
+  `Moneta.new(:Redis, ...)`, so it gets the same JSON value serialization and
+  is not subject to the Marshal deserialization issue above.
+- **CHANGED**: The caching middleware stores response entries with string keys
+  so they round-trip losslessly through the JSON serialization. Reads accept
+  both string and legacy symbol keys.
+- **FIXED**: `Parse::Embeddings::Cache::MonetaStore` now JSON-encodes cached
+  embedding vectors instead of relying on the Moneta store's default Marshal
+  value serializer, closing the same `Marshal.load`-on-read deserialization
+  vector for the embedding cache (whose key is derived from often-user-supplied
+  text). It also emits a one-time warning when handed a Marshal-serializing
+  store and recommends `value_serializer: nil`.
+- **CHANGED**: Documentation for Redis-backed caches, the embedding cache, and
+  the synchronize-create lock store (`Parse.synchronize_create_store`) now
+  builds the Redis store via `Parse::Cache::Redis` or `value_serializer: nil`
+  so a raw `Moneta.new(:Redis, ...)` no longer leaves Marshal on the read path.
+
+#### Internal columns stripped from joined documents on mongo-direct reads
+
+- **FIXED**: `Parse::MongoDB.aggregate` now recursively strips Parse-internal
+  credential columns (`_hashed_password`, `_session_token`, `_auth_data_*`,
+  `_rperm`/`_wperm`, ...) from every result row **and every embedded
+  sub-document** for scoped (non-master) callers. Previously a scoped caller
+  could embed a foreign class (e.g. `_User` or `_Session`) into an arbitrary
+  alias via `$lookup` / `$graphLookup` / `$unionWith` and read back password
+  hashes, OAuth tokens, and session tokens: the per-class `protectedFields`
+  strip is keyed on the outer class, and the ACL sub-document walk only drops
+  ACL-failing sub-documents, so neither covered the aliased foreign document.
+  A new `Parse::PipelineSecurity.redact_internal_fields_deep!` runs as the final
+  redaction step. Structural columns (`_id`, `_p_*`, `_acl`, timestamps) are
+  preserved, so object and ACL reconstruction are unaffected; master-key reads
+  are unchanged.
+
+#### Hardened developer-facing mongo-direct aggregation terminals
+
+- **FIXED**: Credential columns (`_hashed_password`, `_session_token`,
+  `_auth_data_*`, `_email_verify_token`, `_perishable_token`, ...) used as a
+  `$match` field name are now refused **unconditionally** on the mongo-direct
+  path — even on a pipeline running with `allow_internal_fields: true` (the flag
+  that lets SDK-emitted `_rperm`/`_wperm` references through for
+  `readable_by_role` / `publicly_readable`). Previously the `*_direct` terminals
+  (`count_direct`, `results_direct`, `distinct_direct`, the direct group-by
+  helpers) passed `allow_internal_fields: true` unconditionally, so a query
+  whose `where` referenced a credential column compiled into a `$match` key that
+  bypassed the internal-field screen — a count/match oracle that could bisect a
+  bcrypt hash or session token. The ACL columns (`_rperm`/`_wperm`/`_tombstone`)
+  remain gated by `allow_internal_fields`, so `readable_by_role` still works.
+- **FIXED**: `Parse::Query#aggregate` and `#aggregate_from_query` now treat a
+  scoped query (`session_token` / `scope_to_user` / `scope_to_role`) as
+  authoritative over an explicit `mongo_direct: false`. Previously passing
+  `mongo_direct: false` on a scoped aggregation skipped the fail-closed guard
+  and routed to Parse Server's master-key-only REST `/aggregate` endpoint,
+  running the aggregation unscoped (no ACL, CLP, or `protectedFields`). A scoped
+  aggregation now promotes to mongo-direct, or fails closed with
+  `Parse::Query::MongoDirectRequired` when direct Mongo is unavailable; unscoped
+  callers can still opt out to REST with `mongo_direct: false`.
+
+#### Additional hardening
+
+- **FIXED**: Request/response body logging now redacts credentials. At `:debug`
+  level the logging middleware emitted login/signup request bodies (cleartext
+  `password`) and auth response bodies (`sessionToken`, `authData`, MFA
+  secrets); the body path now runs through the same `BodyBuilder.redact`
+  scrubber the header path already used, before truncation.
+- **FIXED**: The `_User` REST endpoints (`fetch_user` / `update_user` /
+  `delete_user`) now validate the `objectId` against
+  `Parse::API::PathSegment.object_id!` before interpolating it into the path,
+  matching the object endpoints. A crafted objectId (e.g. from a compromised
+  server response) can no longer traverse to a different endpoint on a
+  subsequent request.
+- **CHANGED**: `$sessionToken` / `$session_token` (the camelCase forms of the
+  session-token column) are now in `DENIED_FIELD_REFS`, so they cannot be
+  laundered through a `$`-field reference in a pipeline.
+- **IMPROVED**: The internal-collection floor (`_SCHEMA` / `_Hooks` /
+  `_GlobalConfig` / `_Audit` / ...) is now enforced unconditionally on every
+  `$lookup` / `$graphLookup` / `$unionWith` join target in
+  `Parse::ACLScope`, not only when lookup-rewriting runs. This closes a
+  defense-in-depth gap where an internal class whose CLP lookup returned no
+  policy could otherwise have been joinable on the direct path.
+- **IMPROVED**: When the MCP agent server is started on an unauthenticated
+  loopback bind with no Origin/custom-header gate configured, it now defaults
+  to a loopback-only Origin policy. A browser DNS-rebinding attack against
+  `127.0.0.1` carries a non-loopback `Origin` and is refused; native clients
+  (which send no `Origin`) and local browser UIs are unaffected. A one-time
+  warning points operators at `MCP_API_KEY` / `allowed_origins:` /
+  `require_custom_header:` for routable deployments.
+
 ### 5.5.0
 
 #### Multimodal bytes-fetch path with magic-byte MIME verification

@@ -26,6 +26,7 @@ module Parse
       # @param headers [Hash] additional HTTP headers to send with the request.
       # @return [Parse::Response]
       def fetch_user(id, headers: {}, **opts)
+        id = Parse::API::PathSegment.object_id!(id)
         request :get, "#{USER_PATH_PREFIX}/#{id}", headers: headers, opts: opts
       end
 
@@ -74,6 +75,7 @@ module Parse
       # @param headers [Hash] additional HTTP headers to send with the request.
       # @return [Parse::Response]
       def update_user(id, body = {}, headers: {}, **opts)
+        id = Parse::API::PathSegment.object_id!(id)
         response = request :put, "#{USER_PATH_PREFIX}/#{id}", body: body, headers: headers, opts: opts
         response.parse_class = Parse::Model::CLASS_USER
         response
@@ -98,6 +100,7 @@ module Parse
       # @param headers [Hash] additional HTTP headers to send with the request.
       # @return [Parse::Response]
       def delete_user(id, headers: {}, **opts)
+        id = Parse::API::PathSegment.object_id!(id)
         request :delete, "#{USER_PATH_PREFIX}/#{id}", headers: headers, opts: opts
       end
 
