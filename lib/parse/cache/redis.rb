@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "moneta"
+require "json"
 require_relative "pool"
 
 module Parse
@@ -82,6 +83,20 @@ module Parse
         # session-scoped REST responses outlive their token's
         # validity. Callers can still pass `expires: false` to opt out.
         merged_options = { expires: true }.merge(moneta_options)
+        # SECURITY: disable Moneta's value serializer so cached values are NOT
+        # Marshal-encoded. We JSON-(de)serialize values ourselves in #store /
+        # #[] (see #encode_value / #decode_value). The default Moneta-Redis
+        # value serializer is Marshal, which would `Marshal.load` whatever
+        # bytes come back from Redis on every cache hit — an arbitrary-code-
+        # execution primitive if the Redis cache is shared, unauthenticated,
+        # or reachable through a plaintext `redis://` MITM. Forcing nil here
+        # (overriding any caller-supplied `value_serializer:`/`serializer:`)
+        # keeps that gadget-deserialization vector closed regardless of how
+        # the wrapper is configured. Keys keep the default (:marshal) encoding:
+        # they are only ever written and SCAN/DEL-compared as opaque strings,
+        # never `Marshal.load`ed from Redis content, so they are not a
+        # deserialization vector.
+        merged_options = merged_options.merge(value_serializer: nil)
         @moneta_options = merged_options
         @closed = false
         @pool = Pool.new(size: pool_size, timeout: pool_timeout) do
@@ -90,7 +105,7 @@ module Parse
       end
 
       def [](key)
-        @pool[key]
+        decode_value(@pool[key])
       end
 
       def key?(key)
@@ -102,15 +117,18 @@ module Parse
       end
 
       def store(key, value, options = {})
-        @pool.store(key, value, options)
+        @pool.store(key, encode_value(value), options)
       end
 
       # Atomic SETNX. Required so `Parse::CreateLock` can acquire
       # cross-process locks when this wrapper is the configured cache /
       # `synchronize_create_store`. Returns `true` only when the key did
-      # not already exist.
+      # not already exist. The value goes through the same JSON encoding
+      # as {#store} so a later {#[]} read round-trips instead of decoding
+      # to nil. (Parse::LockBackend never hits this path on this wrapper —
+      # it prefers the raw-Redis {#lock_acquire}/{#lock_release} pair.)
       def create(key, value, options = {})
-        @pool.create(key, value, options)
+        @pool.create(key, encode_value(value), options)
       end
 
       # Atomic counter increment. Forwarded for Moneta surface parity.
@@ -135,14 +153,14 @@ module Parse
       # Atomically acquire a lock: SET key=owner only if absent, with a
       # native expiry. Used by {Parse::LockBackend} for {Parse::Lock} and
       # {Parse::CreateLock}. Deliberately bypasses Moneta's `create` —
-      # `Moneta.new(:Redis)` marshals BOTH keys and values, so a raw-Redis
-      # compare-and-delete on the marshaled blob would be fragile and
-      # coupled to Moneta's serializer config. Routing acquire AND release
-      # through plain-string raw Redis here keeps one consistent encoding
-      # across both ends of the lock and makes the keys human-inspectable
-      # in Redis (`parse-stack:lock:v1:<digest>`). Lock keys are
+      # `Moneta.new(:Redis)` marshals keys (and, by default, values), so a
+      # raw-Redis compare-and-delete on a Moneta-encoded blob would be
+      # fragile and coupled to Moneta's serializer config. Routing acquire
+      # AND release through plain-string raw Redis here keeps one consistent
+      # encoding across both ends of the lock and makes the keys human-
+      # inspectable in Redis (`parse-stack:lock:v1:<digest>`). Lock keys are
       # short-lived (TTL ≤ 30s) so there is no migration concern when a
-      # deploy flips between the Moneta-encoded and raw-encoded paths.
+      # deploy flips encodings.
       #
       # @param key [String] plain-string lock key.
       # @param owner [String] unique-per-acquisition owner token.
@@ -221,6 +239,32 @@ module Parse
       end
 
       private
+
+      # Serialize a cache value to a JSON String before handing it to Moneta
+      # (which stores it raw, since the value serializer is disabled — see the
+      # constructor). JSON is used instead of Marshal so the read side never
+      # `Marshal.load`s attacker-influenced Redis bytes. Cache values written
+      # by the caching middleware are `{ "headers" => ..., "body" => ... }`
+      # hashes of strings, which round-trip losslessly through JSON.
+      def encode_value(value)
+        JSON.generate(value)
+      end
+
+      # Decode a JSON String read back from Moneta/Redis. Returns nil on a
+      # miss or on any value that is not valid JSON — most importantly, legacy
+      # Marshal-encoded entries written before this wrapper switched to JSON.
+      # Treating an undecodable value as a miss makes the caller refetch and
+      # re-store it in the JSON format, and ensures a hostile non-JSON blob can
+      # at worst yield a cache miss, never a deserialized Ruby object graph.
+      def decode_value(raw)
+        return nil if raw.nil?
+        JSON.parse(raw)
+      rescue JSON::ParserError, EncodingError, TypeError
+        # ParserError covers malformed and hostile-depth JSON
+        # (JSON::NestingError subclasses it); TypeError covers a
+        # non-String blob from a misconfigured store. All are misses.
+        nil
+      end
 
       def delete_keys_matching!(pattern)
         @pool.pool.with do |store|

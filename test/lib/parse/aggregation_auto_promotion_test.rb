@@ -171,6 +171,44 @@ class AggregationAutoPromotionTest < Minitest::Test
     assert_raises(Parse::Query::MongoDirectRequired) { @query.results }
   end
 
+  # ---- RT-3: Query#aggregate must not let an explicit mongo_direct: false
+  #       opt a scoped query out of ACL/CLP enforcement (REST /aggregate) ----
+
+  PIPE = [{ "$group" => { "_id" => "$artist", "n" => { "$sum" => 1 } } }].freeze
+
+  def test_aggregate_scoped_explicit_mongo_direct_false_fails_closed
+    # The crux: an explicit mongo_direct: false on a SCOPED query must NOT
+    # route to REST /aggregate (master-key-only, unenforced). With mongo-direct
+    # unavailable it fails closed instead of silently leaking unscoped rows.
+    stub_mongodb_enabled!(false)
+    @query.scope_to_role("Admin")
+    assert_raises(Parse::Query::MongoDirectRequired) do
+      @query.aggregate(PIPE, mongo_direct: false)
+    end
+  end
+
+  def test_aggregate_scoped_explicit_mongo_direct_false_promotes_when_ready
+    stub_mongodb_enabled!(true)
+    @query.scope_to_role("Admin")
+    agg = @query.aggregate(PIPE, mongo_direct: false)
+    assert agg.mongo_direct, "scoped aggregate must be promoted to mongo-direct despite mongo_direct: false"
+  end
+
+  def test_aggregate_scoped_session_token_explicit_false_fails_closed
+    stub_mongodb_enabled!(false)
+    @query.session_token = "r:test-session"
+    assert_raises(Parse::Query::MongoDirectRequired) do
+      @query.aggregate(PIPE, mongo_direct: false)
+    end
+  end
+
+  def test_aggregate_unscoped_explicit_mongo_direct_false_stays_on_rest
+    # Unscoped callers can still opt out to REST with an explicit false.
+    stub_mongodb_enabled!(true)
+    agg = @query.aggregate(PIPE, mongo_direct: false)
+    refute agg.mongo_direct, "unscoped aggregate must honor explicit mongo_direct: false"
+  end
+
   private
 
   # Stub Parse::MongoDB.enabled? for the duration of one test. We don't

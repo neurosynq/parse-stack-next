@@ -79,9 +79,31 @@ module Parse
     CORE_FIELDS = { id: :string, created_at: :date, updated_at: :date, acl: :acl }.freeze
     # The delete operation hash.
     DELETE_OP = { "__op" => "Delete" }.freeze
+    # Shared stateless boolean caster used by {#format_value}. One instance
+    # for the process lifetime — `cast` only consults a frozen FALSE_VALUES
+    # set, so reuse is thread-safe.
+    BOOLEAN_CASTER = ActiveModel::Type::Boolean.new.freeze
     # @!visibility private
     def self.included(base)
       base.extend(ClassMethods)
+    end
+
+    # Process-once deprecation warning emitted when an ACL is set through
+    # mass-assignment (`Parse::Object#attributes=`). Setting ACL this way is
+    # still permitted in this release for backward compatibility, but is a
+    # mass-assignment foot-gun (a caller-supplied params hash bearing an
+    # `ACL` key can grant public write). A future release may block it; the
+    # supported path is the explicit `obj.acl =` setter. One-time so loops
+    # over many records do not spam the log.
+    # @!visibility private
+    def self.warn_acl_mass_assignment_once!
+      return if @acl_mass_assignment_warned
+      @acl_mass_assignment_warned = true
+      warn "[Parse::Stack:SECURITY] Setting `acl`/`ACL` via mass-assignment " \
+           "(Parse::Object#attributes=) is deprecated and may be blocked in a " \
+           "future release. A caller-supplied params hash bearing an ACL key can " \
+           "grant unintended access — filter input with StrongParameters and set " \
+           "ACL via the explicit `obj.acl = ...` setter instead."
     end
 
     # The class methods added to Parse::Objects
@@ -723,6 +745,17 @@ module Parse
     # @return (see #apply_attributes!)
     def attributes=(hash)
       return unless hash.is_a?(Hash)
+      # `acl`/`ACL` is still accepted here (a user-facing property), but
+      # mass-assigning an ACL from a caller-supplied hash — e.g. a Rails
+      # controller doing `record.attributes = params` without
+      # StrongParameters — lets an attacker grant themselves write by
+      # sending `{"ACL" => {"*" => {"write" => true}}}`. Warn (once) so the
+      # foot-gun is visible; callers should set ACL via the explicit
+      # `obj.acl =` setter. The constructor path (`Klass.new(acl:)`) calls
+      # apply_attributes! directly and is intentionally not warned.
+      if hash.key?("ACL") || hash.key?("acl") || hash.key?(:ACL) || hash.key?(:acl)
+        Parse::Properties.warn_acl_mass_assignment_once!
+      end
       # - [:id, :objectId]
       # only overwrite @id if it hasn't been set.
       apply_attributes!(hash, dirty_track: true)
@@ -838,11 +871,15 @@ module Parse
           val = val.to_i
         end
       when :boolean
-        if val.nil?
-          val = nil
-        else
-          val = val ? true : false
-        end
+        # Coerce via ActiveModel's boolean caster rather than Ruby
+        # truthiness. Plain `val ? true : false` treats every non-nil,
+        # non-false object as true, so the strings "false", "0", and "off"
+        # — exactly what arrives on the Rails-form / query-string ingestion
+        # path — would coerce to `true` and silently flip a boolean the
+        # wrong way (e.g. an `archived` or admin gate). ActiveModel maps the
+        # string forms ("false"/"0"/"f"/"off"/"") to false/nil. Parse wire
+        # JSON already sends real booleans, which pass through unchanged.
+        val = val.nil? ? nil : BOOLEAN_CASTER.cast(val)
       when :string
         val = val.to_s unless val.blank?
       when :float

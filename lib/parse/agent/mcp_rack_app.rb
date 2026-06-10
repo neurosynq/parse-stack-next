@@ -4,6 +4,7 @@
 require "json"
 require "securerandom"
 require "digest"
+require "uri"
 require_relative "errors"
 require_relative "mcp_dispatcher"
 require_relative "mcp_subscriptions"
@@ -320,6 +321,7 @@ module Parse
                      pre_auth_rate_limiter: nil,
                      allowed_origins: nil,
                      require_custom_header: nil,
+                     loopback_csrf_default: false,
                      resource_subscriptions: false,
                      subscription_manager: nil,
                      notifications: nil,
@@ -376,6 +378,16 @@ module Parse
         @pre_auth_rate_limiter      = pre_auth_rate_limiter
         @allowed_origins            = normalize_allowed_origins(allowed_origins)
         @required_custom_header     = normalize_required_custom_header(require_custom_header)
+        # NEW-9: when no explicit allowed_origins / require_custom_header CSRF
+        # gate is configured but the server was started on an unauthenticated
+        # loopback bind, default to a loopback-only Origin policy. A browser
+        # DNS-rebinding attack against 127.0.0.1 always carries an `Origin`
+        # header (the attacker page's origin), so refusing any present
+        # non-loopback Origin closes that vector — while native clients (curl,
+        # SDK-to-SDK) send NO Origin and stay allowed, and a legitimate local
+        # browser UI sends a loopback Origin and is allowed. Ignored when an
+        # explicit allowlist is configured (operator owns the policy then).
+        @loopback_csrf_default      = loopback_csrf_default && @allowed_origins.nil?
         @health_path                = health_path.is_a?(String) && !health_path.empty? ? health_path : nil
         # Per-app registry of in-flight cancellable requests. Keyed by
         # [correlation_id, request_id]. A `notifications/cancelled` POST
@@ -660,12 +672,9 @@ module Parse
         #     Missing/empty `Origin` is allowed regardless — native
         #     clients (curl, SDK-to-SDK) shouldn't be broken by a
         #     CSRF defense aimed at browsers.
-        if @allowed_origins
-          origin = env["HTTP_ORIGIN"].to_s.strip
-          unless origin.empty? || origin_allowed?(origin)
-            @logger&.warn("[Parse::Agent::MCPRackApp] Origin refused: #{origin.inspect}")
-            return [403, json_headers, [json_rpc_error(-32_700, "Origin not allowed")]]
-          end
+        if origin_refused?(env)
+          @logger&.warn("[Parse::Agent::MCPRackApp] Origin refused: #{env["HTTP_ORIGIN"].to_s.strip.inspect}")
+          return [403, json_headers, [json_rpc_error(-32_700, "Origin not allowed")]]
         end
 
         # 2c. Required custom header (CSRF defense-in-depth). A header
@@ -1051,14 +1060,11 @@ module Parse
           return [400, json_headers, [json_rpc_error(-32_600, "Missing or invalid Mcp-Session-Id")]]
         end
 
-        # The origin allowlist (when configured) guards the listening stream
-        # the same way it guards POST — a browser-driven cross-origin GET to
-        # an SSE endpoint is the analogous CSRF surface.
-        if @allowed_origins
-          origin = env["HTTP_ORIGIN"].to_s.strip
-          unless origin.empty? || origin_allowed?(origin)
-            return [403, json_headers, [json_rpc_error(-32_700, "Origin not allowed")]]
-          end
+        # The origin policy (when configured, or the loopback default) guards
+        # the listening stream the same way it guards POST — a browser-driven
+        # cross-origin GET to an SSE endpoint is the analogous CSRF surface.
+        if origin_refused?(env)
+          return [403, json_headers, [json_rpc_error(-32_700, "Origin not allowed")]]
         end
 
         # Owner-binding: only the principal that established this session (or,
@@ -2119,6 +2125,39 @@ module Parse
       # `@allowed_origins`. Comparison is case-insensitive on host and
       # scheme. Wildcard via leading `.` matches subdomains:
       # `.example.com` matches `app.example.com` and `example.com`.
+      # Single chokepoint for the Origin CSRF gate, shared by the POST and
+      # listening-stream paths. A missing/empty Origin (native clients: curl,
+      # SDK-to-SDK) is always allowed — the CSRF surface is browser-only, and
+      # browsers always send an Origin on cross-origin requests. When an
+      # explicit allowlist is configured it wins; otherwise the loopback
+      # default (NEW-9) refuses any present non-loopback Origin.
+      def origin_refused?(env)
+        origin = env["HTTP_ORIGIN"].to_s.strip
+        return false if origin.empty?
+        if @allowed_origins
+          !origin_allowed?(origin)
+        elsif @loopback_csrf_default
+          !origin_is_loopback?(origin)
+        else
+          false
+        end
+      end
+
+      # True when `origin`'s host is a loopback address (any scheme/port).
+      # Closes browser DNS-rebinding on an unauthenticated loopback bind: the
+      # attacker page's Origin (e.g. http://evil.example) is not loopback and
+      # is refused, while a real local UI on http://localhost:<port> passes.
+      def origin_is_loopback?(origin)
+        host = begin
+          URI.parse(origin).host
+        rescue URI::InvalidURIError, StandardError
+          nil
+        end
+        return false if host.nil?
+        host = host.downcase.delete_prefix("[").delete_suffix("]") # unwrap IPv6 brackets
+        host == "localhost" || host == "127.0.0.1" || host == "::1"
+      end
+
       def origin_allowed?(origin)
         return false unless @allowed_origins
         normalized = origin.downcase

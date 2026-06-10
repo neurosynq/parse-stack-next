@@ -353,7 +353,11 @@ layer shared across processes, wrap any Moneta-compatible backend in
 the bundled adapter:
 
 ```ruby
-moneta = Moneta.new(:Redis, url: ENV["REDIS_URL"])
+# Build the Moneta store with value_serializer: nil. MonetaStore JSON-encodes
+# vectors itself; without value_serializer: nil, Moneta would additionally
+# Marshal the values, and a cache read would Marshal.load bytes from a shared
+# Redis — an RCE vector if that Redis is untrusted or MITM'd over redis://.
+moneta = Moneta.new(:Redis, url: ENV["REDIS_URL"], value_serializer: nil)
 Parse::Embeddings::Cache.enable!(
   store: Parse::Embeddings::Cache::MonetaStore.new(moneta, ttl: 30 * 24 * 3600),
 )

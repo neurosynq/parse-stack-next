@@ -18,7 +18,8 @@ class MassAssignmentProtectionTest < Minitest::Test
 
   def test_mass_assignment_allows_acl
     # ACL is a user-facing property; setting it via the constructor or
-    # `attributes=` must work for legitimate developer code paths.
+    # `attributes=` still works (behavior unchanged in 5.5.1 — it emits a
+    # deprecation warning but is not blocked; see the warning tests below).
     doc = TestDocument.new
     acl = Parse::ACL.new
     acl.apply("role:Admin", read: true, write: true)
@@ -26,6 +27,58 @@ class MassAssignmentProtectionTest < Minitest::Test
     assert_equal "Hello", doc.title
     acl_json = doc.acl.as_json
     assert acl_json["role:Admin"], "developer-set ACL must be applied"
+  end
+
+  # F3 (5.5.1): mass-assigning an ACL is a foot-gun — a caller-supplied
+  # params hash bearing an `ACL` key can grant unintended write. We warn
+  # (once, non-breaking) rather than block; the supported path is the
+  # explicit `obj.acl =` setter.
+  def reset_acl_warn_flag!
+    Parse::Properties.instance_variable_set(:@acl_mass_assignment_warned, false)
+  end
+
+  def test_mass_assignment_acl_emits_deprecation_warning
+    reset_acl_warn_flag!
+    doc = TestDocument.new
+    _out, err = capture_io do
+      doc.attributes = { "ACL" => { "*" => { "read" => true, "write" => true } } }
+    end
+    assert_match(/mass-assignment/i, err)
+    assert_match(/SECURITY/, err)
+  ensure
+    reset_acl_warn_flag!
+  end
+
+  def test_mass_assignment_acl_warning_fires_only_once
+    reset_acl_warn_flag!
+    doc = TestDocument.new
+    _o1, err1 = capture_io { doc.attributes = { "acl" => Parse::ACL.new } }
+    _o2, err2 = capture_io { doc.attributes = { "acl" => Parse::ACL.new } }
+    refute_empty err1, "first ACL mass-assignment must warn"
+    assert_empty err2, "subsequent ACL mass-assignments must not re-warn (process-once)"
+  ensure
+    reset_acl_warn_flag!
+  end
+
+  def test_mass_assignment_without_acl_does_not_warn
+    reset_acl_warn_flag!
+    doc = TestDocument.new
+    _out, err = capture_io { doc.attributes = { "title" => "Hello", "body" => "x" } }
+    assert_empty err, "non-ACL mass-assignment must not emit the ACL warning"
+  ensure
+    reset_acl_warn_flag!
+  end
+
+  def test_constructor_acl_does_not_warn
+    # `Klass.new(acl:)` routes through apply_attributes! directly, not
+    # attributes=, so the legitimate construction idiom stays silent.
+    reset_acl_warn_flag!
+    _out, err = capture_io do
+      TestDocument.new(acl: Parse::ACL.new, title: "Hello")
+    end
+    assert_empty err, "constructor ACL must not emit the mass-assignment warning"
+  ensure
+    reset_acl_warn_flag!
   end
 
   def test_mass_assignment_skips_session_token

@@ -45,6 +45,37 @@ module Parse
         s
       end
 
+      # Parse objectId pattern: 1–40 alphanumerics. Parse Server generates
+      # 10-char alphanumeric ids; the cap is generous to allow custom ids
+      # while still refusing path-traversal (`/`, `.`, `..`) and query
+      # injection (`?`, `&`, `=`). Mirrors Parse::API::Objects::OBJECT_ID_PATTERN.
+      OBJECT_ID_PATTERN = /\A[A-Za-z0-9]{1,40}\z/.freeze
+
+      # Validate a Parse objectId used in a REST path (`users/<id>`,
+      # `classes/<Class>/<id>`) and return it unchanged. Refuses anything that
+      # could traverse to a different endpoint or smuggle a query string when
+      # interpolated raw — e.g. a hostile/compromised Parse Server returning a
+      # crafted `objectId` like `../classes/_User?where=...` on a prior
+      # response that then rides the next fetch/update/delete with whatever
+      # credentials the call is authorized to send.
+      #
+      # @param value the objectId to validate (anything responding to `to_s`).
+      # @param kind [String] human-readable name for error messages.
+      # @return [String] the validated objectId.
+      # @raise [ArgumentError] if blank or it fails the pattern.
+      def object_id!(value, kind: "objectId")
+        s = value.to_s
+        if s.empty?
+          raise ArgumentError, "#{kind} must not be empty"
+        end
+        unless OBJECT_ID_PATTERN.match?(s)
+          raise ArgumentError,
+            "#{kind} #{s.inspect} contains characters not allowed in a Parse " \
+            "objectId. Must match /\\A[A-Za-z0-9]{1,40}\\z/."
+        end
+        s
+      end
+
       # Parse trigger className pattern: a normal identifier, OR one of Parse
       # Server's `@`-prefixed pseudo-classes (`@File` for file triggers,
       # `@Connect` for the connection-global LiveQuery trigger). The optional

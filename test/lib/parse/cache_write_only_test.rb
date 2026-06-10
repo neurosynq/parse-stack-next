@@ -556,7 +556,11 @@ class CacheMiddlewareWriteOnlyTest < Minitest::Test
     # Cache should now have the fresh data
     assert @store.key?(@cache_key), "Cache should be updated after write_only request"
     cached = @store[@cache_key]
-    assert_equal '{"objectId":"abc123","title":"Fresh"}', cached[:body],
+    # The caching middleware now stores values with string keys so they
+    # survive the Redis wrapper's JSON serialization (no Marshal). Read the
+    # string key, with a symbol fallback for legacy entries.
+    cached_body = cached["body"] || cached[:body]
+    assert_equal '{"objectId":"abc123","title":"Fresh"}', cached_body,
       "Cache should contain the fresh response body"
   end
 

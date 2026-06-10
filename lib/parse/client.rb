@@ -716,10 +716,26 @@ module Parse
             warn "[Parse::Client] Cache store provided but :expires is not set or is 0. " \
                  "Caching will be disabled. Set :expires to enable caching (e.g., expires: 10)."
           else
-            # advanced: provide a REDIS url, we'll configure a Moneta Redis store.
+            # advanced: provide a REDIS url, we'll configure a Redis store.
             if opts[:cache].is_a?(String) && opts[:cache].starts_with?("redis://")
               begin
-                opts[:cache] = Moneta.new(:Redis, url: opts[:cache])
+                # Eagerly load the redis adapter so a missing `redis` gem
+                # fails fast here (at setup) with the friendly hint below,
+                # rather than deferring to the first cache access — the
+                # Parse::Cache::Redis pool builds its Moneta-Redis backends
+                # lazily, so without this the LoadError would surface later.
+                require "moneta/adapters/redis"
+                # Route through Parse::Cache::Redis rather than a bare
+                # `Moneta.new(:Redis, ...)`. SECURITY: the Moneta-Redis store
+                # Marshals values by default, so every cache hit would
+                # `Marshal.load` whatever bytes come back from Redis — an
+                # arbitrary-code-execution primitive if the cache is shared,
+                # unauthenticated, or reachable over a plaintext `redis://`
+                # MITM. The wrapper forces `value_serializer: nil` and
+                # JSON-(de)serializes cached values itself, closing that
+                # deserialization vector on this shorthand the same way an
+                # explicitly-constructed wrapper does.
+                opts[:cache] = Parse::Cache::Redis.new(url: opts[:cache])
               rescue LoadError
                 puts "[Parse::Middleware::Caching] Did you forget to load the redis gem (Gemfile)?"
                 raise

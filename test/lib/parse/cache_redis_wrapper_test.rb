@@ -95,4 +95,37 @@ class CacheRedisWrapperTest < Minitest::Test
     w.instance_variable_set(:@pool, Parse::Cache::Pool.new(size: 1) { backend })
     assert_same w, w.clear, "Parse::Cache::Redis#clear should return self for chaining"
   end
+
+  # SECURITY: cached values must be serialized as JSON, never Marshal, so a
+  # cache hit can never `Marshal.load` attacker-influenced Redis bytes into a
+  # gadget object graph (RCE-if-cache-compromised). The wrapper disables
+  # Moneta's value serializer and does its own JSON (de)serialization.
+  def test_values_are_json_encoded_not_marshal
+    w = Parse::Cache::Redis.new(url: "redis://localhost:6379/0")
+    payload = { "headers" => { "Content-Type" => "application/json" },
+                "body" => '{"results":[1,2,3]}' }
+    encoded = w.send(:encode_value, payload)
+    assert_kind_of String, encoded
+    refute encoded.b.start_with?("\x04\b".b),
+      "value must not be a Marshal stream (\\x04\\x08 magic)"
+    assert_equal payload, JSON.parse(encoded), "value must be JSON-decodable"
+    assert_equal payload, w.send(:decode_value, encoded), "JSON value must round-trip"
+  end
+
+  def test_forces_value_serializer_nil_even_when_caller_passes_one
+    # A caller-supplied serializer must not be able to re-enable Marshal on the
+    # value path. The wrapper forces value_serializer: nil.
+    w = Parse::Cache::Redis.new(url: "redis://localhost:6379/0", serializer: :marshal)
+    opts = w.instance_variable_get(:@moneta_options)
+    assert_nil opts[:value_serializer],
+      "wrapper must force value_serializer: nil to keep Marshal off the value path"
+  end
+
+  def test_decode_value_treats_hostile_marshal_bytes_as_miss
+    w = Parse::Cache::Redis.new(url: "redis://localhost:6379/0")
+    hostile = Marshal.dump([1, 2, 3]) # non-JSON bytes an attacker could plant
+    assert_nil w.send(:decode_value, hostile),
+      "undecodable (e.g. Marshal) bytes must decode to nil, never be Marshal.load-ed"
+    assert_nil w.send(:decode_value, nil), "a cache miss must decode to nil"
+  end
 end
