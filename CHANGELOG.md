@@ -1,5 +1,50 @@
 ## parse-stack-next Changelog
 
+### 5.5.2
+
+#### Large aggregation pipelines no longer fail with "Invalid aggregate stage '0'"
+
+- **FIXED**: An aggregation whose request URL exceeds ~2KB (for example a
+  `group_by`, `group_by_date`, `distinct`, or custom `aggregate` pipeline with
+  a large `$in` / `$match`) is rewritten from a GET to a POST carrying
+  `_method=GET`, with the query moved into the request body. The pipeline was
+  sent in the body as a URL-encoded string, but Parse Server's aggregate
+  endpoint only JSON-decodes query-string params, not body params — so the
+  pipeline arrived as a raw string and was rejected with
+  `Invalid aggregate stage '0'`, causing the aggregation to return an empty
+  result. The long-URL override now sends a JSON body for the aggregate
+  endpoint so the pipeline is delivered as a real array (boolean params such as
+  `rawValues` are preserved as booleans). The historical URL-encoded override is
+  unchanged for `find` and other endpoints, which Parse Server already decodes
+  correctly.
+
+#### Aggregations inside `Parse.with_session` blocks are now scoped
+
+- **FIXED**: `group_by_date`, `group_by`, `distinct`, and `count` (aggregation
+  branch) now detect the ambient session token set by `Parse.with_session` and
+  treat the query as scoped — consistent with how `Parse::Client#request`
+  already scopes REST find/get/count calls in the same block. Previously the
+  `query_is_scoped?` / `distinct_query_is_scoped?` checks consulted only the
+  query instance's own `session_token=` / `scope_to_user` / `scope_to_role`
+  and ignored `Parse.current_session_token`, so an aggregation inside a
+  `with_session` block ran unscoped as the master key and returned all rows
+  regardless of ACL. The checks now include the ambient: when scoped and
+  mongo-direct is available the aggregation auto-promotes (ACL/CLP enforced);
+  when scoped and mongo-direct is unavailable it fails closed with
+  `MongoDirectRequired` rather than silently leaking rows.
+- **FIXED**: `group_by_date` now also fails closed (`MongoDirectRequired`) when
+  the query is scoped but mongo-direct is unavailable — matching the existing
+  behavior of `group_by`, `distinct`, and `count`. Previously `group_by_date`
+  silently fell back to the REST `/aggregate` endpoint in that case.
+- **FIXED**: A regression introduced in 5.5.1 where `group_by_date`,
+  `group_by`, and pipeline-based aggregations called inside a
+  `Parse.with_session` block returned empty results `{}`. The ambient session
+  token was forwarded as an HTTP session-token header (suppressing the master
+  key), causing Parse Server's REST `/aggregate` endpoint — which is
+  master-key-only — to return a 401/403. The REST aggregate call sites now
+  force `use_master_key: true` so the ambient cannot suppress it, unless the
+  caller explicitly set `use_master_key: false`.
+
 ### 5.5.1
 
 #### Mongo-direct reads inside `Parse.with_session` are now scoped, not master

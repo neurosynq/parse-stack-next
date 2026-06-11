@@ -1811,13 +1811,25 @@ module Parse
     # Whether this query carries a non-master-key auth scope. Used by
     # `#distinct` (and group_by aggregations) to decide whether to
     # auto-promote the REST aggregate path to mongo-direct so the SDK's
-    # ACLScope / CLPScope enforcement actually runs.
+    # ACLScope / CLPScope enforcement actually runs. Also detects the
+    # fiber-local ambient session set by Parse.with_session so that
+    # aggregations inside a with_session block are treated as scoped —
+    # consistent with how Parse::Client#request already scopes REST calls.
     # @return [Boolean]
     # @api private
     def distinct_query_is_scoped?
       return true if @session_token.is_a?(String) && !@session_token.empty?
       return true if @acl_user
       return true if @acl_role
+      # An ambient Parse.with_session counts as scope ONLY when the query did
+      # not explicitly request master-key mode — mirroring Parse::Client#request,
+      # where an explicit use_master_key: true is a deliberate admin call that
+      # skips the ambient session. Otherwise an admin aggregation inside a
+      # with_session block would be wrongly forced to mongo-direct / fail-closed.
+      unless use_master_key == true
+        ambient = ambient_session_token
+        return true if ambient.is_a?(String) && !ambient.empty?
+      end
       false
     end
 
@@ -1832,12 +1844,13 @@ module Parse
     def raise_scoped_aggregation_requires_mongo_direct!
       raise MongoDirectRequired,
         "[Parse::Query] This scoped aggregation (session_token / " \
-        "scope_to_user / scope_to_role) requires mongo-direct so the " \
-        "SDK can enforce ACL/CLP. Parse Server's REST /aggregate " \
-        "endpoint is master-key-only and enforces neither, so routing " \
-        "it there would silently run unscoped as the master key. " \
-        "Enable mongo-direct via Parse::MongoDB.configure(...), or " \
-        "rewrite without the aggregation terminal."
+        "scope_to_user / scope_to_role, or an active Parse.with_session " \
+        "block) requires mongo-direct so the SDK can enforce ACL/CLP. " \
+        "Parse Server's REST /aggregate endpoint is master-key-only and " \
+        "enforces neither, so routing it there would silently run unscoped " \
+        "as the master key. Enable mongo-direct via " \
+        "Parse::MongoDB.configure(...), or rewrite without the " \
+        "aggregation terminal."
     end
 
     # Scope a query to a specific user's row-level ACL when it auto-routes
@@ -5996,13 +6009,21 @@ module Parse
       if @mongo_direct && defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
         @cached_response = execute_direct!
       else
+        # REST /aggregate is master-key-only. An ambient Parse.with_session
+        # block would suppress the master key via session_token, causing a
+        # 401/403. Force use_master_key unless the caller explicitly disabled
+        # it (use_master_key: false is a deliberate client-mode decision).
+        # `.dup` keeps the master-key flip local to this call even if `_opts`
+        # ever returns a shared/memoized hash.
+        rest_opts = @query.send(:_opts).dup
+        rest_opts[:use_master_key] = true unless rest_opts[:use_master_key] == false
         @cached_response = @query.client.aggregate_pipeline(
           @query.instance_variable_get(:@table),
           @pipeline,
           headers: {},
           raw_values: @raw_values,
           raw_field_names: @raw_field_names,
-          **@query.send(:_opts),
+          **rest_opts,
         )
       end
 
@@ -6388,16 +6409,24 @@ module Parse
     # @return [Array<Hash>] raw aggregation results
     def raw(operation, aggregation_expr)
       formatted_group_field = @query.send(:format_aggregation_field, @group_field)
-      pipeline = build_pipeline(formatted_group_field, aggregation_expr)
 
-      response = @query.client.aggregate_pipeline(
-        @query.instance_variable_get(:@table),
-        pipeline,
-        headers: {},
-        **@query.send(:_opts),
-      )
+      # Build the same pipeline the count/sum/etc. terminals use, then delegate
+      # to Query#aggregate. That central path handles scoped-query routing
+      # (session_token / acl_user / acl_role / ambient Parse.with_session →
+      # auto-promote to mongo-direct, or fail closed when unavailable) so a
+      # scoped `raw` is never sent to the master-key-only REST /aggregate
+      # endpoint, and it returns the raw Array<Hash> rows this method documents.
+      # `$match` from the query's where constraints is added by Query#aggregate.
+      pipeline = []
+      pipeline << { "$unwind" => "$#{formatted_group_field}" } if @flatten_arrays
+      pipeline << { "$group" => { "_id" => "$#{formatted_group_field}", "count" => aggregation_expr } }
+      add_fields = size_addfields_stage
+      pipeline << add_fields if add_fields
+      sort = sort_stage
+      pipeline << sort if sort
+      pipeline << { "$project" => { "_id" => 0, "objectId" => "$_id", "count" => 1 } }
 
-      response.result || []
+      @query.aggregate(pipeline, verbose: @query.instance_variable_get(:@verbose_aggregate)).raw || []
     end
 
     # Count the number of items in each group.
@@ -6541,8 +6570,12 @@ module Parse
       # already does this auto-promotion (lib/parse/agent/tools.rb), this
       # is the equivalent at the Query layer for direct SDK callers.
       use_mongo_direct = @mongo_direct
-      if !use_mongo_direct && query_is_scoped? && parse_mongodb_available?
-        use_mongo_direct = true
+      if !use_mongo_direct && query_is_scoped?
+        if parse_mongodb_available?
+          use_mongo_direct = true
+        else
+          @query.send(:raise_scoped_aggregation_requires_mongo_direct!)
+        end
       end
 
       if use_mongo_direct
@@ -6779,15 +6812,22 @@ module Parse
     end
 
     # Whether the parent query carries any non-master-key auth scope. A
-    # session_token, acl_user, or acl_role means the caller expects the
-    # results to be filtered by ACL — which only happens on the SDK's
-    # mongo-direct path. Used to decide whether to auto-promote the REST
-    # aggregation path to mongo-direct.
+    # session_token, acl_user, acl_role, or an active Parse.with_session
+    # ambient means the caller expects ACL-filtered results — which only
+    # the SDK's mongo-direct path provides. Used to decide whether to
+    # auto-promote the REST aggregation path to mongo-direct.
     def query_is_scoped?
       st = @query.session_token
       return true if st.is_a?(String) && !st.empty?
       return true if @query.instance_variable_get(:@acl_user)
       return true if @query.instance_variable_get(:@acl_role)
+      # Ambient Parse.with_session counts as scope only when the query did not
+      # explicitly set use_master_key: true (matches Parse::Client#request
+      # precedence — an explicit master-key call skips the ambient session).
+      unless @query.use_master_key == true
+        ambient = @query.send(:ambient_session_token)
+        return true if ambient.is_a?(String) && !ambient.empty?
+      end
       false
     end
 
@@ -7228,14 +7268,19 @@ module Parse
       # Format the date field name
       formatted_date_field = @query.send(:format_aggregation_field, @date_field)
 
-      # Auto-promote scoped queries to mongo-direct. See the matching
-      # block in `GroupBy#execute_group_aggregation` for the full
-      # rationale — REST `/aggregate` is master-key-only and unscoped, so
-      # session_token / acl_user / acl_role queries need the SDK's
-      # mongo-direct enforcement layers to actually filter results.
+      # Auto-promote scoped queries to mongo-direct. REST `/aggregate` is
+      # master-key-only and enforces neither ACL nor CLP — a scoped query
+      # (session_token / acl_user / acl_role, or an active
+      # Parse.with_session block) must use the SDK's enforcement layers.
+      # Fail closed if mongo-direct is unavailable rather than silently
+      # returning unscoped rows. Mirrors the scoped-query gate in Query#aggregate.
       use_mongo_direct = @mongo_direct
-      if !use_mongo_direct && query_is_scoped? && parse_mongodb_available?
-        use_mongo_direct = true
+      if !use_mongo_direct && query_is_scoped?
+        if parse_mongodb_available?
+          use_mongo_direct = true
+        else
+          @query.send(:raise_scoped_aggregation_requires_mongo_direct!)
+        end
       end
 
       if use_mongo_direct
@@ -7281,11 +7326,21 @@ module Parse
         puts "[VERBOSE AGGREGATE] Sending to: #{@query.instance_variable_get(:@table)}"
       end
 
+      # Parse Server's REST /aggregate endpoint is master-key-only. An active
+      # Parse.with_session block sets a fiber-local ambient session token that
+      # Parse::Client#request picks up and uses in place of the master key,
+      # causing a 401/403 on this endpoint. Force use_master_key: true so the
+      # ambient session cannot suppress it — unless the caller explicitly set
+      # use_master_key: false (deliberate client-mode / session-token intent).
+      # `.dup` keeps the master-key flip local to this call (see Aggregation#execute!).
+      rest_opts = @query.send(:_opts).dup
+      rest_opts[:use_master_key] = true unless rest_opts[:use_master_key] == false
+
       response = @query.client.aggregate_pipeline(
         @query.instance_variable_get(:@table),
         pipeline,
         headers: {},
-        **@query.send(:_opts),
+        **rest_opts,
       )
 
       if @query.instance_variable_get(:@verbose_aggregate)
@@ -7312,6 +7367,18 @@ module Parse
         end
         result_hash
       else
+        unless response.success?
+          # Surface the failure (the result would otherwise be a silent `{}`)
+          # through the configured logger rather than unconditional stderr.
+          # Log the error code + message, not a full `inspect`, to avoid
+          # echoing an unbounded server payload into logs.
+          logger = Parse.respond_to?(:logger) ? Parse.logger : nil
+          logger&.warn(
+            "[Parse::GroupByDate] aggregate failed " \
+            "(#{@query.instance_variable_get(:@table)} :#{@date_field} :#{@interval}): " \
+            "code=#{response.code} #{response.error}"
+          )
+        end
         {}
       end
     end
@@ -7492,15 +7559,23 @@ module Parse
       { "$sort" => { field => dir } }
     end
 
-    # Mirror of {GroupBy#query_is_scoped?}. A session_token, acl_user, or
-    # acl_role on the parent query means the caller expects ACL filtering,
-    # which only the mongo-direct path provides — Parse Server REST
-    # `/aggregate` is master-key-only and unscoped.
+    # Mirror of {GroupBy#query_is_scoped?}. A session_token, acl_user,
+    # acl_role, or an active Parse.with_session ambient means the caller
+    # expects ACL-filtered results — which only the mongo-direct path
+    # provides. Parse Server REST `/aggregate` is master-key-only and
+    # unscoped.
     def query_is_scoped?
       st = @query.session_token
       return true if st.is_a?(String) && !st.empty?
       return true if @query.instance_variable_get(:@acl_user)
       return true if @query.instance_variable_get(:@acl_role)
+      # Ambient Parse.with_session counts as scope only when the query did not
+      # explicitly set use_master_key: true (matches Parse::Client#request
+      # precedence — an explicit master-key call skips the ambient session).
+      unless @query.use_master_key == true
+        ambient = @query.send(:ambient_session_token)
+        return true if ambient.is_a?(String) && !ambient.empty?
+      end
       false
     end
 
