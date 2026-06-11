@@ -285,14 +285,32 @@ module Parse
         # to be POST instead of GET and send the query parameters in the body of the POST request.
         # The standard maximum POST request (which is a server setting), is usually set to 20MBs
         if env[:method] == :get && env[:url].to_s.length >= MAX_URL_LENGTH
-          env[:request_headers][HTTP_METHOD_OVERRIDE] = "GET"
-          env[:request_headers][CONTENT_TYPE] = "application/x-www-form-urlencoded"
-          # parse-sever looks for method overrides in the body under the `_method` param.
-          # so we will add it to the query string, which will now go into the body.
-          env[:body] = "_method=GET&" + env[:url].query
-          env[:url].query = nil
-          #override
-          env[:method] = :post
+          if aggregate_request?(env[:url])
+            # Parse Server's AggregateRouter only JSON-decodes query-string
+            # params (via JSONFromQuery); it does NOT decode a `pipeline` param
+            # that arrives in the request body. The urlencoded override below
+            # would therefore deliver `pipeline` as a raw JSON *string*, which
+            # AggregateRouter.getPipeline mis-reads character-by-character and
+            # rejects with "Invalid aggregate stage '0'". Send a JSON body
+            # instead so the pipeline survives as a real Array. `_method=GET`
+            # still routes Parse Server to its GET-only aggregate handler.
+            env[:request_headers][HTTP_METHOD_OVERRIDE] = "GET"
+            env[:request_headers][CONTENT_TYPE] = CONTENT_TYPE_FORMAT
+            env[:body] = aggregate_override_body(env[:url].query)
+            env[:url].query = nil
+            env[:method] = :post
+          else
+            env[:request_headers][HTTP_METHOD_OVERRIDE] = "GET"
+            env[:request_headers][CONTENT_TYPE] = "application/x-www-form-urlencoded"
+            # parse-server looks for method overrides in the body under the `_method` param.
+            # so we will add it to the query string, which will now go into the body.
+            # `.to_s` guards the (contrived but possible) case of a >=2KB URL whose
+            # length is all path and no query — nil + String would raise TypeError.
+            env[:body] = "_method=GET&" + env[:url].query.to_s
+            env[:url].query = nil
+            #override
+            env[:method] = :post
+          end
           # else if not a get, always make sure the request is JSON encoded if the content type matches
         elsif env[:request_headers][CONTENT_TYPE] == CONTENT_TYPE_FORMAT &&
               (env[:body].is_a?(Hash) || env[:body].is_a?(Array))
@@ -333,6 +351,51 @@ module Parse
           r.code ||= response_env[:status] if r.error.present?
           response_env[:body] = r
         end
+      end
+
+      private
+
+      # Whether the request targets Parse Server's `/aggregate/<Class>`
+      # endpoint. Used by {#call!} to pick the JSON-body form of the
+      # long-URL GET→POST override (the aggregate endpoint does not
+      # JSON-decode a body `pipeline` param, unlike `where`).
+      #
+      # Anchored to the final two path segments: `.../aggregate/<ClassName>`
+      # where <ClassName> is the last segment (no further slashes). The
+      # className is mandatory and slash-free — see
+      # {Parse::API::Aggregate#aggregate_uri_path}, which validates it via
+      # PathSegment.identifier! — so a real aggregate URL always ends this way.
+      # A `find` request is `.../classes/<ClassName>` (no match), a class
+      # merely *named* with "aggregate" (e.g. `MyAggregateData`) does not match,
+      # and an `/aggregate/` segment appearing earlier in a custom mount prefix
+      # (e.g. `/aggregate/api/classes/Foo`) does not match either.
+      # @param url [URI] the request URL.
+      # @return [Boolean]
+      def aggregate_request?(url)
+        url.path.to_s.match?(%r{/aggregate/[^/]+/?\z})
+      end
+
+      # Build the JSON request body for a long-URL aggregate GET→POST
+      # override. Reconstructs the params from the encoded query string and
+      # JSON-decodes each value so the `pipeline` Array (and boolean
+      # `rawValues`/`rawFieldNames`) reach Parse Server as real types rather
+      # than strings. A value that is not itself JSON is passed through
+      # unchanged. `_method=GET` is injected so Parse Server routes the POST
+      # to its GET-only aggregate handler.
+      # @param query_string [String, nil] the encoded query string.
+      # @return [String] the JSON body to send.
+      def aggregate_override_body(query_string)
+        params = Faraday::Utils.parse_query(query_string.to_s) || {}
+        body = { "_method" => "GET" }
+        params.each do |key, value|
+          body[key] =
+            begin
+              JSON.parse(value)
+            rescue JSON::ParserError, TypeError
+              value
+            end
+        end
+        body.to_json
       end
     end
   end #Middleware

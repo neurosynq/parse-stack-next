@@ -1,5 +1,6 @@
 require_relative "../../test_helper_integration"
 require "minitest/autorun"
+require "cgi" # CGI.escape in the >2KB URL-length assertion; not guaranteed loaded transitively
 
 # Test models for aggregate pipeline testing
 class AggregateTestUser < Parse::Object
@@ -1915,6 +1916,70 @@ class QueryAggregateTest < Minitest::Test
         end
 
         puts "\n✅ Pointer constraint aggregation test completed (debugging results above)"
+      end
+    end
+  end
+
+  # Regression: an aggregate whose encoded URL exceeds ~2KB is rewritten from
+  # GET to POST (_method=GET) with the query moved into the body. Parse Server's
+  # AggregateRouter only JSON-decodes query-string params, not body params, so
+  # the pipeline must be sent as a JSON body (not a URL-encoded string) or it is
+  # rejected with "Invalid aggregate stage '0'". This test drives a real Parse
+  # Server with a >2KB pipeline through all three surfaces (custom pipeline,
+  # group_by, group_by_date) and asserts correct counts instead of an empty/
+  # errored result. See Parse::Middleware::BodyBuilder#aggregate_override_body.
+  def test_large_aggregate_pipeline_exceeding_url_limit
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      with_timeout(30, "large aggregate pipeline (>2KB URL) test") do
+        puts "\n=== Testing Aggregate Pipeline Exceeding 2KB URL Limit ==="
+
+        author = AggregateTestUser.new(name: "Big-IN Author", age: 40, city: "Austin", active: true)
+        assert author.save, "Author should save"
+
+        # Five posts by this author, all created "now" so group_by_date buckets
+        # them into a single day.
+        5.times do |i|
+          p = AggregateTestPost.new(title: "Big-IN Post #{i}", author: author, category: "tech", likes: i)
+          assert p.save, "Post #{i} should save"
+        end
+
+        # A large $in of pointers: the real author plus enough fake ids to push
+        # the encoded aggregate URL well past MAX_URL_LENGTH (2000).
+        fake_ids = (0...400).map { |i| AggregateTestUser.pointer(format("Fake%010d", i)) }
+        in_set = fake_ids + [author.pointer]
+
+        # Confirm the request actually crosses the GET→POST override threshold,
+        # otherwise this test would silently pass without exercising the fix.
+        long_pipeline = AggregateTestPost.where(:author.in => in_set).group_by(:category).pipeline
+        encoded_len = { pipeline: long_pipeline.to_json }.to_a
+          .map { |k, v| "#{k}=#{CGI.escape(v.to_s)}" }.join("&").length
+        assert_operator encoded_len, :>, Parse::Middleware::BodyBuilder::MAX_URL_LENGTH,
+                        "test pipeline must exceed MAX_URL_LENGTH to exercise the POST override"
+
+        # 1) Custom pipeline via the client (the path the unit test hand-builds).
+        result = AggregateTestPost.where(:author.in => in_set).group_by(:category).count
+        assert_kind_of Hash, result
+        assert_equal 5, result.values.sum,
+                     "group_by with a >2KB $in must return real counts, not an empty/errored result"
+        puts "✅ group_by with large $in: #{result.inspect}"
+
+        # 2) group_by_date — the exact user-facing surface from the bug report.
+        by_date = AggregateTestPost.where(:author.in => in_set)
+          .group_by_date(:created_at, :day).count
+        assert_kind_of Hash, by_date
+        assert_equal 5, by_date.values.sum,
+                     "group_by_date with a >2KB $in must bucket all 5 posts, not return {} from 'Invalid aggregate stage 0'"
+        puts "✅ group_by_date with large $in: #{by_date.inspect}"
+
+        # 3) distinct over the same large constraint.
+        cats = AggregateTestPost.where(:author.in => in_set).distinct(:category)
+        assert_includes cats, "tech",
+                        "distinct with a >2KB $in must return values, not an empty/errored result"
+        puts "✅ distinct with large $in: #{cats.inspect}"
+
+        puts "\n✅ Large aggregate pipeline (>2KB URL) test passed"
       end
     end
   end
