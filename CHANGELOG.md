@@ -1,5 +1,13 @@
 ## parse-stack-next Changelog
 
+### 5.5.3
+
+#### Dependency updates
+
+- **CHANGED**: Bumped locked dependencies to their latest compatible releases:
+  `concurrent-ruby` 1.3.6 → 1.3.7, `faraday` 2.14.2 → 2.14.3, `i18n` 1.14.8 →
+  1.15.1, `json` 2.19.8 → 2.19.9, and `redis-client` 0.29.0 → 0.30.0.
+
 ### 5.5.2
 
 #### Large aggregation pipelines no longer fail with "Invalid aggregate stage '0'"
