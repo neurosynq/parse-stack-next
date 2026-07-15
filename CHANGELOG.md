@@ -1,5 +1,12 @@
 ## parse-stack-next Changelog
 
+### 5.5.4
+
+#### Dependency updates
+
+- **CHANGED**: Bumped `graphql` to 2.6.5 (from 2.6.3) in the locked
+  dependencies.
+
 ### 5.5.3
 
 #### Dependency updates
