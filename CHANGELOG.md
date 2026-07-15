@@ -4,8 +4,10 @@
 
 #### Dependency updates
 
-- **CHANGED**: Bumped `graphql` to 2.6.5 (from 2.6.3) in the locked
-  dependencies.
+- **CHANGED**: Bumped locked dependencies to their latest compatible
+  releases — `graphql` 2.6.3 → 2.6.5, `i18n` 1.15.1 → 1.15.2, `json` 2.19.9
+  → 2.21.1, `pp` 0.6.3 → 0.6.4, `rdoc` 7.2.0 → 8.0.0, `tilt` 2.7.0 → 2.8.0,
+  and `yard` 0.9.44 → 0.9.45.
 
 ### 5.5.3
 
