@@ -7,8 +7,8 @@
 module Parse
   # This class represents the data and columns contained in the standard Parse
   # `_JobStatus` collection. Parse Server writes a row here every time a
-  # background job (registered via +Parse.Cloud.job(...)+) runs, recording its
-  # outcome and any status/message updates emitted via +response.message(...)+.
+  # background job (registered via `Parse.Cloud.job(...)`) runs, recording its
+  # outcome and any status/message updates emitted via `response.message(...)`.
   #
   # The default schema for {JobStatus} is as follows:
   #
@@ -94,27 +94,27 @@ module Parse
 
     # @!attribute job_name
     # The name the job was registered under (the first argument to
-    # +Parse.Cloud.job+).
+    # `Parse.Cloud.job`).
     # @return [String]
     property :job_name
 
     # @!attribute source
-    # How the job was invoked. Parse Server itself hard-codes +"api"+ in
-    # +StatusHandler.js+ for runs triggered via +POST /parse/jobs/<name>+;
+    # How the job was invoked. Parse Server itself hard-codes `"api"` in
+    # `StatusHandler.js` for runs triggered via `POST /parse/jobs/<name>`;
     # external schedulers (parse-server-scheduler, dashboard cron tooling)
-    # may inject other values when they create the +_JobStatus+ row.
+    # may inject other values when they create the `_JobStatus` row.
     # @return [String]
     property :source
 
     # @!attribute status
-    # Current state of the job run. Common values are +"running"+,
-    # +"succeeded"+, and +"failed"+.
+    # Current state of the job run. Common values are `"running"`,
+    # `"succeeded"`, and `"failed"`.
     # @return [String]
     property :status
 
     # @!attribute message
     # The most recent status message emitted by the job via
-    # +response.message(...)+.
+    # `response.message(...)`.
     # @return [String]
     property :message
 

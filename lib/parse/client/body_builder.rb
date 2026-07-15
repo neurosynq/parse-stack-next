@@ -122,16 +122,16 @@ module Parse
       #
       # 1. **Structural pass.** If the body (after whitespace trim) parses as
       #    JSON, the parsed structure is walked recursively. Any value whose
-      #    key matches +SENSITIVE_FIELDS_SET+ (case-insensitive) is replaced.
+      #    key matches `SENSITIVE_FIELDS_SET` (case-insensitive) is replaced.
       #    String values that themselves look like JSON are recursively
-      #    parsed and scrubbed — catches +{"body":"{\"password\":\"x\"}"}+
+      #    parsed and scrubbed — catches `{"body":"{\"password\":\"x\"}"}`
       #    payloads.
       #
       # 2. **Regex pass.** The result of the structural pass (or the original
       #    string if parsing failed) is always also run through the
-      #    +SENSITIVE_PATTERN+ regex as defense-in-depth. This catches form-
+      #    `SENSITIVE_PATTERN` regex as defense-in-depth. This catches form-
       #    encoded bodies, partial JSON, escaped-quote payloads, and string
-      #    array elements like +["password=hunter2"]+ that the structural
+      #    array elements like `["password=hunter2"]` that the structural
       #    walker can't redact in-place.
       # @param str [String] the string to redact.
       # @return [String] the redacted string.
@@ -153,9 +153,9 @@ module Parse
           sep_part = $2
           val_part = $3
           # Skip values that the structural pass already redacted —
-          # otherwise the regex value-class +[^"&\s,}\]]+ stops at the
-          # bracket and we end up with +[FILTERED]]+ from the trailing
-          # close-bracket left over from +"[FILTERED]"+.
+          # otherwise the regex value-class `[^"&\s,}\]]+` stops at the
+          # bracket and we end up with `[FILTERED]]` from the trailing
+          # close-bracket left over from `"[FILTERED]"`.
           if val_part == "[FILTERED" || val_part == REDACTED_PLACEHOLDER
             "#{key_part}#{sep_part}#{val_part}"
           else
@@ -184,7 +184,7 @@ module Parse
       #
       # When a value is itself a String that looks like JSON, attempt to
       # parse-scrub-re-encode it so embedded-JSON payloads are also covered
-      # (e.g. +{"body":"{\"password\":\"x\"}"}+).
+      # (e.g. `{"body":"{\"password\":\"x\"}"}`).
       def self.scrub_sensitive!(node)
         case node
         when Hash
@@ -213,7 +213,7 @@ module Parse
 
       # @!visibility private
       # Recursively walk a parsed JSON structure replacing any
-      # numeric-only Array of length >= +LOG_VECTOR_COMPACT_THRESHOLD+
+      # numeric-only Array of length >= `LOG_VECTOR_COMPACT_THRESHOLD`
       # with a compact placeholder string ("<vector dims=N>"). Mutates
       # Hashes/Arrays in place; returns the node for chaining. Distinct
       # pass from {scrub_sensitive!} because the criterion is shape
@@ -259,7 +259,7 @@ module Parse
       end
 
       # @!visibility private
-      # If +str+ parses as JSON (object or array), scrub structurally and
+      # If `str` parses as JSON (object or array), scrub structurally and
       # re-encode. Otherwise return the original string unchanged.
       def self.maybe_scrub_embedded_json(str)
         return str unless (inner = try_parse_json(str))

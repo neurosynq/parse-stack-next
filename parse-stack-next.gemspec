@@ -23,7 +23,25 @@ Gem::Specification.new do |spec|
     "rubygems_mfa_required" => "true",
   }
 
-  spec.files = `git ls-files -z`.split("\x0").reject { |f| f.match(%r{^(test|spec|features)/}) }
+  # Ship only what an SDK consumer needs: the library, executables, the
+  # rendered guides + copy-paste examples, the README banner asset, and the
+  # standard metadata files. Everything else that is tracked purely for
+  # development — .github/, .vscode/, .bundle/, .env.*, scripts/, config/,
+  # Makefile, Rakefile, Gemfile(.lock), and dotfiles — is intentionally
+  # excluded so ~1MB of packaging noise isn't shipped to every install.
+  spec.files = `git ls-files -z`.split("\x0").select do |f|
+    f.start_with?("lib/", "bin/", "docs/", "examples/", "assets/") ||
+      %w[
+        README.md
+        CHANGELOG.md
+        LICENSE.txt
+        SECURITY.md
+        parse-stack-next.gemspec
+      ].include?(f)
+  end.reject do |f|
+    # Internal dev docs that live under docs/ but aren't consumer-facing.
+    f == "docs/client_sdk_todo.md"
+  end
   spec.bindir = "bin"
   spec.executables = ["parse-console"] #spec.files.grep(%r{^bin/pstack/}) { |f| File.basename(f) }
   spec.require_paths = ["lib"]

@@ -398,4 +398,45 @@ class TestCloudFunctionsModule < Minitest::Test
     assert_equal 141, error.code
     @mock_client.verify
   end
+
+  # ------------------------------------------------------------------
+  # Regression: the API-mixin call_function / trigger_job must accept
+  # request options as bare keyword args (matching create_object / push
+  # / fetch_user), not only via an explicit `opts:` hash. Previously
+  # `call_function(name, body, session_token: t)` raised
+  # `ArgumentError: unknown keyword: :session_token`.
+  # ------------------------------------------------------------------
+  class FakeCloudClient
+    include Parse::API::CloudFunctions
+    attr_reader :captured
+    def request(method, path, body: nil, headers: nil, opts: {})
+      @captured = { method: method, path: path, body: body, headers: headers, opts: opts }
+      :ok
+    end
+  end
+
+  def test_api_call_function_accepts_bare_keyword_opts
+    c = FakeCloudClient.new
+    c.call_function("f", { a: 1 }, session_token: "tok")
+    assert_equal({ session_token: "tok" }, c.captured[:opts])
+  end
+
+  def test_api_call_function_still_accepts_explicit_opts_hash
+    c = FakeCloudClient.new
+    c.call_function("f", { a: 1 }, opts: { master_key: true })
+    assert_equal({ master_key: true }, c.captured[:opts])
+  end
+
+  def test_api_call_function_bare_kwargs_coexist_with_context
+    c = FakeCloudClient.new
+    c.call_function("f", {}, session_token: "tok", context: { locale: "en" })
+    assert_equal({ session_token: "tok" }, c.captured[:opts])
+    refute_nil c.captured[:headers][Parse::Protocol::CLOUD_CONTEXT]
+  end
+
+  def test_api_trigger_job_accepts_bare_keyword_opts
+    c = FakeCloudClient.new
+    c.trigger_job("j", { a: 1 }, session_token: "tok")
+    assert_equal({ session_token: "tok" }, c.captured[:opts])
+  end
 end

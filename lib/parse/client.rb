@@ -183,7 +183,7 @@ module Parse
   # application_id or REST key. A server with a mistyped app_id still returns
   # `true` here; use {.connected?} when you also need to validate credentials.
   # @param conn [Symbol] the named client connection to probe. Defaults to :default.
-  # @return [Boolean] +true+ if the server responded with status "ok", +false+
+  # @return [Boolean] `true` if the server responded with status "ok", `false`
   #   if the server is unreachable or returned an unexpected response.
   def self.reachable?(conn = :default)
     client(conn).reachable?
@@ -193,18 +193,18 @@ module Parse
 
   # Check that the Parse Server is reachable and responding.
   # By default this probes the credential-less health endpoint, so it returns
-  # +true+ whenever the server is up (it does NOT, by itself, validate the
+  # `true` whenever the server is up (it does NOT, by itself, validate the
   # application_id or REST key — see {Parse::Client#connected?} for why a
   # data-class probe is unreliable on a hardened server). Pass an `endpoint`
   # (e.g. `"classes/_User"`) to additionally exercise the auth stack against a
   # class you know the configured key can read; a bad key then surfaces as an
   # {Parse::Error::AuthenticationError} at the instance level, which the
-  # instance method converts to +false+. Any other failure is caught by this
-  # module-boundary rescue and converted to +false+.
+  # instance method converts to `false`. Any other failure is caught by this
+  # module-boundary rescue and converted to `false`.
   # @param conn [Symbol] the named client connection to probe. Defaults to :default.
   # @param endpoint [String, nil] optional path to probe instead of the health
   #   endpoint, to validate credentials against a readable class.
-  # @return [Boolean] +true+ if the server is reachable (and, when an endpoint
+  # @return [Boolean] `true` if the server is reachable (and, when an endpoint
   #   is given, the credentials are accepted).
   def self.connected?(conn = :default, endpoint = nil)
     client(conn).connected?(endpoint)
@@ -349,7 +349,7 @@ module Parse
 
     # A NEW non-master {Parse::Client} that mirrors THIS client's connection
     # settings (`server_url` / `application_id` / `api_key`) but carries no
-    # master key and binds +session_token+, so it acts on the server as that
+    # master key and binds `session_token`, so it acts on the server as that
     # user (ACL / CLP / `protectedFields` enforced, no master-key fallback).
     # This is the general primitive behind {Parse::Webhooks::Payload#user_client}
     # and {Parse::User#session_client}: derive a user-scoped client from a
@@ -952,11 +952,11 @@ module Parse
     end
 
     # No-credentials liveness probe. Hits the Parse Server health endpoint and
-    # returns +true+ when the server responds with status "ok". No application
+    # returns `true` when the server responds with status "ok". No application
     # credentials are required, so this passes even when the configured
     # application_id or REST key is wrong. Use {#connected?} to also validate
     # credentials.
-    # @return [Boolean] +true+ if the server is up and returned a healthy status.
+    # @return [Boolean] `true` if the server is up and returned a healthy status.
     def reachable?
       response = request(:get, Parse::API::Server::SERVER_HEALTH_PATH, opts: { cache: false })
       response.success?
@@ -965,11 +965,11 @@ module Parse
     end
 
     # Connectivity probe. By default hits the Parse Server health endpoint —
-    # the same target as {#reachable?} — so it returns +true+ whenever the
+    # the same target as {#reachable?} — so it returns `true` whenever the
     # server is up, regardless of CLP configuration.
     #
-    # Why not a `_User` find? A limit-0 find against +_User+ exercises the auth
-    # stack, but locking +_User+ finds to the master key via a Class-Level
+    # Why not a `_User` find? A limit-0 find against `_User` exercises the auth
+    # stack, but locking `_User` finds to the master key via a Class-Level
     # Permission is standard production hardening — on such a server the probe
     # gets a permission error and (wrongly) reports "not connected" for a
     # perfectly healthy, correctly-configured deployment. The default therefore
@@ -980,12 +980,12 @@ module Parse
     # server, or one of your own readable classes). The probe runs `limit: 0`
     # so it never pulls rows, and routes through the auth middleware, so a wrong
     # application_id / REST key surfaces as an {Parse::Error::AuthenticationError}
-    # and is converted to +false+. Any connection, timeout, or API error returns
-    # +false+ rather than raising; genuine programming errors (e.g.
-    # +NoMethodError+) still propagate.
+    # and is converted to `false`. Any connection, timeout, or API error returns
+    # `false` rather than raising; genuine programming errors (e.g.
+    # `NoMethodError`) still propagate.
     # @param endpoint [String, nil] optional path to probe instead of the
     #   health endpoint, to validate credentials against a readable class.
-    # @return [Boolean] +true+ if the server is reachable (and, when an endpoint
+    # @return [Boolean] `true` if the server is reachable (and, when an endpoint
     #   is given, the credentials are accepted).
     def connected?(endpoint = nil)
       path = endpoint || Parse::API::Server::SERVER_HEALTH_PATH
@@ -1444,18 +1444,18 @@ module Parse
   #
   # SECURITY — cloud results are treated as server-authoritative. The
   # `__type:"Object"` decode in {._decode_cloud_value} routes through
-  # +Parse::Object.build+, which hydrates with trusted-init — the SAME path
-  # used to decode every query / +.fetch+ result. Trusted-init skips the
-  # +PROTECTED_INITIALIZE_KEYS+ filter, so credential-shaped keys
-  # (+sessionToken+, +authData+, +_rperm+, +_wperm+, +roles+, …) present in a
+  # `Parse::Object.build`, which hydrates with trusted-init — the SAME path
+  # used to decode every query / `.fetch` result. Trusted-init skips the
+  # `PROTECTED_INITIALIZE_KEYS` filter, so credential-shaped keys
+  # (`sessionToken`, `authData`, `_rperm`, `_wperm`, `roles`, …) present in a
   # cloud function's return value populate the in-memory object, exactly as they
   # do for any other server response. This is by design: the payload is authored
   # by your Cloud Code and the request is caller-authenticated, and making cloud
   # results filter these keys would make them inconsistent with (and stricter
-  # than) query/+.fetch+ hydration — e.g. a cloud function returning
-  # +request.user+ would come back missing its +sessionToken+. If a cloud
+  # than) query/`.fetch` hydration — e.g. a cloud function returning
+  # `request.user` would come back missing its `sessionToken`. If a cloud
   # function is expected to echo back third-party-influenced data, call it with
-  # +raw: true+ (+Parse.call_function(name, body, raw: true)+) to receive the
+  # `raw: true` (`Parse.call_function(name, body, raw: true)`) to receive the
   # undecoded response and sanitize it yourself before building objects.
   def self._extract_cloud_result(response)
     r = response.result
@@ -1568,7 +1568,7 @@ module Parse
   # @option opts [Boolean] :raw Whether to return the raw response object.
   # @option opts [Boolean] :master_key Whether to use the master key for this request.
   # @option opts [Hash, nil] :context An optional caller context forwarded as the
-  #   +X-Parse-Cloud-Context+ header. Parse Server maps it to +req.info.context+
+  #   `X-Parse-Cloud-Context` header. Parse Server maps it to `req.info.context`
   #   in the function handler and flows it through beforeSave/afterSave triggers.
   # @return [Object] the result data of the response. nil if there was an error.
   def self.call_function(name, body = {}, **opts)
@@ -1600,8 +1600,8 @@ module Parse
   # specific {Parse::Error} subclasses as the underlying client does.
   # @param name (see Parse.call_function)
   # @param body (see Parse.call_function)
-  # @param opts (see Parse.call_function) — +:raw+ has no effect; this method
-  #   always decodes the result. Use {Parse.call_function} with +raw: true+ if
+  # @param opts (see Parse.call_function) — `:raw` has no effect; this method
+  #   always decodes the result. Use {Parse.call_function} with `raw: true` if
   #   you need the undecoded response.
   # @raise [Parse::Error::CloudCodeError] when the response indicates a cloud-code error.
   # @return [Object] the result data of the response.

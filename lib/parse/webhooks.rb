@@ -85,7 +85,7 @@ module Parse
     class ResponseError < StandardError; end
 
     # The authentication-side triggers (local underscore form). These carry a
-    # +_User+ / +_Session+ as the payload object but are NOT object save/delete
+    # `_User` / `_Session` as the payload object but are NOT object save/delete
     # triggers: the router runs no ActiveModel save/create/destroy callbacks for
     # them, and Parse Server ignores their response body.
     AUTH_TRIGGERS = %i[
@@ -98,18 +98,18 @@ module Parse
     LIVE_QUERY_TRIGGERS = %i[before_connect before_subscribe after_event].freeze
 
     # Every trigger whose payload is not an object save/delete/find shape.
-    # Parse Server's webhook response handler resolves +{}+ for all of these
+    # Parse Server's webhook response handler resolves `{}` for all of these
     # (the body is ignored), so the router normalizes their handler result to a
     # success no-op rather than serializing a returned object into the response.
     NON_OBJECT_TRIGGERS = (AUTH_TRIGGERS + LIVE_QUERY_TRIGGERS).freeze
 
-    # The +before*+ subset of {NON_OBJECT_TRIGGERS} for which a handler can DENY
-    # the operation. Parse Server only treats an +{error}+ response as a
-    # rejection -- a +{success:false}+ body resolves and lets the login /
-    # connect / subscribe / reset proceed. So, mirroring the +before_save+
-    # convention, the router converts a +false+ return from one of these into a
-    # {ResponseError} (which serializes to +{error}+). +error!+ works for any
-    # trigger; the +after*+ variants fire after the fact and cannot undo it.
+    # The `before*` subset of {NON_OBJECT_TRIGGERS} for which a handler can DENY
+    # the operation. Parse Server only treats an `{error}` response as a
+    # rejection -- a `{success:false}` body resolves and lets the login /
+    # connect / subscribe / reset proceed. So, mirroring the `before_save`
+    # convention, the router converts a `false` return from one of these into a
+    # {ResponseError} (which serializes to `{error}`). `error!` works for any
+    # trigger; the `after*` variants fire after the fact and cannot undo it.
     REJECTABLE_NON_OBJECT_TRIGGERS = %i[
       before_login before_password_reset_request before_connect before_subscribe
     ].freeze
@@ -607,9 +607,9 @@ module Parse
       # skips the DNS resolution and private/internal CIDR refusal. Other
       # checks (scheme, userinfo, host presence) still apply. Intended for
       # integration tests that register webhooks at Docker bridge hosts
-      # (e.g. +host.docker.internal+) which only resolve from inside the
+      # (e.g. `host.docker.internal`) which only resolve from inside the
       # Parse Server container. May also be enabled via
-      # +PARSE_WEBHOOK_ALLOW_PRIVATE_URLS=true+. Do not enable in
+      # `PARSE_WEBHOOK_ALLOW_PRIVATE_URLS=true`. Do not enable in
       # production: the resolution guard is what blocks attacker-driven
       # webhook redirection to internal hosts.
       # @return [Boolean]

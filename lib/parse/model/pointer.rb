@@ -86,7 +86,7 @@ module Parse
 
     # Assign the Parse objectId. Empty / nil values are permitted (Pointer
     # in unbound state); non-empty values must match {OBJECT_ID_FORMAT}.
-    # @raise [ArgumentError] when +value+ is a non-empty string that does
+    # @raise [ArgumentError] when `value` is a non-empty string that does
     #   not match the format.
     def id=(value)
       if value.nil?
@@ -255,9 +255,9 @@ module Parse
         obj = klass.build(result, parse_class, fetched_keys: top_level_keys, nested_fetched_keys: nested_keys.presence)
       else
         # Full fetch - create without partial fetch tracking. Trusted
-        # hydration: +result+ is the server response body, which
-        # legitimately carries +createdAt+/+updatedAt+/+sessionToken+
-        # and other PROTECTED_MASS_ASSIGNMENT_KEYS. The +@_trusted_init+
+        # hydration: `result` is the server response body, which
+        # legitimately carries `createdAt`/`updatedAt`/`sessionToken`
+        # and other PROTECTED_MASS_ASSIGNMENT_KEYS. The `@_trusted_init`
         # ivar tells {Parse::Object#initialize} to skip the protected-key
         # filter — see that method for why we don't use a kwarg.
         obj = klass.allocate

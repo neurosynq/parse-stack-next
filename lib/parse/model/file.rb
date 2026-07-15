@@ -69,7 +69,7 @@ module Parse
 
     # @!visibility private
     # Default cap on remote-fetched file size (50 MiB). Override via
-    # +Parse::File.max_remote_size+.
+    # `Parse::File.max_remote_size`.
     DEFAULT_MAX_REMOTE_SIZE = 50 * 1024 * 1024
     # @!visibility private
     # Default read/open timeout for remote fetches in seconds.
@@ -90,7 +90,7 @@ module Parse
     ].map { |c| IPAddr.new(c) }.freeze
     # Restrictive port allowlist for Parse::File URL fetches. By default
     # only the standard HTTP/HTTPS ports are permitted. Operators may
-    # extend +Parse::File.allowed_remote_ports+ for legitimate non-standard
+    # extend `Parse::File.allowed_remote_ports` for legitimate non-standard
     # CDN ports.
     DEFAULT_ALLOWED_REMOTE_PORTS = [80, 443, 8080, 8443].freeze
     # @return [String] the name of the file including extension (if any)
@@ -164,7 +164,7 @@ module Parse
       end
 
       # @return [Integer] Maximum byte size for a remote URL fetch via
-      #   +Parse::File.create+ / +Parse::File.new(url)+.
+      #   `Parse::File.create` / `Parse::File.new(url)`.
       attr_writer :max_remote_size
       def max_remote_size
         @max_remote_size ||= DEFAULT_MAX_REMOTE_SIZE
@@ -526,16 +526,16 @@ module Parse
       # the caller can read from.
       #
       # DNS rebinding mitigation: the host is resolved twice — once before
-      # the fetch and once via +URI.open+'s underlying resolver. The
-      # second-pass addresses are re-validated against +BLOCKED_CIDRS+;
-      # any new private/internal IP causes an +ArgumentError+ at progress
+      # the fetch and once via `URI.open`'s underlying resolver. The
+      # second-pass addresses are re-validated against `BLOCKED_CIDRS`;
+      # any new private/internal IP causes an `ArgumentError` at progress
       # time so the body cannot be streamed back. (Caveat: this is a
-      # best-effort defense — the TCP +connect()+ uses a third resolution
+      # best-effort defense — the TCP `connect()` uses a third resolution
       # that we cannot intercept without a custom socket factory. Operators
       # who need strict guarantees should also enforce egress allowlists
       # at the network layer.)
       # @raise [ArgumentError] on any disallowed input or unsafe target.
-      def safe_open_url(url_string)
+      def safe_open_url(url_string, max_bytes: nil)
         uri = begin
           URI.parse(url_string)
         rescue URI::InvalidURIError => e
@@ -561,7 +561,15 @@ module Parse
         end
         resolved = assert_host_allowed!(host)
 
+        # The global cap always bounds the stream; a caller may pass a
+        # tighter `max_bytes:` to abort even earlier (e.g. image fetch with
+        # a per-request ceiling below Parse::File.max_remote_size). Only a
+        # smaller value takes effect — a caller cannot loosen the global cap.
         size_cap = max_remote_size
+        if max_bytes
+          requested = Integer(max_bytes)
+          size_cap = requested if requested < size_cap
+        end
         timeout = remote_timeout
         uri.open(read_timeout: timeout,
                  open_timeout: timeout,
@@ -583,8 +591,8 @@ module Parse
       end
 
       # @!visibility private
-      # Validates that +host+ resolves only to public, non-blocked addresses.
-      # When +Parse::File.allowed_remote_hosts+ is non-empty, host must also
+      # Validates that `host` resolves only to public, non-blocked addresses.
+      # When `Parse::File.allowed_remote_hosts` is non-empty, host must also
       # match an allowlist entry.
       # @return [Array<IPAddr>] the addresses that passed validation.
       def assert_host_allowed!(host)
@@ -614,7 +622,7 @@ module Parse
       end
 
       # @!visibility private
-      # DNS rebinding re-check. Resolves +host+ again and refuses if any
+      # DNS rebinding re-check. Resolves `host` again and refuses if any
       # currently-resolved address is private or differs from the first
       # resolution. Best-effort: kernel resolver caches and a third
       # resolution at connect-time are out of scope.

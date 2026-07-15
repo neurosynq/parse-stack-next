@@ -40,6 +40,14 @@ module Parse
     # acquisitions are silent.
     DEGRADED_WARNING_THROTTLE_SECONDS = 60
 
+    # Upper bound on the in-process Mutex registry (degraded fallback
+    # path). Without a cap, every distinct lock key leaks a permanent
+    # Mutex — a memory-exhaustion vector when keys are high-cardinality
+    # or attacker-influenced. Real deployments use a handful of lock
+    # keys, so this ceiling is far above normal use and only bites a
+    # runaway/abusive caller.
+    PROCESS_MUTEX_REGISTRY_MAX = 4096
+
     class << self
       # Find the Moneta store the lock should write through. Resolved
       # at call time (not memoized) so a test or an operator can swap
@@ -188,13 +196,39 @@ module Parse
       # guarded by a tiny outer Mutex so two threads racing the
       # first acquisition of the same key get the same Mutex.
       #
+      # The registry is bounded at {PROCESS_MUTEX_REGISTRY_MAX} entries
+      # via approximate-LRU eviction: reused keys move to the MRU end,
+      # and when a new key would overflow the cap the oldest *unlocked*
+      # mutexes are evicted first. A currently-held mutex is never
+      # evicted — dropping it would let a concurrent acquisition mint a
+      # fresh mutex for the same key and split mutual exclusion — so under
+      # pathological all-locked saturation the registry may briefly exceed
+      # the cap rather than break correctness.
+      #
       # @param key [String] cache key.
       # @return [Mutex]
       def process_mutex(key)
         @process_mutex_registry_lock ||= Mutex.new
         @process_mutex_registry_lock.synchronize do
-          @process_mutex_registry ||= {}
-          @process_mutex_registry[key] ||= Mutex.new
+          reg = (@process_mutex_registry ||= {})
+
+          if (existing = reg[key])
+            # Move to the MRU end so the eviction scan treats it as
+            # recently used (Ruby Hashes preserve insertion order).
+            reg.delete(key)
+            reg[key] = existing
+            next existing
+          end
+
+          if reg.size >= PROCESS_MUTEX_REGISTRY_MAX
+            reg.keys.each do |k|
+              break if reg.size < PROCESS_MUTEX_REGISTRY_MAX
+              m = reg[k]
+              reg.delete(k) unless m.locked?
+            end
+          end
+
+          reg[key] = Mutex.new
         end
       end
 

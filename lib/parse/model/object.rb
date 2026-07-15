@@ -85,32 +85,32 @@ module Parse
   end
 
   # This is the core class for all app specific Parse table subclasses. This class
-  # in herits from Parse::Pointer since an Object is a Parse::Pointer with additional fields,
+  # inherits from Parse::Pointer since an Object is a Parse::Pointer with additional fields,
   # at a minimum, created_at, updated_at and ACLs. This class also handles all
   # the relational types of associations in a Parse application and handles the main CRUD operations.
   #
   # As the parent class to all custom subclasses, this class provides the default property schema:
   #
-  #   class Parse::Object
-  #      # All subclasses will inherit these properties by default.
+  #     class Parse::Object
+  #       # All subclasses will inherit these properties by default.
   #
-  #      # the objectId column of a record.
-  #      property :id, :string, field: :objectId
+  #       # the objectId column of a record.
+  #       property :id, :string, field: :objectId
   #
-  #      # The the last updated date for a record (Parse::Date)
-  #      property :updated_at, :date
+  #       # The last updated date for a record (Parse::Date)
+  #       property :updated_at, :date
   #
-  #      # The original creation date of a record (Parse::Date)
-  #      property :created_at, :date
+  #       # The original creation date of a record (Parse::Date)
+  #       property :created_at, :date
   #
-  #      # The Parse::ACL field
-  #      property :acl, :acl, field: :ACL
+  #       # The Parse::ACL field
+  #       property :acl, :acl, field: :ACL
   #
-  #   end
+  #     end
   #
   # Most Pointers and Object subclasses are treated the same. Therefore, defining a class Artist < Parse::Object
   # that only has `id` set, will be treated as a pointer. Therefore a Parse::Object can be in a "pointer" state
-  # based on the data that it contains. Becasue of this, it is possible to take a Artist instance
+  # based on the data that it contains. Because of this, it is possible to take an Artist instance
   # (in this example), that is in a pointer state, and fetch the rest of the data for that particular
   # record without having to create a new object. Doing so would now mark it as not being a pointer anymore.
   # This is important to the understanding on how relations and properties are handled.
@@ -125,7 +125,7 @@ module Parse
   #
   # Associations:
   #
-  # Parse supports a three main types of relational associations. One type of
+  # Parse supports three main types of relational associations. One type of
   # relation is the `One-to-One` association. This is implemented through a
   # specific column in Parse with a Pointer data type. This pointer column,
   # contains a local value that refers to a different record in a separate Parse
@@ -1329,25 +1329,25 @@ module Parse
     #
     #   @param hash [Hash] the hash representing the object.
     #     Untrusted by default: keys in
-    #     {Parse::Properties::PROTECTED_INITIALIZE_KEYS} (+sessionToken+,
-    #     +_rperm+, +_wperm+, +_hashed_password+, +authData+, +roles+)
-    #     are filtered out even when an +objectId+ is present. This
-    #     closes the mass-assignment hole where +klass.new(attacker_params)+
-    #     on a hash that happens to include +objectId+ would overwrite
+    #     {Parse::Properties::PROTECTED_INITIALIZE_KEYS} (`sessionToken`,
+    #     `_rperm`, `_wperm`, `_hashed_password`, `authData`, `roles`)
+    #     are filtered out even when an `objectId` is present. This
+    #     closes the mass-assignment hole where `klass.new(attacker_params)`
+    #     on a hash that happens to include `objectId` would overwrite
     #     session tokens, ACLs, and auth data. Use {Parse::Object.build}
     #     for trusted hydration from server JSON; it bypasses the filter.
     # @return [Parse::Object] a the corresponding Parse::Object or subclass.
     def initialize(opts = {})
-      # Trusted hydration is signalled by the +@_trusted_init+ instance
-      # variable rather than by a +trusted:+ keyword argument. Using a
-      # keyword would break subclasses that override +initialize(*args)+
-      # and call +super+ — Ruby 3 keyword-arg semantics would convert the
-      # kwarg into a positional Hash through the variadic +*args+ splat
-      # and the subsequent +super+ would arrive at this method with two
+      # Trusted hydration is signalled by the `@_trusted_init` instance
+      # variable rather than by a `trusted:` keyword argument. Using a
+      # keyword would break subclasses that override `initialize(*args)`
+      # and call `super` — Ruby 3 keyword-arg semantics would convert the
+      # kwarg into a positional Hash through the variadic `*args` splat
+      # and the subsequent `super` would arrive at this method with two
       # positional args. The internal hydration paths
       # ({Parse::Object.build}, {Parse::Pointer} autofetch,
-      # {Parse::User#session}) +allocate+ the object, set the ivar, then
-      # invoke +initialize+ so subclass overrides still fire and pick up
+      # {Parse::User#session}) `allocate` the object, set the ivar, then
+      # invoke `initialize` so subclass overrides still fire and pick up
       # the trust signal here.
       trusted = @_trusted_init == true
       @_trusted_init = nil
@@ -1369,7 +1369,7 @@ module Parse
         # sessionToken / _rperm / _wperm / _hashed_password / authData /
         # roles. The narrow list deliberately allows createdAt /
         # updatedAt / className / __type through so the legitimate
-        # +Klass.new("objectId" => id, "createdAt" => ts, …)+
+        # `Klass.new("objectId" => id, "createdAt" => ts, …)`
         # cache-rehydrate pattern keeps working.
         apply_attributes!(opts,
                           dirty_track: !dirty_track,
@@ -1772,13 +1772,13 @@ module Parse
     # @return [Parse::Object] an instance of the Parse subclass
     def self.build(json, table = nil, fetched_keys: nil, nested_fetched_keys: nil)
       # Precedence (most → least authoritative):
-      # 1. Caller-supplied +table+ — caller knows the expected class
+      # 1. Caller-supplied `table` — caller knows the expected class
       #    (e.g. webhook payload routed to a typed handler, has_many that
       #    knows its declared target class).
-      # 2. The subclass +parse_class+ when invoked on a Parse::Object
+      # 2. The subclass `parse_class` when invoked on a Parse::Object
       #    subclass directly (Song.build(json)).
       # 3. The className inside the JSON — only trusted when neither of
-      #    the above is available (e.g. base-class +Parse::Object.build+
+      #    the above is available (e.g. base-class `Parse::Object.build`
       #    on untyped JSON).
       # Warn on mismatch between an explicit caller class and the
       # payload-supplied className so type-confusion attacks surface in
@@ -1823,9 +1823,9 @@ module Parse
         # Trusted hydration: this path runs on server-side JSON (response
         # bodies, webhook payloads that have already been scrubbed,
         # autofetch results). Server responses legitimately include
-        # protected keys like +sessionToken+, +_rperm+ that must populate
-        # the in-memory object. Untrusted +klass.new(hash)+ callers
-        # default to filter those keys. The +@_trusted_init+ ivar is the
+        # protected keys like `sessionToken`, `_rperm` that must populate
+        # the in-memory object. Untrusted `klass.new(hash)` callers
+        # default to filter those keys. The `@_trusted_init` ivar is the
         # signal — see {#initialize} for why we don't use a kwarg.
         o.instance_variable_set(:@_trusted_init, true)
         o.send(:initialize, json)
@@ -2138,13 +2138,13 @@ class Array
   # Parse::Pointer or are a JSON Parse hash. If it is a hash, a Pare::Object will be built from it
   # if it constrains the proper fields. Non-convertible objects will be removed.
   #
-  # When +className+ is provided by the caller, it is treated as authoritative
-  # — incoming hash +className+ values are ignored. This blocks attacker-
+  # When `className` is provided by the caller, it is treated as authoritative
+  # — incoming hash `className` values are ignored. This blocks attacker-
   # controlled type confusion when this helper is invoked from typed
-  # associations (+has_many+, +belongs_to+) that already know the expected
+  # associations (`has_many`, `belongs_to`) that already know the expected
   # class.
   #
-  # When +className+ is +nil+ (caller is doing untyped array conversion),
+  # When `className` is `nil` (caller is doing untyped array conversion),
   # the helper falls back to the hash-supplied className for compatibility
   # with raw JSON deserialization callers.
   #

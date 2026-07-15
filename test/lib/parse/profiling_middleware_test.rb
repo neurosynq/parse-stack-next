@@ -189,4 +189,35 @@ class ProfilingMiddlewareTest < Minitest::Test
     assert sanitized.include?("apiKey=[FILTERED]"), "apiKey should be filtered"
     refute sanitized.include?("mykey123"), "API key value should not appear"
   end
+
+  # Regression: credentials carried under param names OTHER than the
+  # original three (sessionToken/masterKey/apiKey) must also be redacted.
+  def test_sanitize_url_redacts_credentials_under_other_names
+    middleware = Parse::Middleware::Profiling.new(nil)
+    {
+      "access_token" => "atk_secret",
+      "token"        => "tok_secret",
+      "client_secret" => "cs_secret",
+      "password"     => "hunter2",
+      "Signature"    => "s3sig",
+      "Key-Pair-Id"  => "APKAEXAMPLE",
+    }.each do |param, value|
+      url = "http://localhost:1337/parse/classes/Test?#{param}=#{value}&limit=10"
+      sanitized = middleware.send(:sanitize_url, url)
+      assert sanitized.include?("#{param}=[FILTERED]"), "#{param} should be filtered"
+      refute sanitized.include?(value), "#{param} value must not appear"
+      assert sanitized.include?("limit=10"), "safe param limit should remain"
+    end
+  end
+
+  # Legitimate Parse params that merely CONTAIN a sensitive substring
+  # (keys, redirectClassNameForKey) must NOT be over-redacted.
+  def test_sanitize_url_keeps_safe_key_params_visible
+    middleware = Parse::Middleware::Profiling.new(nil)
+    url = "http://localhost:1337/parse/classes/Test?keys=title,artist&redirectClassNameForKey=owner"
+    sanitized = middleware.send(:sanitize_url, url)
+    assert sanitized.include?("keys=title,artist"), "keys= (field selection) must remain visible"
+    assert sanitized.include?("redirectClassNameForKey=owner"), "redirectClassNameForKey must remain visible"
+    refute sanitized.include?("[FILTERED]"), "no over-redaction of safe params"
+  end
 end

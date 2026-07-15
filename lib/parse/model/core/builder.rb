@@ -19,8 +19,8 @@ module Parse
     end
   end
 
-  # Namespace where +Parse.auto_generate_models!+ installs dynamically
-  # generated +Parse::Object+ subclasses derived from server-side schema.
+  # Namespace where `Parse.auto_generate_models!` installs dynamically
+  # generated `Parse::Object` subclasses derived from server-side schema.
   # Isolating them here prevents server-returned className strings from
   # rebinding top-level constants like ::File, ::Logger, ::Process.
   module Generated
@@ -39,9 +39,9 @@ module Parse
       # Parse Server system classes that ship with the SDK as hand-written
       # subclasses (Parse::User, Parse::Role, etc.). Schema-driven builds
       # must NOT install additional fields or associations on these — a
-      # compromised Parse Server could otherwise inject an +is_admin+
-      # property onto the real +Parse::User+ class, or a +password_history+
-      # accessor onto +_Session+, by returning a poisoned schema.
+      # compromised Parse Server could otherwise inject an `is_admin`
+      # property onto the real `Parse::User` class, or a `password_history`
+      # accessor onto `_Session`, by returning a poisoned schema.
       PROTECTED_SYSTEM_CLASSES = %w[
         _User _Role _Session _Installation _Product _Audience _PushStatus
         _JobStatus _JobSchedule _Hooks _GlobalConfig _SCHEMA _GraphQLConfig
@@ -123,8 +123,8 @@ module Parse
       end
 
       # @!visibility private
-      # Validates a server-returned +targetClass+ string before forwarding
-      # it to +belongs_to+/+has_many+. Returns +nil+ for missing or
+      # Validates a server-returned `targetClass` string before forwarding
+      # it to `belongs_to`/`has_many`. Returns `nil` for missing or
       # invalid values so the association DSL falls back to its inferred
       # default rather than installing an attacker-controlled class name
       # (which could pivot a later type-confusion bypass).

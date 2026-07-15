@@ -3,6 +3,7 @@
 
 require "json"
 require "uri"
+require "ipaddr"
 require_relative "../reranker"
 
 module Parse
@@ -197,8 +198,37 @@ module Parse
           unless uri.is_a?(URI::HTTPS) || uri.is_a?(URI::HTTP)
             raise ArgumentError, "Reranker::Cohere: base_url must be http(s) (got #{base_url.inspect})."
           end
+          # Never accept credentials embedded in the URL. They leak into
+          # logs / error messages / the Faraday connection, and userinfo
+          # can mask the real host (`https://evil@api.cohere.com/`).
+          unless uri.userinfo.nil?
+            raise ArgumentError,
+                  "Reranker::Cohere: base_url must not embed userinfo (credentials in the URL)."
+          end
+          # Plaintext http:// would send the Cohere API key in the clear.
+          # Permit it ONLY for loopback hosts (a local dev proxy / sidecar);
+          # require https:// for anything that leaves the machine. NB:
+          # URI::HTTPS is a subclass of URI::HTTP, so match on the scheme
+          # string, not `is_a?`.
+          if uri.scheme == "http" && !loopback_host?(uri.host)
+            raise ArgumentError,
+                  "Reranker::Cohere: base_url must be https:// for non-loopback hosts " \
+                  "(refusing to send the API key over plaintext http to #{uri.host.inspect})."
+          end
         rescue URI::InvalidURIError => e
           raise ArgumentError, "Reranker::Cohere: invalid base_url #{base_url.inspect} (#{e.message})."
+        end
+
+        # @return [Boolean] true for localhost / 127.0.0.0/8 / ::1 etc.
+        def loopback_host?(host)
+          return false if host.nil? || host.empty?
+          h = host.downcase.sub(/\A\[/, "").sub(/\]\z/, "") # strip IPv6 brackets
+          return true if h == "localhost"
+          begin
+            IPAddr.new(h).loopback?
+          rescue IPAddr::Error
+            false
+          end
         end
 
         def safe_base_host

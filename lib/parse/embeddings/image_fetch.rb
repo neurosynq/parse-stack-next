@@ -141,7 +141,12 @@ module Parse
         canonical = Parse::Embeddings.validate_image_url!(
           url, allow_insecure: allow_insecure, mode: :fetch,
         )
-        io = Parse::File.safe_open_url(canonical)
+        # Push `max_bytes` INTO the fetch so the download aborts mid-stream
+        # once the cap is exceeded, rather than buffering the whole
+        # (globally-capped) body first and rejecting after. The post-read
+        # check below is retained as belt-and-suspenders for transports
+        # that can't enforce the streaming cap.
+        io = Parse::File.safe_open_url(canonical, max_bytes: max_bytes)
         begin
           bytes = io.read
         ensure

@@ -3,6 +3,7 @@
 
 require "faraday"
 require "logger"
+require_relative "url_redaction"
 
 module Parse
   module Middleware
@@ -227,8 +228,10 @@ module Parse
       end
 
       def sanitize_url(url)
-        # Remove sensitive query parameters from logged URLs
-        url.gsub(/([?&])(sessionToken|masterKey|apiKey)=[^&]*/, '\1\2=[FILTERED]')
+        # Redact credential-bearing query params from logged URLs. Shared
+        # with the profiling middleware via Parse::Middleware::URLRedaction
+        # so the two sanitizers can't drift.
+        Parse::Middleware::URLRedaction.sanitize(url)
       end
     end
   end

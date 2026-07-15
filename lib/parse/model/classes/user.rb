@@ -31,13 +31,13 @@ module Parse
 
     # Error code 205 (Parse::Response::ERROR_EMAIL_NOT_FOUND) raised by
     # {Parse::User.login!} and {Parse::User#verify_password} when Parse Server
-    # returns code 205 because +preventLoginWithUnverifiedEmail+ is enabled and
+    # returns code 205 because `preventLoginWithUnverifiedEmail` is enabled and
     # the account's email address has not been verified.
     #
     # It is a SUBCLASS of {AuthenticationError} on purpose: before this typed
     # error existed, the unverified-email rejection raised a plain
-    # +AuthenticationError+, so existing callers wrapping {Parse::User.login!}
-    # in +rescue AuthenticationError+ must keep catching it (subclassing keeps
+    # `AuthenticationError`, so existing callers wrapping {Parse::User.login!}
+    # in `rescue AuthenticationError` must keep catching it (subclassing keeps
     # that contract — making it a sibling would be a silent breaking change).
     # Callers who want to special-case the unverified-email path just rescue
     # this narrower subclass FIRST.
@@ -62,12 +62,12 @@ module Parse
     # <tt>rescue Parse::Error::AuthenticationError</tt> handler covers both
     # wrong-credential failures and lockout situations. Callers that need to
     # distinguish the lockout case just rescue this narrower subclass first.
-    # Because the previous implementation raised a plain +RuntimeError+, there
-    # is no prior +AuthenticationError+ rescue contract to preserve — this is
+    # Because the previous implementation raised a plain `RuntimeError`, there
+    # is no prior `AuthenticationError` rescue contract to preserve — this is
     # a new typed entry in the login-failure taxonomy.
     #
-    # Note that +Parse::Error < StandardError+, so a bare +rescue+ or
-    # +rescue StandardError+ still catches this error.
+    # Note that `Parse::Error < StandardError`, so a bare `rescue` or
+    # `rescue StandardError` still catches this error.
     #
     # @example
     #   begin
@@ -266,7 +266,7 @@ module Parse
     # when the user follows the verification link delivered by the email
     # adapter, and applied to the in-memory object by {#signup!} / signup-on-save
     # when the server includes it in the signup response (see
-    # +SIGNUP_RESPONSE_APPLY_KEYS+).
+    # `SIGNUP_RESPONSE_APPLY_KEYS`).
     # @return [Boolean]
     property :email_verified, :boolean
 
@@ -322,16 +322,16 @@ module Parse
     # Thread-local key used by {.with_authdata_trust} to mark the
     # current hydration as a legitimate self-fetch (login/signup/MFA/
     # `/users/me`). Outside that scope, {#apply_attributes!} strips
-    # +authData+ from incoming server JSON so a `_User` query/find that
+    # `authData` from incoming server JSON so a `_User` query/find that
     # crosses ACL boundaries cannot leak another user's federated-identity
     # tokens into the in-memory object.
     AUTHDATA_TRUST_KEY = :__parse_stack_user_authdata_trusted
 
     class << self
       # @!visibility private
-      # Run +block+ in a scope where the next {Parse::User#apply_attributes!}
-      # call is permitted to hydrate +authData+ from the response. Used by
-      # +login+/+login!+/+session!+/+create+/+link_auth_data!+/MFA paths
+      # Run `block` in a scope where the next {Parse::User#apply_attributes!}
+      # call is permitted to hydrate `authData` from the response. Used by
+      # `login`/`login!`/`session!`/`create`/`link_auth_data!`/MFA paths
       # where the row being hydrated is provably the authenticating user.
       def with_authdata_trust
         prior = Thread.current[AUTHDATA_TRUST_KEY]
@@ -538,20 +538,20 @@ module Parse
     end
 
     # @!visibility private
-    # Defense-in-depth strip of +authData+ on the way into the in-memory
-    # User. Parse Server returns +authData+ on +GET /users/:id+ to any
-    # caller with ACL read on the row, and the default +_User+ ACL is
+    # Defense-in-depth strip of `authData` on the way into the in-memory
+    # User. Parse Server returns `authData` on `GET /users/:id` to any
+    # caller with ACL read on the row, and the default `_User` ACL is
     # permissive in many deployments — without this filter, fetching a
-    # different user (or iterating a +Parse::Query.new(User)+ result set)
-    # would expose their OAuth +access_token+ / +id_token+ to anyone who
+    # different user (or iterating a `Parse::Query.new(User)` result set)
+    # would expose their OAuth `access_token` / `id_token` to anyone who
     # JSON-renders the result (Rails views, agent tool output, logging).
     #
     # The strip runs unconditionally unless the caller is inside a
     # {.with_authdata_trust} scope, which is set by the self-fetch
     # paths in this file (login/login!/session!/create/link_auth_data!/
     # unlink_auth_data!) and by the MFA login extension. Trusted callers
-    # pass through to +super+ with the hash untouched. The PROTECTED
-    # mass-assignment filter that runs inside +super+ is unaffected.
+    # pass through to `super` with the hash untouched. The PROTECTED
+    # mass-assignment filter that runs inside `super` is unaffected.
     def apply_attributes!(hash, dirty_track: false, filter_protected: nil, protected_set: nil)
       if hash.is_a?(Hash) && !self.class.authdata_trusted?
         if hash.key?(:authData) || hash.key?("authData") ||
@@ -576,12 +576,12 @@ module Parse
     end
 
     # @!visibility private
-    # Reduce a server-returned +authData+ hash to a leak-safe MFA status.
-    # Parse Server returns +authData.mfa+ as +{ "secret" => ..., "recovery" =>
+    # Reduce a server-returned `authData` hash to a leak-safe MFA status.
+    # Parse Server returns `authData.mfa` as +{ "secret" => ..., "recovery" =>
     # [...] }+ (the raw TOTP secret and one-time recovery codes) even on a
     # user's own session-token read, so the value itself must never be retained.
-    # This keeps only +{ "mfa" => { "status" => "enabled" } }+ when MFA is
-    # configured, and returns +nil+ otherwise (preserving the prior
+    # This keeps only `{ "mfa" => { "status" => "enabled" } }` when MFA is
+    # configured, and returns `nil` otherwise (preserving the prior
     # strip-to-nil behavior for OAuth-only / non-MFA authData).
     # @return [Hash, nil]
     def sanitized_mfa_authdata(raw)
@@ -607,7 +607,7 @@ module Parse
     end
 
     # @return [Boolean] true if this user is anonymous (i.e. created
-    #   via the +authData.anonymous+ provider rather than via signup
+    #   via the `authData.anonymous` provider rather than via signup
     #   with a username/password or a real OAuth provider).
     def anonymous?
       !anonymous_id.nil?
@@ -640,15 +640,15 @@ module Parse
       self.class.with_authdata_trust { apply_attributes!(response.result) }
     end
 
-    # Upgrade an anonymous user (one created via the +authData.anonymous+
+    # Upgrade an anonymous user (one created via the `authData.anonymous`
     # provider) into a full username/password account. This is the
     # SDK-side counterpart of the Parse JS SDK's
-    # +_linkWith('username', ...)+ flow — it sends a single
-    # +PUT /users/:id+ with the new credentials and an explicit
-    # +authData: { anonymous: nil }+ unlink in the same body, then
+    # `_linkWith('username', ...)` flow — it sends a single
+    # `PUT /users/:id` with the new credentials and an explicit
+    # `authData: { anonymous: nil }` unlink in the same body, then
     # narrowly applies the server's response to the in-memory user.
     #
-    # The +authData.anonymous+ unlink is essential: leaving the anonymous
+    # The `authData.anonymous` unlink is essential: leaving the anonymous
     # provider attached after assigning a username would let anyone else
     # who somehow learned the (random) anonymous id silently log in as
     # the freshly-named account, a documented Parse foot-gun.
@@ -658,9 +658,9 @@ module Parse
     # @param email [String, nil] optional email address. Must be unique
     #   if provided.
     # @raise [Parse::Error::AuthenticationError] when this instance has
-    #   no attached +@session_token+, no objectId, or is not anonymous.
-    # @raise [Parse::Error::UsernameMissingError] when +username+ is blank.
-    # @raise [Parse::Error::PasswordMissingError] when +password+ is blank.
+    #   no attached `@session_token`, no objectId, or is not anonymous.
+    # @raise [Parse::Error::UsernameMissingError] when `username` is blank.
+    # @raise [Parse::Error::PasswordMissingError] when `password` is blank.
     # @raise [Parse::Error::UsernameTakenError] when Parse Server reports
     #   the username already exists.
     # @raise [Parse::Error::EmailTakenError] when Parse Server reports
@@ -929,9 +929,9 @@ module Parse
     def session
       if @session.blank? && @session_token.present?
         response = client.fetch_session(@session_token)
-        # Trusted hydration: +response.result+ is the server-side
-        # _Session row, which legitimately includes +sessionToken+,
-        # +createdAt+, +updatedAt+, and other protected keys. Route
+        # Trusted hydration: `response.result` is the server-side
+        # _Session row, which legitimately includes `sessionToken`,
+        # `createdAt`, `updatedAt`, and other protected keys. Route
         # through {Parse::Object.build} which handles the trusted-init
         # signalling.
         @session ||= Parse::Object.build(response.result, Parse::Model::CLASS_SESSION)
@@ -940,9 +940,9 @@ module Parse
     end
 
     # A non-master {Parse::Client} bound to this user's session token, for
-    # acting on the server *as this user* with full ACL / CLP / +protectedFields+
+    # acting on the server *as this user* with full ACL / CLP / `protectedFields`
     # enforcement and no master-key fallback. It mirrors the connection settings
-    # of +base+ (the configured client by default) but carries no master key and
+    # of `base` (the configured client by default) but carries no master key and
     # binds {#session_token}, so even raw REST calls through it are authorized as
     # the user with no per-call ceremony. The web-counterpart of
     # {Parse::Webhooks::Payload#user_client}; the typical client-side entry point
@@ -952,7 +952,7 @@ module Parse
     #   Parse::Query.new("Post", client: client).results   # scoped to the user
     #
     # @param base [Parse::Client] the client whose connection settings to mirror.
-    # @return [Parse::Client, nil] +nil+ when the user has no session token
+    # @return [Parse::Client, nil] `nil` when the user has no session token
     #   (e.g. fetched/saved under the master key rather than logged in).
     def session_client(base = self.client)
       return nil if @session_token.nil? || @session_token.to_s.strip.empty?
@@ -960,23 +960,23 @@ module Parse
     end
 
     # @!visibility private
-    # Keys that must never flow through +Parse::User.create+ from a
-    # mass-assigned hash. +authData+ on the user-signup endpoint causes
+    # Keys that must never flow through `Parse::User.create` from a
+    # mass-assigned hash. `authData` on the user-signup endpoint causes
     # Parse Server to silently log into the existing account that matches
     # that auth_data and return ITS sessionToken — full account takeover
     # if the caller blindly forwards client-supplied parameters.
-    # +objectId+ allows the caller to pick the user's identifier on
+    # `objectId` allows the caller to pick the user's identifier on
     # creation, sometimes targetable depending on Parse Server config.
     UNSAFE_CREATE_KEYS = %i[authData auth_data objectId id].freeze
 
     # @!visibility private
     # Fields that are server-controlled and must be stripped from any body
-    # that the SDK sends to the signup endpoint or +Parse::User.create+,
+    # that the SDK sends to the signup endpoint or `Parse::User.create`,
     # regardless of who supplied them. Unlike {UNSAFE_CREATE_KEYS}, passing
     # one of these is not refused (no exception is raised); the field is
     # silently dropped before wire transit.
     #
-    # +emailVerified+ is the canonical case: Parse Server's default `_User`
+    # `emailVerified` is the canonical case: Parse Server's default `_User`
     # CLP restricts writes to the master key, so a caller-supplied value
     # would normally be rejected anyway — but the SDK strips it as
     # defense-in-depth so signup with mass-assigned attributes cannot
@@ -1008,7 +1008,7 @@ module Parse
 
     # Creates a new Parse::User given a hash that maps to the fields defined in your Parse::User collection.
     #
-    # Mass-assignment of +authData+/+auth_data+/+objectId+ is refused. If you
+    # Mass-assignment of `authData`/`auth_data`/`objectId` is refused. If you
     # intend to create-or-login a user via federated identity, use
     # {.autologin_service} or {.link_or_create_with_auth_data}. Passing
     # those keys directly bypasses the SDK's federated-identity wrapper
@@ -1017,7 +1017,7 @@ module Parse
     #
     # @param body [Hash] The hash containing the Parse::User fields. The field `username` and `password` are required.
     # @option opts [Boolean] :master_key Whether the master key should be used for this request.
-    # @raise [ArgumentError] If +body+ contains +authData+/+auth_data+/+objectId+ — use {.autologin_service} for federated flows.
+    # @raise [ArgumentError] If `body` contains `authData`/`auth_data`/`objectId` — use {.autologin_service} for federated flows.
     # @raise [Parse::Error::UsernameMissingError] If username is missing.
     # @raise [Parse::Error::PasswordMissingError] If password is missing.
     # @raise [Parse::Error::UsernameTakenError] If the username has already been taken.
@@ -1057,11 +1057,11 @@ module Parse
     end
 
     # @!visibility private
-    # Silently strips {SERVER_CONTROLLED_KEYS} from +body+ in place. Used
+    # Silently strips {SERVER_CONTROLLED_KEYS} from `body` in place. Used
     # by {.create}, {#signup!}, and {#signup_create} as defense-in-depth so
     # caller-supplied values for fields that Parse Server is meant to
-    # control (currently just +emailVerified+) never reach the wire.
-    # @return [Hash, Object] the same +body+ object, mutated.
+    # control (currently just `emailVerified`) never reach the wire.
+    # @return [Hash, Object] the same `body` object, mutated.
     def self.strip_server_controlled_keys!(body)
       return body unless body.is_a?(Hash)
       SERVER_CONTROLLED_KEYS.each do |k|
@@ -1072,10 +1072,10 @@ module Parse
     end
 
     # @!visibility private
-    # Raises +ArgumentError+ if +body+ carries keys that would let an
-    # attacker turn +Parse::User.create+ into an account-takeover sink.
+    # Raises `ArgumentError` if `body` carries keys that would let an
+    # attacker turn `Parse::User.create` into an account-takeover sink.
     # Skipped when called through the SDK's federated-identity wrapper
-    # ({.autologin_service}), which deliberately supplies +authData+ and
+    # ({.autologin_service}), which deliberately supplies `authData` and
     # is responsible for its provenance.
     def self.assert_create_body_safe!(body)
       return unless body.is_a?(Hash)
@@ -1102,7 +1102,7 @@ module Parse
     # @see User.create
     def self.autologin_service(service_name, auth_data, body: {})
       # Trust-mark this call so {.assert_create_body_safe!} permits the
-      # +authData+ that we are explicitly responsible for here. The
+      # `authData` that we are explicitly responsible for here. The
       # marker is consumed inside {.create} before forwarding to the
       # server.
       body = body.merge({
@@ -1113,15 +1113,15 @@ module Parse
     end
 
     # Create and log in a new anonymous user via the
-    # +authData.anonymous+ provider. The returned user instance has a
-    # +session_token+ and an objectId, and {#anonymous?} returns true.
+    # `authData.anonymous` provider. The returned user instance has a
+    # `session_token` and an objectId, and {#anonymous?} returns true.
     # Later, after the user has chosen a username and password, upgrade
     # the account in-place with {#upgrade_anonymous!}.
     #
     # Parse Server requires the anonymous-provider payload to include a
-    # client-generated +id+; this helper produces one via
-    # +SecureRandom.uuid+ so callers don't have to hand-roll the
-    # +authData+ shape.
+    # client-generated `id`; this helper produces one via
+    # `SecureRandom.uuid` so callers don't have to hand-roll the
+    # `authData` shape.
     #
     # @return [User] a freshly-created, logged-in anonymous user.
     # @see #upgrade_anonymous!
@@ -1176,7 +1176,7 @@ module Parse
         case response.code
         when Parse::Response::ERROR_EMAIL_NOT_FOUND
           # Parse Server throws code 205 (EMAIL_NOT_FOUND) when
-          # +preventLoginWithUnverifiedEmail+ is set and the account's email
+          # `preventLoginWithUnverifiedEmail` is set and the account's email
           # address has not yet been verified. Raise the typed error so callers
           # can direct the user to verify their inbox without catching every
           # AuthenticationError.
@@ -1398,24 +1398,24 @@ module Parse
 
     # Verify this user's password without minting a session token.
     #
-    # Delegates to the +GET /parse/verifyPassword+ endpoint (Parse Server
-    # 7.1.0+) using this user's +username+ and the supplied +password+. The
+    # Delegates to the `GET /parse/verifyPassword` endpoint (Parse Server
+    # 7.1.0+) using this user's `username` and the supplied `password`. The
     # check is purely credential validation — no session is created on
     # success, and the user's existing sessions are unaffected.
     #
     # Use this as a step-up authentication gate: before allowing a sensitive
     # action (e.g. changing an email address or deleting an account), call
-    # +verify_password+ to confirm the caller still knows the password.
+    # `verify_password` to confirm the caller still knows the password.
     #
     # @param password [String] the password to verify.
-    # @return [Boolean] +true+ if the credentials are valid.
+    # @return [Boolean] `true` if the credentials are valid.
     # @raise [Parse::Error::EmailNotVerifiedError] when the account exists but
-    #   +preventLoginWithUnverifiedEmail+ is enabled and the email has not been
+    #   `preventLoginWithUnverifiedEmail` is enabled and the email has not been
     #   verified (Parse Server error code 205). The caller may want to prompt
     #   the user to check their inbox rather than treating this as a wrong-
     #   password failure.
     # @raise [Parse::Error::AuthenticationError] when the username does not
-    #   exist or the password is wrong (code 101, +OBJECT_NOT_FOUND+).
+    #   exist or the password is wrong (code 101, `OBJECT_NOT_FOUND`).
     # @return [Boolean]
     # @example
     #   # Step-up check before a destructive action
@@ -1472,7 +1472,7 @@ module Parse
     # use `master: true` for the previous behavior.
     #
     # @param max_depth [Integer] maximum BFS depth (default: 10).
-    # @param master [Boolean] when +true+, bypass `_Role` CLP and run
+    # @param master [Boolean] when `true`, bypass `_Role` CLP and run
     #   the role-graph lookup under master mode. Use for ACL-building
     #   code paths inside the SDK or in admin tooling.
     # @param as [Parse::User, Parse::Pointer, nil] caller-scope. When
@@ -1480,7 +1480,7 @@ module Parse
     #   case). Pass a different user to ask "what would this caller
     #   see when introspecting this user's roles?"; the scope's
     #   permission set is checked against `_Role` CLP.
-    # @return [Set<String>] role names (no +role:+ prefix). Empty set
+    # @return [Set<String>] role names (no `role:` prefix). Empty set
     #   when the user has no objectId yet or holds no roles.
     # @raise [Parse::CLPScope::Denied] when the scope cannot `find`
     #   on `_Role` under the current CLP.

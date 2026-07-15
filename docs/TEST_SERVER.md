@@ -1,271 +1,148 @@
 # Parse Stack Test Server Setup
 
-This document explains how to set up a local Parse Server for testing the parse-stack Ruby SDK.
+This document explains how to run the local, isolated Parse Server stack used
+to exercise the parse-stack-next Ruby SDK's integration suite.
+
+The stack is namespaced so it never collides with another Parse test system on
+the same machine: a dedicated Compose project, a private `29xxx` host-port
+block, dedicated container/volume names (`psnext-it-*`), loopback-only port
+binds by default, and a dedicated database.
 
 ## Quick Start
 
-### Option 1: Using Make (Recommended)
+### Option 1: Using Make
 
 ```bash
-# Start the test server
-make test-server-start
-
-# Test the connection
-make test-connection
-
-# Run integration tests
-make test-integration
-
-# Stop the test server
-make test-server-stop
+make test-server-start   # bring up the stack
+make test-connection     # verify connectivity
+make test-integration    # run the integration suite
+make test-server-stop    # tear the stack down
 ```
 
-### Option 2: Docker Compose
+### Option 2: Docker Compose directly
 
-1. **Start the test server:**
-   ```bash
-   docker-compose -f docker-compose.test.yml up -d
-   ```
+```bash
+# Start
+docker-compose -f scripts/docker/docker-compose.test.yml up -d
 
-2. **Test the connection:**
-   ```bash
-   ruby test_server_connection.rb
-   ```
+# Verify Parse Server is healthy
+curl http://localhost:29337/parse/health   # => {"status":"ok"}
 
-3. **Run integration tests:**
-   ```bash
-   PARSE_TEST_USE_DOCKER=true bundle exec rake test
-   ```
+# Run integration tests
+PARSE_TEST_USE_DOCKER=true bundle exec rake test:integration
 
-4. **Stop the test server:**
-   ```bash
-   docker-compose -f docker-compose.test.yml down
-   ```
+# Stop
+docker-compose -f scripts/docker/docker-compose.test.yml down
+```
 
-### Option 3: Use Your Own Parse Server
+### Option 3: Use your own Parse Server
 
-Set environment variables to point to your Parse Server:
+Point the suite at any Parse Server by exporting the client-side variables:
 
 ```bash
 export PARSE_TEST_SERVER_URL="http://your-server:1337/parse"
 export PARSE_TEST_APP_ID="your-app-id"
-export PARSE_TEST_API_KEY="your-rest-key"  
+export PARSE_TEST_API_KEY="your-rest-key"
 export PARSE_TEST_MASTER_KEY="your-master-key"
 ```
 
-## Services Included
+## Services and ports
 
-The Docker Compose setup provides:
+Every value has a baked-in default, so the stack is isolated even with no env
+file present. Host ports live in the `29xxx` block and bind to `127.0.0.1` by
+default.
 
-- **MongoDB** (port 27017): Database backend
-- **Parse Server** (port 1337): Main API server with custom startup script
-- **Parse Dashboard** (port 4040): Web interface for data management
+| Service         | Host port | Override            | Container             |
+|-----------------|-----------|---------------------|-----------------------|
+| Parse Server    | 29337     | `PARSE_HOST_PORT`   | `psnext-it-server`    |
+| MongoDB         | 29017     | `MONGO_HOST_PORT`   | `psnext-it-mongo`     |
+| Redis           | 29379     | `REDIS_HOST_PORT`   | `psnext-it-redis`     |
+| Parse Dashboard | 29040     | `DASHBOARD_HOST_PORT` | `psnext-it-dashboard` |
 
-## Technical Implementation
+- **`PSNEXT_PREFIX`** (default `psnext-it`) names the Compose project and every
+  container. Set it (e.g. `PSNEXT_PREFIX=psnext-ci`) to run a second, fully
+  separate copy.
+- **Versions**: Parse Server is pinned to `parseplatform/parse-server:9.9.0`
+  (see `scripts/docker/Dockerfile.parse`), MongoDB `mongo:8`, Redis
+  `redis:7-alpine`, Dashboard `parseplatform/parse-dashboard:9`.
+- **Database**: Parse uses `parse_stack_next_it`.
 
-### Custom Parse Server Image
+## Credentials (compose defaults)
 
-The setup uses a custom Docker image built on top of `parseplatform/parse-server:8.2.3` that includes:
+| Setting     | Default             | Compose env             |
+|-------------|---------------------|-------------------------|
+| App ID      | `psnextItAppId`     | `PARSE_APP_ID`          |
+| Master key  | `psnextItMasterKey` | `PARSE_MASTER_KEY`      |
+| REST key    | `psnext-it-rest-key`| `PARSE_API_KEY`         |
 
-- **Custom startup script** (`scripts/start-parse.sh`) that sets the `PARSE_SERVER_MASTER_KEY_IPS` environment variable
-- **IP restriction bypass** allowing requests from any IP address (`0.0.0.0/0,::/0`)
-- **Automatic environment variable setup** for proper master key authentication
+These defaults are intentionally non-secret — they only ever bind to loopback.
+Supply real values (and non-loopback binds) via your shell or a secret manager
+if you point the stack at anything shared.
 
-### Master Key Authentication
+## Security posture (not an anti-pattern)
 
-The setup resolves Parse Server's IP restriction for master key usage by:
+The stack is hardened by construction, not opened up:
 
-1. Using a custom Docker image with an embedded startup script
-2. Setting `PARSE_SERVER_MASTER_KEY_IPS=0.0.0.0/0,::/0` to allow all IP addresses
-3. This enables schema operations and full master key functionality for testing
+- **Loopback binds by default** — `PARSE_BIND` / `MONGO_BIND` / `REDIS_BIND` /
+  `DASHBOARD_BIND` all default to `127.0.0.1`, so nothing is published on the
+  LAN unless you explicitly override a bind.
+- **Scoped master-key IPs** — Parse Server's `masterKeyIps` is set to loopback
+  plus the private Docker ranges
+  (`127.0.0.1/32,::1/128,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8`) so the
+  Ruby suite and the Dashboard container can use the master key, but it is
+  **not** opened to `0.0.0.0/0`.
+- **Preflight guard** — a `preflight` service (`scripts/docker/preflight.sh`)
+  gates startup and refuses to bring the stack up on a non-loopback bind while
+  still using the default credentials, unless `ALLOW_INSECURE_BIND=1` or real
+  `PARSE_MASTER_KEY` / `MONGO_ROOT_PASSWORD` values are supplied.
 
-### File Structure
+## Client-side test variables
 
-```
-parse-stack-next/
-├── scripts/
-│   ├── docker/
-│   │   ├── docker-compose.test.yml # Main Docker Compose configuration
-│   │   └── Dockerfile.parse       # Custom Parse Server image
-│   ├── start-parse.sh             # Startup script with environment setup
-│   └── test_server_connection.rb  # Connection test script
-├── config/
-│   └── parse-config.json    # Parse Server configuration (unused)
-├── test/
-│   ├── cloud/
-│   │   └── main.js         # Cloud Code for testing
-│   └── support/
-│       ├── test_server.rb   # Ruby test helper utilities
-│       └── docker_helper.rb # Docker container management
-└── .env.test              # Environment variable defaults
-```
+The Ruby suite reads these (all have `29xxx` / `psnext-it` defaults):
 
-## Test Configuration
+| Variable                 | Purpose                              |
+|--------------------------|--------------------------------------|
+| `PARSE_TEST_SERVER_URL`  | Parse Server URL (`http://localhost:29337/parse`) |
+| `PARSE_TEST_APP_ID`      | Application ID                       |
+| `PARSE_TEST_API_KEY`     | REST API key                         |
+| `PARSE_TEST_MASTER_KEY`  | Master key                           |
+| `PARSE_TEST_MONGO_URI`   | Mongo URI for mongo-direct tests     |
+| `PARSE_TEST_REDIS_URL`   | Redis URL                            |
+| `PARSE_TEST_LIVE_QUERY_URL` | LiveQuery WebSocket URL           |
+| `PARSE_TEST_USE_DOCKER`  | Auto-manage the Docker stack         |
 
-### Environment Variables
+`.env.test` is a committed reference listing the whole set;
+`set -a; source .env.test; set +a` loads them all at once. Nothing auto-loads
+it — the baked-in defaults apply otherwise.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PARSE_TEST_SERVER_URL` | `http://localhost:1337/parse` | Parse Server URL |
-| `PARSE_TEST_APP_ID` | `myAppId` | Application ID |
-| `PARSE_TEST_API_KEY` | `test-rest-key` | REST API Key |
-| `PARSE_TEST_MASTER_KEY` | `myMasterKey` | Master Key |
-| `PARSE_TEST_USE_DOCKER` | `false` | Auto-manage Docker containers |
-| `PARSE_TEST_AUTO_START` | `false` | Start containers automatically |
-| `PARSE_TEST_AUTO_STOP` | `false` | Stop containers on exit |
+## Dashboard
 
-### Using `.env.test`
-
-Copy and customize the test environment file:
-
-```bash
-cp .env.test .env.test.local
-# Edit .env.test.local with your settings
-```
-
-## Writing Integration Tests
-
-### Basic Setup
-
-```ruby
-require_relative 'test_helper_integration'
-
-class MyIntegrationTest < Minitest::Test
-  include ParseStackIntegrationTest
-  
-  def test_user_creation
-    with_parse_server do
-      user = create_test_user(username: 'testuser')
-      assert user.id.present?
-      assert_equal 'testuser', user.username
-    end
-  end
-end
-```
-
-### Test Helpers Available
-
-- `with_parse_server { }` - Skip test if server unavailable
-- `create_test_user(attributes)` - Create and track test user
-- `create_test_object(class_name, attributes)` - Create and track test object
-- `reset_database!` - Clear all non-system data
-- `@test_context.track(object)` - Track object for cleanup
-
-### Manual Server Management
-
-```ruby
-# In your tests or console
-require 'test/support/docker_helper'
-
-# Start containers
-Parse::Test::DockerHelper.start!
-
-# Check if running
-Parse::Test::DockerHelper.running?
-
-# View logs
-puts Parse::Test::DockerHelper.logs
-
-# Stop containers
-Parse::Test::DockerHelper.stop!
-```
-
-## Dashboard Access
-
-When using Docker Compose, you can access the Parse Dashboard at:
-- URL: http://localhost:4040
-- Username: `admin`
-- Password: `admin`
-
-## Cloud Code Testing
-
-Sample cloud functions are provided in `test/cloud/main.js`:
-
-```ruby
-# Test cloud functions
-result = Parse::CloudFunction.call('hello', name: 'World')
-assert_equal 'Hello World!', result
-```
+With the stack up, the Parse Dashboard is at <http://localhost:29040>.
 
 ## Troubleshooting
 
-### Docker Issues
-
 ```bash
-# Check container status
-docker-compose -f docker-compose.test.yml ps
+# Container status
+docker-compose -f scripts/docker/docker-compose.test.yml ps
 
-# View Parse Server logs
-docker logs parse-stack-test-server
+# Parse Server logs
+docker logs psnext-it-server
 
-# Reset everything
-docker-compose -f docker-compose.test.yml down -v
-docker-compose -f docker-compose.test.yml up -d
+# Full reset (clears volumes)
+docker-compose -f scripts/docker/docker-compose.test.yml down -v
+docker-compose -f scripts/docker/docker-compose.test.yml up -d
 ```
 
-### Master Key Authentication Issues
+### Master-key IP rejection
 
-If you see `Request using master key rejected as the request IP address ... is not set in Parse Server option 'masterKeyIps'`:
+If you see `Request using master key rejected as the request IP address ... is
+not set in Parse Server option 'masterKeyIps'`, your client is reaching the
+server from an address outside the scoped `masterKeyIps` list above. Run the
+suite from the host (loopback) or from within the Docker network, rather than
+widening `masterKeyIps`.
 
-1. **Verify the custom image is built**: 
-   ```bash
-   docker-compose -f docker-compose.test.yml build parse
-   ```
+### Port conflicts
 
-2. **Check startup script execution**:
-   ```bash
-   docker logs parse-stack-test-server | grep "PARSE_SERVER_MASTER_KEY_IPS"
-   ```
-   Should show: `PARSE_SERVER_MASTER_KEY_IPS: 0.0.0.0/0,::/0`
-
-3. **Test master key directly**:
-   ```bash
-   curl -X GET \
-     -H "X-Parse-Application-Id: myAppId" \
-     -H "X-Parse-Master-Key: myMasterKey" \
-     http://localhost:1337/parse/schemas
-   ```
-
-### Connection Issues
-
-```ruby
-# Test connectivity in console
-require 'test/support/test_server'
-Parse::Test::ServerHelper.setup
-Parse::Test::ServerHelper.server_available?
-```
-
-### Port Conflicts
-
-If ports 1337, 4040, or 27017 are in use, modify `docker-compose.test.yml`:
-
-```yaml
-services:
-  parse:
-    ports:
-      - "1338:1337"  # Use port 1338 instead
-```
-
-Then update your environment variables accordingly.
-
-## Production vs Test Differences
-
-The test server configuration includes:
-- Relaxed security settings for testing
-- Auto-creation of classes
-- Verbose logging
-- Sample cloud code
-
-**Never use these settings in production!**
-
-## Status
-
-✅ **Working Setup**: This test server configuration has been verified to work with:
-- Parse Server 8.2.3
-- MongoDB 5.0  
-- Master key authentication for schema operations
-- Basic CRUD operations via REST API
-- Ruby Parse Stack SDK connection
-- Cloud Code execution
-
-The setup successfully resolves Parse Server's IP restriction issues that typically prevent master key usage in Docker environments.
+Every host port is overridable via the `*_HOST_PORT` variables in the table
+above (and the matching `PARSE_TEST_*` client variable). Move both the compose
+side and the client side together so the containers and the suite agree.

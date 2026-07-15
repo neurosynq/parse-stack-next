@@ -7,7 +7,7 @@
 module Parse
   # This class represents the data and columns contained in the standard Parse
   # `_JobSchedule` collection. Rows here define recurring runs for background
-  # jobs registered via +Parse.Cloud.job(...)+. The collection is populated by
+  # jobs registered via `Parse.Cloud.job(...)`. The collection is populated by
   # the Parse Dashboard's "Schedule a Job" UI and consumed by Parse Server's
   # scheduler.
   #
@@ -29,7 +29,7 @@ module Parse
   # *Defining and scheduling a job*
   #
   # The job itself is registered in Parse Server's Cloud Code (server-side
-  # JavaScript). See {Parse::JobStatus} for the +Parse.Cloud.job(...)+
+  # JavaScript). See {Parse::JobStatus} for the `Parse.Cloud.job(...)`
   # registration example.
   #
   # Schedules are normally created through the Parse Dashboard "Jobs" tab,
@@ -44,8 +44,8 @@ module Parse
   # `_JobSchedule` is a metadata collection: it stores schedule definitions
   # but Parse Server itself does not auto-trigger jobs from these rows. The
   # actual dispatch is performed by external tooling (e.g.
-  # +parse-server-scheduler+, dashboard-driven cron wrappers, or a sidecar
-  # process) which reads `_JobSchedule` and fires +POST /parse/jobs/<name>+
+  # `parse-server-scheduler`, dashboard-driven cron wrappers, or a sidecar
+  # process) which reads `_JobSchedule` and fires `POST /parse/jobs/<name>`
   # at the appropriate times. Run status rows then appear in
   # {Parse::JobStatus}.
   #
@@ -102,8 +102,8 @@ module Parse
 
     # @!attribute days_of_week
     # Array of day-of-week identifiers indicating which days the job is
-    # eligible to run. The exact token set (e.g. +"mon"+/+"tue"+/... vs.
-    # +0+..+6+) is determined by the scheduler tooling that writes the row;
+    # eligible to run. The exact token set (e.g. `"mon"`/`"tue"`/... vs.
+    # `0`..`6`) is determined by the scheduler tooling that writes the row;
     # the Parse Server schema only requires that the column hold an array.
     # @return [Array]
     property :days_of_week, :array
@@ -116,9 +116,9 @@ module Parse
 
     # @!attribute last_run
     # Raw `Number` timestamp recording the previous run. The unit is
-    # scheduler-defined — most external schedulers write +Date.now()+
+    # scheduler-defined — most external schedulers write `Date.now()`
     # milliseconds, but the canonical Parse Server schema only declares
-    # +Number+ and does not pin a unit. Treat values written by one
+    # `Number` and does not pin a unit. Treat values written by one
     # scheduler as opaque to others.
     # @return [Integer]
     property :last_run, :integer

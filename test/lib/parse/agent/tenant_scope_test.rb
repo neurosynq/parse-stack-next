@@ -764,4 +764,59 @@ class AgentTenantScopeTest < Minitest::Test
       end
     end
   end
+
+  # ---- Cross-tenant join default-deny (assert_joins_tenant_safe!) -----------
+  #
+  # The outer $match only scopes the outer collection; a $lookup /
+  # $graphLookup / $unionWith into a class WITHOUT a compatible
+  # agent_tenant_scope could surface other tenants' rows. Under an active
+  # tenant scope such joins are refused until sub-pipeline propagation lands.
+
+  ORG_SCOPE = { field: :org_id, value: "acme" }.freeze
+
+  def assert_joins(pipeline)
+    Parse::Agent::Tools.assert_joins_tenant_safe!(pipeline, ORG_SCOPE)
+  end
+
+  def test_join_into_tenant_incompatible_class_is_refused
+    # TenantProduct declares no agent_tenant_scope.
+    pipeline = [{ "$lookup" => { "from" => "TenantProduct", "as" => "p" } }]
+    err = assert_raises(Parse::Agent::AccessDenied) { assert_joins(pipeline) }
+    assert_equal :tenant_join_denied, err.kind
+  end
+
+  def test_join_into_tenant_compatible_class_is_allowed
+    # TenantOrder declares agent_tenant_scope on the SAME field (org_id).
+    pipeline = [{ "$lookup" => { "from" => "TenantOrder", "as" => "o" } }]
+    assert_joins(pipeline) # must not raise
+  end
+
+  def test_graph_lookup_and_union_with_are_guarded
+    [
+      [{ "$graphLookup" => { "from" => "TenantProduct" } }],
+      [{ "$unionWith" => { "coll" => "TenantProduct" } }],
+    ].each do |pipeline|
+      assert_raises(Parse::Agent::AccessDenied) { assert_joins(pipeline) }
+    end
+  end
+
+  def test_join_nested_in_facet_is_caught
+    pipeline = [{ "$facet" => { "branch" => [{ "$lookup" => { "from" => "TenantProduct" } }] } }]
+    assert_raises(Parse::Agent::AccessDenied) { assert_joins(pipeline) }
+  end
+
+  def test_join_in_lookup_subpipeline_is_caught
+    pipeline = [{ "$lookup" => { "from" => "TenantOrder", "as" => "o",
+                                 "pipeline" => [{ "$unionWith" => { "coll" => "TenantProduct" } }] } }]
+    assert_raises(Parse::Agent::AccessDenied) { assert_joins(pipeline) }
+  end
+
+  def test_no_scope_allows_any_join
+    pipeline = [{ "$lookup" => { "from" => "TenantProduct" } }]
+    Parse::Agent::Tools.assert_joins_tenant_safe!(pipeline, nil) # must not raise
+  end
+
+  def test_pipeline_without_joins_passes
+    assert_joins([{ "$match" => { "amount" => { "$gt" => 10 } } }, { "$limit" => 5 }])
+  end
 end

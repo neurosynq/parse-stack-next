@@ -626,6 +626,6 @@ end
 
 ## More Information
 
-- [CHANGELOG](./CHANGELOG.md) - Full feature history
+- [CHANGELOG](../CHANGELOG.md) - Full feature history
 - [GitHub Releases](https://github.com/neurosynq/parse-stack-next/releases) - Release notes
 - [Parse Server Docs](https://docs.parseplatform.org) - Parse Server documentation

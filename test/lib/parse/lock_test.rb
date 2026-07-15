@@ -428,6 +428,37 @@ class ParseLockTest < Minitest::Test
     end
   end
 
+  # The in-process mutex registry (degraded fallback) must be bounded so
+  # high-cardinality lock keys can't leak Mutexes unbounded (MISC-1).
+  def test_process_mutex_registry_is_bounded
+    Parse::LockBackend.reset!
+    cap = Parse::LockBackend::PROCESS_MUTEX_REGISTRY_MAX
+    (cap + 500).times { |i| Parse::LockBackend.send(:process_mutex, "k#{i}") }
+    reg = Parse::LockBackend.instance_variable_get(:@process_mutex_registry)
+    assert reg.size <= cap,
+      "registry must stay within the cap (was #{reg.size}, cap #{cap})"
+  ensure
+    Parse::LockBackend.reset!
+  end
+
+  def test_process_mutex_never_evicts_a_held_mutex
+    Parse::LockBackend.reset!
+    cap = Parse::LockBackend::PROCESS_MUTEX_REGISTRY_MAX
+    held = Parse::LockBackend.send(:process_mutex, "held-key")
+    held.lock
+    begin
+      # Overflow the registry many times over; the held mutex must survive.
+      (cap + 200).times { |i| Parse::LockBackend.send(:process_mutex, "flood#{i}") }
+      reg = Parse::LockBackend.instance_variable_get(:@process_mutex_registry)
+      assert_same held, reg["held-key"],
+        "a currently-held mutex must never be evicted (would split mutual exclusion)"
+    ensure
+      held.unlock
+    end
+  ensure
+    Parse::LockBackend.reset!
+  end
+
   private
 
   def refute_raises_timeout

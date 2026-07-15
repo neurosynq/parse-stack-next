@@ -67,28 +67,28 @@ module Parse
       attr_accessor :query, :log, :objects
       attr_accessor :original, :update, :raw
       # @!attribute [rw] event
-      #   The LiveQuery event type for an +afterEvent+ trigger -- one of
-      #   +"create"+, +"enter"+, +"update"+, +"leave"+, or +"delete"+ -- or
-      #   +"connect"+ for a +beforeConnect+ trigger. +nil+ for every non-
+      #   The LiveQuery event type for an `afterEvent` trigger -- one of
+      #   `"create"`, `"enter"`, `"update"`, `"leave"`, or `"delete"` -- or
+      #   `"connect"` for a `beforeConnect` trigger. `nil` for every non-
       #   LiveQuery trigger. See {#after_event?} / {#before_connect?}.
       #   @return [String, nil]
       # @!attribute [rw] clients
-      #   Connection-global metadata sent on the LiveQuery +beforeConnect+ /
-      #   +afterEvent+ triggers: the number of currently-connected LiveQuery
-      #   clients. +nil+ for non-LiveQuery triggers.
+      #   Connection-global metadata sent on the LiveQuery `beforeConnect` /
+      #   `afterEvent` triggers: the number of currently-connected LiveQuery
+      #   clients. `nil` for non-LiveQuery triggers.
       #   @return [Integer, nil]
       # @!attribute [rw] subscriptions
-      #   Connection-global metadata sent on the LiveQuery +beforeConnect+ /
-      #   +afterEvent+ triggers: the number of active subscriptions. +nil+ for
+      #   Connection-global metadata sent on the LiveQuery `beforeConnect` /
+      #   `afterEvent` triggers: the number of active subscriptions. `nil` for
       #   non-LiveQuery triggers.
       #   @return [Integer, nil]
       attr_accessor :event, :clients, :subscriptions
       # @!attribute [rw] context
       #   The caller-supplied context object threaded from the originating REST
-      #   write or cloud-function call via the +X-Parse-Cloud-Context+ header.
-      #   Parse Server includes this as a top-level +context+ key in trigger
+      #   write or cloud-function call via the `X-Parse-Cloud-Context` header.
+      #   Parse Server includes this as a top-level `context` key in trigger
       #   payloads (beforeSave/afterSave/etc.). Returns a Hash when present, or
-      #   +nil+ when the originating request carried no context.
+      #   `nil` when the originating request carried no context.
       #   @return [Hash, nil]
       attr_accessor :context
       # @!attribute [r] session_token
@@ -96,7 +96,7 @@ module Parse
       #   webhook payload (`user.sessionToken`) before credentials are scrubbed
       #   from {#user} / {#object} / {#original} / {#update}. Present only when
       #   the originating request was made by a logged-in user -- a master-key
-      #   request carries no user and no token, so this is +nil+. It is
+      #   request carries no user and no token, so this is `nil`. It is
       #   intentionally NOT one of {ATTRIBUTES}, so it never appears in
       #   {#as_json} or in the redacted request log. Reach for it (or the
       #   higher-level {#user_client} / {#user_agent}) only when a handler
@@ -232,7 +232,7 @@ module Parse
       ].freeze
 
       # @!visibility private
-      # Returns a copy of +obj+ with only +WEBHOOK_TRIGGER_CREDENTIAL_KEYS+
+      # Returns a copy of `obj` with only `WEBHOOK_TRIGGER_CREDENTIAL_KEYS`
       # removed. Operates on string and symbol keys (Parse Server uses camelCase
       # strings on the wire; downstream code may have already symbolized).
       # Pass-through for non-Hash input.
@@ -274,7 +274,7 @@ module Parse
       end
 
       # @!visibility private
-      # Returns a copy of +obj+ with the model's declared `:vector`
+      # Returns a copy of `obj` with the model's declared `:vector`
       # columns removed. Embeddings are large dense float arrays that leak
       # ML signal; a webhook handler has no reason to receive them, and
       # leaving them in bloats logs and any object a handler re-persists.
@@ -302,10 +302,10 @@ module Parse
       end
 
       # @!visibility private
-      # Pulls the caller's session token out of the (unscrubbed) +user+ hash.
-      # Parse Server sends it as the camelCase string key +sessionToken+; this
+      # Pulls the caller's session token out of the (unscrubbed) `user` hash.
+      # Parse Server sends it as the camelCase string key `sessionToken`; this
       # tolerates a symbol key and the snake_case form too, mirroring the
-      # leniency in +scrub_credentials+. Returns +nil+ for a blank token or a
+      # leniency in `scrub_credentials`. Returns `nil` for a blank token or a
       # non-Hash / absent user (a master-key request has no user).
       def self.extract_session_token(user_hash)
         return nil unless user_hash.is_a?(Hash)
@@ -365,14 +365,14 @@ module Parse
 
       # An opt-in, user-scoped {Parse::Client} for acting on the server as the
       # webhook's calling user. It mirrors the default client's connection
-      # settings (+server_url+, +application_id+, +api_key+) but carries NO
+      # settings (`server_url`, `application_id`, `api_key`) but carries NO
       # master key and BINDS the caller's {#session_token}, so every request it
       # makes -- with no further ceremony -- is authorized by Parse Server as
-      # that user: ACL, CLP and +protectedFields+ are all enforced. (A
+      # that user: ACL, CLP and `protectedFields` are all enforced. (A
       # `Parse.with_session` block still overrides the bound token if you need
       # to act as someone else within a call.) Memoized per payload, since each
       # webhook delivery carries a distinct token.
-      # @return [Parse::Client, nil] +nil+ when the payload carried no token.
+      # @return [Parse::Client, nil] `nil` when the payload carried no token.
       def user_client
         return nil if @session_token.nil?
         @user_client ||= Parse::Client.client.become(@session_token)
@@ -380,15 +380,15 @@ module Parse
 
       # An opt-in, non-master {Parse::Agent} scoped to the webhook caller's
       # session token. Because its client has no master key and it is built
-      # with a non-empty +session_token:+, the agent runs in CLIENT MODE:
+      # with a non-empty `session_token:`, the agent runs in CLIENT MODE:
       # every tool/query routes through a path Parse Server (or the SDK's own
       # ACL/CLP enforcement layer) authorizes as the calling user, with no
       # master-key fallback to silently bypass row-level security. This is the
       # handle to use when a handler should read or act strictly within the
       # caller's permissions. Additional agent options (e.g.
-      # +permissions: :readwrite+) may be passed through.
+      # `permissions: :readwrite`) may be passed through.
       # @param opts [Hash] extra keyword args forwarded to {Parse::Agent#initialize}.
-      # @return [Parse::Agent, nil] +nil+ when the payload carried no token.
+      # @return [Parse::Agent, nil] `nil` when the payload carried no token.
       def user_agent(**opts)
         return nil if @session_token.nil?
         require_relative "../agent" unless defined?(Parse::Agent)
@@ -462,11 +462,11 @@ module Parse
 
       # true if this is a beforeLogin webhook trigger request.
       #
-      # NOTE: a +beforeLogin+ payload carries the user being authenticated as
-      # {#object} / {#parse_object} (a +_User+), NOT as {#user} -- the caller is
-      # not yet authenticated when the trigger fires, so {#user} is +nil+. (By
-      # +afterLogin+ both are populated and equal.) Reach for {#parse_object} to
-      # inspect the logging-in user during +beforeLogin+.
+      # NOTE: a `beforeLogin` payload carries the user being authenticated as
+      # {#object} / {#parse_object} (a `_User`), NOT as {#user} -- the caller is
+      # not yet authenticated when the trigger fires, so {#user} is `nil`. (By
+      # `afterLogin` both are populated and equal.) Reach for {#parse_object} to
+      # inspect the logging-in user during `beforeLogin`.
       def before_login?
         trigger? && @trigger_name.to_sym == :beforeLogin
       end
@@ -477,19 +477,19 @@ module Parse
       end
 
       # true if this is a afterLogout webhook trigger request. The logged-out
-      # session is carried as {#object} / {#parse_object} (a +_Session+).
+      # session is carried as {#object} / {#parse_object} (a `_Session`).
       def after_logout?
         trigger? && @trigger_name.to_sym == :afterLogout
       end
 
       # true if this is a beforePasswordResetRequest webhook trigger request.
-      # The target user is carried as {#object} / {#parse_object} (a +_User+).
+      # The target user is carried as {#object} / {#parse_object} (a `_User`).
       def before_password_reset_request?
         trigger? && @trigger_name.to_sym == :beforePasswordResetRequest
       end
 
       # true if this is a LiveQuery beforeConnect webhook trigger request.
-      # Connection-global: carries no {#object}; the className is the +@Connect+
+      # Connection-global: carries no {#object}; the className is the `@Connect`
       # sentinel and the caller's token (if any) is in {#session_token}.
       def before_connect?
         trigger? && @trigger_name.to_sym == :beforeConnect
@@ -510,10 +510,10 @@ module Parse
 
       # true if this is one of the authentication-side triggers
       # (beforeLogin / afterLogin / afterLogout / beforePasswordResetRequest).
-      # These carry a +_User+ / +_Session+ as {#object} but are NOT object
+      # These carry a `_User` / `_Session` as {#object} but are NOT object
       # save/delete triggers: no ActiveModel save/create/destroy callbacks run
       # for them, and Parse Server ignores the response body (the only way to
-      # affect a +before*+ one is to deny it -- see the webhook router).
+      # affect a `before*` one is to deny it -- see the webhook router).
       def auth_trigger?
         before_login? || after_login? || after_logout? || before_password_reset_request?
       end
@@ -521,7 +521,7 @@ module Parse
       # true if this is one of the LiveQuery triggers (beforeConnect /
       # beforeSubscribe / afterEvent). Parse Server delivers these over an HTTP
       # webhook only in a co-located single-process LiveQuery setup;
-      # +beforeConnect+ in particular carries a live client and is effectively
+      # `beforeConnect` in particular carries a live client and is effectively
       # in-process-only. See the webhooks guide.
       def live_query_trigger?
         before_connect? || before_subscribe? || after_event?
@@ -560,7 +560,7 @@ module Parse
       end
 
       # @!visibility private
-      # Returns +true+ when +@object+/+@original+ contain a className that
+      # Returns `true` when `@object`/`@original` contain a className that
       # disagrees with the trigger's expected class. Used to skip building
       # a typed object when the payload was clearly forged or routed
       # incorrectly.

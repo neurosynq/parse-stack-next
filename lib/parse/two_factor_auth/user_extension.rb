@@ -318,12 +318,12 @@ module Parse
         # CONFIRM the disable took effect from the SERVER's own view — a
         # positive post-condition rather than trusting the unlink response
         # alone. We must read the server directly here, NOT lean on the
-        # in-memory #mfa_enabled? projection: Parse Server omits +authData+
+        # in-memory #mfa_enabled? projection: Parse Server omits `authData`
         # entirely for a user with no providers, so once MFA is unlinked an
-        # ordinary fetch carries no +authData+ key at all and therefore can
-        # never clear the +{ mfa: { status: "enabled" } }+ value pinned at
+        # ordinary fetch carries no `authData` key at all and therefore can
+        # never clear the `{ mfa: { status: "enabled" } }` value pinned at
         # enrollment. An enabled account's own (session-token) read returns
-        # +authData.mfa+; a disabled one omits it — so an absent/mfa-less
+        # `authData.mfa`; a disabled one omits it — so an absent/mfa-less
         # authData on this trusted self-read is the authoritative signal.
         if mfa_enabled_on_server?
           raise MFA::VerificationError, "MFA disable did not take effect (still enabled after unlink)"
@@ -337,27 +337,27 @@ module Parse
       # verification entirely, so the caller must prove (out-of-band) that
       # the operator initiating the disable is authorized to do so.
       #
-      # The +authorized_by:+ keyword is required and must be a
+      # The `authorized_by:` keyword is required and must be a
       # {Parse::User} (or {Parse::Pointer} to a User) representing the
       # operator performing the override. The caller is responsible for
       # verifying that operator's privileges (e.g. via a role check). An
-      # optional +admin_role:+ argument lets this method enforce a role
+      # optional `admin_role:` argument lets this method enforce a role
       # membership check on the operator using the existing role-hierarchy
       # support; when given, the operator must belong to the role (or any
-      # of its child roles) or +ForbiddenError+ is raised.
+      # of its child roles) or `ForbiddenError` is raised.
       #
       # @param authorized_by [Parse::User, Parse::Pointer] the operator
       #   performing the override. Required.
       # @param admin_role [Parse::Role, String, nil] role (or role name)
-      #   that +authorized_by+ must belong to. Library-enforced. Either
-      #   this or +allow_unverified: true+ is REQUIRED (fail-closed).
+      #   that `authorized_by` must belong to. Library-enforced. Either
+      #   this or `allow_unverified: true` is REQUIRED (fail-closed).
       # @param allow_unverified [Boolean] explicitly accept caller-side
-      #   authorization without a library role check. Defaults to +false+;
-      #   must be set deliberately to bypass MFA without an +admin_role+.
+      #   authorization without a library role check. Defaults to `false`;
+      #   must be set deliberately to bypass MFA without an `admin_role`.
       # @return [Boolean] True if disabled successfully.
-      # @raise [ArgumentError] when +authorized_by:+ is missing or not a User.
-      # @raise [Parse::MFA::ForbiddenError] when neither +admin_role+ nor
-      #   +allow_unverified:+ is supplied, or when +admin_role+ is supplied
+      # @raise [ArgumentError] when `authorized_by:` is missing or not a User.
+      # @raise [Parse::MFA::ForbiddenError] when neither `admin_role` nor
+      #   `allow_unverified:` is supplied, or when `admin_role` is supplied
       #   and the operator is not a member.
       #
       # @example Library-enforced role check (preferred)
@@ -415,8 +415,8 @@ module Parse
         end
 
         # Refresh auth_data, then drop the in-memory MFA projection. As in
-        # #disable_mfa!, a disabled user's read omits +authData+, so the
-        # +{ mfa: { status: "enabled" } }+ value pinned at enrollment won't
+        # #disable_mfa!, a disabled user's read omits `authData`, so the
+        # `{ mfa: { status: "enabled" } }` value pinned at enrollment won't
         # self-clear on fetch — clear it explicitly so #mfa_enabled? reports
         # the truth after a master-key disable.
         fetch
@@ -426,7 +426,7 @@ module Parse
       end
 
       # @deprecated Use {#disable_mfa_master_key!} with an explicit
-      #   +authorized_by:+ argument. The old name had no authorization gate
+      #   `authorized_by:` argument. The old name had no authorization gate
       #   and acted as a one-call IDOR primitive when invoked on an
       #   attacker-controlled user instance.
       def disable_mfa_admin!(*args, **kwargs)
@@ -496,10 +496,10 @@ module Parse
 
       # @!visibility private
       # Authoritative server-side MFA check via a trusted self-read.
-      # Reads +authData.mfa+ straight from a fresh session-token fetch
+      # Reads `authData.mfa` straight from a fresh session-token fetch
       # rather than the (possibly stale) in-memory projection. An enabled
-      # account returns +authData.mfa+ with a +status+/+secret+; a disabled
-      # one omits +authData+ — so absence (or an mfa-less authData) means
+      # account returns `authData.mfa` with a `status`/`secret`; a disabled
+      # one omits `authData` — so absence (or an mfa-less authData) means
       # disabled.
       # @return [Boolean]
       def mfa_enabled_on_server?
@@ -512,13 +512,13 @@ module Parse
 
       # @!visibility private
       # Drop the in-memory MFA projection after a disable. A disabled user's
-      # server read omits +authData+ entirely, so an ordinary fetch can
-      # never clear the +{ mfa: { status: "enabled" } }+ value pinned at
-      # enrollment; do it explicitly here. Only the +mfa+ subkey is removed
+      # server read omits `authData` entirely, so an ordinary fetch can
+      # never clear the `{ mfa: { status: "enabled" } }` value pinned at
+      # enrollment; do it explicitly here. Only the `mfa` subkey is removed
       # (any anonymous/OAuth authData is preserved), and the assignment runs
-      # through the non-dirtying hydration path inside a +with_authdata_trust+
+      # through the non-dirtying hydration path inside a `with_authdata_trust`
       # scope so it is neither stripped nor marked dirty — a later #save will
-      # not resend +authData+.
+      # not resend `authData`.
       def clear_local_mfa_projection!
         cleared = auth_data.is_a?(Hash) ? auth_data.dup : {}
         cleared.delete("mfa")

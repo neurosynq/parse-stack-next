@@ -438,15 +438,36 @@ input[name=q]::placeholder {
   margin-top: 1.4em;
 }
 
-#listing ul.alpha li.letter h2 {
+/* YARD emits the section letters as bare `<li class="letter">A</li>`
+ * (no inner h2), so style the li itself. */
+#listing ul.alpha li.letter {
   color: var(--accent);
-  border-bottom: 2px solid var(--accent);
-  display: inline-block;
-  padding: 0 .8em .2em 0;
+  font-weight: 650;
 }
 
 #listing ul li a {
   border-bottom: 1px dotted var(--border);
+}
+
+/* The "(Parse::Constraint)" origin annotations; stock #666 is too dim
+ * against the dark surfaces. */
+#listing ul small {
+  color: var(--fg-muted);
+}
+
+/* Stock style.css stripes index rows with hardcoded light grays
+ * (li.r1 #f0f0f0 / li.r2 #fafafa) that glow white in dark mode. */
+li.r1 { background: var(--bg-soft); }
+li.r2 { background: var(--bg); }
+
+/* File Listing pills at the top of _index.html. */
+.index_inline_list li,
+.index_inline_list li.r1,
+.index_inline_list li.r2 {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-right: 6px;
 }
 
 /* -------- inheritance / mixin lists -------- */
@@ -892,9 +913,13 @@ h2.h2_sum,
 
 /* The collapse arrows in the class-tree iframe are a base64 PNG
  * sprite of dark glyphs on a transparent background — invisible
- * against our dark surface. CSS filter inverts them in place. */
-#full_list li a.toggle {
-  filter: invert(0.85) hue-rotate(180deg) brightness(1.6);
+ * against our dark surface. CSS filter inverts them in place.
+ * Dark mode only: in light mode the stock dark glyphs are correct,
+ * and inverting them would wash them out against the light rail. */
+@media (prefers-color-scheme: dark) {
+  #full_list li a.toggle {
+    filter: invert(0.85) hue-rotate(180deg) brightness(1.6);
+  }
 }
 
 /* ============================================================
@@ -928,11 +953,29 @@ h2.h2_sum,
   padding: 1px 6px !important;
 }
 
-/* But never on the code blocks themselves (the pre.code descendants). */
+/* But never on the code blocks themselves (the pre.code descendants).
+ * The scoped variants are required, not belt-and-braces: file pages
+ * (README + guides) compile fenced blocks to <pre><code class="ruby">,
+ * and with both rules !important the positive `#filecontents code`
+ * (0,1,0,1) would otherwise beat a bare `pre code` (0,0,0,2) — the
+ * inline-level <code> then draws its border on every wrapped line
+ * fragment, streaking the whole block. */
 pre code,
 pre tt,
 pre.code code,
-pre.code tt {
+pre.code tt,
+.docstring pre code,
+.docstring pre tt,
+.tags pre code,
+.tags pre tt,
+.summary pre code,
+.summary pre tt,
+#filecontents pre code,
+#filecontents pre tt,
+.discussion pre code,
+.discussion pre tt,
+.method_details pre code,
+.method_details pre tt {
   background: transparent !important;
   border: 0 !important;
   padding: 0 !important;

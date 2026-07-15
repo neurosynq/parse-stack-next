@@ -28,15 +28,15 @@ module Parse
   # When writing aggregation pipelines for direct MongoDB queries, use MongoDB's native
   # field naming conventions:
   #
-  # - *Regular fields*: Use camelCase (e.g., +releaseDate+, +playCount+, +firstName+)
-  # - *Pointer fields*: Use +_p_+ prefix (e.g., +_p_author+, +_p_album+)
-  # - *Built-in dates*: Use +_created_at+ and +_updated_at+
-  # - *Field references*: Use +$fieldName+ syntax (e.g., +$releaseDate+, +$_p_author+)
+  # - *Regular fields*: Use camelCase (e.g., `releaseDate`, `playCount`, `firstName`)
+  # - *Pointer fields*: Use `_p_` prefix (e.g., `_p_author`, `_p_album`)
+  # - *Built-in dates*: Use `_created_at` and `_updated_at`
+  # - *Field references*: Use `$fieldName` syntax (e.g., `$releaseDate`, `$_p_author`)
   #
   # Results are automatically converted to Ruby-friendly format:
-  # - Field names converted to snake_case (+totalPlays+ → +total_plays+)
-  # - Custom aggregation results wrapped in +AggregationResult+ for method access
-  # - Parse documents returned as proper +Parse::Object+ instances
+  # - Field names converted to snake_case (`totalPlays` → `total_plays`)
+  # - Custom aggregation results wrapped in `AggregationResult` for method access
+  # - Parse documents returned as proper `Parse::Object` instances
   #
   # @example Aggregation pipeline with MongoDB field names
   #   pipeline = [
@@ -52,9 +52,9 @@ module Parse
   # == Date Comparisons
   #
   # MongoDB stores dates in UTC. When comparing dates in aggregation pipelines:
-  # - Use Ruby +Time+ objects for comparisons (automatically converted to BSON dates)
-  # - Ruby +Date+ objects (without time) are stored as midnight UTC
-  # - For accurate date-only comparisons, use +Time.utc(year, month, day)+
+  # - Use Ruby `Time` objects for comparisons (automatically converted to BSON dates)
+  # - Ruby `Date` objects (without time) are stored as midnight UTC
+  # - For accurate date-only comparisons, use `Time.utc(year, month, day)`
   #
   # @example Date comparison in aggregation
   #   # Compare with a specific UTC time
@@ -1460,7 +1460,7 @@ module Parse
       # @param max_time_ms [Integer, nil] optional server-side time limit in milliseconds.
       #   When provided, MongoDB will cancel the query if it exceeds this budget and
       #   the driver error is translated to {Parse::MongoDB::ExecutionTimeout}.
-      #   Pass +nil+ (the default) for no cap.
+      #   Pass `nil` (the default) for no cap.
       # @return [Array<Hash>] the raw results from MongoDB
       # @param rewrite_lookups [Boolean, nil] when true (default `nil` --
       #   reads `Parse.rewrite_lookups`), auto-rewrite LLM-style $lookup
@@ -1469,16 +1469,16 @@ module Parse
       # @param allow_internal_fields [Boolean] when true, skip the
       #   internal-fields denylist check (e.g. for SDK-generated ACL
       #   filters produced by {Parse::Query#readable_by_role} and friends
-      #   that legitimately reference +_rperm+/+_wperm+). The
-      #   DENIED_OPERATORS walk, forensic-operator-in-+$expr+ check, and
-      #   internal-field +$+-reference string check all still run.
-      #   Passed +true+ only from the SDK direct-execution sites that
+      #   that legitimately reference `_rperm`/`_wperm`). The
+      #   DENIED_OPERATORS walk, forensic-operator-in-`$expr` check, and
+      #   internal-field `$`-reference string check all still run.
+      #   Passed `true` only from the SDK direct-execution sites that
       #   build their pipeline entirely from {Parse::Query#compile_where}:
-      #   +Parse::Query#results_direct+, +#first_direct+ (via
-      #   +results_direct+), +#count_direct+, +#distinct_direct+,
-      #   +#atlas_search+ builder-block, and the two +#group_by_*+ direct
-      #   paths. The Agent MCP tool path and +Aggregation#execute_direct!+
-      #   keep the default +false+ so attacker-controlled or user-supplied
+      #   `Parse::Query#results_direct`, `#first_direct` (via
+      #   `results_direct`), `#count_direct`, `#distinct_direct`,
+      #   `#atlas_search` builder-block, and the two `#group_by_*` direct
+      #   paths. The Agent MCP tool path and `Aggregation#execute_direct!`
+      #   keep the default `false` so attacker-controlled or user-supplied
       #   aggregate stages cannot reach internal columns.
       # @param session_token [String, nil] when provided, the SDK
       #   resolves the token to the requesting user + role subscription
@@ -1582,7 +1582,7 @@ module Parse
         # are SDK-generated (not attacker-controlled), so no
         # re-validation is needed before they're handed to MongoDB.
         if (acl_stage = Parse::ACLScope.match_stage_for(resolution))
-          pipeline = [acl_stage] + pipeline
+          pipeline = prepend_or_fold_acl_match(pipeline, acl_stage)
         end
         pipeline = Parse::ACLScope.rewrite_pipeline(pipeline, resolution)
 
@@ -1671,6 +1671,59 @@ module Parse
       rescue => e
         raise_if_timeout!(e, collection_name, max_time_ms)
         raise
+      end
+
+      # Inject the scoped ACL `$match` at the front of a pipeline — UNLESS
+      # the first stage is `$geoNear`, which MongoDB requires to be
+      # pipeline stage 0. In that case fold the ACL predicate into
+      # `$geoNear.query` (a candidate-document pre-filter, semantically
+      # equivalent to a leading `$match`) so the stage-0 invariant holds
+      # and the scoped geo query still enforces `_rperm`.
+      #
+      # A scoped `geo_near` previously failed CLOSED here: the prepended
+      # `$match` pushed `$geoNear` off stage 0 and MongoDB rejected the
+      # whole pipeline. Post-fetch redaction (protectedFields / sub-doc /
+      # internal-field) runs regardless, so folding loses no enforcement.
+      #
+      # @param pipeline [Array<Hash>]
+      # @param acl_stage [Hash] `{ "$match" => <predicate> }` from
+      #   {Parse::ACLScope.match_stage_for}.
+      # @return [Array<Hash>] a new pipeline; caller stages are not mutated.
+      def prepend_or_fold_acl_match(pipeline, acl_stage)
+        geo_key = geo_near_stage_key(pipeline.first)
+        return [acl_stage] + pipeline unless geo_key
+
+        match_pred = acl_stage["$match"] || acl_stage[:$match]
+        geo = pipeline.first[geo_key].dup
+        # Match the stage's own key style: reuse an existing `query` key of
+        # either type, else follow the `$geoNear` key's type (string stage
+        # → "query", symbol stage → :query). The Mongo driver normalizes
+        # either way, but keeping one style avoids a duplicate query key.
+        q_key =
+          if geo.key?("query") then "query"
+          elsif geo.key?(:query) then :query
+          elsif geo_key.is_a?(String) then "query"
+          else :query
+          end
+        existing = geo[q_key]
+        geo[q_key] =
+          if existing.is_a?(Hash) && !existing.empty?
+            { "$and" => [existing, match_pred] }
+          else
+            match_pred
+          end
+        new_first = pipeline.first.dup
+        new_first[geo_key] = geo
+        [new_first] + pipeline[1..]
+      end
+
+      # @return [Symbol, String, nil] the `$geoNear` key (symbol or string
+      #   form) if `stage` is a `$geoNear` stage, else nil.
+      def geo_near_stage_key(stage)
+        return nil unless stage.is_a?(Hash)
+        return :$geoNear if stage.key?(:$geoNear)
+        return "$geoNear" if stage.key?("$geoNear")
+        nil
       end
 
       # Execute a `$geoNear` aggregation against a collection, returning
@@ -2048,10 +2101,10 @@ module Parse
       end
 
       # Convert a raw MongoDB aggregation row, coercing values (BSON ObjectIds,
-      # dates, nested documents) but preserving all field names including +_id+.
-      # Unlike {.convert_document_to_parse}, this does NOT rename +_id+ to
-      # +objectId+, because aggregation +$group+ stages reuse +_id+ as the
-      # group key (e.g. a pointer string like +"Workspace$abc"+) rather than as a
+      # dates, nested documents) but preserving all field names including `_id`.
+      # Unlike {.convert_document_to_parse}, this does NOT rename `_id` to
+      # `objectId`, because aggregation `$group` stages reuse `_id` as the
+      # group key (e.g. a pointer string like `"Workspace$abc"`) rather than as a
       # Parse object identifier.
       #
       # @param doc [Hash] a raw MongoDB aggregation result row
@@ -2379,7 +2432,7 @@ module Parse
       #   DENIED_OPERATORS walk still runs. Intended only for callers
       #   that built the pipeline via {Parse::Query}'s own constraint
       #   DSL (e.g. {Parse::Query#readable_by_role}); raw user-supplied
-      #   pipelines (Agent MCP tools) must keep the default +false+.
+      #   pipelines (Agent MCP tools) must keep the default `false`.
       #
       # Public for testability and for callers that want to validate
       # input before forwarding to {.find} / {.aggregate}.

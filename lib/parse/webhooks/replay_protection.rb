@@ -11,8 +11,8 @@ module Parse
     # NEW-EXT-4: webhook freshness and replay protection.
     #
     # Parse Server's default webhook delivery is authenticated only by the
-    # static +X-Parse-Webhook-Key+ header. A captured POST is therefore
-    # indefinitely replayable -- a Ruby-initiated save bearing an +_RB_+
+    # static `X-Parse-Webhook-Key` header. A captured POST is therefore
+    # indefinitely replayable -- a Ruby-initiated save bearing an `_RB_`
     # request id will continue to suppress server-side after_* callbacks
     # every time it is replayed, and a generic trigger payload can be
     # delivered repeatedly to fire double-charges or other side effects.
@@ -20,23 +20,23 @@ module Parse
     # This module adds two layers on top of the existing static-key check:
     #
     # 1. **Always-on body+request-id dedup.** A bounded LRU records a
-    #    SHA-256 of +(request_id || "")+ joined with the request body. A
-    #    duplicate seen within +replay_window_seconds+ is rejected with
-    #    +"Webhook replay detected."+. Cooperation with Parse Server is not
+    #    SHA-256 of `(request_id || "")` joined with the request body. A
+    #    duplicate seen within `replay_window_seconds` is rejected with
+    #    `"Webhook replay detected."`. Cooperation with Parse Server is not
     #    required; this protects against in-window replays only, but those
     #    are the cheapest attack to mount (proxy retries, captured fast
     #    loops, retransmits).
     #
-    # 2. **Opt-in HMAC freshness verification.** When a +signing_secret+ is
+    # 2. **Opt-in HMAC freshness verification.** When a `signing_secret` is
     #    configured (programmatically or via
-    #    +PARSE_WEBHOOK_SIGNING_SECRET+) the dispatcher requires two extra
+    #    `PARSE_WEBHOOK_SIGNING_SECRET`) the dispatcher requires two extra
     #    headers on every request:
     #
-    #    * +X-Parse-Webhook-Timestamp+ -- decimal Unix epoch seconds.
-    #    * +X-Parse-Webhook-Signature+ -- hex-encoded HMAC-SHA256 of the
-    #      bytes +"#{timestamp}.#{body}"+ keyed with the signing secret.
+    #    * `X-Parse-Webhook-Timestamp` -- decimal Unix epoch seconds.
+    #    * `X-Parse-Webhook-Signature` -- hex-encoded HMAC-SHA256 of the
+    #      bytes `"#{timestamp}.#{body}"` keyed with the signing secret.
     #
-    #    Requests outside +signing_max_skew_seconds+ (default 300) or with
+    #    Requests outside `signing_max_skew_seconds` (default 300) or with
     #    an invalid signature are rejected. Once enabled, this gives full
     #    binding between the body and the time of delivery and closes the
     #    replay window beyond the freshness skew.
@@ -61,9 +61,9 @@ module Parse
         attr_writer :signing_secret, :signing_max_skew_seconds,
                     :replay_window_seconds, :replay_cache_size
 
-        # Shared HMAC secret used to verify +X-Parse-Webhook-Signature+.
+        # Shared HMAC secret used to verify `X-Parse-Webhook-Signature`.
         # When nil/empty, signature verification is skipped (layer 1 still
-        # applies). Defaults to +ENV["PARSE_WEBHOOK_SIGNING_SECRET"]+.
+        # applies). Defaults to `ENV["PARSE_WEBHOOK_SIGNING_SECRET"]`.
         def signing_secret
           return @signing_secret if defined?(@signing_secret) && !@signing_secret.nil?
           ENV["PARSE_WEBHOOK_SIGNING_SECRET"]
@@ -71,12 +71,12 @@ module Parse
 
         # Maximum allowed clock skew (in seconds) between the timestamp
         # header and the receiver. Requests outside this window are
-        # rejected as stale when +signing_secret+ is set.
+        # rejected as stale when `signing_secret` is set.
         def signing_max_skew_seconds
           @signing_max_skew_seconds || DEFAULT_MAX_SKEW
         end
 
-        # How long a +(request_id, body)+ digest stays in the dedup cache.
+        # How long a `(request_id, body)` digest stays in the dedup cache.
         # Duplicates seen within this window are rejected.
         def replay_window_seconds
           @replay_window_seconds || DEFAULT_REPLAY_WINDOW
@@ -112,7 +112,7 @@ module Parse
         # @!visibility private
         # Returns nil when the request passes both replay and signature
         # checks; otherwise returns a short error string suitable for the
-        # webhook error response. The headers come from +env+ so this
+        # webhook error response. The headers come from `env` so this
         # works with any Rack request.
         def verify!(env, body_str, request_id)
           secret = signing_secret

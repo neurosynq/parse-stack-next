@@ -33,7 +33,7 @@ module Parse
     READ_PREFERENCE = "X-Parse-Read-Preference"
     # The request header field for threading a caller-supplied context object
     # through a write or cloud-function call. Parse Server maps this header to
-    # +req.info.context+ and flows it through beforeSave/afterSave triggers.
+    # `req.info.context` and flows it through beforeSave/afterSave triggers.
     CLOUD_CONTEXT = "X-Parse-Cloud-Context"
 
     # Valid read preference values for MongoDB

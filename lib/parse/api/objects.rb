@@ -36,9 +36,9 @@ module Parse
       module ClassMethods
         # Get the API path for this class.
         #
-        # Both +className+ and +id+ are validated to prevent path-smuggling
+        # Both `className` and `id` are validated to prevent path-smuggling
         # attacks where an attacker-controlled string traverses to a
-        # different REST endpoint (e.g. +"../sessions/me"+) with whatever
+        # different REST endpoint (e.g. `"../sessions/me"`) with whatever
         # auth the outer request carries — typically the master key.
         #
         # @param className [String] the name of the Parse collection.
@@ -85,9 +85,9 @@ module Parse
       # @param opts [Hash] additional options to pass to the {Parse::Client} request.
       # @param headers [Hash] additional HTTP headers to send with the request.
       # @param context [Hash, nil] an optional caller context forwarded as the
-      #   +X-Parse-Cloud-Context+ header. Parse Server maps it to
-      #   +req.info.context+ inside beforeSave/afterSave cloud triggers.
-      #   Omit or pass +nil+ to leave behavior unchanged.
+      #   `X-Parse-Cloud-Context` header. Parse Server maps it to
+      #   `req.info.context` inside beforeSave/afterSave cloud triggers.
+      #   Omit or pass `nil` to leave behavior unchanged.
       # @return [Parse::Response]
       def create_object(className, body = {}, headers: {}, context: nil, **opts)
         unless context.nil?
@@ -143,9 +143,9 @@ module Parse
       # @param opts [Hash] additional options to pass to the {Parse::Client} request.
       # @param headers [Hash] additional HTTP headers to send with the request.
       # @param context [Hash, nil] an optional caller context forwarded as the
-      #   +X-Parse-Cloud-Context+ header. Parse Server maps it to
-      #   +req.info.context+ inside beforeSave/afterSave cloud triggers.
-      #   Omit or pass +nil+ to leave behavior unchanged.
+      #   `X-Parse-Cloud-Context` header. Parse Server maps it to
+      #   `req.info.context` inside beforeSave/afterSave cloud triggers.
+      #   Omit or pass `nil` to leave behavior unchanged.
       # @return [Parse::Response]
       def update_object(className, id, body = {}, headers: {}, context: nil, **opts)
         unless context.nil?

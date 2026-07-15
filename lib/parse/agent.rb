@@ -739,7 +739,7 @@ module Parse
 
     # Built-in mutation tools that route through session-token REST and
     # are therefore enforceable by Parse Server's native ACL/CLP. Gated
-    # additionally by the per-agent +allow_mutations:+ kwarg in client
+    # additionally by the per-agent `allow_mutations:` kwarg in client
     # mode (default false) and by the existing process-level env vars
     # (PARSE_AGENT_ALLOW_WRITE_TOOLS + PARSE_AGENT_ALLOW_RAW_CRUD).
     CLIENT_SAFE_MUTATION_TOOLS = %i[
@@ -806,7 +806,7 @@ module Parse
       #   configure this on load.
       attr_accessor :allowed_llm_endpoints
 
-      # Validate +endpoint+ against {allowed_llm_endpoints}. No-op
+      # Validate `endpoint` against {allowed_llm_endpoints}. No-op
       # when the allowlist is unset. Raises `ArgumentError` on miss so
       # the caller's `ask` / `ask_streaming` invocation fails before
       # any HTTP request is sent.
@@ -887,29 +887,29 @@ module Parse
     attr_reader :session_token
 
     # @return [Parse::User, Parse::Pointer, nil] the User identity the
-    #   agent was constructed with via +acl_user:+. The agent's
+    #   agent was constructed with via `acl_user:`. The agent's
     #   {#acl_scope} resolves this user's permission_strings
     #   (objectId + roles, expanded) at construction. nil for
     #   session_token / acl_role / master-key construction.
     attr_reader :acl_user_scope
 
     # @return [Parse::Role, String, Symbol, nil] the Role identity the
-    #   agent was constructed with via +acl_role:+. Used for
+    #   agent was constructed with via `acl_role:`. Used for
     #   service-account-style scoping ("see as if a user with this
     #   role were asking") without a specific user. nil for
     #   session_token / acl_user / master-key construction.
     attr_reader :acl_role_scope
 
     # @return [Parse::ACLScope::Resolution, nil] the resolved ACL scope
-    #   for this agent. Frozen at construction. +nil+ means master-key
+    #   for this agent. Frozen at construction. `nil` means master-key
     #   posture — the agent runs every tool call with the application
     #   master key, bypassing per-row ACL/CLP enforcement. Non-nil
-    #   carries a +permission_strings+ allow-set that built-in tools
+    #   carries a `permission_strings` allow-set that built-in tools
     #   forward to mongo-direct / Atlas Search via {#acl_scope_kwargs}.
     attr_reader :acl_scope
 
     # @return [Boolean] whether this agent may run Atlas Search tools
-    #   in master-key-equivalent mode when no +session_token+ is set.
+    #   in master-key-equivalent mode when no `session_token` is set.
     #   See {#master_atlas?} for the gate semantics applied by the
     #   Atlas Search tool handlers in {Parse::Agent::Tools}.
     attr_reader :master_atlas
@@ -921,7 +921,7 @@ module Parse
     #   Parse::Client has no master_key). In client mode the dispatchable
     #   tool set is restricted to {CLIENT_SAFE_READ_TOOLS},
     #   {CLIENT_SAFE_MUTATION_TOOLS} (gated on {#allow_mutations?}), and
-    #   any registered tool declared +client_safe: true+.
+    #   any registered tool declared `client_safe: true`.
     def client_mode?
       @client_mode == true
     end
@@ -930,7 +930,7 @@ module Parse
     #   tools (create_object/update_object/delete_object). Layered with
     #   the process-level PARSE_AGENT_ALLOW_WRITE_TOOLS +
     #   PARSE_AGENT_ALLOW_RAW_CRUD env vars (all three must be true).
-    #   Default: +false+ in client mode, +true+ in master-key mode.
+    #   Default: `false` in client mode, `true` in master-key mode.
     def allow_mutations?
       @allow_mutations == true
     end
@@ -1050,10 +1050,10 @@ module Parse
       tok.cancelled?
     end
 
-    # @return [Boolean] +true+ when this agent has been explicitly
-    #   constructed with +master_atlas: true+. Used by the Atlas
+    # @return [Boolean] `true` when this agent has been explicitly
+    #   constructed with `master_atlas: true`. Used by the Atlas
     #   Search tool handlers in {Parse::Agent::Tools} to gate calls
-    #   that would otherwise refuse because no +session_token+ is
+    #   that would otherwise refuse because no `session_token` is
     #   available — see {Parse::AtlasSearch} for the reasoning behind
     #   the dedicated opt-in (Atlas Search bypasses Parse Server
     #   entirely, so the agent's normal master-key posture is not a
@@ -1098,7 +1098,7 @@ module Parse
     # The agent's resolved identity claim set — the
     # `["*", userObjectId, "role:Foo", ...]` array that gets matched
     # against a document's `_rperm` (for read) or `_wperm` (for
-    # write). Returns +nil+ for master-key posture (unrestricted reach
+    # write). Returns `nil` for master-key posture (unrestricted reach
     # — no filtering applied).
     #
     # The set is identity-based and identical for read and write
@@ -1113,7 +1113,7 @@ module Parse
     # A ready-to-prepend `$match` stage filtering an aggregation
     # pipeline to documents the agent's scope is allowed to READ.
     # Mirrors what the built-in read tools inject automatically via
-    # {Parse::ACLScope.match_stage_for}. Returns +nil+ for master-key
+    # {Parse::ACLScope.match_stage_for}. Returns `nil` for master-key
     # posture.
     #
     # @return [Hash, nil]
@@ -1129,7 +1129,7 @@ module Parse
     # perform writes (e.g., a custom `agent_method` that batch-updates
     # rows under the agent's scope) prepend this stage themselves so
     # the update only sees rows whose `_wperm` includes the agent's
-    # identity. Returns +nil+ for master-key posture.
+    # identity. Returns `nil` for master-key posture.
     #
     # @return [Hash, nil]
     def acl_write_match_stage
@@ -1138,11 +1138,11 @@ module Parse
       { "$match" => Parse::ACL.write_predicate(perms) }
     end
 
-    # +true+ when the agent carries any non-master-key scope
+    # `true` when the agent carries any non-master-key scope
     # (session_token, acl_user, or acl_role). Use this when deciding
     # whether a Parse Server endpoint that DOES NOT enforce ACL
     # (notably the REST `aggregate` endpoint) is safe to route through:
-    # any +true+ here means the REST path would silently bypass the
+    # any `true` here means the REST path would silently bypass the
     # agent's declared scope, so the tool must use the mongo-direct
     # path (which runs Parse::ACLScope's `_rperm` injection).
     #
@@ -1151,11 +1151,11 @@ module Parse
       !@acl_scope.nil?
     end
 
-    # +true+ when the agent's ACL scope cannot be honored by Parse
+    # `true` when the agent's ACL scope cannot be honored by Parse
     # Server's REST surface at all (no "act as role" affordance) and
     # the SDK must auto-route every built-in tool through mongo-direct
     # (Parse::MongoDB.aggregate / Parse::Query#results_direct). Fires
-    # ONLY for +acl_user:+ and +acl_role:+ scopes; session_token
+    # ONLY for `acl_user:` and `acl_role:` scopes; session_token
     # agents can keep the REST find_objects path because Parse Server
     # validates the token natively for find / get endpoints.
     #
@@ -1170,7 +1170,7 @@ module Parse
       !(@acl_user_scope.nil? && @acl_role_scope.nil?)
     end
 
-    # +true+ when an AGGREGATE operation for this agent MUST run through
+    # `true` when an AGGREGATE operation for this agent MUST run through
     # the SDK's mongo-direct path (Parse::MongoDB.aggregate) instead of
     # Parse Server's REST aggregate endpoint. The REST aggregate endpoint
     # enforces NEITHER ACL, CLP, nor protectedFields and requires the
@@ -1183,7 +1183,7 @@ module Parse
     # REST find/get DOES enforce a session token — but REST aggregate does
     # not). Fires for acl_user / acl_role scopes AND for any session-token
     # identity, including a runtime-impersonated agent whose @acl_scope has
-    # been cleared. Master-key agents return +false+.
+    # been cleared. Master-key agents return `false`.
     #
     # @return [Boolean]
     def requires_mongo_direct?
@@ -1766,7 +1766,7 @@ module Parse
       #                           false default would silently disable
       #                           writes for every existing master-key
       #                           agent).
-      # When +parent:+ is supplied, the child cannot widen the parent's
+      # When `parent:` is supplied, the child cannot widen the parent's
       # gate: if parent.allow_mutations? is false, child must also be
       # false. Default-on-nil inherits the parent's value verbatim so
       # the safe path (omit kwarg) is trivially correct.
@@ -2543,6 +2543,18 @@ module Parse
           details = e.respond_to?(:to_details) ? e.to_details : {}
           response = error_response(e.message, error_code: :access_denied, details: details.any? ? details : nil)
 
+          # Recognized-but-unimplemented tool (the built-in write/admin
+          # CRUD tools ship without a handler). Surface the actionable
+          # message rather than collapsing to the opaque internal-error
+          # path, and tag a distinct :not_implemented code so callers can
+          # branch on "tool doesn't exist here" vs a real failure.
+        rescue Parse::Agent::NotImplemented => e
+          trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
+          payload[:success]     = false
+          payload[:error_class] = e.class.name
+          payload[:error_code]  = :not_implemented
+          response = error_response(e.message, error_code: :not_implemented)
+
           # Validation errors (e.g. from registered tool handlers or get_objects)
         rescue Parse::Agent::ValidationError => e
           trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
@@ -3012,7 +3024,7 @@ module Parse
     # {#import_conversation}.
     IMPORT_MAX_CONTENT_LEN = 32 * 1024
     # @!visibility private
-    # Roles permitted on imported conversation entries. +system+ and +tool+
+    # Roles permitted on imported conversation entries. `system` and `tool`
     # are explicitly excluded — without this guard, an attacker who
     # controls a saved transcript can plant fabricated tool results
     # (which the next LLM turn treats as authentic prior retrievals) or
@@ -3024,10 +3036,10 @@ module Parse
     # conversation history and token usage. Permissions are NEVER
     # restored from the export — they belong to the Agent constructor.
     #
-    # Only +role: "user"+ and +role: "assistant"+ entries with
-    # String/nil +content+ are accepted. Disallowed roles, oversized
+    # Only `role: "user"` and `role: "assistant"` entries with
+    # String/nil `content` are accepted. Disallowed roles, oversized
     # content, or message counts above {IMPORT_MAX_MESSAGES} raise
-    # +ArgumentError+; a malformed JSON payload returns +false+ with a
+    # `ArgumentError`; a malformed JSON payload returns `false` with a
     # warning.
     #
     # @param json_string [String] JSON string from {#export_conversation}.
@@ -3761,11 +3773,11 @@ module Parse
 
     # Get the current authentication context.
     #
-    # @return [Hash] +:type+ is one of +:session_token+, +:acl_user+,
-    #   +:acl_role+, or +:master_key+. +:using_master_key+ is +true+
-    #   ONLY for +:master_key+; scoped agents (session_token / acl_user /
+    # @return [Hash] `:type` is one of `:session_token`, `:acl_user`,
+    #   `:acl_role`, or `:master_key`. `:using_master_key` is `true`
+    #   ONLY for `:master_key`; scoped agents (session_token / acl_user /
     #   acl_role) run with explicit ACL enforcement and never set the
-    #   master-key flag. The +:identity+ slot carries a posture-specific
+    #   master-key flag. The `:identity` slot carries a posture-specific
     #   identifier (user_id for session/acl_user, role name for
     #   acl_role, nil for master_key) so the AUDIT log can attribute
     #   tool calls accurately.

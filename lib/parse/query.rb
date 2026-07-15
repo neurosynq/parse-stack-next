@@ -19,7 +19,7 @@ module Parse
   # your Parse collections by utilizing the {http://docs.parseplatform.org/rest/guide/#queries
   # REST Querying interface}. This is the main engine behind making Parse queries
   # on remote collections. It takes a set of constraints and generates the
-  # proper hash parameters that are passed to an API request in order to retrive
+  # proper hash parameters that are passed to an API request in order to retrieve
   # matching results. The querying design pattern is inspired from
   # {http://datamapper.org/ DataMapper} where symbols are overloaded with
   # specific methods with attached values.
@@ -44,19 +44,19 @@ module Parse
   # names when compiling the query. This feature can be overridden by changing the
   # value of {Parse::Query.field_formatter}.
   #
-  #  # default uses :columnize
-  #  query = Parse::User.query :field_one => 1, :FieldTwo => 2, :Field_Three => 3
-  #  query.compile_where # => {"fieldOne"=>1, "fieldTwo"=>2, "fieldThree"=>3}
+  #     # default uses :columnize
+  #     query = Parse::User.query :field_one => 1, :FieldTwo => 2, :Field_Three => 3
+  #     query.compile_where # => {"fieldOne"=>1, "fieldTwo"=>2, "fieldThree"=>3}
   #
-  #  # turn off
-  #  Parse::Query.field_formatter = nil
-  #  query = Parse::User.query :field_one => 1, :FieldTwo => 2, :Field_Three => 3
-  #  query.compile_where # => {"field_one"=>1, "FieldTwo"=>2, "Field_Three"=>3}
+  #     # turn off
+  #     Parse::Query.field_formatter = nil
+  #     query = Parse::User.query :field_one => 1, :FieldTwo => 2, :Field_Three => 3
+  #     query.compile_where # => {"field_one"=>1, "FieldTwo"=>2, "Field_Three"=>3}
   #
-  #  # force everything camel case
-  #  Parse::Query.field_formatter = :camelize
-  #  query = Parse::User.query :field_one => 1, :FieldTwo => 2, :Field_Three => 3
-  #  query.compile_where # => {"FieldOne"=>1, "FieldTwo"=>2, "FieldThree"=>3}
+  #     # force everything camel case
+  #     Parse::Query.field_formatter = :camelize
+  #     query = Parse::User.query :field_one => 1, :FieldTwo => 2, :Field_Three => 3
+  #     query.compile_where # => {"FieldOne"=>1, "FieldTwo"=>2, "FieldThree"=>3}
   #
   # Most of the constraints supported by Parse are available to `Parse::Query`.
   # Assuming you have a column named `field`, here are some examples. For an
@@ -635,23 +635,23 @@ module Parse
     # When set, Parse Server excludes the named fields from each returned
     # object, complementing the {#keys} allowlist. The two options can be
     # combined: Parse Server first applies the {#keys} allowlist, then
-    # strips any field names listed in +excludeKeys+.
+    # strips any field names listed in `excludeKeys`.
     #
-    # @note On the REST query path (+encode: true+ in {#compile}) this maps to
-    #   Parse Server's path-scoped +excludeKeys+. On the mongo-direct path
-    #   (explicit +.results_direct+, an auto-route, or an aggregation that
-    #   auto-promotes — e.g. an +$inQuery+ pointer constraint that rewrites to
-    #   a +$lookup+) the pipeline can only project the {#keys} allowlist, so
+    # @note On the REST query path (`encode: true` in {#compile}) this maps to
+    #   Parse Server's path-scoped `excludeKeys`. On the mongo-direct path
+    #   (explicit `.results_direct`, an auto-route, or an aggregation that
+    #   auto-promotes — e.g. an `$inQuery` pointer constraint that rewrites to
+    #   a `$lookup`) the pipeline can only project the {#keys} allowlist, so
     #   the SDK honors the denylist as a post-fetch sanitize over the returned
     #   results instead. That mongo-direct sanitize is recursive by name: it
     #   strips EVERY key with a matching name at any depth, so excluding a
     #   field also removes a same-named field inside included/nested objects —
     #   broader than the REST path's top-level/dotted scoping. Reserved
-    #   envelope fields (+objectId+, +className+, +__type+, +createdAt+,
-    #   +updatedAt+, +ACL+ and their Mongo storage-form names) are never
+    #   envelope fields (`objectId`, `className`, `__type`, `createdAt`,
+    #   `updatedAt`, `ACL` and their Mongo storage-form names) are never
     #   stripped, so object reconstruction is unaffected. The raw aggregation
     #   accessor (`aggregate(...).raw`) returns unredacted documents — the
-    #   sanitize applies to the object/decoded result paths. +excludeKeys+ is a
+    #   sanitize applies to the object/decoded result paths. `excludeKeys` is a
     #   projection convenience, not an ACL/CLP boundary, so it does not affect
     #   access control.
     #
@@ -731,7 +731,7 @@ module Parse
     #  Song.all :order => { :like_count => :desc, :name => :asc }
     # @param ordering [Parse::Order, Symbol, String, Hash] one or more
     #   ordering directives. A Hash maps field => direction. Unsupported
-    #   argument types raise +ArgumentError+ rather than being silently
+    #   argument types raise `ArgumentError` rather than being silently
     #   dropped.
     # @return [self]
     def order(*ordering)
@@ -808,9 +808,9 @@ module Parse
     #  Song.all :limit => 2025 # large limits supported.
     #  Song.all :limit => :max # as many records as possible.
     # @param count [Integer,Symbol,String,nil] The number of records to return.
-    #  Pass +:max+ to fetch as many records as possible (Parse-Server dependent).
-    #  Numeric strings (e.g. +"50"+) are coerced to Integer. Pass +nil+ to
-    #  explicitly clear the limit. Any other value raises +ArgumentError+
+    #  Pass `:max` to fetch as many records as possible (Parse-Server dependent).
+    #  Numeric strings (e.g. `"50"`) are coerced to Integer. Pass `nil` to
+    #  explicitly clear the limit. Any other value raises `ArgumentError`
     #  rather than silently disabling the limit.
     # @return [self]
     def limit(count)
@@ -855,18 +855,18 @@ module Parse
     # Forces Parse Server (and the underlying MongoDB driver) to use the
     # named index instead of the query planner's choice. Useful for
     # benchmarking or for working around sub-optimal plan selection.
-    # The hint is emitted in the compiled REST query body as the +hint+
+    # The hint is emitted in the compiled REST query body as the `hint`
     # parameter (supported by Parse Server 7.4.0+) AND forwarded to the
-    # mongo-direct path — +results_direct+ / +count_direct+ / +distinct_direct+
+    # mongo-direct path — `results_direct` / `count_direct` / `distinct_direct`
     # pass it to {Parse::MongoDB.aggregate}/{Parse::MongoDB.find} as the Mongo
-    # +hint+ option, so a plan diagnosed with {#explain} can be corrected on
+    # `hint` option, so a plan diagnosed with {#explain} can be corrected on
     # either path.
     #
     # @example Force a specific index
     #   Post.query(:status => "published").hint("status_1_created_at_-1").results
     #
     # @param index_name [String, nil, :_read_] the index name or key pattern to use,
-    #   or +nil+ to clear a previously set hint. Called with no arguments acts as a
+    #   or `nil` to clear a previously set hint. Called with no arguments acts as a
     #   reader and returns the current hint value.
     # @return [String, nil, self]
     HINT_UNSET = :_hint_unset_ # @!visibility private
@@ -1029,7 +1029,7 @@ module Parse
     #  # parts of a single where constraint
     #  { :column.constraint => value }
     # @see Parse::Constraint
-    # @param conditions [Hash] a set of constraints for this query.
+    # @param expressions [Hash] a set of constraints for this query.
     # @param opts [Hash] a set of options when adding the constraints. This is
     #  specific for each Parse::Constraint.
     # @return [self]
@@ -1669,7 +1669,7 @@ module Parse
       _id _created_at _updated_at _acl
     ].freeze
 
-    # Recursively delete every key named in +names+ from a nested
+    # Recursively delete every key named in `names` from a nested
     # Hash/Array structure, in place. Symbol and string keys both match.
     # @param value [Object] a Hash, Array, or scalar
     # @param names [Set<String>] the key names to drop
@@ -2079,6 +2079,39 @@ module Parse
       end
     end
 
+    # Auth kwargs for the Atlas Search bridge (`#atlas_search` builder
+    # block). Explicit `atlas_search(...)` auth kwargs win; otherwise
+    # derive from the query's own scope (`#scope_to_user`, an explicit
+    # `session_token`, an ambient `Parse.with_session`, or `use_master_key`).
+    #
+    # Unlike {#mongo_direct_auth_kwargs} there is deliberately NO silent
+    # `{ master: true }` fallback for an unscoped query — we return `{}`
+    # so `Parse::AtlasSearch.search_with_stage` applies Atlas Search's own
+    # policy (`resolve_scope!`): public-only fallback, or `ACLRequired`
+    # when `Parse::AtlasSearch.require_session_token` is on. That keeps the
+    # search bridge fail-closed rather than defaulting an unscoped block
+    # search to a master-key ACL bypass.
+    # @return [Hash] zero-or-one-of { session_token:/master:/acl_user:/acl_role: }
+    # @!visibility private
+    def atlas_search_auth_kwargs(options)
+      explicit = %i[session_token master acl_user acl_role].select { |k| options.key?(k) }
+      return explicit.to_h { |k| [k, options[k]] } if explicit.any?
+
+      if @acl_user
+        { acl_user: @acl_user }
+      elsif @acl_role
+        { acl_role: @acl_role }
+      elsif @session_token.is_a?(String) && !@session_token.empty?
+        { session_token: @session_token }
+      elsif use_master_key == true
+        { master: true }
+      elsif (ambient = ambient_session_token)
+        { session_token: ambient }
+      else
+        {}
+      end
+    end
+
     # The fiber-local ambient session token set by `Parse.with_session`,
     # or nil. A whitespace-only ambient is treated as absent so it cannot
     # block the master fallback and then fail a later presence check —
@@ -2140,7 +2173,7 @@ module Parse
     #   instead of Parse::Object instances (default: false)
     # @param max_time_ms [Integer, nil] optional server-side time limit in milliseconds.
     #   When provided, MongoDB will cancel the aggregation if it exceeds this budget and
-    #   {Parse::MongoDB::ExecutionTimeout} is raised. Pass +nil+ (the default) for no cap.
+    #   {Parse::MongoDB::ExecutionTimeout} is raised. Pass `nil` (the default) for no cap.
     # @yield a block to iterate for each object that matched the query
     # @return [Array<Parse::Object>] if raw is false, a list of Parse::Object subclasses
     # @return [Array<Hash>] if raw is true, Parse-formatted JSON hashes
@@ -2180,7 +2213,7 @@ module Parse
 
       # Execute the aggregation directly on MongoDB. The pipeline was built
       # entirely from SDK constraint translation (no user-supplied stages),
-      # so legitimate +_rperm+/+_wperm+ references emitted by
+      # so legitimate `_rperm`/`_wperm` references emitted by
       # {#readable_by_role} and friends are sanctioned. The DENIED_OPERATORS
       # walk still runs at the MongoDB layer. When `session_token:` or
       # `master:` is supplied, Parse::MongoDB.aggregate adds the
@@ -2491,46 +2524,47 @@ module Parse
       skip_val = options[:skip] || (@skip > 0 ? @skip : 0)
 
       if block_given?
-        # Builder block mode
+        # Builder-block mode: the caller configures the $search stage
+        # directly via the yielded SearchBuilder. Route through
+        # Parse::AtlasSearch.search_with_stage so the SAME SDK-side
+        # enforcement chain as the options API runs — scope resolution,
+        # CLP `find`, the ACL $match placed AFTER $search (not prepended
+        # to stage 0), protectedFields/pointerFields redaction, and the
+        # $expr protected-field oracle guard on the caller filter.
+        #
+        # The previous implementation called Parse::MongoDB.aggregate
+        # with `allow_internal_fields: true` and NO auth forwarding: it
+        # both ran unscoped (resolved to :public / master, no ACL) and,
+        # because that helper prepends the ACL $match at position 0, was
+        # rejected outright by Atlas (which requires $search at stage 0).
+        # It was non-functional under both supported security configs.
         index_name = options[:index] || Parse::AtlasSearch.default_index
         builder = Parse::AtlasSearch::SearchBuilder.new(index_name: index_name)
         yield builder
 
-        # Build pipeline: $search must be first
-        pipeline = [builder.build]
-
-        # Add score projection
-        pipeline << { "$addFields" => { "_score" => { "$meta" => "searchScore" } } }
-
-        # Add existing query constraints as $match
+        # Carry the query's existing constraints as the caller filter,
+        # exactly as the options branch does (same raw compiled shape,
+        # interpolated into a post-$search $match).
+        filter = options[:filter]
         compiled_where = compile_where
         if compiled_where.present?
           regular_constraints = compiled_where.reject { |f, _| f == "__aggregation_pipeline" }
-          if regular_constraints.any?
-            mongo_constraints = convert_constraints_for_direct_mongodb(regular_constraints)
-            pipeline << { "$match" => mongo_constraints }
-          end
+          filter = (filter || {}).merge(regular_constraints) if regular_constraints.any?
         end
 
-        # Add sort, skip, limit
-        pipeline << { "$sort" => { "_score" => -1 } }
-        pipeline << { "$skip" => skip_val } if skip_val > 0
-        pipeline << { "$limit" => limit }
+        search_opts = {
+          filter: filter,
+          limit: limit,
+          skip: skip_val,
+          class_name: @table,
+          raw: options[:raw],
+          **atlas_search_auth_kwargs(options),
+        }
+        rp = options.key?(:read_preference) ? options[:read_preference] : @read_preference
+        search_opts[:read_preference] = rp unless rp.nil?
+        search_opts[:max_time_ms] = options[:max_time_ms] if options.key?(:max_time_ms)
 
-        # SDK-built pipeline only — see results_direct for rationale.
-        raw_results = Parse::MongoDB.aggregate(@table, pipeline,
-                                               allow_internal_fields: true,
-                                               read_preference: @read_preference,
-                                             hint: @hint)
-
-        # Convert results
-        if options[:raw]
-          Parse::AtlasSearch::SearchResult.new(results: raw_results, raw_results: raw_results)
-        else
-          parse_results = Parse::MongoDB.convert_documents_to_parse(raw_results, @table)
-          objects = parse_results.map { |doc| Parse.decode(doc) }.compact
-          Parse::AtlasSearch::SearchResult.new(results: objects, raw_results: raw_results)
-        end
+        Parse::AtlasSearch.search_with_stage(@table, builder.build, **search_opts)
       else
         # Simple options API - delegate to AtlasSearch module
         raise ArgumentError, "query string is required when not using a block" if query.nil?
@@ -5964,22 +5998,22 @@ module Parse
     # @param verbose [Boolean, nil] whether to print verbose output (nil means use query's setting)
     # @param mongo_direct [Boolean] if true, uses MongoDB directly bypassing Parse Server (required for $literal)
     # @param max_time_ms [Integer, nil] optional server-side time limit in milliseconds passed to
-    #   {Parse::MongoDB.aggregate} when mongo_direct is true. Pass +nil+ (the default) for no cap.
-    # @param raw_values [Boolean] when true, passes +rawValues: true+ to the Parse Server REST
+    #   {Parse::MongoDB.aggregate} when mongo_direct is true. Pass `nil` (the default) for no cap.
+    # @param raw_values [Boolean] when true, passes `rawValues: true` to the Parse Server REST
     #   aggregate endpoint (PS 9.9.0+). Has no effect on the mongo-direct path.
-    # @param raw_field_names [Boolean] when true, passes +rawFieldNames: true+ to the Parse Server
+    # @param raw_field_names [Boolean] when true, passes `rawFieldNames: true` to the Parse Server
     #   REST aggregate endpoint (PS 9.9.0+). Has no effect on the mongo-direct path.
     # @param allow_internal_fields [Boolean] when true, the mongo-direct path
-    #   forwards +allow_internal_fields: true+ to {Parse::MongoDB.aggregate} so
-    #   SDK-built ACL `$match` stages that legitimately reference +_rperm+ /
-    #   +_wperm+ (emitted by {Parse::Query#readable_by}, +#publicly_readable+,
+    #   forwards `allow_internal_fields: true` to {Parse::MongoDB.aggregate} so
+    #   SDK-built ACL `$match` stages that legitimately reference `_rperm` /
+    #   `_wperm` (emitted by {Parse::Query#readable_by}, `#publicly_readable`,
     #   and friends) pass the pipeline-security internal-fields denylist —
-    #   matching the parity already held by +results_direct+ / +count_direct+ /
-    #   +distinct_direct+. Set +true+ ONLY when this Aggregation's pipeline was
+    #   matching the parity already held by `results_direct` / `count_direct` /
+    #   `distinct_direct`. Set `true` ONLY when this Aggregation's pipeline was
     #   built entirely from SDK constraint translation (no caller-supplied
     #   stages); the credential-field guard (`_hashed_password`, session tokens,
-    #   auth data) is what +allow_internal_fields+ relaxes, so it must never be
-    #   set on a pipeline that interpolates user input. Defaults to +false+.
+    #   auth data) is what `allow_internal_fields` relaxes, so it must never be
+    #   set on a pipeline that interpolates user input. Defaults to `false`.
     def initialize(query, pipeline, verbose: nil, mongo_direct: false, max_time_ms: nil,
                    raw_values: false, raw_field_names: false, allow_internal_fields: false)
       @query = query
@@ -6041,7 +6075,7 @@ module Parse
 
     # Execute aggregation directly on MongoDB
     # @param max_time_ms [Integer, nil] optional server-side time limit (milliseconds).
-    #   Defaults to the value passed to {#initialize} via the +max_time_ms:+ keyword.
+    #   Defaults to the value passed to {#initialize} via the `max_time_ms:` keyword.
     # @return [Array<Hash>] raw MongoDB results
     def execute_direct!(max_time_ms: @max_time_ms)
       table = @query.instance_variable_get(:@table)

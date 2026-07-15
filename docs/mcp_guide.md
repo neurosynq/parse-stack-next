@@ -3844,7 +3844,7 @@ Tenant scope is applied as a `$match` stage at the TOP-level pipeline only. Sub-
 2. **Refuse lookups from tenant-bound agents entirely** — application code rejects pipelines containing `$lookup` / `$graphLookup` / `$unionWith` when `agent.tenant_id` is set.
 3. **Mark joinable cross-tenant classes as `agent_hidden`** — the most permissive joining-class is unreachable to the agent.
 
-The proper fix (recursive scope injection into sub-pipelines) is tracked as a follow-up; see [SECURITY_GUIDE.md](../SECURITY_GUIDE.md) for the threat model and posture recommendations.
+The proper fix (recursive scope injection into sub-pipelines) is tracked as a follow-up; see [acl_clp_guide.md](./acl_clp_guide.md) and [SECURITY.md](../SECURITY.md) for the threat model and posture recommendations.
 
 ---
 

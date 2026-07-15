@@ -645,8 +645,9 @@ explicit mappings are correct for production.
 - [mongodb_direct_guide.md](./mongodb_direct_guide.md) — the full
   direct-Mongo / index-management API reference (DSL spelling,
   writer URI, triple-gate, rake tasks)
-- [SECURITY_GUIDE.md](../SECURITY_GUIDE.md) — security posture around
-  the writer URI, role validation, audit trail
+- [acl_clp_guide.md](./acl_clp_guide.md) — security posture around
+  the writer URI, role validation, and ACL/CLP enforcement on the
+  mongo-direct path
 - MongoDB official: <https://www.mongodb.com/docs/manual/indexes/>
 - Parse Server source for auto-managed indexes:
   <https://github.com/parse-community/parse-server/blob/master/src/Adapters/Storage/Mongo/MongoStorageAdapter.js>
