@@ -1,5 +1,100 @@
 ## parse-stack-next Changelog
 
+### 5.5.5
+
+#### Agent `call_method` runs under the caller's scope, not the master key
+
+- **FIXED**: Instance `call_method` resolved its receiver with a bare
+  `klass.find` on the master-backed default client, so a scoped agent could
+  read — and through a write method, mutate — any object by id. The receiver
+  (both the real call and the dry-run existence check) is now fetched through
+  the requesting agent's scope: a session scope fetches with the session token
+  (Parse Server enforces ACL/CLP), an `acl_user` / `acl_role` scope routes
+  mongo-direct (ACL simulation), and a row the scope cannot read fails closed
+  to "not found". The method body runs inside the caller's session so its own
+  writes inherit the same principal, and an instance write/admin method under
+  an `acl_user` / `acl_role` scope — which has no session token to bind — is
+  refused rather than run with master authority.
+- **FIXED**: Aggregation pipelines now default-deny joins under an active
+  tenant scope. A `$lookup` / `$graphLookup` / `$unionWith` sub-pipeline runs
+  in the joined collection's context with no tenant predicate injected, so any
+  such join could surface rows from other tenants; all are refused while a
+  tenant scope is active. The `$unionWith` bare-string shorthand
+  (`{ "$unionWith" => "Class" }`) is now covered by that guard as well as the
+  class-allowlist, hidden/underscore, and CLP-`find` gates, which previously
+  inspected only the Hash form.
+- **IMPROVED**: Unimplemented agent tools now raise a typed
+  `Parse::Agent::NotImplemented` error, and tools without a handler are omitted
+  from tool listings.
+
+#### Blank or injected credentials no longer escalate to the master key
+
+- **FIXED**: An explicitly-supplied blank or whitespace `session_token:` no
+  longer falls through to the master key. It now fails closed to an anonymous
+  request (master suppressed, no session header) and does not fall back to a
+  bound or ambient token. `Parse.with_session` likewise rejects a blank token
+  at the source instead of storing a whitespace ambient that the request layer
+  would then drop.
+- **FIXED**: The control options `use_master_key` and `session` can no longer
+  be set from a string-keyed conditions hash — the "forward a request params
+  hash straight into `Query.new` / `where`" pattern. `{"use_master_key" =>
+  true}` from untrusted params was an ACL/CLP-bypass mass-assignment; these two
+  keys are now honored only when passed as symbols (code-authored), and a
+  string form is treated as an ordinary field constraint with a warning.
+
+#### Atlas Search and aggregation stay ACL-scoped
+
+- **FIXED**: Atlas Search keeps `$search` at pipeline stage 0 while running the
+  scoped ACL/CLP enforcement chain (ACL `$match` folded after `$search`,
+  protectedFields strip, pointerFields filter, and a protected-field `$expr`
+  oracle guard). Query-derived constraints on the builder-block, options, and
+  autocomplete paths are converted to MongoDB storage form before the
+  post-`$search` `$match`, so a pointer/date/objectId constraint targets the
+  correct storage column and no longer fails BSON serialization.
+- **FIXED**: `search_with_stage` rejects a non-`$search` stage and any
+  `returnStoredSource`, which could otherwise return only index-stored fields
+  (without `_rperm`), be read as public by the ACL match, and leak restricted
+  rows.
+- **FIXED**: A scoped `$geoNear` folds the ACL predicate into `$geoNear.query`
+  rather than prepending a `$match`, keeping `$geoNear` at stage 0 so the query
+  no longer fails under ACL scoping. The fold embeds a copy of the caller's
+  existing query so the caller's pipeline is not mutated.
+
+#### Outbound fetches and the shipped CLI are hardened
+
+- **FIXED**: `parse-console --url` now parses and scheme-validates its argument
+  (HTTP(S) only) before fetching, instead of passing it to `Kernel#open` —
+  closing a path where a `|command` argument would be executed as a subprocess.
+- **IMPROVED**: The Cohere reranker `base_url` is validated to reject
+  credentials embedded in the URL and plaintext HTTP to non-loopback hosts.
+- **IMPROVED**: Remote file/image fetches enforce a streaming size cap that
+  aborts mid-download; the per-call `max_bytes:` ceiling is validated as a
+  positive integer, so a zero, negative, or non-numeric value is refused up
+  front rather than silently rejecting every response.
+
+#### Redaction, locking, and API ergonomics
+
+- **IMPROVED**: Query-string credential redaction for logging and request
+  profiling is now a single shared implementation, so the two cannot drift. It
+  redacts the value of any credential-bearing parameter name (matched by a
+  generic rule with a safe-list, and aware of percent-encoded names) and uses
+  possessive-quantifier matching so it stays linear on pathological URLs.
+- **FIXED**: The in-process fallback mutex registry (used when no shared lock
+  store is configured) is bounded, and its eviction can no longer reclaim a
+  mutex a caller is about to lock — a pending-acquirer reservation prevents two
+  callers from getting distinct mutexes for the same key.
+- **IMPROVED**: `call_function` and `trigger_job` accept request options as
+  bare keyword arguments (for example `call_function("f", {}, session_token:
+  t)`), merged with the explicit `opts:` hash for back-compat.
+
+#### Packaging, CI, and docs
+
+- **CHANGED**: The shipped-gem file list was narrowed to an allowlist of the
+  library, binaries, docs, examples, and standard metadata.
+- **CHANGED**: The SHA-pinned `ruby/setup-ruby` GitHub action was bumped to
+  `v1.318.0` across the CI, docs, and release workflows.
+- **IMPROVED**: README, test-server, and guide updates, plus YARD styling.
+
 ### 5.5.4
 
 #### Dependency updates
