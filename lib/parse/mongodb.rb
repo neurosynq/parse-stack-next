@@ -1708,7 +1708,12 @@ module Parse
         existing = geo[q_key]
         geo[q_key] =
           if existing.is_a?(Hash) && !existing.empty?
-            { "$and" => [existing, match_pred] }
+            # `existing` is still the caller's own `$geoNear.query` hash
+            # (the outer `.dup` above is shallow). Embed a copy, not the
+            # original, so the folded pipeline and the caller's pipeline
+            # don't share a mutable hash — honoring the "caller stages are
+            # not mutated" contract in both directions.
+            { "$and" => [existing.dup, match_pred] }
           else
             match_pred
           end

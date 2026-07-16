@@ -40,7 +40,14 @@ module Parse
       # @return [String] the URL with credential-bearing query values redacted
       def sanitize(url)
         str = url.to_s
-        str.gsub(/([?&])([^=&#]+)=([^&#]*)/) do
+        # Possessive quantifiers (`++` / `*+`) so the param-name and value
+        # runs never backtrack: on a pathological URL (a long run of
+        # non-delimiter chars with no `=`) the greedy form would rescan
+        # super-linearly (polynomial ReDoS on caller-supplied URLs flowing
+        # into log/profile redaction). The excluded-delimiter classes make
+        # the match unambiguous, so possessive matching is identical to the
+        # greedy match for every real query string.
+        str.gsub(/([?&])([^=&#]++)=([^&#]*+)/) do
           sep = Regexp.last_match(1)
           name = Regexp.last_match(2)
           value = Regexp.last_match(3)

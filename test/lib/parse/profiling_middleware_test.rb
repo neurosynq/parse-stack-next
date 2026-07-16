@@ -254,6 +254,20 @@ class ProfilingMiddlewareTest < Minitest::Test
     refute sanitized.include?("[FILTERED]"), "double-encoded name must not be treated as sessionToken"
   end
 
+  # ReDoS guard: the redaction regex uses possessive quantifiers so it stays
+  # well-behaved on pathological URLs (a long delimiter-free run, or many
+  # repeated '?"'). It must complete quickly and still redact a trailing
+  # credential correctly.
+  def test_sanitize_url_handles_pathological_input_quickly
+    require "timeout"
+    middleware = Parse::Middleware::Profiling.new(nil)
+    pathological = "http://h/p?" + ("?\"" * 100_000) + "&sessionToken=r:secret"
+    sanitized = Timeout.timeout(5) { middleware.send(:sanitize_url, pathological) }
+    assert sanitized.include?("sessionToken=[FILTERED]"),
+           "a trailing credential must still be redacted under pathological input"
+    refute sanitized.include?("r:secret")
+  end
+
   # Legitimate Parse params that merely CONTAIN a sensitive substring
   # (keys, excludeKeys, redirectClassNameForKey) must NOT be over-redacted.
   def test_sanitize_url_keeps_safe_key_params_visible

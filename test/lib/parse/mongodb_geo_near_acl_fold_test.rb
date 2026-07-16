@@ -66,4 +66,22 @@ class MongoDBGeoNearACLFoldTest < Minitest::Test
     assert result.first.key?("$geoNear"), "$geoNear (string key) must stay at stage 0"
     assert_equal ACL_STAGE["$match"], result.first["$geoNear"]["query"]
   end
+
+  # The folded pipeline must not share the caller's `$geoNear.query` hash:
+  # mutating the caller's query afterwards must not change the folded result
+  # (and vice versa). Guards the shallow-copy aliasing the outer .dup missed.
+  def test_folded_query_does_not_alias_callers_query_hash
+    caller_query = { "status" => "published" }
+    pipeline = [{ :$geoNear => { near: { type: "Point", coordinates: [1, 2] },
+                                 distanceField: "dist", query: caller_query } }]
+    result = fold(pipeline)
+    folded_existing = result.first[:$geoNear][:query]["$and"][0]
+    refute_same caller_query, folded_existing,
+                "the folded pipeline must embed a copy of the caller's query, not the same object"
+
+    # Mutating the caller's query after folding must not leak into the result.
+    caller_query["injected"] = true
+    refute folded_existing.key?("injected"),
+           "mutating the caller's $geoNear.query must not change the folded pipeline"
+  end
 end

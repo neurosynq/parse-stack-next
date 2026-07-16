@@ -576,7 +576,7 @@ module Parse
                  redirect: false,
                  content_length_proc: ->(len) {
                    if len && len > size_cap
-                     raise ArgumentError, "Remote file exceeds Parse::File.max_remote_size (#{size_cap} bytes)"
+                     raise ArgumentError, "Remote file exceeds the size cap (#{size_cap} bytes)"
                    end
                    # DNS-rebinding re-check: by the time content_length_proc
                    # fires, the connection has been established. Re-resolve
@@ -585,7 +585,7 @@ module Parse
                  },
                  progress_proc: ->(transferred) {
                    if transferred > size_cap
-                     raise ArgumentError, "Remote file exceeds Parse::File.max_remote_size (#{size_cap} bytes)"
+                     raise ArgumentError, "Remote file exceeds the size cap (#{size_cap} bytes)"
                    end
                  })
       end
