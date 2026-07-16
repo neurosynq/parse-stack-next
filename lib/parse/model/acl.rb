@@ -178,8 +178,8 @@ module Parse
       ACL::Permission.new(read, write)
     end
 
-    # Build a MongoDB +$match+-shaped predicate that matches documents
-    # readable by any of +permissions+. The canonical shape Parse
+    # Build a MongoDB `$match`-shaped predicate that matches documents
+    # readable by any of `permissions`. The canonical shape Parse
     # Server enforces at the REST/SDK layer:
     #
     #   { "$or" => [
@@ -187,27 +187,27 @@ module Parse
     #       { "_rperm" => { "$exists" => false } }
     #   ]}
     #
-    # The +$exists: false+ branch is mandatory. Parse Server treats a
-    # missing +_rperm+ field as publicly readable (the field is only
+    # The `$exists: false` branch is mandatory. Parse Server treats a
+    # missing `_rperm` field as publicly readable (the field is only
     # written when an ACL exists), so dropping that branch silently
     # hides every public document.
     #
     # Used by:
     #   * {Parse::Query::ACLReadableByConstraint} and
     #     {Parse::Query::ACLReadableByRoleConstraint} to compile
-    #     +:ACL.readable_by+ / +:ACL.readable_by_role+ query
+    #     `:ACL.readable_by` / `:ACL.readable_by_role` query
     #     constraints into aggregation pipelines.
-    #   * {Parse::AtlasSearch} to enforce ACL on +$search+ pipelines
+    #   * {Parse::AtlasSearch} to enforce ACL on `$search` pipelines
     #     that bypass Parse Server and query MongoDB directly.
     #
     # @param permissions [Array<String>] permission strings — user
-    #   objectIds, +"role:RoleName"+, or +"*"+ for public.
-    # @param include_public [Boolean] when +true+ (default), +"*"+ is
-    #   appended to +permissions+ if missing. Set +false+ for a
-    #   strict-permissions check (e.g., +:ACL.readable_by => "none"+
+    #   objectIds, `"role:RoleName"`, or `"*"` for public.
+    # @param include_public [Boolean] when `true` (default), `"*"` is
+    #   appended to `permissions` if missing. Set `false` for a
+    #   strict-permissions check (e.g., `:ACL.readable_by => "none"`
     #   semantics).
-    # @return [Hash] a MongoDB +$or+ subexpression suitable for use
-    #   inside a +$match+ stage.
+    # @return [Hash] a MongoDB `$or` subexpression suitable for use
+    #   inside a `$match` stage.
     # @example
     #   permissions = ["*", user.id] + user.acl_roles.to_a.map { |n| "role:#{n}" }
     #   pipeline << { "$match" => Parse::ACL.read_predicate(permissions) }
@@ -215,13 +215,13 @@ module Parse
       permission_predicate("_rperm", permissions, include_public: include_public, include_missing: include_missing)
     end
 
-    # Build a MongoDB +$match+-shaped predicate that matches documents
-    # writable by any of +permissions+. Mirrors {.read_predicate} on
-    # the +_wperm+ field. See {.read_predicate} for the shape and the
-    # significance of the +$exists: false+ branch.
+    # Build a MongoDB `$match`-shaped predicate that matches documents
+    # writable by any of `permissions`. Mirrors {.read_predicate} on
+    # the `_wperm` field. See {.read_predicate} for the shape and the
+    # significance of the `$exists: false` branch.
     # @param permissions [Array<String>] permission strings.
-    # @param include_public [Boolean] whether to append +"*"+.
-    # @return [Hash] a MongoDB +$or+ subexpression.
+    # @param include_public [Boolean] whether to append `"*"`.
+    # @return [Hash] a MongoDB `$or` subexpression.
     def self.write_predicate(permissions, include_public: true, include_missing: true)
       permission_predicate("_wperm", permissions, include_public: include_public, include_missing: include_missing)
     end
@@ -229,15 +229,15 @@ module Parse
     # @!visibility private
     # Shared implementation for {.read_predicate} and {.write_predicate}.
     # Normalizes the permissions array (string-coerced, deduplicated,
-    # +"*"+ appended when +include_public+) and returns the +$or+
+    # `"*"` appended when `include_public`) and returns the `$or`
     # subexpression.
     # @param include_missing [Boolean] when true (default), append the
-    #   +{ field => { "$exists" => false } }+ branch so a missing
-    #   +_rperm+/+_wperm+ (treated as public by Parse Server) also matches.
+    #   `{ field => { "$exists" => false } }` branch so a missing
+    #   `_rperm`/`_wperm` (treated as public by Parse Server) also matches.
     #   Set false for an EXACT match that requires the column to be present
-    #   and to contain one of +permissions+ (the strict/`readable_by_exact`
-    #   surface). When false and only the +$in+ branch remains, the +$or+
-    #   wrapper is dropped for a cleaner +{ field => { "$in" => perms } }+.
+    #   and to contain one of `permissions` (the strict/`readable_by_exact`
+    #   surface). When false and only the `$in` branch remains, the `$or`
+    #   wrapper is dropped for a cleaner `{ field => { "$in" => perms } }`.
     def self.permission_predicate(field, permissions, include_public: true, include_missing: true)
       perms = Array(permissions).map(&:to_s).reject(&:empty?).uniq
       perms << "*" if include_public && !perms.include?("*")

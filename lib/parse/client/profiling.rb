@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "faraday"
+require_relative "url_redaction"
 
 module Parse
   module Middleware
@@ -120,8 +121,10 @@ module Parse
       private
 
       def sanitize_url(url)
-        # Remove sensitive query parameters
-        url.gsub(/([?&])(sessionToken|masterKey|apiKey)=[^&]*/, '\1\2=[FILTERED]')
+        # Redact credential-bearing query params. Shared with the logging
+        # middleware via Parse::Middleware::URLRedaction so the two
+        # sanitizers can't drift (F14 + its profiling twin).
+        Parse::Middleware::URLRedaction.sanitize(url)
       end
 
       def response_body_size(response_env)

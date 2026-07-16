@@ -608,11 +608,11 @@ module Parse
         end
       end
 
-      # RFC 6455 §1.3 magic GUID used to derive +Sec-WebSocket-Accept+
-      # from the client-supplied +Sec-WebSocket-Key+. Server proves it
+      # RFC 6455 §1.3 magic GUID used to derive `Sec-WebSocket-Accept`
+      # from the client-supplied `Sec-WebSocket-Key`. Server proves it
       # spoke WebSocket (and not e.g. a confused HTTP/1.1 server that
-      # happens to return +HTTP/1.1 101+) by echoing
-      # +Base64(SHA1(key || GUID))+ back to the client.
+      # happens to return `HTTP/1.1 101`) by echoing
+      # `Base64(SHA1(key || GUID))` back to the client.
       WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11".freeze
 
       # @!visibility private
@@ -625,7 +625,7 @@ module Parse
       HANDSHAKE_PER_LINE_BYTES = 8 * 1024
 
       # Perform WebSocket handshake. Verifies the server's
-      # +Sec-WebSocket-Accept+ matches the SHA-1 of the random key +
+      # `Sec-WebSocket-Accept` matches the SHA-1 of the random key +
       # the WebSocket magic GUID, preventing cross-protocol acceptance
       # of any HTTP/1.1 101 response from a non-WebSocket server.
       def perform_handshake(host, path)
@@ -668,8 +668,8 @@ module Parse
       # @!visibility private
       # Parses and validates the server handshake response per RFC 6455 §4.1.
       # Refuses any response that does not (a) start with HTTP/1.1 101,
-      # (b) carry +Upgrade: websocket+, (c) carry +Connection: Upgrade+,
-      # and (d) carry +Sec-WebSocket-Accept: <expected>+ matching the
+      # (b) carry `Upgrade: websocket`, (c) carry `Connection: Upgrade`,
+      # and (d) carry `Sec-WebSocket-Accept: <expected>` matching the
       # client-derived value.
       def validate_handshake_response!(response, expected_accept)
         if response.empty?

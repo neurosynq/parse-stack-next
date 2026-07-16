@@ -41,6 +41,32 @@ class SecurityHardeningTest < Minitest::Test
     assert_match(/http\(s\)/, err.message)
   end
 
+  # max_bytes is a positive byte ceiling, not a sentinel. A non-positive value
+  # (0 / negative) or non-numeric input must be refused up front — a negative
+  # cap would otherwise drive size_cap negative and make every non-empty
+  # response raise "exceeds". Validation runs before any DNS/host work, so a
+  # public host here never reaches the network.
+  def test_safe_open_url_rejects_zero_max_bytes
+    err = assert_raises(ArgumentError) do
+      Parse::File.safe_open_url("https://example.com/f.png", max_bytes: 0)
+    end
+    assert_match(/max_bytes must be a positive integer/, err.message)
+  end
+
+  def test_safe_open_url_rejects_negative_max_bytes
+    err = assert_raises(ArgumentError) do
+      Parse::File.safe_open_url("https://example.com/f.png", max_bytes: -5)
+    end
+    assert_match(/max_bytes must be a positive integer/, err.message)
+  end
+
+  def test_safe_open_url_rejects_non_numeric_max_bytes
+    err = assert_raises(ArgumentError) do
+      Parse::File.safe_open_url("https://example.com/f.png", max_bytes: "lots")
+    end
+    assert_match(/max_bytes must be a positive integer/, err.message)
+  end
+
   def test_safe_open_url_rejects_loopback_ip_literal
     err = assert_raises(ArgumentError) do
       Parse::File.safe_open_url("http://127.0.0.1/anything")

@@ -282,10 +282,10 @@ module Parse
     # @param node [Hash, Array, Object] the structure to walk.
     # @param allow_internal_fields [Boolean] when true, skip the
     #   {INTERNAL_FIELDS_DENYLIST} check (e.g. for SDK-generated ACL
-    #   filters that legitimately reference +_rperm+/+_wperm+ via
+    #   filters that legitimately reference `_rperm`/`_wperm` via
     #   {Parse::Query#readable_by_role} and friends). The
     #   {DENIED_OPERATORS} walk and forensic-operator gating still
-    #   apply. Default +false+ for callers that forward raw,
+    #   apply. Default `false` for callers that forward raw,
     #   user-influenced pipelines (e.g. Agent MCP tools).
     # @raise [Error] if a denied operator is found at any depth.
     # @return [true]

@@ -80,8 +80,8 @@ module Parse
       # Return the Session record for this session token.
       # @param token [String] the session token
       # @param opts [Hash] additional keyword options forwarded to the
-      #   underlying client request (e.g. +cache: false+,
-      #   +use_master_key: false+, +headers:+).
+      #   underlying client request (e.g. `cache: false`,
+      #   `use_master_key: false`, `headers:`).
       # @return [Session] the session for this token, otherwise nil.
       def session(token, **opts)
         # A stray :session_token in opts would be forwarded into the request

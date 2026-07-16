@@ -764,4 +764,78 @@ class AgentTenantScopeTest < Minitest::Test
       end
     end
   end
+
+  # ---- Join default-deny under an active tenant scope -----------------------
+  #
+  # The outer $match only scopes the outer collection; a $lookup /
+  # $graphLookup / $unionWith sub-pipeline runs in the JOINED collection's
+  # context with no tenant predicate injected. Because the tenant VALUE is
+  # not propagated into the sub-pipeline, EVERY join is refused while a
+  # tenant scope is active — even a join into a class that declares the
+  # same agent_tenant_scope (it is tenant-aware but still returns all
+  # tenants' rows). Fail-closed until value propagation lands.
+
+  ORG_SCOPE = { field: :org_id, value: "acme" }.freeze
+
+  def assert_joins(pipeline)
+    Parse::Agent::Tools.assert_joins_tenant_safe!(pipeline, ORG_SCOPE)
+  end
+
+  def test_join_into_tenant_incompatible_class_is_refused
+    # TenantProduct declares no agent_tenant_scope.
+    pipeline = [{ "$lookup" => { "from" => "TenantProduct", "as" => "p" } }]
+    err = assert_raises(Parse::Agent::AccessDenied) { assert_joins(pipeline) }
+    assert_equal :tenant_join_denied, err.kind
+  end
+
+  def test_join_into_tenant_compatible_class_is_also_refused
+    # TenantOrder declares agent_tenant_scope on the SAME field (org_id),
+    # but the scope VALUE is not propagated into the join sub-pipeline, so
+    # the join would still return every tenant's rows -> deny.
+    pipeline = [{ "$lookup" => { "from" => "TenantOrder", "as" => "o" } }]
+    err = assert_raises(Parse::Agent::AccessDenied) { assert_joins(pipeline) }
+    assert_equal :tenant_join_denied, err.kind
+  end
+
+  def test_string_form_union_with_is_refused
+    # `{ "$unionWith" => "X" }` (bare-string shorthand) previously slipped
+    # past the guard because only Hash values were inspected.
+    pipeline = [{ "$unionWith" => "TenantOrder" }]
+    err = assert_raises(Parse::Agent::AccessDenied) { assert_joins(pipeline) }
+    assert_equal :tenant_join_denied, err.kind
+  end
+
+  def test_string_form_union_with_nested_in_facet_is_refused
+    pipeline = [{ "$facet" => { "b" => [{ "$unionWith" => "TenantOrder" }] } }]
+    assert_raises(Parse::Agent::AccessDenied) { assert_joins(pipeline) }
+  end
+
+  def test_graph_lookup_and_union_with_are_guarded
+    [
+      [{ "$graphLookup" => { "from" => "TenantProduct" } }],
+      [{ "$unionWith" => { "coll" => "TenantProduct" } }],
+    ].each do |pipeline|
+      assert_raises(Parse::Agent::AccessDenied) { assert_joins(pipeline) }
+    end
+  end
+
+  def test_join_nested_in_facet_is_caught
+    pipeline = [{ "$facet" => { "branch" => [{ "$lookup" => { "from" => "TenantProduct" } }] } }]
+    assert_raises(Parse::Agent::AccessDenied) { assert_joins(pipeline) }
+  end
+
+  def test_join_in_lookup_subpipeline_is_caught
+    pipeline = [{ "$lookup" => { "from" => "TenantOrder", "as" => "o",
+                                 "pipeline" => [{ "$unionWith" => { "coll" => "TenantProduct" } }] } }]
+    assert_raises(Parse::Agent::AccessDenied) { assert_joins(pipeline) }
+  end
+
+  def test_no_scope_allows_any_join
+    pipeline = [{ "$lookup" => { "from" => "TenantProduct" } }]
+    Parse::Agent::Tools.assert_joins_tenant_safe!(pipeline, nil) # must not raise
+  end
+
+  def test_pipeline_without_joins_passes
+    assert_joins([{ "$match" => { "amount" => { "$gt" => 10 } } }, { "$limit" => 5 }])
+  end
 end

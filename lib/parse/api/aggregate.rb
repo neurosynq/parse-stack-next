@@ -25,7 +25,7 @@ module Parse
       module ClassMethods
         # Get the aggregate API path for this class.
         #
-        # +className+ is validated to prevent path-smuggling — aggregate
+        # `className` is validated to prevent path-smuggling — aggregate
         # endpoints are master-key-only on Parse Server, so any traversal
         # here pivots a master-key request to a different endpoint.
         #
@@ -66,9 +66,9 @@ module Parse
       # @param pipeline [Array] the MongoDB aggregation pipeline stages.
       # @param opts [Hash] additional options to pass to the {Parse::Client} request.
       # @param headers [Hash] additional HTTP headers to send with the request.
-      # @param raw_values [Boolean] when true, adds +rawValues: true+ to the request
+      # @param raw_values [Boolean] when true, adds `rawValues: true` to the request
       #   so Parse Server returns un-decoded field values (PS 9.9.0+, #10438).
-      # @param raw_field_names [Boolean] when true, adds +rawFieldNames: true+ to the
+      # @param raw_field_names [Boolean] when true, adds `rawFieldNames: true` to the
       #   request so Parse Server returns original (un-decoded) field names (PS 9.9.0+).
       # @return [Parse::Response]
       # @see Parse::Query

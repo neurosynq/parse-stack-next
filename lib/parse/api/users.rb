@@ -108,9 +108,9 @@ module Parse
       #
       # Client-side rate limited on a per-email basis using the same
       # tracker that backs {#login} (entries are namespaced under a
-      # +pwreset:+ prefix so the two limiters don't collide on usernames
+      # `pwreset:` prefix so the two limiters don't collide on usernames
       # that happen to equal an email). Every request counts toward the
-      # backoff — Parse Server's +requestPasswordReset+ response does
+      # backoff — Parse Server's `requestPasswordReset` response does
       # not differentiate "email exists" from "email does not exist"
       # (and rightly so, to avoid account enumeration), so the SDK
       # cannot distinguish a legitimate retry from an attacker probing
@@ -212,23 +212,23 @@ module Parse
       # that the username + password combination is correct without producing a
       # new session token on success.
       #
-      # Uses the +POST /parse/verifyPassword+ endpoint (credentials in the request
-      # BODY, mirroring +login+) rather than the +GET+ form. Parse Server accepts
+      # Uses the `POST /parse/verifyPassword` endpoint (credentials in the request
+      # BODY, mirroring `login`) rather than the `GET` form. Parse Server accepts
       # both (same handler, neither master-key gated; the POST variant landed in
       # 7.1.0), but POST keeps the plaintext password out of the URL — and
-      # therefore out of server access logs, reverse-proxy logs, the +Referer+
+      # therefore out of server access logs, reverse-proxy logs, the `Referer`
       # header, and the SDK's URL-keyed response cache.
       #
       # On success Parse Server returns the user object (HTTP 200) with the same
-      # shape as a login response (minus +sessionToken+). On failure it returns a
+      # shape as a login response (minus `sessionToken`). On failure it returns a
       # 4xx with an error body, most commonly:
-      # - code 101 (+ERROR_OBJECT_NOT_FOUND+) for an unknown username or wrong password.
-      # - code 205 (+ERROR_EMAIL_NOT_FOUND+) when +preventLoginWithUnverifiedEmail+
+      # - code 101 (`ERROR_OBJECT_NOT_FOUND`) for an unknown username or wrong password.
+      # - code 205 (`ERROR_EMAIL_NOT_FOUND`) when `preventLoginWithUnverifiedEmail`
       #   is enabled and the account's email has not been verified.
       #
       # Client-side rate limited per username using the SAME bucket as {#login}
       # (bare username, no namespace) — failures across both credential oracles
-      # accumulate, so an attacker cannot bypass a +login+ lockout by pivoting to
+      # accumulate, so an attacker cannot bypass a `login` lockout by pivoting to
       # this endpoint. The trade-off: a run of failed step-up re-auth calls counts
       # toward (and can trigger) the primary login lockout for that username.
       # Client-side limiting is a convenience, not a boundary — the server is the

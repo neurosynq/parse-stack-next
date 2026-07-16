@@ -40,6 +40,14 @@ module Parse
     # acquisitions are silent.
     DEGRADED_WARNING_THROTTLE_SECONDS = 60
 
+    # Upper bound on the in-process Mutex registry (degraded fallback
+    # path). Without a cap, every distinct lock key leaks a permanent
+    # Mutex — a memory-exhaustion vector when keys are high-cardinality
+    # or attacker-influenced. Real deployments use a handful of lock
+    # keys, so this ceiling is far above normal use and only bites a
+    # runaway/abusive caller.
+    PROCESS_MUTEX_REGISTRY_MAX = 4096
+
     class << self
       # Find the Moneta store the lock should write through. Resolved
       # at call time (not memoized) so a test or an operator can swap
@@ -182,20 +190,127 @@ module Parse
         DEFAULT_POLL_BASE + (rand * 2 - 1) * DEFAULT_POLL_JITTER
       end
 
+      # Run `block` while holding the per-key in-process Mutex for the
+      # degraded fallback path, safe against registry eviction. This is
+      # the API callers should use — NOT the bare {.process_mutex}
+      # accessor.
+      #
+      # {.process_mutex} returns an *unlocked* Mutex; there is a window
+      # between the accessor returning and the caller reaching
+      # `Mutex#synchronize`. Under registry saturation the approximate-LRU
+      # eviction could observe that Mutex as unlocked and reclaim it, after
+      # which a second caller mints a DISTINCT Mutex for the same key —
+      # splitting mutual exclusion. This method closes the window by
+      # registering the caller as a *pending acquirer* inside the same
+      # critical section that hands out the Mutex, and eviction never
+      # reclaims a key with pending acquirers (or a locked Mutex).
+      #
+      # @param key [String] cache key.
+      # @yield executed while holding the per-key Mutex.
+      # @return the block's return value.
+      def synchronize_process_mutex(key, &block)
+        mutex = checkout_process_mutex(key)
+        begin
+          mutex.synchronize(&block)
+        ensure
+          checkin_process_mutex(key)
+        end
+      end
+
       # Per-key in-process Mutex registry for the degraded fallback
       # path. The first acquisition for a given key creates the
       # Mutex; subsequent acquisitions reuse it. Registry itself is
       # guarded by a tiny outer Mutex so two threads racing the
       # first acquisition of the same key get the same Mutex.
       #
+      # The registry is bounded at {PROCESS_MUTEX_REGISTRY_MAX} entries
+      # via approximate-LRU eviction: reused keys move to the MRU end,
+      # and when a new key would overflow the cap the oldest evictable
+      # mutexes are dropped first. A Mutex is evictable only when it is
+      # neither locked NOR reserved by a pending acquirer (see
+      # {.synchronize_process_mutex}); dropping either would let a
+      # concurrent acquisition mint a fresh Mutex for the same key and
+      # split mutual exclusion. Under pathological all-in-use saturation
+      # the registry may briefly exceed the cap rather than break
+      # correctness.
+      #
+      # NOTE: a Mutex handed back here is eligible for eviction until it is
+      # locked. Callers that lock it later (rather than immediately) must
+      # go through {.synchronize_process_mutex}, which reserves the key.
+      #
       # @param key [String] cache key.
       # @return [Mutex]
       def process_mutex(key)
         @process_mutex_registry_lock ||= Mutex.new
+        @process_mutex_registry_lock.synchronize { registry_get_or_create(key) }
+      end
+
+      # @api private
+      # Atomically get-or-create the per-key Mutex AND reserve it for the
+      # caller (pending-acquirer count += 1) so eviction cannot reclaim it
+      # before the caller locks it. MUST be balanced by
+      # {.checkin_process_mutex} in an `ensure`.
+      #
+      # @param key [String] cache key.
+      # @return [Mutex]
+      def checkout_process_mutex(key)
+        @process_mutex_registry_lock ||= Mutex.new
         @process_mutex_registry_lock.synchronize do
-          @process_mutex_registry ||= {}
-          @process_mutex_registry[key] ||= Mutex.new
+          mutex = registry_get_or_create(key)
+          pending = (@process_mutex_pending ||= Hash.new(0))
+          pending[key] += 1
+          mutex
         end
+      end
+
+      # @api private
+      # Release a pending-acquirer reservation taken by
+      # {.checkout_process_mutex}.
+      #
+      # @param key [String] cache key.
+      # @return [void]
+      def checkin_process_mutex(key)
+        @process_mutex_registry_lock ||= Mutex.new
+        @process_mutex_registry_lock.synchronize do
+          pending = (@process_mutex_pending ||= Hash.new(0))
+          if pending.key?(key)
+            pending[key] -= 1
+            pending.delete(key) if pending[key] <= 0
+          end
+        end
+      end
+
+      # @api private
+      # Get-or-create + approximate-LRU eviction. MUST be called with
+      # `@process_mutex_registry_lock` already held (all three public
+      # entry points synchronize on it before calling in).
+      #
+      # @param key [String] cache key.
+      # @return [Mutex]
+      def registry_get_or_create(key)
+        reg = (@process_mutex_registry ||= {})
+
+        if (existing = reg[key])
+          # Move to the MRU end so the eviction scan treats it as
+          # recently used (Ruby Hashes preserve insertion order).
+          reg.delete(key)
+          reg[key] = existing
+          return existing
+        end
+
+        if reg.size >= PROCESS_MUTEX_REGISTRY_MAX
+          pending = (@process_mutex_pending ||= Hash.new(0))
+          reg.keys.each do |k|
+            break if reg.size < PROCESS_MUTEX_REGISTRY_MAX
+            m = reg[k]
+            # Evict only Mutexes that are neither locked nor reserved by a
+            # pending acquirer — either state means a caller is (about to
+            # be) inside it, and reclaiming would split mutual exclusion.
+            reg.delete(k) unless m.locked? || pending[k] > 0
+          end
+        end
+
+        reg[key] = Mutex.new
       end
 
       # @return [Float] CLOCK_MONOTONIC seconds.
@@ -211,6 +326,7 @@ module Parse
         @degraded_warned_at = nil
         @process_mutex_registry = nil
         @process_mutex_registry_lock = nil
+        @process_mutex_pending = nil
         @auto_secret = nil
         @plain_sha_warned = nil
       end

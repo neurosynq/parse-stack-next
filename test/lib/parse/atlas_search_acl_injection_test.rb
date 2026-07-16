@@ -34,6 +34,17 @@ require "parse/atlas_search"
 #      Parse::MongoDB.aggregate, hiding the bug.
 #   7. protectedFields are stripped from result rows.
 #   8. _highlights paths matching protectedFields are dropped.
+
+# Model backing the block-mode filter-conversion regression test. A real
+# SDK model is required so the query's pointer constraint maps to its `_p_`
+# storage column (the conversion is schema-aware — see
+# Parse::Query#convert_field_for_direct_mongodb).
+class AtlasBlockModeDoc < Parse::Object
+  parse_class "AtlasBlockModeDoc"
+  property :title, :string
+  belongs_to :owner, as: :user
+end
+
 class AtlasSearchACLInjectionTest < Minitest::Test
   # @!visibility private
   # Fake Mongo::Collection. Captures whatever pipeline / options are
@@ -481,7 +492,233 @@ class AtlasSearchACLInjectionTest < Minitest::Test
     assert pipeline.first.key?("$searchMeta"), "facet pipeline begins with $searchMeta"
   end
 
+  # ----------------------------------------------------------------
+  # NEW: $expr protected-field oracle guard on the caller filter.
+  #
+  # `validate_filter!` blocks $where/$function/$out/$merge but NOT
+  # `$expr`. A scoped caller could otherwise binary-search a
+  # protectedFields value with `{"$expr" => {"$gt" => ["$ssn", "M"]}}`
+  # even though the column is stripped from OUTPUT. The `filter:` path
+  # previously skipped the guard the mongo-direct aggregate path applies.
+  # ----------------------------------------------------------------
+
+  def test_expr_filter_referencing_protected_field_is_refused
+    seed_clp("Song", {
+      "find" => { "*" => true },
+      "protectedFields" => { "*" => ["ssn"] },
+    })
+    token = stub_session(user_id: "U1", role_names: [])
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::AtlasSearch.search("Song", "hi",
+                                session_token: token,
+                                filter: { "$expr" => { "$gt" => ["$ssn", "M"] } })
+    end
+  end
+
+  def test_expr_filter_referencing_nonprotected_field_is_allowed
+    seed_clp("Song", {
+      "find" => { "*" => true },
+      "protectedFields" => { "*" => ["ssn"] },
+    })
+    token = stub_session(user_id: "U1", role_names: [])
+    # Referencing a NON-protected field via $expr is fine.
+    Parse::AtlasSearch.search("Song", "hi",
+                              session_token: token,
+                              filter: { "$expr" => { "$gt" => ["$plays", 10] } })
+    pipeline = pipeline_for("Song")
+    refute_nil pipeline, "non-protected $expr filter must execute"
+  end
+
+  def test_expr_filter_referencing_protected_field_allowed_for_master
+    seed_clp("Song", {
+      "find" => { "*" => true },
+      "protectedFields" => { "*" => ["ssn"] },
+    })
+    # master has no protectedFields to protect — the guard self-skips.
+    Parse::AtlasSearch.search("Song", "hi",
+                              master: true,
+                              filter: { "$expr" => { "$gt" => ["$ssn", "M"] } })
+    pipeline = pipeline_for("Song")
+    refute_nil pipeline, "master $expr filter must execute (no protectedFields enforcement)"
+  end
+
+  # ----------------------------------------------------------------
+  # NEW: Parse::Query#atlas_search builder-block mode.
+  #
+  # Previously non-functional: it called Parse::MongoDB.aggregate with
+  # no auth forwarding (unscoped) AND an ACL $match prepended to stage 0
+  # (rejected by Atlas). It now routes through search_with_stage, which
+  # forwards the query's scope, keeps $search at stage 0, and runs the
+  # full enforcement chain.
+  # ----------------------------------------------------------------
+
+  def test_query_block_mode_forwards_session_scope_and_keeps_search_stage_zero
+    require "parse/query"
+    token = stub_session(user_id: "U1", role_names: %w[Member])
+    q = Parse::Query.new("Song")
+    q.session_token = token
+    q.atlas_search do |s|
+      s.text(query: "love", path: :title)
+    end
+
+    pipeline = pipeline_for("Song")
+    refute_nil pipeline, "block-mode search must execute a pipeline"
+    assert_equal 0, search_stage_index(pipeline),
+                 "$search MUST be stage 0 in block mode (Atlas invariant)"
+    acl = find_acl_match_stage(pipeline)
+    refute_nil acl, "block-mode must inject the ACL $match for a session scope"
+    perms = acl["$match"]["$or"].first["_rperm"]["$in"]
+    assert_includes perms, "U1", "ACL $match must carry the scoped user's permission strings"
+  end
+
+  def test_query_block_mode_master_suppresses_acl_match
+    require "parse/query"
+    # Explicit `master: true` on the call wins over any query scope.
+    q = Parse::Query.new("Song")
+    q.atlas_search(master: true) do |s|
+      s.text(query: "love", path: :title)
+    end
+
+    pipeline = pipeline_for("Song")
+    refute_nil pipeline, "block-mode master search must execute"
+    assert_equal 0, search_stage_index(pipeline), "$search MUST be stage 0"
+    assert_nil find_acl_match_stage(pipeline),
+               "master: true block search must NOT inject a _rperm $match"
+  end
+
+  def test_query_block_mode_expr_filter_oracle_guard_applies
+    require "parse/query"
+    seed_clp("Song", {
+      "find" => { "*" => true },
+      "protectedFields" => { "*" => ["ssn"] },
+    })
+    token = stub_session(user_id: "U1", role_names: [])
+    q = Parse::Query.new("Song")
+    q.session_token = token
+    # The caller filter carried into the block search must get the same
+    # $expr oracle guard as the options path.
+    assert_raises(Parse::CLPScope::Denied) do
+      q.atlas_search(filter: { "$expr" => { "$gt" => ["$ssn", "M"] } }) do |s|
+        s.text(query: "hi", path: :title)
+      end
+    end
+  end
+
+  # search_with_stage forwards a caller-supplied $search stage. A stage
+  # carrying returnStoredSource: true would make Atlas return only
+  # index-stored fields; if _rperm is not stored, the ACL $match treats
+  # the row as public (missing _rperm == unrestricted) and restricted
+  # documents leak. The stage must be rejected outright.
+  def test_search_with_stage_rejects_return_stored_source
+    stage = { "$search" => {
+      "index" => "default",
+      "text" => { "query" => "x", "path" => "title" },
+      "returnStoredSource" => true,
+    } }
+    err = assert_raises(Parse::AtlasSearch::InvalidSearchParameters) do
+      Parse::AtlasSearch.search_with_stage("Song", stage, master: true)
+    end
+    assert_match(/returnStoredSource/, err.message)
+    assert_nil pipeline_for("Song"), "an unsafe stage must not execute a pipeline"
+  end
+
+  def test_search_with_stage_rejects_non_search_stage
+    assert_raises(Parse::AtlasSearch::InvalidSearchParameters) do
+      Parse::AtlasSearch.search_with_stage("Song", { "$match" => { "x" => 1 } }, master: true)
+    end
+  end
+
+  def test_search_with_stage_accepts_plain_search_stage
+    stage = { "$search" => { "index" => "default", "text" => { "query" => "x", "path" => "title" } } }
+    Parse::AtlasSearch.search_with_stage("Song", stage, master: true) # must not raise
+    refute_nil pipeline_for("Song")
+  end
+
+  # Regression (#5): builder-block mode must convert the query's own
+  # constraints to Mongo storage form before folding them into the
+  # post-$search $match. A raw Parse::Pointer would fail BSON
+  # serialization; an unconverted pointer field would target `owner`
+  # instead of the `_p_owner` storage column.
+  def test_query_block_mode_converts_pointer_constraint_to_storage_form
+    require "parse/query"
+    seed_clp("AtlasBlockModeDoc", {
+      "find" => { "*" => true }, "get" => { "*" => true }, "count" => { "*" => true },
+    })
+    token = stub_session(user_id: "U1", role_names: [])
+    q = AtlasBlockModeDoc.query(owner: Parse::Pointer.new("_User", "U1"))
+    q.session_token = token
+    q.atlas_search { |s| s.text(query: "love", path: :title) }
+
+    pipeline = pipeline_for("AtlasBlockModeDoc")
+    refute_nil pipeline, "block-mode search must execute a pipeline"
+
+    assert no_parse_pointer?(pipeline),
+      "block-mode filter must not carry a raw Parse::Pointer into the pipeline (BSON-unsafe)"
+
+    filter_match = pipeline.reverse.find do |st|
+      st.is_a?(Hash) && st["$match"].is_a?(Hash) && st["$match"].key?("_p_owner")
+    end
+    refute_nil filter_match,
+      "owner pointer constraint must convert to the _p_owner storage column"
+    assert_equal "_User$U1", filter_match["$match"]["_p_owner"]
+  end
+
+  # The SAME conversion must apply on the options (non-block) API and on
+  # autocomplete — both merged raw REST-shape constraints before the fix.
+  def test_query_options_mode_converts_pointer_constraint_to_storage_form
+    require "parse/query"
+    seed_clp("AtlasBlockModeDoc", {
+      "find" => { "*" => true }, "get" => { "*" => true }, "count" => { "*" => true },
+    })
+    token = stub_session(user_id: "U1", role_names: [])
+    q = AtlasBlockModeDoc.query(owner: Parse::Pointer.new("_User", "U1"))
+    q.session_token = token
+    q.atlas_search("love", fields: [:title])
+
+    pipeline = pipeline_for("AtlasBlockModeDoc")
+    refute_nil pipeline, "options-mode search must execute a pipeline"
+    assert no_parse_pointer?(pipeline),
+      "options-mode filter must not carry a raw Parse::Pointer (BSON-unsafe)"
+    filter_match = pipeline.reverse.find do |st|
+      st.is_a?(Hash) && st["$match"].is_a?(Hash) && st["$match"].key?("_p_owner")
+    end
+    refute_nil filter_match, "owner pointer constraint must convert to _p_owner"
+    assert_equal "_User$U1", filter_match["$match"]["_p_owner"]
+  end
+
+  def test_query_autocomplete_mode_converts_pointer_constraint_to_storage_form
+    require "parse/query"
+    seed_clp("AtlasBlockModeDoc", {
+      "find" => { "*" => true }, "get" => { "*" => true }, "count" => { "*" => true },
+    })
+    token = stub_session(user_id: "U1", role_names: [])
+    q = AtlasBlockModeDoc.query(owner: Parse::Pointer.new("_User", "U1"))
+    q.session_token = token
+    q.atlas_autocomplete("lo", field: :title)
+
+    pipeline = pipeline_for("AtlasBlockModeDoc")
+    refute_nil pipeline, "autocomplete must execute a pipeline"
+    assert no_parse_pointer?(pipeline),
+      "autocomplete filter must not carry a raw Parse::Pointer (BSON-unsafe)"
+    filter_match = pipeline.reverse.find do |st|
+      st.is_a?(Hash) && st["$match"].is_a?(Hash) && st["$match"].key?("_p_owner")
+    end
+    refute_nil filter_match, "owner pointer constraint must convert to _p_owner in autocomplete"
+    assert_equal "_User$U1", filter_match["$match"]["_p_owner"]
+  end
+
   private
+
+  # Deep-walk: true iff no Parse::Pointer object survives anywhere in the
+  # structure (a raw Parse::Pointer in a $match fails BSON encoding).
+  def no_parse_pointer?(obj)
+    case obj
+    when Parse::Pointer then false
+    when Hash  then obj.each_pair.all? { |k, v| no_parse_pointer?(k) && no_parse_pointer?(v) }
+    when Array then obj.all? { |v| no_parse_pointer?(v) }
+    else true
+    end
+  end
 
   def capture_stderr
     old = $stderr

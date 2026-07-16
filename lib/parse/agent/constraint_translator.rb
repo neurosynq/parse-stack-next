@@ -72,9 +72,9 @@ module Parse
       ].freeze
 
       # Operators whose value carries an inner sub-query of the shape
-      # +{className:, where:, key:}+. Each must be validated through
+      # `{className:, where:, key:}`. Each must be validated through
       # {Tools.assert_class_accessible!} so the LLM cannot reach into a
-      # hidden class via the sub-query, and the inner +where+ must be
+      # hidden class via the sub-query, and the inner `where` must be
       # recursively re-translated so blocked operators inside it are
       # also caught.
       CROSS_CLASS_OPERATORS = %w[
@@ -260,11 +260,11 @@ module Parse
       end
 
       # Translate the value of a cross-class operator
-      # (+$inQuery+/+$notInQuery+/+$select+/+$dontSelect+). The value
-      # carries an embedded +className+ that must be validated against
-      # the active accessibility policy, and an embedded +where+ that
+      # (`$inQuery`/`$notInQuery`/`$select`/`$dontSelect`). The value
+      # carries an embedded `className` that must be validated against
+      # the active accessibility policy, and an embedded `where` that
       # must be recursively translated so blocked operators (e.g.
-      # +$where+ nested inside) cannot smuggle through.
+      # `$where` nested inside) cannot smuggle through.
       def translate_cross_class_value(op, val, depth:, agent: nil)
         return val unless val.is_a?(Hash)
         val = val.transform_keys(&:to_s)
@@ -321,20 +321,20 @@ module Parse
         translate_value(val, depth: depth, agent: agent)
       end
 
-      # Validate the owning-object class named by a +$relatedTo+ constraint.
+      # Validate the owning-object class named by a `$relatedTo` constraint.
       #
-      # +$relatedTo+ has the shape +{ object: <Pointer>, key: <relation field> }+.
-      # Unlike +$inQuery+ / +$select+ it carries no +className+ / inner +where+,
+      # `$relatedTo` has the shape `{ object: <Pointer>, key: <relation field> }`.
+      # Unlike `$inQuery` / `$select` it carries no `className` / inner `where`,
       # so it is NOT a {CROSS_CLASS_OPERATORS} entry — but it DOES reach across
       # to a second class: the owning object whose relation is being read. Left
       # unvalidated, an agent narrowed to one class (or with a class globally
-      # +agent_hidden+) could still name a relation anchored on an off-allowlist
-      # class via the +object+ pointer. That is the SDK-surface analog of
-      # GHSA-wmwx-jr2p-4j4r, where Parse Server's own +$relatedTo+ bypassed the
+      # `agent_hidden`) could still name a relation anchored on an off-allowlist
+      # class via the `object` pointer. That is the SDK-surface analog of
+      # GHSA-wmwx-jr2p-4j4r, where Parse Server's own `$relatedTo` bypassed the
       # owning object's ACL. Run the owning class through the same accessibility
       # policy as every other cross-class hop, then translate the value normally.
       #
-      # Fails closed when the owning class cannot be resolved from +object+: an
+      # Fails closed when the owning class cannot be resolved from `object`: an
       # unresolvable pointer is exactly the shape that would otherwise slip the
       # check, so refuse the constraint rather than skip it.
       def translate_related_to_value(val, depth:, agent: nil)
@@ -351,10 +351,10 @@ module Parse
         translate_value(val, depth: depth, agent: agent)
       end
 
-      # Extract the Parse class name of a +$relatedTo+ constraint's owning
-      # object from its +object+ slot, which may be a Parse::Pointer, a Parse
-      # pointer/relation hash (+{__type:, className:, objectId:}+, string or
-      # symbol keys), or a storage-form string (+"ClassName$objectId"+).
+      # Extract the Parse class name of a `$relatedTo` constraint's owning
+      # object from its `object` slot, which may be a Parse::Pointer, a Parse
+      # pointer/relation hash (`{__type:, className:, objectId:}`, string or
+      # symbol keys), or a storage-form string (`"ClassName$objectId"`).
       # Returns nil when no class can be resolved so the caller can fail closed.
       def related_to_owning_class(val)
         return nil unless val.is_a?(Hash)
@@ -371,7 +371,7 @@ module Parse
       end
 
       # Hook into the agent-side accessibility check when the agent
-      # module is loaded; in pure-unit contexts where +Parse::Agent::Tools+
+      # module is loaded; in pure-unit contexts where `Parse::Agent::Tools`
       # has not been loaded, default to a no-op rather than raising —
       # the strict check is enforced wherever the agent dispatches.
       def assert_embedded_class_accessible!(op, class_name, agent: nil)

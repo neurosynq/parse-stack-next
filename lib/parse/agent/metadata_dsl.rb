@@ -450,15 +450,15 @@ module Parse
         #   preview-only execution. When false (default), passing dry_run: true in
         #   arguments is refused at dispatch time with :invalid_argument.
         # @param permitted_keys [Array<Symbol,String>, nil] when provided,
-        #   +call_method+ refuses any +arguments+ key not in this list.
+        #   `call_method` refuses any `arguments` key not in this list.
         #   Without this, an LLM (or a prompt-injection payload) can
-        #   pass arbitrary keys through a method that splats with +**+,
-        #   reaching protected columns like +_hashed_password+ or +ACL+.
-        #   Highly recommended on any +agent_write+/+agent_admin+ method
+        #   pass arbitrary keys through a method that splats with `**`,
+        #   reaching protected columns like `_hashed_password` or `ACL`.
+        #   Highly recommended on any `agent_write`/`agent_admin` method
         #   that takes a kwargs splat.
         # @param parameters [Hash, nil] when provided, a JSON Schema (as a
-        #   Ruby Hash) describing the +arguments+ object. Surfaced in
-        #   +tools/list+ so the LLM submits properly-shaped inputs and
+        #   Ruby Hash) describing the `arguments` object. Surfaced in
+        #   `tools/list` so the LLM submits properly-shaped inputs and
         #   stricter MCP clients can validate before dispatch.
         # @return [Hash] the method metadata
         def agent_method(method_name, description = nil, permission: :readonly,

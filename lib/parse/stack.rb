@@ -44,14 +44,14 @@ module Parse
 
   # Fiber-local key consulted by the authentication middleware. A truthy
   # entry suppresses the master-key header for the duration of the block
-  # set by {Parse.without_master_key}; a +:enabled+ entry forces the
+  # set by {Parse.without_master_key}; a `:enabled` entry forces the
   # master-key header back on inside a nested {Parse.with_master_key}
   # block.
   MASTER_KEY_STATE_KEY = :__parse_master_key_state__
 
-  # Run +block+ with the master key suppressed for every Parse request
+  # Run `block` with the master key suppressed for every Parse request
   # originating in the current fiber. Equivalent to setting the
-  # +X-Disable-Parse-Master-Key+ header on each request, but block-scoped
+  # `X-Disable-Parse-Master-Key` header on each request, but block-scoped
   # so callers can wrap a unit of work — e.g. running an action "as if
   # the configured master key were not available" — without threading
   # the header through every intermediate call.
@@ -105,7 +105,7 @@ module Parse
   # the previous value on exit.
   SESSION_TOKEN_STATE_KEY = :__parse_session_token__
 
-  # Run +block+ with an ambient session token set for the current fiber.
+  # Run `block` with an ambient session token set for the current fiber.
   # Inside the block, every Parse request that doesn't explicitly pass
   # `session_token:` *and* doesn't explicitly request `use_master_key:
   # true` will be sent with this token. Equivalent to threading
@@ -140,8 +140,21 @@ module Parse
   def self.with_session(token)
     resolved = token.respond_to?(:session_token) ? token.session_token : token
     resolved = resolved.to_s if resolved
+    # Capture BEFORE any raise so the `ensure` always restores the real
+    # previous ambient (never clobbers an enclosing with_session).
     previous = Fiber[SESSION_TOKEN_STATE_KEY]
-    Fiber[SESSION_TOKEN_STATE_KEY] = (resolved && !resolved.empty?) ? resolved : nil
+    # SEC-02: a present-but-blank (empty or whitespace) token is an unusable
+    # credential. The prior behavior stored a whitespace token as the ambient
+    # (only an exactly-empty string was treated as absent), and the request
+    # layer would then drop it and silently send the master key. Reject blank
+    # tokens loudly at the source instead. `nil` still means "no ambient".
+    if resolved.is_a?(String) && resolved.strip.empty?
+      raise ArgumentError,
+        "Parse.with_session was given a blank session token. A present-but-empty " \
+        "token is refused so the block cannot silently execute with master-key " \
+        "authority — pass a valid session token, or `nil` for no ambient session."
+    end
+    Fiber[SESSION_TOKEN_STATE_KEY] = resolved
     yield
   ensure
     Fiber[SESSION_TOKEN_STATE_KEY] = previous
@@ -584,11 +597,11 @@ module Parse
   # nil, falls back to {Parse.cache}.
   #
   # SECURITY: if you pass a raw Moneta-Redis store, build it with
-  # +value_serializer: nil+. The lock release path reads the stored owner
-  # token back (+store[key]+) to compare-and-delete; with Moneta's default
-  # Marshal value serializer that read +Marshal.load+s bytes from Redis — an
+  # `value_serializer: nil`. The lock release path reads the stored owner
+  # token back (`store[key]`) to compare-and-delete; with Moneta's default
+  # Marshal value serializer that read `Marshal.load`s bytes from Redis — an
   # RCE vector on a shared/untrusted/MITM'd lock store. With
-  # +value_serializer: nil+ the owner token is a plain string and is never
+  # `value_serializer: nil` the owner token is a plain string and is never
   # deserialized. Alternatively pass a {Parse::Cache::Redis} instance, which
   # uses a raw-string acquire/release path and avoids Marshal entirely.
   # @example
@@ -600,7 +613,7 @@ module Parse
   # Optional allowlist of {Parse::Object} subclasses that may use the
   # synchronize-create lock. When set, calls from any other class raise
   # {Parse::CreateLockUnavailableError}. When nil (default) with the global
-  # default enabled, a one-time +[Parse::Stack:SECURITY]+ warning is emitted
+  # default enabled, a one-time `[Parse::Stack:SECURITY]` warning is emitted
   # noting the unbounded surface; the lock still applies to every class.
   #
   # **Inheritance behavior:** The allowlist check in

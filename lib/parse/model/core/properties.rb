@@ -708,13 +708,13 @@ module Parse
     #   writers when the caller is trusted.
     # @param filter_protected [Boolean, nil] whether to filter out
     #   {Parse::Properties::PROTECTED_MASS_ASSIGNMENT_KEYS}. Defaults to
-    #   +dirty_track+ for backwards-compat (the historical coupling). Callers
-    #   can pass +true+ explicitly to filter even on the trusted hydration
+    #   `dirty_track` for backwards-compat (the historical coupling). Callers
+    #   can pass `true` explicitly to filter even on the trusted hydration
     #   path (used by {Parse::Object#initialize} when constructed with
-    #   +trusted: false+ but an +objectId+ is in the hash). +false+ explicitly
+    #   `trusted: false` but an `objectId` is in the hash). `false` explicitly
     #   preserves the legacy "server response" semantics.
     # @param protected_set [Array<String>, nil] override which key list to
-    #   filter when +filter_protected+ is true. Defaults to the wider
+    #   filter when `filter_protected` is true. Defaults to the wider
     #   {Parse::Properties::PROTECTED_MASS_ASSIGNMENT_KEYS}.
     #   {Parse::Object#initialize} passes
     #   {Parse::Properties::PROTECTED_INITIALIZE_KEYS} here to allow

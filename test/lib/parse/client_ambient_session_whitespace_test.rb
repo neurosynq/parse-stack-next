@@ -77,14 +77,29 @@ class ClientAmbientSessionWhitespaceTest < Minitest::Test
     final
   end
 
-  def test_whitespace_ambient_uses_bound_token_and_omits_master_key
+  def test_whitespace_ambient_is_rejected_at_source
+    # SEC-02: with_session refuses a blank/whitespace token outright, so a
+    # whitespace ambient can no longer be established (and therefore can no
+    # longer degrade to a master-key send). The prior fallback-to-bound
+    # behavior is superseded by rejecting the unusable credential at source.
     client = build_client(session_token: BOUND)
-    headers = Parse.with_session("   ") { wire_headers(client) }
+    assert_raises(ArgumentError) do
+      Parse.with_session("   ") { wire_headers(client) }
+    end
+  end
 
-    assert_nil headers[MASTER_KEY],
-               "a whitespace-only ambient must not let the master key reach the wire"
-    assert_equal BOUND, headers[SESSION_TOKEN],
-                 "the client's bound token must be used when the ambient is whitespace-only"
+  def test_explicit_blank_session_token_fails_closed_not_master
+    # SEC-02: an explicitly-supplied blank/whitespace session_token is an
+    # unusable credential — it must go out anonymous (master suppressed),
+    # never as master, and must NOT silently fall back to the bound token.
+    client = build_client(session_token: BOUND)
+    ["", "   ", "\t"].each do |blank|
+      headers = wire_headers(client, opts: { session_token: blank })
+      assert_nil headers[MASTER_KEY],
+                 "explicit blank session_token #{blank.inspect} must not send the master key"
+      refute headers.key?(SESSION_TOKEN),
+             "explicit blank session_token #{blank.inspect} must not fall back to a session header"
+    end
   end
 
   def test_real_ambient_token_still_wins_over_bound_token

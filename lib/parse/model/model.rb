@@ -81,15 +81,15 @@ module Parse
     # leading-underscore storage form. Consulted by {String#to_parse_class}
     # ONLY as a fallback when {find_class} cannot resolve the name — which
     # happens at class-declaration time for a built-in whose Ruby class is not
-    # yet registered (e.g. +Parse::Installation+ declares +belongs_to :user+
-    # before +Parse::User+ is loaded). Without this fallback the conversion
-    # froze the wrong literal (+"User"+) into the association +references+ map
-    # and pushed it to the server schema as the pointer +targetClass+, which
-    # Parse Server then rejected (+Pointer<User>+ vs +Pointer<_User>+). A
+    # yet registered (e.g. `Parse::Installation` declares `belongs_to :user`
+    # before `Parse::User` is loaded). Without this fallback the conversion
+    # froze the wrong literal (`"User"`) into the association `references` map
+    # and pushed it to the server schema as the pointer `targetClass`, which
+    # Parse Server then rejected (`Pointer<User>` vs `Pointer<_User>`). A
     # genuinely-registered class still wins via {find_class}, so a custom
-    # +parse_class+ table mapping is never overridden by this map.
+    # `parse_class` table mapping is never overridden by this map.
     # Keys are the camelized bare names (the form {String#to_parse_class}
-    # computes before lookup); only +User+ is actually targeted by a built-in
+    # computes before lookup); only `User` is actually targeted by a built-in
     # association before its class registers, the rest are hygiene so an app
     # that declares a pointer/relation to any built-in resolves correctly
     # regardless of load order.
@@ -235,27 +235,27 @@ module Parse
     # Whether two Parse class-name strings denote the same class. This is the
     # canonical equality used to suppress spurious className-mismatch warnings.
     # Two names are the same class when they are string-equal, when one is the
-    # leading-underscore system form of the other (+User+ <-> +_User+, +Role+
-    # <-> +_Role+, +Installation+ <-> +_Installation+, +Session+ <->
-    # +_Session+), or when both resolve to the same registered +Parse::Object+
-    # subclass (covers custom +parse_class+ table mappings).
+    # leading-underscore system form of the other (`User` <-> `_User`, `Role`
+    # <-> `_Role`, `Installation` <-> `_Installation`, `Session` <->
+    # `_Session`), or when both resolve to the same registered `Parse::Object`
+    # subclass (covers custom `parse_class` table mappings).
     #
     # The underscore rule is what makes the comparison correct independent of
     # autoload order — at declaration time {find_class} may not yet have
-    # +Parse::User+ registered (so a +belongs_to :user+ captures +"User"+
-    # rather than +"_User"+), but the server always emits the +_User+ storage
+    # `Parse::User` registered (so a `belongs_to :user` captures `"User"`
+    # rather than `"_User"`), but the server always emits the `_User` storage
     # form, and both denote the same class. The rule matches exactly one
-    # system prefix underscore, so a malformed +"__User"+ is not conflated
-    # with +"_User"+.
+    # system prefix underscore, so a malformed `"__User"` is not conflated
+    # with `"_User"`.
     #
     # These warnings are an ADVISORY type-confusion signal, not the
     # enforcement mechanism: every call site that consults this method builds
     # the resulting object from the declared/trusted class regardless of the
-    # incoming className (see +Parse::Object.build+, which always uses the
-    # +table+ argument the caller passes). A false-positive here can therefore
+    # incoming className (see `Parse::Object.build`, which always uses the
+    # `table` argument the caller passes). A false-positive here can therefore
     # only suppress a log line — it can never route a pointer of the wrong
-    # class into a typed slot. Distinct classes still compare unequal (+User+
-    # vs +_Session+, +User+ vs +_Role+, and +nil+), so a genuinely mismatched
+    # class into a typed slot. Distinct classes still compare unequal (`User`
+    # vs `_Session`, `User` vs `_Role`, and `nil`), so a genuinely mismatched
     # pointer still surfaces in logs.
     #
     # @param a [String, Symbol, nil] a Parse class name.

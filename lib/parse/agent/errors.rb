@@ -121,22 +121,22 @@ module Parse
       end
     end
 
-    # Raised inside the +call_method+ tool when the resolved
-    # +ClassName.method_name+ is excluded by the agent instance's
-    # +methods:+ filter. The execute() rescue maps this to a
-    # +:tool_filtered+ error_code so consumers can distinguish "the
+    # Raised inside the `call_method` tool when the resolved
+    # `ClassName.method_name` is excluded by the agent instance's
+    # `methods:` filter. The execute() rescue maps this to a
+    # `:tool_filtered` error_code so consumers can distinguish "the
     # filter excluded this method" from "this method isn't declared
     # agent-callable" (a Parse::Error) or "the tier doesn't allow it"
-    # (a +:permission_denied+).
+    # (a `:permission_denied`).
     class MethodFiltered < AgentError; end
 
     # Raised at semantic-search dispatch time when at least one class in
-    # the model registry declares +agent_tenant_scope+ but the class
+    # the model registry declares `agent_tenant_scope` but the class
     # being searched does not. In a tenant-aware deployment an
     # un-scoped searchable surface would let an agent retrieve across
     # tenant boundaries, so the gate is a hard refusal, not a warning.
     # Enforced at dispatch (when all classes are loaded) rather than at
-    # +agent_searchable+ declaration time so class-load order can't
+    # `agent_searchable` declaration time so class-load order can't
     # produce a false negative.
     class MissingTenantScope < AgentError; end
 
@@ -145,5 +145,27 @@ module Parse
     # `:refuse`. A SecurityError subclass so it routes through execute's
     # security rescue and is never swallowed.
     class PromptInjectionDetected < SecurityError; end
+
+    # Raised by Parse::Agent::Tools.invoke when a tool name is recognized
+    # (advertised in a permission tier / passes the gates) but has no
+    # handler in this SDK version. The built-in raw-CRUD write/admin tools
+    # (`create_object`, `update_object`, `delete_object`, `create_class`,
+    # `delete_class`) are declared in the write/admin tiers but ship
+    # without an implementation — invoking one previously raised a bare
+    # `NoMethodError` that collapsed to an opaque "internal error" on the
+    # wire. This turns that into a clear, typed refusal so the caller
+    # learns the tool is not implemented rather than that the SDK broke.
+    class NotImplemented < AgentError
+      attr_reader :tool_name
+
+      def initialize(tool_name, message = nil)
+        @tool_name = tool_name.to_s
+        super(message || "Tool '#{@tool_name}' is recognized but not implemented in this " \
+                         "SDK version. The built-in raw create/update/delete tools are not " \
+                         "available; expose the operation as an application method via " \
+                         "`agent_method` + `call_method`, or register a handler with " \
+                         "`Parse::Agent::Tools.register`.")
+      end
+    end
   end
 end

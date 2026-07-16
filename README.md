@@ -4,14 +4,14 @@
 
 A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [parse-stack-next](https://github.com/neurosynq/parse-stack-next) is a Ruby client SDK, REST client, and Active Model ORM for [Parse Server](http://parseplatform.org/), combining a low-level API client, a query engine, an object-relational mapper (ORM), and a Cloud Code Webhooks rack application in a single gem.
 
-### What's new in 5.5
+## What's new in 5.5
 
 - **5.5.0 — Multimodal bytes-fetch with magic-byte MIME verification** — `embed_image ..., source: :bytes` has the SDK download an image itself through the `Parse::File.safe_open_url` SSRF primitive, verify the content by **magic-byte sniff** (the `Content-Type` header is never consulted — a `.jpg` URL serving HTML is refused), cross-check the URL extension, enforce a `Parse::Embeddings.allowed_image_types` allowlist, strip EXIF/XMP metadata **by default** (JPEG APP1, PNG `eXIf`, WebP `EXIF`/`XMP ` chunks; opt out with `exif_strip: false`), and forward the verified bytes to Voyage/Cohere as a base64 data URI. No provider-side URL fetch occurs, so the `trust_provider_url_fetch` sentinel is not required — the host allowlist still applies. See [CHANGELOG.md](./CHANGELOG.md)
 - **5.5.0 — Embedding-model migration tooling** — `Class.reembed!(only_stale: true)` bulk re-embeds rows through the current provider/model (resumable; skips rows already current), driven by the new auto-declared `<into>_meta` provenance sibling (`{provider, model, dimensions, modality, embedded_at}`, stamped on every recompute). `Parse::Embeddings::BatchEmbedder` adds batch-level requests-per-minute pacing and exponential backoff for bulk jobs; `Parse::Embeddings::Cache.enable!` adds an opt-in query-embed cache keyed by `(provider, model, input_type, input-hash)` so repeated identical queries skip the provider round-trip. See [CHANGELOG.md](./CHANGELOG.md)
 - **5.5.0 — Vector index drift detection** — on first auto-discovered use of an Atlas vectorSearch index, the SDK verifies the deployed index's `numDimensions`/`similarity` against the `:vector` property declaration and confirms a registered `agent_tenant_scope` field is covered as a `type: "filter"` path. Policy via `Parse::VectorSearch.index_drift_policy` (`:warn` default / `:raise` / `:ignore`). `Parse::Schema::SearchIndexMigrator` now auto-includes the tenant-scope field in `vectorSearch` declarations, so newly created indexes support tenant-scoped pre-filtering out of the box. See [CHANGELOG.md](./CHANGELOG.md)
 - **5.5.0 — Retrieval spend-cap and filter hardening** — the per-tenant embedding spend cap now covers every query-embed path (`find_similar(text:)`, `hybrid_search(text:)`, `Parse::Retrieval.retrieve`), not just the `semantic_search` agent tool; tenant identity resolves through the ambient `Parse.with_cache_tenant` scope. Caller-supplied retrieval filters now translate Parse pointer values to storage form (`{ owner: user }` → `{ "_p_owner" => "_User$id" }`), so pointer filters match rows instead of silently matching nothing. See [CHANGELOG.md](./CHANGELOG.md)
 
-### What's new in 5.4
+## What's new in 5.4
 
 - **5.4.0 — Hybrid search + reranking for RAG** — `Class.hybrid_search(text:, lexical:, vector:, k:, fusion:)` fuses a lexical Atlas Search branch with a `$vectorSearch` branch using reciprocal-rank fusion (RRF): lexical search nails exact tokens (codes, proper nouns), vector search nails paraphrase, and fusing the two beats either alone. Each branch enforces ACL/CLP independently before fusion (no separate hydration fetch to secure); results carry `#hybrid_score` / `#hybrid_ranks`. `Parse::VectorSearch::Hybrid.rank_fusion_supported?` detects Atlas 8.0+ native `$rankFusion` by a cached behavioural probe (native execution is opt-in; client-side RRF is the always-enforced default). `Parse::Retrieval::Reranker` adds cross-encoder reranking (`Reranker::Cohere` over `/v2/rerank`, plus a deterministic `Reranker::Fixture`), wired into `Parse::Retrieval.retrieve(hybrid:, rerank:)`. `Parse::Embeddings::SpendCap` adds an opt-in per-tenant embedding token cap (hard-refuse) at the `semantic_search` agent-tool boundary. See [CHANGELOG.md](./CHANGELOG.md) and [`docs/atlas_vector_search_guide.md`](./docs/atlas_vector_search_guide.md)
 - **5.4.0 — Vector backfill, visibility, and webhook redaction** — `Class.embed_pending!` backfills embeddings for records whose managed `:vector` field is null (objectId-cursor pagination); `Parse::Object#compute_embedding!` forces an in-place recompute without a save; `vector_visibility :owner_only | :public` controls whether a class's vectors appear in `as_json` by default; and webhook trigger payloads now strip declared `:vector` columns by default (a `:public` class keeps them). See [CHANGELOG.md](./CHANGELOG.md)
@@ -20,13 +20,13 @@ A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [
 - **5.4.0 — Audience hash queries persist correctly** — `Parse::Audience#query` is now stored as a JSON string on the wire to match Parse Server's `_Audience.query` column type, so saving an audience with a `Hash` query no longer fails the server schema check. The public API is unchanged — assign a `Hash`, read a `Hash` back. See [CHANGELOG.md](./CHANGELOG.md)
 - **5.4.0 — Faster AtlasSearch role-cache expiry** — `Parse::AtlasSearch` `role_cache_ttl` now defaults to 30 seconds (was 120) so a role grant or revoke is reflected in `$search` ACL decisions sooner, at the cost of slightly more frequent role lookups. See [CHANGELOG.md](./CHANGELOG.md)
 
-### What's new in 5.3
+## What's new in 5.3
 
 - **5.3.0 — Run webhook handlers (and clients) as the calling user** — Parse Server embeds the caller's live session token in every trigger webhook fired by a logged-in user. A handler can now opt in to acting on the server *as that user* — full ACL/CLP/`protectedFields` enforcement, no master key. `payload.session_token` exposes the captured token (`nil` for master-key requests; still scrubbed from `payload.user`/`payload.object`/`as_json`/logs); `payload.user_agent` returns a client-mode `Parse::Agent`, and `payload.user_client` a non-master `Parse::Client` with the token **bound** so even raw REST calls authorize as the user. The same user-scoped client is available client-side via `Parse::User#session_client` and the `Parse::Client#become(token)` primitive, with `Parse::Client#with_session { … }` for block scoping. Backed by a new `Parse::Client.new(session_token:)` option. See [Acting as the calling user](#acting-as-the-calling-user)
 - **5.3.0 — Pluralized class-name aliases** — referencing the plural form of a model constant now resolves to that class, so `Posts.where(:author.eq => user).count` works for a class `Post`. The alias is created lazily on first reference and is the *same class object*, so every class method (`query`/`where`, `count`, `find`, `all`, scopes) works through it and `Posts.parse_class` still returns `"Post"`. Because it is the same class it adds no `Parse::Object.descendants` entry and never registers a separate Parse schema class. Classes whose name already ends in `s` are skipped by the automatic path; non-Parse plurals and typos fall through to a normal `NameError`. On by default — opt out with `Parse.pluralized_aliases = false` (or `PARSE_PLURALIZED_ALIASES=false`). For a custom plural, an `s`-ending class, or a namespaced model, call `pluralized_alias!` in the class body. See [Pluralized class-name aliases](#pluralized-class-name-aliases)
 - **5.3.0 — afterSave create reports changed fields; force_ssl-consistent file equality** — a trigger handler that keys off dirty tracking now sees every field on an `afterSave` *create*, symmetric with `afterSave` updates: the built object marks each populated data property changed (from `nil`) while `createdAt`/`updatedAt`/`ACL`/`objectId` stay clean and object readability, `new?`, and `existed?` are unchanged — so a handler that builds a payload from `*_changed?` / `changes` works uniformly across create and update. Separately, `Parse::File#==` now compares both files through the canonical `url` reader, so two files at the same location compare equal regardless of `Parse::File.force_ssl` (and `a == b` matches `b == a`), and a re-signed URL for the same object no longer reads as a change. See [Cloud Code Triggers](#cloud-code-triggers)
 
-### What's new in 5.2
+## What's new in 5.2
 
 - **5.2.1 — Webhook triggers receive the full Parse object** — trigger handlers (`beforeSave`/`afterSave`/…) now get the complete server object (`createdAt`/`updatedAt`, `ACL`, internal fields); only live credentials (session tokens, password hashes) are stripped. `Parse::Object#existed?` / `#new?` are reliable in `afterSave`, `afterSave` updates carry dirty tracking, and the model lifecycle runs in ActiveModel order — `before_save → before_create` then `after_create → after_save` — so `before_create` now fires for REST/JS/Auth0 creates (and `after_save` no longer double-fires). See [Cloud Code Triggers](#cloud-code-triggers)
 - **Retrieval layer — `Parse::Retrieval` (`Parse::RAG`)** — `Parse::Retrieval.retrieve(query:, klass:, k:, filter:, tenant_scope:, …)` embeds a natural-language query, runs Atlas `$vectorSearch` through the existing ACL-enforcing `find_similar`, and splits each retrieved document's text field into scored `Parse::Retrieval::Chunk`s. Chunking is presentation-only (embedding stays one-vector-per-record), via `Parse::Retrieval::Chunker::FixedSizeOverlap(size:, overlap:, by:, max_chunks_per_document:)` (subclass `Chunker::Base` for custom strategies). ACL is mongo-direct (no REST two-stage); tenant scope folds into the Atlas pre-filter
@@ -40,7 +40,7 @@ A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full 5.2 entry.
 
-### What's new in 5.1
+## What's new in 5.1
 
 - **`Parse::File` URL normalization + presigned-URL stash** — `Parse::File#url=` and `attributes=` now strip signed-URL query parameters (`X-Amz-Signature`, `AWSAccessKeyId`, `Key-Pair-Id`, etc.) before storage; the bare canonical URL lands in `@url`, and the original signed URL is stashed in `file.presigned_url` with a data-driven expiry in `file.presigned_url_expires_at`. New `file.presigned_url_valid?(buffer: 60)` predicate, configurable `Parse::File.signed_url_policy = :strip | :raise`, and `Parse::File.log_filter` / `log_filter_strict` regexes for `lograge` / Sentry / Honeybadger scrubbers. `Parse::File#inspect` no longer emits the URL — see CHANGELOG for the error-reporter payload migration callout
 - **`Parse::Lock` — public TTL-bounded mutual-exclusion primitive** — `Parse::Lock.acquire(key, ttl:, wait:) { … }` exposes the Redis-backed lock previously hidden inside `first_or_create!` as a first-class API. In-process `Mutex` fallback for memory-backed caches, fails closed on backend errors, HMAC-keyed via `PARSE_STACK_LOCK_SECRET`, namespace-separated from `first_or_create!` so the two cannot collide
@@ -56,7 +56,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full 5.2 entry.
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full 5.1 entry, including breaking changes, migration callouts, and the round-by-round security review notes.
 
-### What's new in 5.0
+## What's new in 5.0
 
 - **RAG foundation** — `:vector` property type, `Parse::Embeddings` provider registry shipping built-in adapters for OpenAI, Cohere (v3 + v4.0 Matryoshka text-mode), Voyage (incl. open-weight `voyage-4-nano` and `voyage-multimodal-3` text-mode), Jina v3/v4/v5/code, Qwen 3 (DashScope), and a generic `LocalHTTP` client for Ollama / LM Studio / vLLM / TEI. `Klass.find_similar(vector:/text:, k:)` over Atlas `$vectorSearch`, and an `embed` class macro that digest-tracks source fields so vectors only recompute when content changes
 - **`Parse::Cache::Redis`** — Moneta-compatible Redis cache wrapper with a built-in `ConnectionPool`, optional `cache_namespace:` for multi-tenant Redis sharing, and graceful degrade on pool saturation
@@ -64,12 +64,12 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full 5.1 entry, including breaking ch
 - **MCP transport hardening** — Streamable HTTP `Mcp-Session-Id` header (renamed from `X-MCP-Session-Id`, **breaking**), `MCP-Protocol-Version` validation, `DELETE /` session termination, structured-content (`outputSchema`) on built-in tools, optional `health_path:` liveness probe
 - **`Parse::GraphQL::TypeGenerator`** — generate `graphql-ruby` types directly from your `Parse::Object` subclasses (no Parse Server round-trip), with `:vector` columns surfaced as `[Float]` and association registries (`has_one_associations`, `has_many_associations`) populated at DSL time
 - **LiveQuery promoted to stable** — the experimental warning is removed; `Parse.live_query_enabled = true` is retained as a network-egress safety toggle, not a stability gate
-- **Server-version deprecation warning** — one-shot warning when connecting to Parse Server below the supported floor (currently 7.0.0); silence with `Parse.suppress_server_version_warning = true`
+- **Server-version deprecation warning** — one-shot warning when connecting to a Parse Server older than the configured threshold (default `7.0.0`, override with `PARSE_DEPRECATED_SERVER_VERSION_BELOW`); silence with `Parse.suppress_server_version_warning = true`. The **supported baseline is Parse Server 9.x** (the SDK is developed and tested against a pinned `parse-server:9.9.0`); the default warning threshold is intentionally conservative so older deployments only get an advisory, not a hard break.
 - **`mongo_relation_index :field, dedup: true`** — register a compound `{owningId, relatedId}` UNIQUE on relation join collections to prevent duplicate-pair subscriptions without breaking `has_many` semantics
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full 5.0 entry, including security-hardening notes and Ruby 3.x cleanup.
 
-### Core capabilities
+## Core capabilities
 
 > **Vector search requires MongoDB Atlas (or Atlas Local).** The `:vector`
 > property, `find_similar`, `hybrid_search`, and `Parse::Retrieval` all
@@ -104,16 +104,16 @@ Below is a [quick start guide](#overview). See also the [Usage Guide](./docs/usa
 
 > **Note:** API reference docs are published at [neurosynq.github.io/parse-stack-next](https://neurosynq.github.io/parse-stack-next/index.html). Generated via YARD from the current source; covers the full 5.x surface.
 
-### Credits
+## Credits
 
 This project (`parse-stack-next`) is a continuation of the [Parse Stack framework](https://github.com/modernistik/parse-stack) originally created by [Modernistik](https://www.modernistik.com). We are grateful for their foundational work and continue to build upon it under the [neurosynq](https://github.com/neurosynq) organization.
 
-### Code Status
+## Code Status
 [![Gem Version](https://img.shields.io/gem/v/parse-stack-next.svg)](https://rubygems.org/gems/parse-stack-next)
 [![Downloads](https://img.shields.io/gem/dt/parse-stack-next.svg)](https://rubygems.org/gems/parse-stack-next)
 [![Releases](https://img.shields.io/github/v/release/neurosynq/parse-stack-next)](https://github.com/neurosynq/parse-stack-next/releases)
 
-#### Tutorial Videos
+### Tutorial Videos
 
 The following videos were recorded for the original parse-stack gem. The model, query, and association surface they cover is unchanged in parse-stack-next, so they remain a useful introduction; see the [Usage Guide](./docs/usage_guide.md) for v5.x-specific features (vector search, Redis cache, agent tools).
 
@@ -177,7 +177,7 @@ Parse.auto_generate_models!
 # or define custom Subclasses (Highly Recommended)
 class Song < Parse::Object
   property :name
-  property :play, :integer
+  property :plays, :integer
   property :audio_file, :file
   property :tags, :array
   property :released, :date
@@ -248,7 +248,7 @@ Runnable, self-contained scripts live in [`examples/`](examples/) — see
 
 ## Release History
 
-**Current version: 5.4.0** | **Ruby 3.2+ required**
+**Current version: 5.5.5** | **Ruby 3.2+ required**
 
 The 5.0 highlights (vector search / RAG, pooled Redis cache, AS::N instrumentation, MCP transport hardening, GraphQL type generation) are summarized in the [What's new in 5.0](#whats-new-in-50) section above. Earlier releases are recorded below.
 
@@ -293,6 +293,19 @@ Per-version detail lives in [CHANGELOG.md](./CHANGELOG.md) and on the [Releases 
 ### 1.x — initial Parse Server SDK
 
 The 1.x line is the original [`modernistik/parse-stack`](https://github.com/modernistik/parse-stack) — Active Model ORM, REST client, query DSL, associations, and Cloud Code webhooks for Parse Server. `parse-stack-next` is a continuation of that work; the first release published under the new gem name is **4.5.0** (above), on RubyGems as [`parse-stack-next`](https://rubygems.org/gems/parse-stack-next).
+
+## Guides
+
+In-depth guides for the larger subsystems live under [`docs/`](./docs):
+
+- [Usage Guide](./docs/usage_guide.md) — end-to-end tour of models, queries, and CRUD.
+- [Client SDK Guide](./docs/client_sdk_guide.md) — running as an unprivileged (non-master) client: session tokens, `with_session`, row-level ACL enforcement, LiveQuery from the client side.
+- [ACL & CLP Guide](./docs/acl_clp_guide.md) — access-control model, Class-Level Permissions, and how enforcement differs across REST vs mongo-direct.
+- [Direct MongoDB Guide](./docs/mongodb_direct_guide.md) — the `results_direct` / `Parse::MongoDB` path, its authority model, and when to reach for it.
+- [MongoDB Index Optimization Guide](./docs/mongodb_index_optimization_guide.md) — index DSL, schema migrators, and the writer-URI triple-gate.
+- [Atlas & Vector Search Guide](./docs/atlas_vector_search_guide.md) — `$search`, vector search, `find_similar`, `hybrid_search`, embeddings, and RAG retrieval.
+- [AI Agent & MCP Guide](./docs/mcp_guide.md) — `Parse::Agent`, the built-in tools, permission tiers, and the MCP server surface.
+- [Webhooks Guide](./docs/webhooks_guide.md) — Cloud Code webhook receiver, triggers, field guards, and replay protection.
 
 ## Table of Contents
 

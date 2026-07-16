@@ -57,6 +57,41 @@ class AgentTest < Minitest::Test
     assert_match(/Permission denied/, result[:error])
   end
 
+  # The built-in write/admin CRUD tools are advertised in the tiers but
+  # ship without a handler. Invoking one (bypassing the permission gate,
+  # as Tools.invoke does after execute clears it) must raise a clear
+  # typed Parse::Agent::NotImplemented, NOT a bare NoMethodError that
+  # collapses to an opaque internal error on the wire.
+  def test_unimplemented_write_tool_raises_not_implemented
+    %i[create_object update_object delete_object create_class delete_class].each do |tool|
+      err = assert_raises(Parse::Agent::NotImplemented) do
+        Parse::Agent::Tools.invoke(@agent, tool, class_name: "Song")
+      end
+      assert_equal tool.to_s, err.tool_name
+      assert_match(/not implemented/i, err.message)
+    end
+  end
+
+  def test_implemented_readonly_tool_still_dispatches_through_invoke
+    # A readonly builtin (list_tools needs no server round-trip) must
+    # still dispatch normally through the same invoke path.
+    result = Parse::Agent::Tools.invoke(@agent, :list_tools)
+    refute_nil result
+  end
+
+  # Success gate G1: a tool that's a member of a permission tier but has
+  # no handler must NEVER be advertised in tools/list, even when the full
+  # write+admin tier list is handed to definitions().
+  def test_definitions_never_advertises_handlerless_tools
+    all_tier_tools = Parse::Agent::PERMISSION_LEVELS.values.flatten
+    listed = Parse::Agent::Tools.definitions(all_tier_tools, format: :mcp).map { |d| d[:name] }
+    %w[create_object update_object delete_object create_class delete_class].each do |t|
+      refute_includes listed, t, "tools/list must not advertise handlerless tool #{t}"
+    end
+    # ...but real readonly tools still appear.
+    assert_includes listed, "query_class"
+  end
+
   # ============================================================
   # MCP Configuration Tests
   # ============================================================

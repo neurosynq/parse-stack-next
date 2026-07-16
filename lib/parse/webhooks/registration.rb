@@ -24,8 +24,8 @@ module Parse
       # Parse Server. Rejects non-http(s) schemes, embedded userinfo, and
       # hostnames that resolve to loopback, link-local, RFC1918, CGNAT,
       # multicast, or cloud-metadata addresses (covered by
-      # +Parse::File::BLOCKED_CIDRS+). Without these checks an attacker who
-      # can reach +register_webhook!+ could redirect Parse Server's trigger
+      # `Parse::File::BLOCKED_CIDRS`). Without these checks an attacker who
+      # can reach `register_webhook!` could redirect Parse Server's trigger
       # POSTs to an internal host (e.g. the cloud metadata service) and
       # exfiltrate request bodies. Returns the input URL unchanged on
       # success.

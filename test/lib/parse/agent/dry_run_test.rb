@@ -163,17 +163,21 @@ class AgentDryRunTest < Minitest::Test
 
   def test_instance_method_with_dry_run_true_returns_preview
     stub_obj = DryRecord.new
-    stub_obj.id = "rec_dry_abc"
+    stub_obj.id = "recDryAbc"
     # Bypass autofetch by setting the attribute directly
     stub_obj.instance_variable_set(:@status, "active")
-    DryRecord.stub_find(stub_obj)
 
+    # SEC-01: call_method now resolves the instance receiver through the
+    # agent's scoped client (fetch_call_method_receiver), not klass.find.
+    # Stub at that boundary so this test exercises the dry-run LOGIC.
     agent = Parse::Agent.new(permissions: :admin)
-    result = agent.execute(:call_method,
-                           class_name: "DryRunRecord",
-                           method_name: "archive",
-                           object_id: "rec_dry_abc",
-                           arguments: { "dry_run" => true })
+    result = Parse::Agent::Tools.stub(:fetch_call_method_receiver, stub_obj) do
+      agent.execute(:call_method,
+                    class_name: "DryRunRecord",
+                    method_name: "archive",
+                    object_id: "recDryAbc",
+                    arguments: { "dry_run" => true })
+    end
     assert result[:success], "expected success but got: #{result[:error]}"
     r = result[:data][:result]
     assert r.key?(:would_archive), "preview result should include :would_archive"
@@ -184,15 +188,16 @@ class AgentDryRunTest < Minitest::Test
 
   def test_instance_method_without_dry_run_executes_normally
     stub_obj = DryRecord.new
-    stub_obj.id = "rec_dry_xyz"
+    stub_obj.id = "recDryXyz"
     stub_obj.disable_autofetch!
-    DryRecord.stub_find(stub_obj)
 
     agent = Parse::Agent.new(permissions: :admin)
-    result = agent.execute(:call_method,
-                           class_name: "DryRunRecord",
-                           method_name: "archive",
-                           object_id: "rec_dry_xyz")
+    result = Parse::Agent::Tools.stub(:fetch_call_method_receiver, stub_obj) do
+      agent.execute(:call_method,
+                    class_name: "DryRunRecord",
+                    method_name: "archive",
+                    object_id: "recDryXyz")
+    end
     assert result[:success], "expected success but got: #{result[:error]}"
     assert_equal true, result[:data][:result][:archived]
     refute result[:data][:result].key?(:would_archive)
@@ -204,18 +209,19 @@ class AgentDryRunTest < Minitest::Test
 
   def test_universal_preview_when_dry_run_true_and_not_declared
     stub_obj = DryRecord.new
-    stub_obj.id = "w_001"
+    stub_obj.id = "w001"
     stub_obj.disable_autofetch! if stub_obj.respond_to?(:disable_autofetch!)
-    DryRecord.stub_find(stub_obj)
 
     # Use the instance-method case so we can verify the object-resolution
     # check is part of the universal-preview path.
     agent = Parse::Agent.new(permissions: :admin)
-    result = agent.execute(:call_method,
-                           class_name: "DryRunRecord",
-                           method_name: "archive",
-                           object_id: "w_001",
-                           arguments: { "dry_run" => true })
+    result = Parse::Agent::Tools.stub(:fetch_call_method_receiver, stub_obj) do
+      agent.execute(:call_method,
+                    class_name: "DryRunRecord",
+                    method_name: "archive",
+                    object_id: "w001",
+                    arguments: { "dry_run" => true })
+    end
     # archive on DryRecord declared supports_dry_run: true. So this path
     # is NOT the universal preview — it's the method's own preview.
     assert result[:success]

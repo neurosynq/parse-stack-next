@@ -8,8 +8,8 @@ test-server-start:
 	docker-compose -f scripts/docker/docker-compose.test.yml up -d
 	@echo "Waiting for services to start..."
 	@sleep 10
-	@echo "Parse Server available at: http://localhost:1337/parse"
-	@echo "Parse Dashboard available at: http://localhost:4040"
+	@echo "Parse Server available at: http://localhost:29337/parse"
+	@echo "Parse Dashboard available at: http://localhost:29040"
 
 # Stop the test server
 test-server-stop:
@@ -27,17 +27,17 @@ test-connection:
 # Run integration tests with test server
 test-integration:
 	@echo "Running integration tests..."
-	PARSE_TEST_USE_DOCKER=true bundle exec rake test
+	PARSE_TEST_USE_DOCKER=true bundle exec rake test:integration
 
-# Clean up containers and volumes
+# Clean up this stack's containers and volumes (scoped — does NOT touch
+# unrelated Docker projects; run `docker system prune` yourself if desired)
 clean:
-	@echo "Cleaning up containers and volumes..."
+	@echo "Cleaning up this stack's containers and volumes..."
 	docker-compose -f scripts/docker/docker-compose.test.yml down -v
-	docker system prune -f
 
 # View Parse Server logs
 logs:
-	docker logs parse-stack-test-server -f
+	docker logs psnext-it-server -f
 
 # View all container logs
 logs-all:

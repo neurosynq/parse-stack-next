@@ -122,4 +122,33 @@ class RetrievalRerankerTest < Minitest::Test
     assert_raises(ArgumentError) { R::Cohere.new(api_key: "") }
     assert_raises(ArgumentError) { R::Cohere.new(api_key: "k", base_url: "ftp://x") }
   end
+
+  def test_cohere_rejects_plaintext_http_to_remote_host
+    # Plaintext http:// to a non-loopback host would leak the API key.
+    assert_raises(ArgumentError) do
+      R::Cohere.new(api_key: "k", base_url: "http://api.cohere.com/v2")
+    end
+  end
+
+  def test_cohere_rejects_userinfo_in_base_url
+    assert_raises(ArgumentError) do
+      R::Cohere.new(api_key: "k", base_url: "https://evil@api.cohere.com/v2")
+    end
+  end
+
+  def test_cohere_allows_plaintext_http_to_loopback
+    # A local dev proxy / sidecar over http://localhost is fine — the key
+    # never leaves the machine.
+    %w[
+      http://localhost:8080/v2
+      http://127.0.0.1:8080/v2
+      http://[::1]:8080/v2
+    ].each do |url|
+      R::Cohere.new(api_key: "k", base_url: url)
+    end
+  end
+
+  def test_cohere_allows_https_remote
+    R::Cohere.new(api_key: "k", base_url: "https://api.cohere.com/v2")
+  end
 end

@@ -74,14 +74,14 @@ module Parse
     # caller did not explicitly opt in via {Parse::Push.allow_broadcast}
     # or per-instance {#broadcast!}.
     #
-    # This is a fail-closed guard against the +to_audience+ /
-    # +to_audience_id+ class of footguns where a typo, deleted audience,
+    # This is a fail-closed guard against the `to_audience` /
+    # `to_audience_id` class of footguns where a typo, deleted audience,
     # or unset-param silently degrades a targeted push into a global one.
     class BroadcastNotAllowed < StandardError; end
 
     # Raised when {#to_audience} or {#to_audience_id} cannot resolve the
     # requested audience. Previously these methods warned and returned
-    # +self+, which let the subsequent +send!+ silently broadcast to every
+    # `self`, which let the subsequent `send!` silently broadcast to every
     # Installation. They now raise so typos and renames surface at the
     # call site instead.
     class AudienceNotFound < ArgumentError; end
@@ -89,9 +89,9 @@ module Parse
     # @!attribute [rw] allow_broadcast
     #   Whether {Parse::Push} permits an unconstrained push (no `where`,
     #   no `channels`) to broadcast to every Installation. Defaults to
-    #   +false+ — sending an unconstrained push raises {BroadcastNotAllowed}.
+    #   `false` — sending an unconstrained push raises {BroadcastNotAllowed}.
     #
-    #   Set to +true+ at boot for apps that legitimately broadcast (e.g.,
+    #   Set to `true` at boot for apps that legitimately broadcast (e.g.,
     #   `Parse::Push.allow_broadcast = true`). Or opt in per-instance with
     #   {#broadcast!}, which is auditable in code review.
     #   @return [Boolean]

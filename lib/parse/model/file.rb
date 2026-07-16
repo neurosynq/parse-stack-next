@@ -69,7 +69,7 @@ module Parse
 
     # @!visibility private
     # Default cap on remote-fetched file size (50 MiB). Override via
-    # +Parse::File.max_remote_size+.
+    # `Parse::File.max_remote_size`.
     DEFAULT_MAX_REMOTE_SIZE = 50 * 1024 * 1024
     # @!visibility private
     # Default read/open timeout for remote fetches in seconds.
@@ -90,7 +90,7 @@ module Parse
     ].map { |c| IPAddr.new(c) }.freeze
     # Restrictive port allowlist for Parse::File URL fetches. By default
     # only the standard HTTP/HTTPS ports are permitted. Operators may
-    # extend +Parse::File.allowed_remote_ports+ for legitimate non-standard
+    # extend `Parse::File.allowed_remote_ports` for legitimate non-standard
     # CDN ports.
     DEFAULT_ALLOWED_REMOTE_PORTS = [80, 443, 8080, 8443].freeze
     # @return [String] the name of the file including extension (if any)
@@ -164,7 +164,7 @@ module Parse
       end
 
       # @return [Integer] Maximum byte size for a remote URL fetch via
-      #   +Parse::File.create+ / +Parse::File.new(url)+.
+      #   `Parse::File.create` / `Parse::File.new(url)`.
       attr_writer :max_remote_size
       def max_remote_size
         @max_remote_size ||= DEFAULT_MAX_REMOTE_SIZE
@@ -526,16 +526,22 @@ module Parse
       # the caller can read from.
       #
       # DNS rebinding mitigation: the host is resolved twice — once before
-      # the fetch and once via +URI.open+'s underlying resolver. The
-      # second-pass addresses are re-validated against +BLOCKED_CIDRS+;
-      # any new private/internal IP causes an +ArgumentError+ at progress
+      # the fetch and once via `URI.open`'s underlying resolver. The
+      # second-pass addresses are re-validated against `BLOCKED_CIDRS`;
+      # any new private/internal IP causes an `ArgumentError` at progress
       # time so the body cannot be streamed back. (Caveat: this is a
-      # best-effort defense — the TCP +connect()+ uses a third resolution
+      # best-effort defense — the TCP `connect()` uses a third resolution
       # that we cannot intercept without a custom socket factory. Operators
       # who need strict guarantees should also enforce egress allowlists
       # at the network layer.)
       # @raise [ArgumentError] on any disallowed input or unsafe target.
-      def safe_open_url(url_string)
+      def safe_open_url(url_string, max_bytes: nil)
+        # Validate the per-call streaming cap up front. A non-positive value is
+        # a caller error, not a "cap everything" instruction: 0 would reject any
+        # non-empty body, and a negative cap makes `max_bytes < size_cap` always
+        # true, driving size_cap negative so every non-empty response raises
+        # "exceeds". Fail fast with a clear message before any DNS/host work.
+        max_bytes = coerce_positive_max_bytes(max_bytes)
         uri = begin
           URI.parse(url_string)
         rescue URI::InvalidURIError => e
@@ -561,14 +567,22 @@ module Parse
         end
         resolved = assert_host_allowed!(host)
 
+        # The global cap always bounds the stream; a caller may pass a
+        # tighter `max_bytes:` to abort even earlier (e.g. image fetch with
+        # a per-request ceiling below Parse::File.max_remote_size). Only a
+        # smaller value takes effect — a caller cannot loosen the global cap.
+        # `max_bytes` is already a validated positive Integer (or nil) here.
+        # Only a value below the global cap takes effect — a caller cannot
+        # loosen the global ceiling.
         size_cap = max_remote_size
+        size_cap = max_bytes if max_bytes && max_bytes < size_cap
         timeout = remote_timeout
         uri.open(read_timeout: timeout,
                  open_timeout: timeout,
                  redirect: false,
                  content_length_proc: ->(len) {
                    if len && len > size_cap
-                     raise ArgumentError, "Remote file exceeds Parse::File.max_remote_size (#{size_cap} bytes)"
+                     raise ArgumentError, "Remote file exceeds the size cap (#{size_cap} bytes)"
                    end
                    # DNS-rebinding re-check: by the time content_length_proc
                    # fires, the connection has been established. Re-resolve
@@ -577,14 +591,33 @@ module Parse
                  },
                  progress_proc: ->(transferred) {
                    if transferred > size_cap
-                     raise ArgumentError, "Remote file exceeds Parse::File.max_remote_size (#{size_cap} bytes)"
+                     raise ArgumentError, "Remote file exceeds the size cap (#{size_cap} bytes)"
                    end
                  })
       end
 
       # @!visibility private
-      # Validates that +host+ resolves only to public, non-blocked addresses.
-      # When +Parse::File.allowed_remote_hosts+ is non-empty, host must also
+      # Coerce a caller-supplied `max_bytes:` to a positive Integer, or nil
+      # when unset. A non-numeric, zero, or negative value raises ArgumentError
+      # — the streaming cap is a positive byte ceiling, never a sentinel.
+      # @return [Integer, nil]
+      def coerce_positive_max_bytes(max_bytes)
+        return nil if max_bytes.nil?
+        requested =
+          begin
+            Integer(max_bytes)
+          rescue ArgumentError, TypeError
+            raise ArgumentError, "max_bytes must be a positive integer (got #{max_bytes.inspect})"
+          end
+        unless requested.positive?
+          raise ArgumentError, "max_bytes must be a positive integer (got #{requested})"
+        end
+        requested
+      end
+
+      # @!visibility private
+      # Validates that `host` resolves only to public, non-blocked addresses.
+      # When `Parse::File.allowed_remote_hosts` is non-empty, host must also
       # match an allowlist entry.
       # @return [Array<IPAddr>] the addresses that passed validation.
       def assert_host_allowed!(host)
@@ -614,10 +647,18 @@ module Parse
       end
 
       # @!visibility private
-      # DNS rebinding re-check. Resolves +host+ again and refuses if any
-      # currently-resolved address is private or differs from the first
-      # resolution. Best-effort: kernel resolver caches and a third
-      # resolution at connect-time are out of scope.
+      # DNS rebinding re-check, best-effort. After the connection is
+      # established, re-resolves `host` and refuses if any currently-resolved
+      # address is private/internal (in BLOCKED_CIDRS) — the SSRF shape where a
+      # host that first resolved to a public address later rebinds to an
+      # internal one. It deliberately does NOT require the re-resolved set to
+      # equal the first resolution (`prior_addrs`): legitimate round-robin / CDN
+      # hosts return different public IPs per lookup, and the HTTP client
+      # resolves the actual socket itself, so pinning to the first IPs here
+      # would add false positives without binding the real connection.
+      # `prior_addrs` only gates the check to the case where the initial
+      # resolution succeeded. Kernel resolver caches and a resolution at
+      # connect-time proper are out of scope.
       def assert_host_not_rebound!(host, prior_addrs)
         return if prior_addrs.nil? || prior_addrs.empty?
         current = resolve_addresses(host)

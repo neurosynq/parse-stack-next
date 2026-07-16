@@ -209,17 +209,41 @@ a:visited {
  * parse-stack-next overlay (sidebar / class-list iframe)
  * ============================================================ */
 
+/* Scheme-aware palette. Light is the default; the dark block below
+ * mirrors common.css's prefers-color-scheme handling. Keeping the
+ * overlay unconditional (as it originally was) made the rail
+ * unreadable in light mode: common.css paints #full_list with the
+ * light surface while these rules kept the near-white dark-mode
+ * text (its `#full_list li .item a` selector out-specifies
+ * common.css's `#full_list li a` regardless of load order). */
 :root {
-	--ps-bg:        #1E1F22;
-	--ps-bg-soft:   #2A2C30;
-	--ps-bg-hover:  #34373C;
-	--ps-fg:        #E6E8EB;
-	--ps-fg-muted:  #9CA3AF;
-	--ps-accent:    #E63946;
-	--ps-link:      #4FB8F4;
-	--ps-border:    #3A3D42;
+	--ps-bg:        #FFFFFF;
+	--ps-bg-soft:   #F8F9FA;
+	--ps-bg-hover:  #E8EAED;
+	--ps-fg:        #1F2328;
+	--ps-fg-muted:  #6B7280;
+	--ps-accent:    #B22234;
+	--ps-link:      #169CEE;
+	--ps-border:    #E5E7EB;
+	--ps-scroll-thumb: #C7CBD1;
+	--ps-header-shadow: 0 1px 3px rgba(0, 0, 0, .08);
 	--ps-font:      -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter",
 	                Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--ps-bg:        #1E1F22;
+		--ps-bg-soft:   #2A2C30;
+		--ps-bg-hover:  #34373C;
+		--ps-fg:        #E6E8EB;
+		--ps-fg-muted:  #9CA3AF;
+		--ps-accent:    #E63946;
+		--ps-link:      #4FB8F4;
+		--ps-border:    #3A3D42;
+		--ps-scroll-thumb: #4a4d52;
+		--ps-header-shadow: 0 1px 3px rgba(0, 0, 0, .3);
+	}
 }
 
 body {
@@ -238,7 +262,7 @@ h1 {
 .fixed_header {
 	background: var(--ps-bg-soft) !important;
 	border-bottom: 1px solid var(--ps-border);
-	box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
+	box-shadow: var(--ps-header-shadow);
 }
 
 #search input,
@@ -299,7 +323,7 @@ h1 {
 
 ::-webkit-scrollbar          { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track    { background: var(--ps-bg); }
-::-webkit-scrollbar-thumb    { background: #4a4d52; border-radius: 4px; }
+::-webkit-scrollbar-thumb    { background: var(--ps-scroll-thumb); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--ps-link); }
 
 /* ============================================================
@@ -381,7 +405,10 @@ body > #content {
 }
 
 /* The collapse toggle PNG is a dark-on-transparent sprite; invert it
- * so the arrow shows on dark backgrounds. */
-#full_list li a.toggle {
-	filter: invert(0.85) hue-rotate(180deg) brightness(1.6);
+ * so the arrow shows on dark backgrounds. Dark mode only — in light
+ * mode the stock dark glyphs are already correct. */
+@media (prefers-color-scheme: dark) {
+	#full_list li a.toggle {
+		filter: invert(0.85) hue-rotate(180deg) brightness(1.6);
+	}
 }

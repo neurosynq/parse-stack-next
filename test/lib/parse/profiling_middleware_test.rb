@@ -189,4 +189,94 @@ class ProfilingMiddlewareTest < Minitest::Test
     assert sanitized.include?("apiKey=[FILTERED]"), "apiKey should be filtered"
     refute sanitized.include?("mykey123"), "API key value should not appear"
   end
+
+  # Regression: credentials carried under param names OTHER than the
+  # original three (sessionToken/masterKey/apiKey) must also be redacted.
+  def test_sanitize_url_redacts_credentials_under_other_names
+    middleware = Parse::Middleware::Profiling.new(nil)
+    {
+      "access_token" => "atk_secret",
+      "token"        => "tok_secret",
+      "client_secret" => "cs_secret",
+      "password"     => "hunter2",
+      "Signature"    => "s3sig",
+      "Key-Pair-Id"  => "APKAEXAMPLE",
+    }.each do |param, value|
+      url = "http://localhost:1337/parse/classes/Test?#{param}=#{value}&limit=10"
+      sanitized = middleware.send(:sanitize_url, url)
+      assert sanitized.include?("#{param}=[FILTERED]"), "#{param} should be filtered"
+      refute sanitized.include?(value), "#{param} value must not appear"
+      assert sanitized.include?("limit=10"), "safe param limit should remain"
+    end
+  end
+
+  # Regression: a credential carried under a percent-ENCODED param name
+  # (session%54oken == sessionToken) must still be redacted. Matching the
+  # raw name alone let the encoded form slip through even though the server
+  # decodes it before reading the credential.
+  def test_sanitize_url_redacts_percent_encoded_credential_names
+    middleware = Parse::Middleware::Profiling.new(nil)
+    {
+      "session%54oken" => "r:abc123",   # sessionToken
+      "master%4Bey"    => "mk_secret",  # masterKey (K)
+      "%61piKey"       => "ak_secret",  # apiKey (a)
+    }.each do |param, value|
+      url = "http://localhost:1337/parse/classes/Test?#{param}=#{value}&limit=10"
+      sanitized = middleware.send(:sanitize_url, url)
+      refute sanitized.include?(value),
+        "#{param} value must not appear (encoded name must still be matched)"
+      assert sanitized.include?("#{param}=[FILTERED]"),
+        "output preserves the original (encoded) spelling with a filtered value"
+      assert sanitized.include?("limit=10"), "safe param limit should remain"
+    end
+  end
+
+  # A high-byte percent escape in a param NAME (e.g. %C3, a lone UTF-8 lead
+  # byte) must not crash the sanitizer. ASCII-only name decoding leaves such
+  # escapes literal so the downstream match never sees an invalid-encoding
+  # string; a genuinely-sensitive param on the same URL is still redacted.
+  def test_sanitize_url_does_not_crash_on_non_ascii_percent_escape
+    middleware = Parse::Middleware::Profiling.new(nil)
+    url = "http://localhost:1337/parse/classes/Test?session%C3oken=r:abc&masterKey=secret&limit=10"
+    sanitized = middleware.send(:sanitize_url, url) # must not raise ArgumentError
+    assert_kind_of String, sanitized
+    assert sanitized.include?("masterKey=[FILTERED]"), "the real credential is still redacted"
+    refute sanitized.include?("secret"), "masterKey value must not appear"
+  end
+
+  # Double-encoded names must NOT be decoded recursively: %2554 -> %54 (not
+  # the letter T), so `session%2554oken` is not `sessionToken` and is left
+  # visible — matching how a real query parser would read it.
+  def test_sanitize_url_does_not_recursively_decode_names
+    middleware = Parse::Middleware::Profiling.new(nil)
+    url = "http://localhost:1337/parse/classes/Test?session%2554oken=notacreds&limit=10"
+    sanitized = middleware.send(:sanitize_url, url)
+    refute sanitized.include?("[FILTERED]"), "double-encoded name must not be treated as sessionToken"
+  end
+
+  # ReDoS guard: the redaction regex uses possessive quantifiers so it stays
+  # well-behaved on pathological URLs (a long delimiter-free run, or many
+  # repeated '?"'). It must complete quickly and still redact a trailing
+  # credential correctly.
+  def test_sanitize_url_handles_pathological_input_quickly
+    require "timeout"
+    middleware = Parse::Middleware::Profiling.new(nil)
+    pathological = "http://h/p?" + ("?\"" * 100_000) + "&sessionToken=r:secret"
+    sanitized = Timeout.timeout(5) { middleware.send(:sanitize_url, pathological) }
+    assert sanitized.include?("sessionToken=[FILTERED]"),
+           "a trailing credential must still be redacted under pathological input"
+    refute sanitized.include?("r:secret")
+  end
+
+  # Legitimate Parse params that merely CONTAIN a sensitive substring
+  # (keys, excludeKeys, redirectClassNameForKey) must NOT be over-redacted.
+  def test_sanitize_url_keeps_safe_key_params_visible
+    middleware = Parse::Middleware::Profiling.new(nil)
+    url = "http://localhost:1337/parse/classes/Test?keys=title,artist&excludeKeys=secret_notes&redirectClassNameForKey=owner"
+    sanitized = middleware.send(:sanitize_url, url)
+    assert sanitized.include?("keys=title,artist"), "keys= (field selection) must remain visible"
+    assert sanitized.include?("excludeKeys=secret_notes"), "excludeKeys= (field selection) must remain visible"
+    assert sanitized.include?("redirectClassNameForKey=owner"), "redirectClassNameForKey must remain visible"
+    refute sanitized.include?("[FILTERED]"), "no over-redaction of safe params"
+  end
 end

@@ -74,7 +74,7 @@ module Parse
       attr_reader :session_token
 
       # @return [Array<String>, nil] field names that trigger update events when
-      #   changed (PS 7.0+ `watch` option). +nil+ means all field changes trigger
+      #   changed (PS 7.0+ `watch` option). `nil` means all field changes trigger
       #   update events.
       attr_reader :watch
 

@@ -249,7 +249,7 @@ class EmbeddingsImageFetchTest < Minitest::Test
   # ---------- fetch! pipeline ----------
 
   def with_stubbed_download(bytes)
-    Parse::File.stub(:safe_open_url, ->(_url) { StringIO.new(bytes) }) do
+    Parse::File.stub(:safe_open_url, ->(_url, **_opts) { StringIO.new(bytes) }) do
       yield
     end
   end
@@ -261,10 +261,26 @@ class EmbeddingsImageFetchTest < Minitest::Test
         raise IOError, "connection reset mid-body"
       end
     end.new("".b)
-    Parse::File.stub(:safe_open_url, ->(_url) { io }) do
+    Parse::File.stub(:safe_open_url, ->(_url, **_opts) { io }) do
       assert_raises(IOError) { IF.fetch!("https://1.1.1.1/a.jpg") }
     end
     assert io.closed?, "the download handle must be closed even when read raises"
+  end
+
+  # max_bytes must be pushed INTO safe_open_url so the download aborts
+  # mid-stream, not buffered whole and rejected after (NEW-6).
+  def test_fetch_forwards_max_bytes_to_safe_open_url
+    Parse::Embeddings.allowed_image_hosts = ["1.1.1.1"]
+    seen = {}
+    png = png_with_exif
+    stub = lambda do |_url, **opts|
+      seen[:max_bytes] = opts[:max_bytes]
+      StringIO.new(png)
+    end
+    Parse::File.stub(:safe_open_url, stub) do
+      IF.fetch!("https://1.1.1.1/a.png", max_bytes: 4096)
+    end
+    assert_equal 4096, seen[:max_bytes], "fetch! must forward max_bytes: into safe_open_url"
   end
 
   def test_fetch_requires_host_allowlist_but_not_sentinel

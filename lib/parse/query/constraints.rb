@@ -2550,21 +2550,21 @@ module Parse
 
     # @!visibility private
     # Shared helpers for the four ACL constraint subclasses
-    # (+:ACL.readable_by+, +:ACL.readable_by_role+, +:ACL.writable_by+,
-    # +:ACL.writable_by_role+). Collects a list of permission strings
+    # (`:ACL.readable_by`, `:ACL.readable_by_role`, `:ACL.writable_by`,
+    # `:ACL.writable_by_role`). Collects a list of permission strings
     # from a caller-supplied value of User/Role/Pointer/Array/String,
     # using {Parse::Role.all_for_user} (user inputs) and
     # {Parse::Role#all_parent_role_names} (role inputs) so the
     # traversal walks the inheritance direction Parse Server actually
-    # enforces. Prior implementations inlined +role.all_child_roles+,
+    # enforces. Prior implementations inlined `role.all_child_roles`,
     # which traverses the wrong direction and over-grants.
     module ACLPermissions
       module_function
 
-      # Expand a +:ACL.readable_by+ / +:ACL.writable_by+ value into a
-      # permission-string array. Uses explicit +is_a?+ calls (rather
-      # than +case/when+) so callers that pass duck-typed mocks with
-      # overridden +is_a?+ — common in the constraint test suite —
+      # Expand a `:ACL.readable_by` / `:ACL.writable_by` value into a
+      # permission-string array. Uses explicit `is_a?` calls (rather
+      # than `case/when`) so callers that pass duck-typed mocks with
+      # overridden `is_a?` — common in the constraint test suite —
       # continue to route correctly.
       # @param value [Parse::User, Parse::Role, Parse::Pointer, String, Array]
       # @return [Array<String>]
@@ -2612,9 +2612,9 @@ module Parse
         str == "public" ? "*" : str
       end
 
-      # Expand a +:ACL.readable_by_role+ / +:ACL.writable_by_role+ value
+      # Expand a `:ACL.readable_by_role` / `:ACL.writable_by_role` value
       # into a permission-string array. Differs from {.collect} by
-      # auto-prefixing bare strings with +"role:"+ and refusing
+      # auto-prefixing bare strings with `"role:"` and refusing
       # non-role arguments.
       # @param value [Parse::Role, Parse::Pointer, String, Array]
       # @return [Array<String>]
@@ -2686,18 +2686,18 @@ module Parse
 
       # Compile a final permission-string array into an aggregation
       # pipeline match-stage on the requested permission field. The
-      # +$exists: false+ branch is appended by {Parse::ACL.read_predicate}
-      # / {Parse::ACL.write_predicate} so a missing +_rperm+/+_wperm+
+      # `$exists: false` branch is appended by {Parse::ACL.read_predicate}
+      # / {Parse::ACL.write_predicate} so a missing `_rperm`/`_wperm`
       # (treated as public by Parse Server) still matches.
       # @param permissions [Array<String>]
-      # @param field [String] +"_rperm"+ or +"_wperm"+.
+      # @param field [String] `"_rperm"` or `"_wperm"`.
       # @return [Hash] aggregation-pipeline wrapper compatible with
       #   {Parse::Query}'s constraint-build contract.
       # @param strict [Boolean] when true, build an EXACT match: suppress
-      #   both the implicit public +"*"+ grant AND the missing-field
-      #   (+$exists: false+) branch, so only rows whose +_rperm+/+_wperm+
-      #   literally contains one of +permissions+ match. Used by the
-      #   +readable_by(..., strict: true)+ / +readable_by_exact+ surface.
+      #   both the implicit public `"*"` grant AND the missing-field
+      #   (`$exists: false`) branch, so only rows whose `_rperm`/`_wperm`
+      #   literally contains one of `permissions` match. Used by the
+      #   `readable_by(..., strict: true)` / `readable_by_exact` surface.
       def pipeline(permissions, field:, strict: false)
         deduped = permissions.compact.reject(&:empty?).uniq
         if deduped.empty?
@@ -2712,9 +2712,9 @@ module Parse
       end
 
       # @!visibility private
-      # Whether a +readable_by+ / +writable_by+ value expresses "no
-      # permissions" (master-key-only): +nil+, an empty Array, the String
-      # +"none"+, or the Symbol +:none+. These map to {.empty_pipeline}.
+      # Whether a `readable_by` / `writable_by` value expresses "no
+      # permissions" (master-key-only): `nil`, an empty Array, the String
+      # `"none"`, or the Symbol `:none`. These map to {.empty_pipeline}.
       def empty_intent?(value)
         return true if value.nil?
         return true if value == "none" || value == :none
@@ -2724,11 +2724,11 @@ module Parse
 
       # @!visibility private
       # The match for "no permissions": an explicit empty array. A missing
-      # +_rperm+/+_wperm+ is treated by Parse Server as PUBLIC — the
-      # opposite of master-only — so it must NOT match here. +$eq: []+
+      # `_rperm`/`_wperm` is treated by Parse Server as PUBLIC — the
+      # opposite of master-only — so it must NOT match here. `$eq: []`
       # already excludes a missing field (missing != []); the +$exists:
       # true+ guard documents that intent.
-      # @param field [String] +"_rperm"+ or +"_wperm"+.
+      # @param field [String] `"_rperm"` or `"_wperm"`.
       def empty_pipeline(field:)
         { "__aggregation_pipeline" => [
           { "$match" => { field => { "$exists" => true, "$eq" => [] } } },
@@ -2736,11 +2736,11 @@ module Parse
       end
 
       # @!visibility private
-      # Permission keys for a +not_readable_by+ / +not_writable_by+ value:
+      # Permission keys for a `not_readable_by` / `not_writable_by` value:
       # the expanded grant set (user→roles, role→parent roles) PLUS the
-      # public +"*"+ wildcard. A public row is readable/writable by everyone,
+      # public `"*"` wildcard. A public row is readable/writable by everyone,
       # so it must be EXCLUDED from a "not readable/writable by X" result —
-      # hence +"*"+ is added to the +$nin+ set. Returns +[]+ for an
+      # hence `"*"` is added to the `$nin` set. Returns `[]` for an
       # empty-intent value (no negation constraint is applied).
       # @return [Array<String>]
       def collect_for_negation(value)
@@ -2831,7 +2831,7 @@ module Parse
       register :readable_by
 
       # @return [Boolean] whether to compile an EXACT match (suppress the
-      #   implicit public +"*"+ grant and the missing-field branch).
+      #   implicit public `"*"` grant and the missing-field branch).
       #   Overridden by {ACLReadableByExactConstraint}.
       def strict?
         false
@@ -2855,10 +2855,10 @@ module Parse
     end
 
     # Strict variant of {ACLReadableByConstraint}: matches ONLY rows whose
-    # +_rperm+ literally contains one of the resolved permissions — no
-    # implicit public +"*"+ and no missing-+_rperm+ (public-by-absence) rows.
-    # Reached via +Query#readable_by(value, strict: true)+ or the
-    # +:ACL.readable_by_exact+ symbol operator. Use this for ownership /
+    # `_rperm` literally contains one of the resolved permissions — no
+    # implicit public `"*"` and no missing-`_rperm` (public-by-absence) rows.
+    # Reached via `Query#readable_by(value, strict: true)` or the
+    # `:ACL.readable_by_exact` symbol operator. Use this for ownership /
     # security audits ("which rows explicitly grant this principal") rather
     # than access simulation ("what can this principal read").
     class ACLReadableByExactConstraint < ACLReadableByConstraint
@@ -3185,23 +3185,23 @@ module Parse
       end
     end
 
-    # @deprecated Thin alias of {ACLReadableByConstraint}. The +:readable_by+
+    # @deprecated Thin alias of {ACLReadableByConstraint}. The `:readable_by`
     #   operator is registered by {ACLReadableByConstraint}; this constant is
     #   retained only so any code referencing it keeps working. The previous
     #   standalone implementation (no role expansion, no implicit public
-    #   +"*"+, divergent empty-ACL shape) has been removed — it never backed
-    #   the +:readable_by+ operator and silently disagreed with it.
+    #   `"*"`, divergent empty-ACL shape) has been removed — it never backed
+    #   the `:readable_by` operator and silently disagreed with it.
     class ReadableByConstraint < ACLReadableByConstraint
     end
 
     # @deprecated Alias of {ACLWritableByConstraint}. The British-spelled
-    #   +:writeable_by+ operator now resolves to the SAME public-inclusive,
-    #   role-expanding implementation as +:writable_by+ — previously it was a
+    #   `:writeable_by` operator now resolves to the SAME public-inclusive,
+    #   role-expanding implementation as `:writable_by` — previously it was a
     #   separate, strict, non-expanding constraint, so the one-letter spelling
     #   difference silently changed query semantics. For the old exact-match
     #   behavior (no implicit public, no role expansion, no missing-field),
-    #   use +readable_by(..., strict: true)+ / +writable_by(..., strict: true)+
-    #   or the +:writable_by_exact+ operator.
+    #   use `readable_by(..., strict: true)` / `writable_by(..., strict: true)`
+    #   or the `:writable_by_exact` operator.
     class WriteableByConstraint < ACLWritableByConstraint
       register :writeable_by
     end
@@ -3223,7 +3223,7 @@ module Parse
     #
     # @note "Not readable by X" excludes rows readable by X *directly*, *via
     #   any role X inherits*, AND *publicly* — so a User value expands its
-    #   roles and the public +"*"+ is always added to the exclusion set.
+    #   roles and the public `"*"` is always added to the exclusion set.
     # @note This constraint uses aggregation pipeline because Parse Server
     #   restricts direct queries on the internal _rperm field.
     class NotReadableByConstraint < Constraint

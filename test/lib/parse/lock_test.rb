@@ -428,6 +428,93 @@ class ParseLockTest < Minitest::Test
     end
   end
 
+  # The in-process mutex registry (degraded fallback) must be bounded so
+  # high-cardinality lock keys can't leak Mutexes unbounded (MISC-1).
+  def test_process_mutex_registry_is_bounded
+    Parse::LockBackend.reset!
+    cap = Parse::LockBackend::PROCESS_MUTEX_REGISTRY_MAX
+    (cap + 500).times { |i| Parse::LockBackend.send(:process_mutex, "k#{i}") }
+    reg = Parse::LockBackend.instance_variable_get(:@process_mutex_registry)
+    assert reg.size <= cap,
+      "registry must stay within the cap (was #{reg.size}, cap #{cap})"
+  ensure
+    Parse::LockBackend.reset!
+  end
+
+  def test_process_mutex_never_evicts_a_held_mutex
+    Parse::LockBackend.reset!
+    cap = Parse::LockBackend::PROCESS_MUTEX_REGISTRY_MAX
+    held = Parse::LockBackend.send(:process_mutex, "held-key")
+    held.lock
+    begin
+      # Overflow the registry many times over; the held mutex must survive.
+      (cap + 200).times { |i| Parse::LockBackend.send(:process_mutex, "flood#{i}") }
+      reg = Parse::LockBackend.instance_variable_get(:@process_mutex_registry)
+      assert_same held, reg["held-key"],
+        "a currently-held mutex must never be evicted (would split mutual exclusion)"
+    ensure
+      held.unlock
+    end
+  ensure
+    Parse::LockBackend.reset!
+  end
+
+  # A Mutex handed out is UNLOCKED until the caller reaches #synchronize.
+  # In that window the bare accessor made it eligible for eviction, so
+  # registry saturation could reclaim it and a second caller would mint a
+  # DISTINCT Mutex for the same key — splitting mutual exclusion. The
+  # checkout path reserves the key (pending-acquirer count) inside the
+  # registry lock, so eviction must skip it even before it is locked.
+  def test_checked_out_mutex_survives_eviction_before_it_is_locked
+    Parse::LockBackend.reset!
+    cap = Parse::LockBackend::PROCESS_MUTEX_REGISTRY_MAX
+    reserved = Parse::LockBackend.send(:checkout_process_mutex, "victim") # NOT locked yet
+    begin
+      (cap + 200).times { |i| Parse::LockBackend.send(:process_mutex, "flood#{i}") }
+      again = Parse::LockBackend.send(:checkout_process_mutex, "victim")
+      assert_same reserved, again,
+        "a checked-out (pending) mutex must not be evicted before it is locked"
+      Parse::LockBackend.send(:checkin_process_mutex, "victim")
+    ensure
+      Parse::LockBackend.send(:checkin_process_mutex, "victim")
+    end
+  ensure
+    Parse::LockBackend.reset!
+  end
+
+  def test_synchronize_process_mutex_runs_block_and_releases_reservation
+    Parse::LockBackend.reset!
+    cap = Parse::LockBackend::PROCESS_MUTEX_REGISTRY_MAX
+    result = Parse::LockBackend.synchronize_process_mutex("k") { :ran }
+    assert_equal :ran, result
+    # Prove the reservation was actually released (not a soft nil check):
+    # "k" was inserted first, so once it is neither locked nor reserved a
+    # registry flood must evict it. If checkin never ran, pending["k"] would
+    # still be 1 and the key would survive.
+    (cap + 50).times { |i| Parse::LockBackend.send(:process_mutex, "flood#{i}") }
+    reg = Parse::LockBackend.instance_variable_get(:@process_mutex_registry)
+    refute reg.key?("k"),
+      "after the block returns the key must be evictable (reservation released)"
+  ensure
+    Parse::LockBackend.reset!
+  end
+
+  # A raise inside the block must still check the reservation back in
+  # exactly once (balanced ensure), leaving the key evictable.
+  def test_synchronize_process_mutex_releases_reservation_on_block_raise
+    Parse::LockBackend.reset!
+    cap = Parse::LockBackend::PROCESS_MUTEX_REGISTRY_MAX
+    assert_raises(RuntimeError) do
+      Parse::LockBackend.synchronize_process_mutex("k") { raise "boom" }
+    end
+    (cap + 50).times { |i| Parse::LockBackend.send(:process_mutex, "flood#{i}") }
+    reg = Parse::LockBackend.instance_variable_get(:@process_mutex_registry)
+    refute reg.key?("k"),
+      "a raising block must still release the reservation (key stays evictable)"
+  ensure
+    Parse::LockBackend.reset!
+  end
+
   private
 
   def refute_raises_timeout

@@ -114,34 +114,34 @@ module Parse
       # Return the transitive upward closure of role names a user
       # inherits permissions from.
       #
-      # Parse Server +_Role+ inheritance: when role +X+ holds role +Y+
-      # in its +roles+ relation, users of +Y+ inherit +X+'s
-      # permissions. So given a user +U+, the permission set is built
+      # Parse Server `_Role` inheritance: when role `X` holds role `Y`
+      # in its `roles` relation, users of `Y` inherit `X`'s
+      # permissions. So given a user `U`, the permission set is built
       # by:
       #
-      #   1. Querying for every role +D+ where +U+ is a direct member
-      #      (+_Role.users+ contains +U+).
-      #   2. For each direct role +D+, walking upward to every role
-      #      +P+ that lists +D+ in its +roles+ relation. Repeat until
+      #   1. Querying for every role `D` where `U` is a direct member
+      #      (`_Role.users` contains `U`).
+      #   2. For each direct role `D`, walking upward to every role
+      #      `P` that lists `D` in its `roles` relation. Repeat until
       #      no new parents are found.
       #
-      # This is the correct primitive for building +_rperm+ predicates
+      # This is the correct primitive for building `_rperm` predicates
       # (e.g., {ACLReadableByConstraint}, {ACLWritableByConstraint},
-      # and the Atlas Search ACL +$match+ injection). The legacy walk
+      # and the Atlas Search ACL `$match` injection). The legacy walk
       # via {#all_child_roles} on the user's direct roles traverses
       # the wrong direction and over-grants — it returns roles whose
       # users include the input user through inheritance, not the
       # roles the input user inherits permissions from.
       #
       # Cycle-safe: a visited-id set guards against pathological
-      # +_Role.roles+ cycles (e.g. A→B→A).
+      # `_Role.roles` cycles (e.g. A→B→A).
       #
       # @param user [Parse::User, Parse::Pointer, String, nil] the
-      #   user to expand. A +Parse::Pointer+ must be on the +_User+
-      #   class. A +String+ is treated as a +_User+ objectId. +nil+
+      #   user to expand. A `Parse::Pointer` must be on the `_User`
+      #   class. A `String` is treated as a `_User` objectId. `nil`
       #   returns an empty set (anonymous).
       # @param max_depth [Integer] maximum BFS depth (default: 10).
-      # @param master [Boolean] when +true+, opt in to the mongo-direct
+      # @param master [Boolean] when `true`, opt in to the mongo-direct
       #   fast path under master-mode (bypasses `_Role` CLP). Use for
       #   admin/analytics code paths that legitimately need a
       #   master-scope view of the role graph.
@@ -150,7 +150,7 @@ module Parse
       #   scope (subject to `_Role` CLP). The scope is forwarded
       #   verbatim to {Parse::MongoDB.role_names_for_user}; CLP denial
       #   raises {Parse::CLPScope::Denied}.
-      # @return [Set<String>] role names (no +role:+ prefix) the user
+      # @return [Set<String>] role names (no `role:` prefix) the user
       #   transitively inherits permissions from, including direct
       #   memberships. Empty set for anonymous or no-membership users.
       # @note When neither `master:` nor `as:` is supplied, the
@@ -248,19 +248,19 @@ module Parse
       end
 
       # Walk upward from a starting frontier of {Parse::Role} objects
-      # through the +_Role.roles+ inverse relation, collecting every
+      # through the `_Role.roles` inverse relation, collecting every
       # role name reachable. Used by {.all_for_user} (frontier = the
       # user's direct roles) and {Parse::Role#all_parent_role_names}
       # (frontier = the role itself).
       #
       # The starting frontier is INCLUDED in the returned set, because
-      # the semantics is "every role name whose presence in +_rperm+
+      # the semantics is "every role name whose presence in `_rperm`
       # grants access" — direct membership counts.
       #
       # @param starting_roles [Array<Parse::Role>] roles to begin the
       #   upward traversal from.
       # @param max_depth [Integer] maximum BFS depth.
-      # @return [Set<String>] role names (no +role:+ prefix) including
+      # @return [Set<String>] role names (no `role:` prefix) including
       #   the starting frontier and every transitive parent.
       def expand_inheritance_upward(starting_roles, max_depth: 10)
         names = Set.new
@@ -303,9 +303,9 @@ module Parse
       private
 
       # @!visibility private
-      # Coerce caller-supplied user argument into a +Parse::Pointer+
-      # on +_User+ suitable for an inverse-relation query. Returns
-      # +nil+ when the input cannot be resolved to a +_User+ id, in
+      # Coerce caller-supplied user argument into a `Parse::Pointer`
+      # on `_User` suitable for an inverse-relation query. Returns
+      # `nil` when the input cannot be resolved to a `_User` id, in
       # which case {.all_for_user} returns an empty set without
       # issuing a network call.
       def role_lookup_pointer_for(user)
@@ -375,7 +375,7 @@ module Parse
     # IMPORTANT — Parse Server _Role inheritance semantics: when role X
     # holds role Y in its `roles` relation, **users of Y inherit X's
     # permissions** (not the other way around). So calling
-    # +admin.add_child_role(moderator)+ does NOT grant Moderator's
+    # `admin.add_child_role(moderator)` does NOT grant Moderator's
     # capabilities to Admin; it grants Admin's capabilities to every
     # Moderator user — privilege escalation.
     #
@@ -393,7 +393,7 @@ module Parse
     #
     # @param role [Parse::Role] the role to add to this role's `roles` relation.
     # @return [self] returns self for chaining.
-    # @raise [ArgumentError] when +role+ is +self+ (a self-loop in the `_Role.roles` relation produces an infinite recursion on lookup and serves no permission purpose).
+    # @raise [ArgumentError] when `role` is `self` (a self-loop in the `_Role.roles` relation produces an infinite recursion on lookup and serves no permission purpose).
     def add_child_role(role)
       assert_not_self_reference!(role, :add_child_role)
       roles.add(role)
@@ -404,7 +404,7 @@ module Parse
     # {#add_child_role} for the inheritance-direction caveat.
     # @param role_list [Array<Parse::Role>] roles to add.
     # @return [self] returns self for chaining.
-    # @raise [ArgumentError] when any entry in +role_list+ is +self+.
+    # @raise [ArgumentError] when any entry in `role_list` is `self`.
     def add_child_roles(*role_list)
       flat = role_list.flatten
       flat.each { |r| assert_not_self_reference!(r, :add_child_roles) }
@@ -429,11 +429,11 @@ module Parse
     end
 
     # Grant this role's capabilities to the given role's users. Reads as:
-    # "users with +grantee+ now have +self+'s capabilities."
-    # Equivalent to +self.add_child_role(grantee)+ but unambiguous about
+    # "users with `grantee` now have `self`'s capabilities."
+    # Equivalent to `self.add_child_role(grantee)` but unambiguous about
     # the direction of inheritance.
     #
-    # Non-saving — the caller must call +self.save+ to persist. See
+    # Non-saving — the caller must call `self.save` to persist. See
     # {#grant_capabilities_to!} for the auto-saving variant.
     #
     # @param grantee [Parse::Role] the role whose users will inherit this role's permissions.
@@ -448,7 +448,7 @@ module Parse
     end
 
     # Auto-saving variant of {#grant_capabilities_to}. Performs the
-    # relation mutation AND persists +self+ in one call. Returns +self+
+    # relation mutation AND persists `self` in one call. Returns `self`
     # consistently so the caller can chain or store the result without
     # tracking which object was mutated. Prefer this in tests and
     # one-shot scripts where batching multiple mutations isn't needed.
@@ -466,19 +466,19 @@ module Parse
     end
 
     # Inverse spelling of {#grant_capabilities_to}: "this role's users
-    # inherit +source+'s capabilities". Performs the relation mutation
-    # on +source+, not on +self+.
+    # inherit `source`'s capabilities". Performs the relation mutation
+    # on `source`, not on `self`.
     #
-    # **Save target.** The mutation lives on +source.roles+. To persist,
-    # the caller must save +source+, NOT +self+. This asymmetry exists
+    # **Save target.** The mutation lives on `source.roles`. To persist,
+    # the caller must save `source`, NOT `self`. This asymmetry exists
     # because Parse Server stores the relation on the role that holds
-    # the +roles+ list, and that role is +source+. The non-bang form is
+    # the `roles` list, and that role is `source`. The non-bang form is
     # retained for callers that need to batch multiple mutations on
-    # +source+ before a single save; prefer {#inherits_capabilities_from!}
+    # `source` before a single save; prefer {#inherits_capabilities_from!}
     # for the one-shot case where the auto-save matches intent.
     #
     # @param source [Parse::Role] the role whose capabilities this role's users acquire.
-    # @return [Parse::Role] the +source+ role (caller still needs to .save it
+    # @return [Parse::Role] the `source` role (caller still needs to .save it
     #   if not using the bang variant).
     # @example Non-saving (must save source separately)
     #   admin.inherits_capabilities_from(moderator)
@@ -493,14 +493,14 @@ module Parse
     end
 
     # Auto-saving variant of {#inherits_capabilities_from}. Performs the
-    # mutation on +source.roles+ AND saves +source+ for you, then
-    # returns +self+ so the caller can keep working with the role they
+    # mutation on `source.roles` AND saves `source` for you, then
+    # returns `self` so the caller can keep working with the role they
     # called the method on. Resolves the most common stumbling block
     # with {#inherits_capabilities_from}: the "save target" asymmetry.
     #
     # @param source [Parse::Role] the role whose capabilities this role's users acquire.
     # @return [self] the role that now inherits (caller's original receiver).
-    # @raise [Parse::RecordNotSaved] if the save of +source+ fails.
+    # @raise [Parse::RecordNotSaved] if the save of `source` fails.
     # @example
     #   admin.inherits_capabilities_from!(moderator)
     #   # → Admin users can now do anything Moderator users can. Persisted.
@@ -528,13 +528,13 @@ module Parse
 
     # Get all users belonging to this role, including users from child roles recursively.
     #
-    # Cycle-safe: a +visited+ set guards against pathological
-    # +_Role.roles+ cycles (e.g. A→B→A) that would otherwise cause
+    # Cycle-safe: a `visited` set guards against pathological
+    # `_Role.roles` cycles (e.g. A→B→A) that would otherwise cause
     # exponential per-node query fan-out.
     #
     # @param max_depth [Integer] maximum recursion depth.
     # @param visited [Set] internal cycle-detection accumulator.
-    # @param master [Boolean] when +true+, opt in to the mongo-direct
+    # @param master [Boolean] when `true`, opt in to the mongo-direct
     #   fast path under master-mode. The follow-up `_User` fetch also
     #   runs unscoped — used for admin/analytics paths that need a
     #   master-key view of every member.
@@ -662,10 +662,10 @@ module Parse
     end
     private :hydrate_users_under_scope
 
-    # Get the set of role names whose presence in a +_rperm+ array
+    # Get the set of role names whose presence in a `_rperm` array
     # grants access to this role's members. That's the role itself
-    # plus every role +P+ that lists this role in its +roles+ relation,
-    # transitively upward — because users of this role inherit +P+'s
+    # plus every role `P` that lists this role in its `roles` relation,
+    # transitively upward — because users of this role inherit `P`'s
     # permissions under Parse Server's role-inheritance semantics
     # (see {#add_child_role}).
     #
@@ -673,19 +673,19 @@ module Parse
     # two share an internal BFS via
     # {Parse::Role.expand_inheritance_upward}. Use this method when
     # compiling an ACL predicate around a role argument, e.g.
-    # +:ACL.readable_by => admin_role+: the role itself contributes
-    # +"role:Admin"+, and any role whose +.roles+ relation contains
-    # +admin_role+ also grants Admins access through inheritance.
+    # `:ACL.readable_by => admin_role`: the role itself contributes
+    # `"role:Admin"`, and any role whose `.roles` relation contains
+    # `admin_role` also grants Admins access through inheritance.
     #
     # The legacy {#all_child_roles} walk is NOT a substitute. Child
     # roles inherit FROM this role (their members get this role's
-    # capabilities), so child-role names in +_rperm+ would not grant
+    # capabilities), so child-role names in `_rperm` would not grant
     # this role's members anything — the walk traverses the wrong
     # direction for ACL composition.
     #
     # @param max_depth [Integer] maximum BFS depth (default: 10).
-    # @return [Set<String>] role names (no +role:+ prefix) including
-    #   +self.name+ and every transitive parent.
+    # @return [Set<String>] role names (no `role:` prefix) including
+    #   `self.name` and every transitive parent.
     # @example
     #   permission_strings = admin.all_parent_role_names.map { |n| "role:#{n}" }
     def all_parent_role_names(max_depth: 10)

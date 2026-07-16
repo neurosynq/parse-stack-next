@@ -129,6 +129,20 @@ class AgentClassFilterTest < Minitest::Test
     assert_equal :class_filter, err.kind
   end
 
+  # Regression (#3): the `$unionWith` String shorthand
+  # (`{ "$unionWith" => "X" }`) must face the SAME class-filter gate as the
+  # Hash form. Previously the walker computed target=nil for a non-Hash
+  # value and skipped the allowlist check entirely — an agent restricted to
+  # ClassFilterPost could union in an off-allowlist class.
+  def test_string_form_union_with_off_allowlist_target_is_refused
+    agent = silence_master_key { Parse::Agent.new(classes: { only: [ClassFilterPost] }) }
+    pipeline = [{ "$unionWith" => "ClassFilterComment" }]
+    err = assert_raises(Parse::Agent::AccessDenied) do
+      Parse::Agent::Tools.enforce_pipeline_access_policy!("ClassFilterPost", pipeline, agent: agent)
+    end
+    assert_equal :class_filter, err.kind
+  end
+
   # ---- Post-fetch redaction floor -----------------------------------------
 
   def test_walk_and_redact_scrubs_off_allowlist_pointer_strings

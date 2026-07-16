@@ -76,7 +76,15 @@ opt_parser = OptionParser.new do |o|
   o.on('--url URL', 'Load the env config from a url.') do |url|
     begin
       puts "Loading config: #{url}"
-      json = JSON.load open(url)
+      # SEC-20: do NOT pass a user-supplied string to bare Kernel#open —
+      # `open("|command")` executes a subprocess. Parse an explicit URI and
+      # require an HTTP(S) scheme, then use open-uri's URI::HTTP#open (a real
+      # network fetch), never the Kernel form.
+      uri = URI.parse(url)
+      unless uri.is_a?(URI::HTTP) # URI::HTTPS < URI::HTTP, so this admits both
+        raise "Refusing to load config from a non-HTTP(S) URL: #{url.inspect}"
+      end
+      json = JSON.load(uri.open)
       raise "Contents not a JSON hash." unless json.is_a?(Hash)
       json.each { |k,v| ENV[k.upcase] = v }
       opts[:server_url] ||= ENV['PARSE_SERVER_URL']

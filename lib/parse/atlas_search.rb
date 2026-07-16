@@ -37,21 +37,21 @@ module Parse
     # Error raised for invalid search parameters
     class InvalidSearchParameters < StandardError; end
 
-    # Error raised when the caller did not supply +session_token:+ or
-    # +master: true+ and {.require_session_token} is +true+. Atlas
+    # Error raised when the caller did not supply `session_token:` or
+    # `master: true` and {.require_session_token} is `true`. Atlas
     # Search bypasses Parse Server's ACL evaluation, so the caller
     # must either pass a session token (so the SDK can inject a
-    # +_rperm+ +$match+) or explicitly opt into master-key semantics.
+    # `_rperm` `$match`) or explicitly opt into master-key semantics.
     class ACLRequired < StandardError; end
 
-    # Error raised when {.faceted_search} is called with a +session_token+.
-    # +$searchMeta+ returns a single metadata document — bucket
+    # Error raised when {.faceted_search} is called with a `session_token`.
+    # `$searchMeta` returns a single metadata document — bucket
     # counts that include restricted documents and cannot be
-    # post-filtered with +$match+ because the matched documents are
+    # post-filtered with `$match` because the matched documents are
     # not in the output stream. ACL-safe faceting requires the search
-    # index to tokenize +_rperm+ and a +compound.filter+ injection
+    # index to tokenize `_rperm` and a `compound.filter` injection
     # path; both are deferred to a follow-up release. Callers that
-    # need ACL-aware faceting today must either run with +master: true+
+    # need ACL-aware faceting today must either run with `master: true`
     # or implement post-aggregation filtering themselves.
     class FacetedSearchNotACLSafe < StandardError; end
 
@@ -79,23 +79,23 @@ module Parse
       attr_accessor :allow_raw
 
       # @!attribute [rw] require_session_token
-      #   When +true+, {.search}, {.autocomplete}, and
+      #   When `true`, {.search}, {.autocomplete}, and
       #   {.faceted_search} raise {ACLRequired} unless the caller
-      #   passes either +session_token:+ or +master: true+. Default:
-      #   +false+, matching the pre-ACL behavior — a one-time
-      #   +[Parse::AtlasSearch:SECURITY]+ banner is emitted instead
+      #   passes either `session_token:` or `master: true`. Default:
+      #   `false`, matching the pre-ACL behavior — a one-time
+      #   `[Parse::AtlasSearch:SECURITY]` banner is emitted instead
       #   for missing-token calls, the same pattern used by
       #   {Parse::Agent} for master-key construction.
       #
       #   New deployments are strongly encouraged to flip this to
-      #   +true+ at startup. The next major release will flip the
+      #   `true` at startup. The next major release will flip the
       #   default.
       #   @return [Boolean]
       attr_accessor :require_session_token
 
       # @!attribute [rw] session_cache_ttl
       #   TTL (seconds) for {Session}'s session-token → user-id cache.
-      #   Default: 3600 (1 hour). Longer values reduce +/users/me+
+      #   Default: 3600 (1 hour). Longer values reduce `/users/me`
       #   round-trips but extend the window during which a revoked
       #   session can still authenticate Atlas Search calls; apps
       #   with sub-TTL revocation requirements should call
@@ -115,8 +115,8 @@ module Parse
       # @!attribute [rw] session_cache
       #   Pluggable cache for {Session}'s session-token lookups.
       #   Replace with a Redis/Memcached adapter for cross-process
-      #   sharing; the object must respond to +get(key)+,
-      #   +set(key, value, ttl:)+, and +invalidate(key)+. Defaults
+      #   sharing; the object must respond to `get(key)`,
+      #   `set(key, value, ttl:)`, and `invalidate(key)`. Defaults
       #   to a process-local {Session::MemoryCache}.
       #   @return [#get, #set, #invalidate]
       attr_accessor :session_cache
@@ -135,9 +135,9 @@ module Parse
       #   (raw flag ignored) in production-like environments and
       #   `true` when RACK_ENV/RAILS_ENV is `development` or `test`.
       #   Internal-field stripping runs regardless.
-      # @param require_session_token [Boolean] when +true+, library
-      #   calls without +session_token:+ or +master: true+ raise
-      #   {ACLRequired}. See {#require_session_token}. Default: +false+.
+      # @param require_session_token [Boolean] when `true`, library
+      #   calls without `session_token:` or `master: true` raise
+      #   {ACLRequired}. See {#require_session_token}. Default: `false`.
       # @param session_cache_ttl [Integer] session-token cache TTL
       #   (seconds). Default: 3600.
       # @param role_cache_ttl [Integer] role-name cache TTL (seconds).
@@ -252,7 +252,7 @@ module Parse
       # @option options [String, Parse::Role] :acl_role act as the given role for
       #   ACL evaluation (no REST equivalent; mongo-direct only).
       # @option options [Symbol] :read_preference MongoDB read preference applied
-      #   to the underlying collection (e.g. +:secondary+).
+      #   to the underlying collection (e.g. `:secondary`).
       # @option options [Integer] :max_time_ms maximum server-side execution time
       #   in milliseconds for the aggregate command.
       #
@@ -316,80 +316,77 @@ module Parse
           builder.with_highlight(path: options[:highlight_field])
         end
 
-        # CRITICAL: $search MUST be stage 0 of an Atlas Search
-        # pipeline. MongoDB Atlas rejects pipelines whose first stage
-        # is anything other than $search/$searchMeta. Do NOT route
-        # through Parse::MongoDB.aggregate here — that helper prepends
-        # the ACL $match to position 0, which Atlas would reject. We
-        # build the pipeline manually with $search at index 0 and
-        # place the ACL $match AFTER $search (which is correct: $search
-        # has already produced its candidate set, the $match narrows it
-        # to ACL-readable rows, then the caller filter narrows further).
-        pipeline = [builder.build]
-
-        # Add score projection
-        pipeline << { "$addFields" => { "_score" => { "$meta" => "searchScore" } } }
-
-        # Add highlights projection if requested
-        if options[:highlight_field]
-          pipeline << { "$addFields" => { "_highlights" => { "$meta" => "searchHighlights" } } }
-        end
-
-        # Inject ACL $match BEFORE the caller-supplied filter (but AFTER
-        # $search and the $addFields stages) so the user-controlled
-        # filter cannot exfiltrate restricted documents that passed the
-        # $search operator. The $exists: false branch in `read_predicate`
-        # covers documents Parse Server treats as public (no _rperm).
-        unless resolution.master?
-          acl_match = Parse::ACLScope.match_stage_for(resolution)
-          pipeline << acl_match if acl_match
-        end
-
-        # Add filter stage if provided
-        if options[:filter]
-          mongo_filter = convert_filter_for_mongodb(options[:filter], collection_name)
-          pipeline << { "$match" => mongo_filter }
-        end
-
-        # Add sort (default by score)
-        sort_spec = options[:sort] || { "_score" => -1 }
-        pipeline << { "$sort" => sort_spec }
-
-        # Add pagination
-        pipeline << { "$skip" => skip_val } if skip_val > 0
-        pipeline << { "$limit" => limit }
-
-        # Execute directly against the MongoDB collection — bypasses
-        # Parse::MongoDB.aggregate so its ACL-prepend doesn't violate
-        # the $search-at-stage-0 invariant. We're reproducing the
-        # SDK-side enforcement chain (ACL match, protectedFields strip,
-        # pointerFields filter, embedded sub-doc redaction) inline below.
-        raw_results = run_atlas_pipeline!(
-          collection_name, pipeline, options[:max_time_ms],
+        # $search MUST be stage 0 of an Atlas Search pipeline (MongoDB
+        # rejects any other first stage), so we must NOT route through
+        # Parse::MongoDB.aggregate — that helper prepends the ACL $match
+        # to position 0. Execution plus the full SDK-side enforcement
+        # chain (ACL $match placed AFTER $search, protectedFields strip,
+        # pointerFields filter, sub-doc redaction) lives in
+        # `search_pipeline!`, shared with the builder-block path
+        # (`search_with_stage` / Parse::Query#atlas_search).
+        search_pipeline!(
+          collection_name, builder.build,
+          resolution: resolution,
+          protected_fields: protected_fields,
+          pointer_fields: pointer_fields,
+          highlight_field: options[:highlight_field],
+          filter: options[:filter],
+          sort: options[:sort],
+          skip: skip_val,
+          limit: limit,
+          max_time_ms: options[:max_time_ms],
           read_preference: read_preference,
+          class_name: options[:class_name] || collection_name,
+          raw: options[:raw],
         )
+      end
 
-        # Post-fetch enforcement: walk the result rows the same way
-        # Parse::MongoDB.aggregate would. Master mode is the ACL bypass
-        # — skip every redaction layer (matches the helper's behavior).
-        unless resolution.master?
-          Parse::ACLScope.redact_results!(raw_results, resolution)
-          Parse::CLPScope.redact_protected_fields!(raw_results, protected_fields) if protected_fields.any?
-          if pointer_fields
-            raw_results = Parse::CLPScope.filter_by_pointer_fields(
-              raw_results, pointer_fields, resolution.user_id,
-            )
-          end
-          # ATLAS-4: drop any `_highlights` entry whose `path` names a
-          # protected field. `searchHighlights` returns the matched
-          # token plus its surrounding text, which would otherwise leak
-          # the protected field's value through the snippet.
-          strip_protected_highlights!(raw_results, protected_fields) if protected_fields.any?
-        end
+      # Execute a caller-supplied `$search` stage (built via a
+      # {SearchBuilder}) with the same ACL/CLP/protectedFields/
+      # pointerFields enforcement as {.search}, keeping `$search` at
+      # stage 0. This is the entry point for Parse::Query#atlas_search's
+      # builder-block mode, which constructs its own `$search` stage
+      # instead of going through the query/fields/fuzzy options.
+      #
+      # Auth is resolved from `options` exactly like {.search}:
+      # `session_token:` / `master: true` / `acl_user:` / `acl_role:`
+      # (mutually exclusive). Without one, behavior follows
+      # `require_session_token` (public-only fallback, or `ACLRequired`).
+      #
+      # @param collection_name [String] the Parse collection name
+      # @param search_stage [Hash] a built `{ "$search" => {...} }` stage
+      # @param options [Hash] `:filter`, `:sort`, `:skip`, `:limit`,
+      #   `:highlight_field`, `:max_time_ms`, `:read_preference`,
+      #   `:class_name`, `:raw`, plus the auth kwargs above.
+      # @return [Parse::AtlasSearch::SearchResult]
+      def search_with_stage(collection_name, search_stage, **options)
+        require_available!
+        assert_search_stage_safe!(search_stage)
 
-        # Convert results
-        class_name = options[:class_name] || collection_name
-        process_search_results(raw_results, class_name, options[:raw])
+        read_preference = options.delete(:read_preference)
+        resolution = resolve_scope!(options, method_name: :search)
+        assert_clp_find!(collection_name, resolution)
+        pointer_fields = resolve_pointer_fields!(collection_name, resolution)
+        protected_fields = Parse::CLPScope.protected_fields_for(
+          collection_name, resolution.permission_strings,
+        )
+        assert_highlight_field_allowed!(options[:highlight_field], protected_fields, resolution)
+
+        search_pipeline!(
+          collection_name, search_stage,
+          resolution: resolution,
+          protected_fields: protected_fields,
+          pointer_fields: pointer_fields,
+          highlight_field: options[:highlight_field],
+          filter: options[:filter],
+          sort: options[:sort],
+          skip: options[:skip] || 0,
+          limit: options[:limit] || 100,
+          max_time_ms: options[:max_time_ms],
+          read_preference: read_preference,
+          class_name: options[:class_name] || collection_name,
+          raw: options[:raw],
+        )
       end
 
       # Perform an autocomplete search for search-as-you-type functionality.
@@ -415,7 +412,7 @@ module Parse
       # @option options [String, Parse::Role] :acl_role act as the given role for
       #   ACL evaluation (no REST equivalent; mongo-direct only).
       # @option options [Symbol] :read_preference MongoDB read preference applied
-      #   to the underlying collection (e.g. +:secondary+).
+      #   to the underlying collection (e.g. `:secondary`).
       # @option options [Integer] :max_time_ms maximum server-side execution time
       #   in milliseconds for the aggregate command.
       #
@@ -489,7 +486,7 @@ module Parse
 
         # Add filter if provided
         if options[:filter]
-          mongo_filter = convert_filter_for_mongodb(options[:filter], collection_name)
+          mongo_filter = convert_filter_for_mongodb(options[:filter], collection_name, resolution: resolution)
           pipeline << { "$match" => mongo_filter }
         end
 
@@ -535,11 +532,11 @@ module Parse
       # @param query [String, nil] the search query text (nil for match-all)
       # @param facets [Hash] facet definitions
       # @param options [Hash] search options (same as {#search}; see that
-      #   method for the full list of accepted +@option+ entries including
-      #   +:index+, +:fields+, +:fuzzy+, +:limit+, +:filter+, +:read_preference+,
-      #   +:max_time_ms+, and the scoping kwargs +:master+, +:session_token+,
-      #   +:acl_user+, +:acl_role+). Note: scoped identity kwargs require
-      #   +master: true+ to be passed explicitly — $searchMeta bucket counts
+      #   method for the full list of accepted `@option` entries including
+      #   `:index`, `:fields`, `:fuzzy`, `:limit`, `:filter`, `:read_preference`,
+      #   `:max_time_ms`, and the scoping kwargs `:master`, `:session_token`,
+      #   `:acl_user`, `:acl_role`). Note: scoped identity kwargs require
+      #   `master: true` to be passed explicitly — $searchMeta bucket counts
       #   cannot be filtered by ACL after the fact, so the method refuses
       #   to silently downgrade.
       #
@@ -681,6 +678,85 @@ module Parse
 
       private
 
+      # Execute a `$search`-first pipeline with the full SDK-side
+      # ACL/CLP enforcement chain, keeping `$search` at stage 0. Shared
+      # by {.search} (options API) and {.search_with_stage} (the
+      # builder-block path used by Parse::Query#atlas_search). The
+      # caller must have already resolved scope and pre-flighted the CLP
+      # `find` / pointerFields / protectedFields / highlight-field
+      # checks.
+      def search_pipeline!(collection_name, search_stage, resolution:,
+                           protected_fields:, pointer_fields:,
+                           highlight_field: nil, filter: nil, sort: nil,
+                           skip: 0, limit: 100, max_time_ms: nil,
+                           read_preference: nil, class_name: nil, raw: false)
+        # Backstop the stage-safety check at the shared execution chokepoint
+        # so ANY path that runs a $search stage (not just search_with_stage)
+        # rejects a non-$search stage / returnStoredSource. The .search and
+        # .autocomplete callers build safe stages via SearchBuilder, so this
+        # only ever fires for a caller-supplied stage.
+        assert_search_stage_safe!(search_stage)
+        pipeline = [search_stage]
+
+        # Score projection.
+        pipeline << { "$addFields" => { "_score" => { "$meta" => "searchScore" } } }
+
+        # Highlights projection if requested.
+        if highlight_field
+          pipeline << { "$addFields" => { "_highlights" => { "$meta" => "searchHighlights" } } }
+        end
+
+        # Inject ACL $match AFTER $search / $addFields but BEFORE the
+        # caller-supplied filter, so a user-controlled filter cannot
+        # exfiltrate restricted documents that passed the $search
+        # operator. The $exists: false branch in `read_predicate` covers
+        # documents Parse Server treats as public (no _rperm). Master
+        # mode is the ACL bypass — skip it (matches
+        # Parse::MongoDB.aggregate's behavior).
+        unless resolution.master?
+          acl_match = Parse::ACLScope.match_stage_for(resolution)
+          pipeline << acl_match if acl_match
+        end
+
+        # Caller-supplied filter, sanitized against operator injection
+        # AND protected-field oracle probing (via the resolution).
+        if filter
+          mongo_filter = convert_filter_for_mongodb(filter, collection_name, resolution: resolution)
+          pipeline << { "$match" => mongo_filter }
+        end
+
+        pipeline << { "$sort" => (sort || { "_score" => -1 }) }
+        pipeline << { "$skip" => skip } if skip.to_i > 0
+        pipeline << { "$limit" => limit }
+
+        # Execute directly against the collection — bypasses
+        # Parse::MongoDB.aggregate so its ACL-prepend doesn't violate the
+        # $search-at-stage-0 invariant. We reproduce the SDK-side
+        # enforcement chain inline below.
+        raw_results = run_atlas_pipeline!(
+          collection_name, pipeline, max_time_ms, read_preference: read_preference,
+        )
+
+        # Post-fetch enforcement: walk the result rows the same way
+        # Parse::MongoDB.aggregate would. Master mode skips every
+        # redaction layer.
+        unless resolution.master?
+          Parse::ACLScope.redact_results!(raw_results, resolution)
+          Parse::CLPScope.redact_protected_fields!(raw_results, protected_fields) if protected_fields.any?
+          if pointer_fields
+            raw_results = Parse::CLPScope.filter_by_pointer_fields(
+              raw_results, pointer_fields, resolution.user_id,
+            )
+          end
+          # ATLAS-4: drop any `_highlights` entry whose `path` names a
+          # protected field — the snippet would otherwise leak the
+          # protected value.
+          strip_protected_highlights!(raw_results, protected_fields) if protected_fields.any?
+        end
+
+        process_search_results(raw_results, class_name || collection_name, raw)
+      end
+
       def require_available!
         Parse::MongoDB.require_gem!
         unless available?
@@ -690,30 +766,30 @@ module Parse
         end
       end
 
-      # Pop the auth-related kwargs (+:session_token+, +:master+,
-      # +:acl_user+, +:acl_role+) off +options+ and return a fully
+      # Pop the auth-related kwargs (`:session_token`, `:master`,
+      # `:acl_user`, `:acl_role`) off `options` and return a fully
       # resolved {Parse::ACLScope::Resolution}. Replaces the old
-      # +resolve_acl_options!+ shim that returned a bare Hash — the
+      # `resolve_acl_options!` shim that returned a bare Hash — the
       # post-fetch enforcement chain ({Parse::ACLScope.redact_results!},
       # {Parse::CLPScope.redact_protected_fields!}, etc.) all consume a
       # Resolution, so producing one here keeps the call sites uniform.
       #
       # Modes match {Parse::ACLScope::Resolution}:
       #
-      #   * +:session+ — +session_token:+ resolved, or +acl_user:+ /
-      #     +acl_role:+ supplied. ACL+CLP+protectedFields enforcement
+      #   * `:session` — `session_token:` resolved, or `acl_user:` /
+      #     `acl_role:` supplied. ACL+CLP+protectedFields enforcement
       #     runs in full.
-      #   * +:master+ — +master: true+. ACL/CLP enforcement is bypassed
+      #   * `:master` — `master: true`. ACL/CLP enforcement is bypassed
       #     (the caller has explicit master-key intent).
-      #   * +:public+ — no scope kwargs supplied, +require_session_token+
-      #     is +false+. A one-time banner is emitted and the call
+      #   * `:public` — no scope kwargs supplied, `require_session_token`
+      #     is `false`. A one-time banner is emitted and the call
       #     falls through with public-only ACL semantics — public-mode
       #     enforcement still runs (refused rows are filtered, the
       #     CLP allowlist is consulted), the perms set is just
-      #     +["*"]+ rather than user-scoped.
+      #     `["*"]` rather than user-scoped.
       #
       # Raises {ACLRequired} when no scope kwargs are supplied and
-      # {.require_session_token} is +true+. The agent-tool path
+      # {.require_session_token} is `true`. The agent-tool path
       # refuses unconditionally regardless of this toggle — see
       # {Parse::Agent::Tools}.
       def resolve_scope!(options, method_name:)
@@ -880,9 +956,9 @@ module Parse
         raise
       end
 
-      # Emit a one-time +[Parse::AtlasSearch:SECURITY]+ banner the
+      # Emit a one-time `[Parse::AtlasSearch:SECURITY]` banner the
       # first time an Atlas Search call runs without a session_token
-      # and without an explicit +master: true+. Mirrors the
+      # and without an explicit `master: true`. Mirrors the
       # warned-once pattern {Parse::Agent} uses for master-key
       # construction so noisy logs don't drown out the warning, but
       # one log line per process is enough to surface the misuse to
@@ -909,14 +985,71 @@ module Parse
         Array(fields).map(&:to_s)
       end
 
-      def convert_filter_for_mongodb(filter, collection_name)
+      # Validate a caller-supplied `$search` stage before it is executed
+      # by {.search_with_stage}. The SDK's own {SearchBuilder} always emits
+      # a safe stage, but `search_with_stage` is public and a caller can
+      # hand-roll one — so we refuse the shapes that would silently defeat
+      # ACL enforcement.
+      #
+      # The load-bearing check is `returnStoredSource`: with stored-source
+      # projection Atlas returns ONLY the index-stored fields. If `_rperm`
+      # is not among them, the post-`$search` ACL `$match` (and the
+      # post-fetch redaction) treat the row as public — `_rperm` absent is
+      # interpreted as "no restriction" — so an ACL-restricted document's
+      # stored fields leak. There is no per-document rehydration on this
+      # path, so the only safe answer is to reject the flag outright.
+      #
+      # @param search_stage [Hash] the `{ "$search" => {...} }` stage.
+      # @raise [InvalidSearchParameters] on a non-$search or unsafe stage.
+      def assert_search_stage_safe!(search_stage)
+        unless search_stage.is_a?(Hash)
+          raise InvalidSearchParameters,
+            "search_stage must be a Hash containing a $search stage"
+        end
+        body = search_stage["$search"] || search_stage[:"$search"]
+        if body.nil?
+          raise InvalidSearchParameters,
+            "search_stage must contain a $search stage (build it with a SearchBuilder)"
+        end
+        if body.is_a?(Hash)
+          stored = body["returnStoredSource"] || body[:returnStoredSource]
+          if stored
+            raise InvalidSearchParameters,
+              "returnStoredSource is not permitted in a $search stage passed to " \
+              "search_with_stage: Atlas stored-source projection can omit _rperm, " \
+              "which would defeat ACL enforcement on the returned documents."
+          end
+        end
+        search_stage
+      end
+
+      def convert_filter_for_mongodb(filter, collection_name, resolution: nil)
+        return filter unless filter
+
         # The filter hash is interpolated directly into a `$match` stage in
         # the search pipeline. A caller forwarding a user-controlled filter
         # (search UI, autocomplete endpoint) must not be able to inject
         # `$where`, `$function`, `$accumulator`, `$out`, or `$merge` here.
         # `Parse::PipelineSecurity.validate_filter!` recurses through the
         # hash and refuses any of those operators at any depth.
-        Parse::PipelineSecurity.validate_filter!(filter) if filter
+        Parse::PipelineSecurity.validate_filter!(filter)
+
+        # Additionally refuse `$expr`-based references to protected fields.
+        # `validate_filter!` blocks the code-execution operators above but
+        # NOT `$expr`, which a scoped caller could use to binary-search a
+        # protectedFields value (`{"$expr" => {"$gt" => ["$ssn", "x"]}}`)
+        # even though the field is stripped from the OUTPUT. This is the
+        # same oracle guard the mongo-direct aggregate path applies; the
+        # `filter:` path previously skipped it. `refuse_protected_field_-
+        # references!` self-skips on master / nil resolution / empty
+        # protectedFields, so it's safe to call unconditionally when a
+        # resolution is supplied.
+        if resolution
+          Parse::PipelineSecurity.refuse_protected_field_references!(
+            [{ "$match" => filter }], collection_name, resolution,
+          )
+        end
+
         filter
       end
 

@@ -523,7 +523,7 @@ module Parse
       #   via the conventional accessor names some Parse-Stack models
       #   ship with), OR
       # - {Parse::Schema.default_class_level_permissions} if set, OR
-      # - +nil+ to leave `classLevelPermissions` off the schema body so
+      # - `nil` to leave `classLevelPermissions` off the schema body so
       #   Parse Server uses its built-in defaults.
       def model_class_level_permissions
         %i[class_level_permissions classLevelPermissions clp].each do |reader|

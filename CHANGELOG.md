@@ -4508,17 +4508,17 @@ query.where(genre: "rock").last_updated(limit: 3)
 
 ```ruby
 # Default behavior - pointers for storage (backward compatible)
-post.assets.as_json
+post.documents.as_json
 # => [{"__type"=>"Pointer", "className"=>"Document", "objectId"=>"abc"}, ...]
 
 # Serialize with fetched fields (no autofetch, pointers stay as pointers)
-post.assets.as_json(pointers_only: false)
+post.documents.as_json(pointers_only: false)
 # => [{"objectId"=>"abc", "file"=>{...}, "caption"=>"My photo", ...}, ...]
 
-# In webhooks, manually override assets serialization:
+# In webhooks, manually override documents serialization:
 cloud_results.map do |post|
   json = post.as_json
-  json['assets'] = post.assets.as_json(pointers_only: false) if post.assets.any?
+  json['documents'] = post.documents.as_json(pointers_only: false) if post.documents.any?
   json
 end
 ```

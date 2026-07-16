@@ -76,9 +76,9 @@ module Parse
       }.freeze
 
       # Per-tool clamps for Atlas Search result counts. The hard cap
-      # (+ATLAS_LIMIT_MAX+) keeps response sizes predictable when an
+      # (`ATLAS_LIMIT_MAX`) keeps response sizes predictable when an
       # LLM agent asks for "everything"; the default keeps token
-      # spend reasonable when an agent forgets to set +limit:+.
+      # spend reasonable when an agent forgets to set `limit:`.
       ATLAS_LIMIT_DEFAULT = 10
       ATLAS_LIMIT_MAX = 20
 
@@ -1071,12 +1071,12 @@ module Parse
         #   Timeout.timeout. Must be >= 1 (a non-positive value raises
         #   ArgumentError, since Timeout.timeout(0) would disable the bound).
         # @param handler [Proc] lambda(agent, **args) -> Hash (required)
-        # @param client_safe [Boolean] when +true+, the tool is dispatchable
+        # @param client_safe [Boolean] when `true`, the tool is dispatchable
         #   from a client-mode agent (one whose client has no master_key).
-        #   Default +false+ — registered tools are master-key-only unless
+        #   Default `false` — registered tools are master-key-only unless
         #   the author explicitly declares them safe for session-token
         #   contexts. The handler is responsible for routing through
-        #   +agent.client+ with +agent.session_token+ rather than touching
+        #   `agent.client` with `agent.session_token` rather than touching
         #   the master key directly.
         # @raise [ArgumentError] when required kwargs are missing or permission is invalid
         #
@@ -1248,8 +1248,18 @@ module Parse
 
           if entry
             with_timeout(sym) { entry[:handler].call(agent, **kwargs) }
-          else
+          elsif Tools.respond_to?(sym, true)
             Tools.send(sym, agent, **kwargs)
+          else
+            # Recognized tool name (it passed the tier/gate checks in
+            # Parse::Agent#execute to get here) but no handler ships for
+            # it — the built-in write/admin CRUD tools (create_object,
+            # update_object, delete_object, create_class, delete_class)
+            # are declared in the tiers without an implementation. Raise a
+            # clear typed error instead of the bare NoMethodError that
+            # `Tools.send` would otherwise produce (which collapses to an
+            # opaque "internal error" on the wire).
+            raise Parse::Agent::NotImplemented.new(sym)
           end
         end
 
@@ -1316,9 +1326,9 @@ module Parse
         #     natively authorizes (ACL + CLP + protectedFields).
         #   * Built-in mutation tools listed in CLIENT_SAFE_MUTATION_TOOLS —
         #     same REST-native authorization. The caller is responsible for
-        #     additionally checking the per-agent +allow_mutations+ gate;
+        #     additionally checking the per-agent `allow_mutations` gate;
         #     this predicate reports REST-safety only.
-        #   * Custom tools registered with +client_safe: true+ — the
+        #   * Custom tools registered with `client_safe: true` — the
         #     registering author has declared the handler safe for
         #     client-mode dispatch.
         #
@@ -1393,6 +1403,17 @@ module Parse
 
         defs = allowed_tools.filter_map do |tool_name|
           sym = tool_name.to_sym
+          # Invariant: never advertise a tool we can't actually dispatch.
+          # The declared-but-unimplemented write/admin CRUD tools
+          # (create_object/update_object/delete_object/create_class/
+          # delete_class) are members of the write/admin permission tiers
+          # but ship no handler — advertising one in tools/list only to
+          # have it raise NotImplemented on call is worse than omitting it.
+          # A tool is dispatchable iff it's a registered handler or a
+          # builtin Tools method. (Today these also lack a TOOL_DEFINITIONS
+          # entry, so they'd drop out anyway; this makes the guarantee
+          # explicit and future-proof.)
+          next unless registered_defs.key?(sym) || Tools.respond_to?(sym, true)
           registered_defs[sym] || TOOL_DEFINITIONS[sym]
         end
 
@@ -1504,12 +1525,12 @@ module Parse
       # agent_method names. Same shape as Ruby method names with a length cap.
       METHOD_NAME_RE = /\A[A-Za-z_][A-Za-z0-9_]{0,127}[!?=]?\z/.freeze
 
-      # Keys that are NEVER permitted as +arguments+ to +call_method+,
-      # regardless of the method's declared +permitted_keys+. These
+      # Keys that are NEVER permitted as `arguments` to `call_method`,
+      # regardless of the method's declared `permitted_keys`. These
       # reference Parse-internal columns (auth/credential state, ACL,
       # identifiers managed by Parse Server) and have no legitimate
       # use case being set by an LLM through a wrapper method that
-      # splats its arguments with +**+.
+      # splats its arguments with `**`.
       CALL_METHOD_DENIED_KEYS = %i[
         _hashed_password _password_history
         authData auth_data _auth_data
@@ -1521,16 +1542,16 @@ module Parse
         className __type
       ].freeze
 
-      # Framework-reserved keys that are always permitted in +arguments+
-      # regardless of the method's +permitted_keys+ list. +dry_run+ is
-      # gated separately by +supports_dry_run+ on the method definition.
+      # Framework-reserved keys that are always permitted in `arguments`
+      # regardless of the method's `permitted_keys` list. `dry_run` is
+      # gated separately by `supports_dry_run` on the method definition.
       # Reserved kwargs the agent dispatcher may inject into an
-      # +agent_method+ body. +dry_run+ is forwarded when the method
-      # declared +supports_dry_run: true+. +agent+ is injected
+      # `agent_method` body. `dry_run` is forwarded when the method
+      # declared `supports_dry_run: true`. `agent` is injected
       # whenever the method's signature declares the keyword (so the
-      # author can read +agent.acl_scope_kwargs+ / +agent.acl_scope+
+      # author can read `agent.acl_scope_kwargs` / `agent.acl_scope`
       # and apply the agent's identity to internal queries the method
-      # runs). Neither key counts against +permitted_keys:+.
+      # runs). Neither key counts against `permitted_keys:`.
       AGENT_METHOD_RESERVED_ARG_KEYS = %i[dry_run agent].freeze
 
       # Refuse access to a class marked `agent_hidden`, AND validate that the
@@ -1731,6 +1752,79 @@ module Parse
         [{ "$match" => { wire_key => scope[:value] } }] + pipeline
       end
       module_function :apply_tenant_scope_to_pipeline
+
+      # Default-deny joins under an active tenant scope. A field-based
+      # tenant scope only constrains the OUTER collection: the outer
+      # `$match` prepended by {#apply_tenant_scope_to_pipeline} does not
+      # reach into a `$lookup` / `$graphLookup` / `$unionWith`
+      # sub-pipeline, which Mongo evaluates in the JOINED collection's
+      # context with NO tenant predicate injected.
+      #
+      # An earlier version allowed a join when the target class declared
+      # the SAME `agent_tenant_scope` field, on the theory that a
+      # tenant-aware target was safe. It is not: nothing propagates the
+      # tenant *value* into the sub-pipeline, so an (even empty) join into
+      # a "compatible" class still returns rows for every tenant. Until
+      # value propagation into join sub-pipelines lands, refuse ANY join
+      # while a tenant scope is active — the only fail-closed contract.
+      #
+      # @param pipeline [Array<Hash>] the caller pipeline (pre-scope-prepend)
+      # @param scope [Hash, nil] { field:, value: } from {#resolve_tenant_scope!}
+      # @raise [Parse::Agent::AccessDenied] on any join under an active scope
+      def assert_joins_tenant_safe!(pipeline, scope)
+        return unless scope
+        return unless pipeline.is_a?(Array)
+        scope_field = scope[:field].to_s
+        each_join_target(pipeline) do |target|
+          raise Parse::Agent::AccessDenied.new(
+            target,
+            "Join refused under an active tenant scope ('#{scope_field}'): the " \
+            "tenant predicate is not propagated into a $lookup/$graphLookup/" \
+            "$unionWith sub-pipeline, so the join could surface rows from other " \
+            "tenants. Run the join without an agent tenant scope, or constrain " \
+            "the joined class ('#{target}') explicitly.",
+            kind: :tenant_join_denied,
+          )
+        end
+      end
+      module_function :assert_joins_tenant_safe!
+
+      # Yield each join-target collection name found in `$lookup` /
+      # `$graphLookup` / `$unionWith` stages, recursing into `$facet`
+      # branches and `$lookup`/`$unionWith` sub-pipelines. Handles BOTH
+      # the Hash form (`{ from:/coll: ..., pipeline: [...] }`) and the
+      # `$unionWith` String shorthand (`{ "$unionWith" => "Collection" }`)
+      # — the latter previously slipped past every join gate because the
+      # walkers only inspected Hash values.
+      #
+      # @param pipeline [Array<Hash>]
+      # @yieldparam target [String] a join-target collection name
+      def each_join_target(pipeline, &block)
+        return unless pipeline.is_a?(Array)
+        pipeline.each do |stage|
+          next unless stage.is_a?(Hash)
+          stage.each do |op, value|
+            case op.to_s
+            when "$lookup", "$graphLookup", "$unionWith"
+              if value.is_a?(Hash)
+                target = value["from"] || value[:from] || value["coll"] || value[:coll]
+                yield target.to_s if target
+                sub = value["pipeline"] || value[:pipeline]
+                each_join_target(sub, &block) if sub.is_a?(Array)
+              elsif value.is_a?(String)
+                # String shorthand — only `$unionWith` accepts a bare
+                # collection name; harmless to accept the shape for all
+                # three since $lookup/$graphLookup never produce it.
+                yield value
+              end
+            when "$facet"
+              next unless value.is_a?(Hash)
+              value.each_value { |branch| each_join_target(branch, &block) if branch.is_a?(Array) }
+            end
+          end
+        end
+      end
+      module_function :each_join_target
 
       # === Per-agent filter and canonical filter helpers ===
       #
@@ -2181,8 +2275,16 @@ module Parse
         stage.each do |op, value|
           case op.to_s
           when "$lookup", "$graphLookup", "$unionWith"
-            target = value.is_a?(Hash) ?
-              (value["from"] || value[:from] || value["coll"] || value[:coll]) : nil
+            # `$unionWith` also accepts the String shorthand
+            # `{ "$unionWith" => "Collection" }`. Extract that target too,
+            # otherwise the underscore denylist, hidden?, class-filter
+            # allowlist, and CLP-find gates below silently skip it.
+            target =
+              if value.is_a?(Hash)
+                value["from"] || value[:from] || value["coll"] || value[:coll]
+              elsif value.is_a?(String)
+                value
+              end
             target_str = nil
             if target
               target_str = target.to_s
@@ -2323,8 +2425,8 @@ module Parse
           when "$match"
             # $match expressions can reference any field. Without the
             # field-name check, an attacker can run a boolean oracle on
-            # +_hashed_password+ or any other +agent_hidden+ /
-            # non-allowlisted column by bisecting via +$regex+ and
+            # `_hashed_password` or any other `agent_hidden` /
+            # non-allowlisted column by bisecting via `$regex` and
             # reading the row count delta. Apply the same field-name
             # restriction as projection stages.
             next unless permitted_fields && value.is_a?(Hash)
@@ -2377,9 +2479,9 @@ module Parse
       # @api private
       # Walk a $match hash refusing field keys outside the allowlist.
       # Logical operators ($and/$or/$nor/$not) recurse. $expr expressions
-      # use the field-reference walker (which understands +$fieldName+
-      # strings) and are also blocked at the +PipelineSecurity+ layer
-      # for forensic operators inside +$expr+.
+      # use the field-reference walker (which understands `$fieldName`
+      # strings) and are also blocked at the `PipelineSecurity` layer
+      # for forensic operators inside `$expr`.
       def check_match_keys_for_restricted_fields!(node, permitted_fields)
         return unless node.is_a?(Hash)
         node.each do |k, v|
@@ -3029,7 +3131,7 @@ module Parse
       # @param include [Array<String>] pointer fields to include
       # @return [Hash] query results, or a refusal hash if COLLSCAN detected
       # @raise [ConstraintTranslator::ConstraintSecurityError] if blocked operators are used
-      # Valid formats for the +format:+ kwarg on query_class. "json" is
+      # Valid formats for the `format:` kwarg on query_class. "json" is
       # the default and returns the structured row envelope; the others
       # delegate to the export_data formatters so the conversational
       # query path can produce a CSV/Markdown/text-table dump without
@@ -3415,8 +3517,8 @@ module Parse
         end
 
         # Validate each id format using the shared OBJECT_ID_RE so
-        # +get_objects+ accepts the same set of identifiers as
-        # +get_object+ — apps with custom-id schemes that use hyphens or
+        # `get_objects` accepts the same set of identifiers as
+        # `get_object` — apps with custom-id schemes that use hyphens or
         # underscores should not see one entry point accept the id and
         # another reject it.
         unique_ids.each do |id|
@@ -3639,6 +3741,10 @@ module Parse
         # Done after pipeline validation so the injected stage doesn't
         # interfere with the validator's denylist walk.
         scope              = resolve_tenant_scope!(agent, class_name)
+        # Default-deny joins into tenant-incompatible classes BEFORE the
+        # outer $match is prepended (the outer scope can't reach a join
+        # sub-pipeline).
+        assert_joins_tenant_safe!(pipeline, scope)
         scoped_pipeline    = apply_tenant_scope_to_pipeline(pipeline, scope)
 
         # Per-agent filter (declared via Parse::Agent.new(filters: ...)) is
@@ -4319,6 +4425,7 @@ module Parse
       def run_aggregation_for_group_tool!(agent, class_name:, pipeline:, tool:,
                                           apply_canonical_filter: true)
         scope = resolve_tenant_scope!(agent, class_name)
+        assert_joins_tenant_safe!(pipeline, scope)
         scoped = apply_tenant_scope_to_pipeline(pipeline, scope)
 
         # TRACK-AGENT-7 split: per-agent filter is UNCONDITIONAL; canonical
@@ -4388,7 +4495,7 @@ module Parse
 
       # @api private
       # H2: After extract_pointer_class! resolves [cls, pairs], check whether
-      # +cls+ is an agent_hidden class. If it is, replace every key (objectId)
+      # `cls` is an agent_hidden class. If it is, replace every key (objectId)
       # with nil so the hidden class's row identifiers are not surfaced, and
       # return nil as the pointer_class so the class name is also suppressed
       # from the envelope.
@@ -4682,6 +4789,7 @@ module Parse
       def export_via_aggregate(agent, class_name:, pipeline:, scope: nil)
         PipelineValidator.validate!(pipeline)
         enforce_pipeline_access_policy!(class_name, pipeline, agent: agent)
+        assert_joins_tenant_safe!(pipeline, scope)
         # Prepend tenant scope $match before per-agent + canonical filter and auto-limit.
         scoped_pipeline = apply_tenant_scope_to_pipeline(pipeline, scope)
         # TRACK-AGENT-7 split: per-agent filter is UNCONDITIONAL.
@@ -5056,16 +5164,39 @@ module Parse
             )
           end
         end
+        # SEC-01: an instance write/admin method under an acl_user:/acl_role:
+        # scope cannot be enforced. The receiver is fetched with READ scope
+        # (below), but the method body's save/destroy run on the object's
+        # default (master) client, and there is NO session token to bind as
+        # ambient — so an acl_user agent with mere read access to a row could
+        # mutate it with master authority (read -> write escalation). Session-
+        # scoped agents bind the token during invocation; master agents are
+        # admin-by-design. Only the tokenless acl_user/acl_role write case is
+        # unenforceable, so refuse it.
+        if method_info[:type] == :instance &&
+           (required_perm == :write || required_perm == :admin) &&
+           agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
+          raise Parse::Agent::AccessDenied.new(
+            class_name,
+            "Instance #{required_perm} method '#{class_name}.#{method_name}' cannot be " \
+            "invoked under an acl_user:/acl_role: scope: there is no session token to " \
+            "bind, so the method's writes could not be enforced against the caller's " \
+            "row ACL. Use a session-token-scoped (or master) agent for instance " \
+            "write/admin methods.",
+            kind: :unenforceable_scope,
+          )
+        end
+
         args = arguments || {}
         args = args.transform_keys(&:to_sym) if args.is_a?(Hash)
 
         # Apply mass-assignment guards. Always-denied keys come first:
-        # +_hashed_password+, +authData+, +_session_token+, +sessionToken+,
-        # +ACL+, +objectId+, +id+, +username+, +_rperm+, +_wperm+,
-        # +_perishable_token+, +_email_verify_token+, +createdAt+,
-        # +updatedAt+, +className+, +__type+. These can never flow
-        # through +call_method+ regardless of +permitted_keys+. Then if
-        # the method declared +permitted_keys+, the remaining args are
+        # `_hashed_password`, `authData`, `_session_token`, `sessionToken`,
+        # `ACL`, `objectId`, `id`, `username`, `_rperm`, `_wperm`,
+        # `_perishable_token`, `_email_verify_token`, `createdAt`,
+        # `updatedAt`, `className`, `__type`. These can never flow
+        # through `call_method` regardless of `permitted_keys`. Then if
+        # the method declared `permitted_keys`, the remaining args are
         # intersected with that allowlist.
         if args.is_a?(Hash) && !args.empty?
           violated = args.each_key.select { |k| CALL_METHOD_DENIED_KEYS.include?(k) }
@@ -5091,8 +5222,8 @@ module Parse
 
         # Dry-run handling. Two paths:
         #
-        # 1. The method declared +supports_dry_run: true+ — keep the
-        #    +dry_run+ flag in +args+ so the method body can branch on
+        # 1. The method declared `supports_dry_run: true` — keep the
+        #    `dry_run` flag in `args` so the method body can branch on
         #    it and produce its own preview (e.g., a structural diff,
         #    pre-flight counters). The method controls the contract.
         #
@@ -5104,9 +5235,9 @@ module Parse
         #    layer can ALWAYS safely report what the call WOULD do
         #    (permission tier resolved, args validated, object resolved
         #    when needed) without invoking the method itself. We now
-        #    return a structural preview envelope and the +dry_run+ arg
+        #    return a structural preview envelope and the `dry_run` arg
         #    is stripped before any execution path. The preview is
-        #    explicitly flagged +supports_real_dry_run: false+ so a
+        #    explicitly flagged `supports_real_dry_run: false` so a
         #    consumer knows the method body wasn't consulted and a real
         #    dry-run (with method-author logic) isn't available.
         dry_run_requested = args.key?(:dry_run) && args[:dry_run]
@@ -5117,7 +5248,10 @@ module Parse
           # since the same lookup will fail at execution time.
           if method_info[:type] == :instance
             raise "object_id required for instance method '#{method_name}'" unless object_id
-            obj_exists = !klass.find(object_id).nil?
+            # SEC-01: resolve existence through the AGENT'S scope, not the
+            # master default client — otherwise the dry-run is an existence
+            # oracle for rows outside the caller's ACL/tenant scope.
+            obj_exists = !fetch_call_method_receiver(agent, klass, class_name, object_id).nil?
             unless obj_exists
               raise "Object not found: #{class_name}##{object_id}"
             end
@@ -5142,9 +5276,9 @@ module Parse
         end
 
         # If the method didn't declare dry-run support and the caller
-        # passed a falsy +dry_run+ (or sent the key without it being
+        # passed a falsy `dry_run` (or sent the key without it being
         # truthy), strip it before forwarding — the method body has no
-        # idea about +dry_run+ and would raise ArgumentError on the
+        # idea about `dry_run` and would raise ArgumentError on the
         # unexpected kwarg.
         if args.key?(:dry_run) && !method_info[:supports_dry_run]
           args = args.reject { |k, _| k == :dry_run }
@@ -5152,13 +5286,33 @@ module Parse
 
         # Execute with timeout - user methods could be slow
         with_timeout(:call_method) do
-          result = if method_info[:type] == :instance
+          invoke = lambda do
+            if method_info[:type] == :instance
               raise "object_id required for instance method '#{method_name}'" unless object_id
-              obj = klass.find(object_id)
+              # SEC-01: fetch the receiver through the agent's scope (ACL/CLP/
+              # tenant enforced), NOT the master default client. Fails closed —
+              # a row the scope can't read surfaces as "not found".
+              obj = fetch_call_method_receiver(agent, klass, class_name, object_id)
               raise "Object not found: #{class_name}##{object_id}" unless obj
               call_with_args(obj, method_sym, args, agent: agent)
             else
               call_with_args(klass, method_sym, args, agent: agent)
+            end
+          end
+
+          # SEC-01: bind the agent's session token as the ambient session for
+          # the duration of the method body, so any save/destroy the method
+          # performs on the receiver (or an internally-loaded object) inherits
+          # the caller's principal and is enforced against ACL/CLP server-side,
+          # instead of silently running on the object's master default client.
+          # Master agents (no token) run unbound by design; acl_user/acl_role
+          # write/admin instance methods were already refused above.
+          token = agent.respond_to?(:session_token) ? agent.session_token : nil
+          result =
+            if token.is_a?(String) && !token.strip.empty?
+              Parse.with_session(token) { invoke.call }
+            else
+              invoke.call
             end
 
           {
@@ -5545,20 +5699,20 @@ module Parse
       # atlas_autocomplete, atlas_faceted_search — wrap
       # {Parse::AtlasSearch}. Common gating:
       #
-      #   * +assert_class_accessible!+ enforces the global
-      #     +agent_hidden+ + per-agent +classes:+ allowlist before any
+      #   * `assert_class_accessible!` enforces the global
+      #     `agent_hidden` + per-agent `classes:` allowlist before any
       #     search is issued.
-      #   * +atlas_auth_options!+ refuses unless the agent carries a
-      #     +session_token+ OR was constructed with +master_atlas: true+.
+      #   * `atlas_auth_options!` refuses unless the agent carries a
+      #     `session_token` OR was constructed with `master_atlas: true`.
       #     Atlas Search bypasses Parse Server entirely, so the agent
       #     must declare its ACL posture; reusing the implicit
       #     master-key signal from a session-less agent would
       #     silently grant Atlas-bypass authority.
-      #   * +agent_fields+ allowlist is intersected with the caller's
-      #     +fields:+ / +highlight_field:+ / facet paths at the
+      #   * `agent_fields` allowlist is intersected with the caller's
+      #     `fields:` / `highlight_field:` / facet paths at the
       #     boundary, and applied again to the returned documents and
       #     highlight payloads so a field indexed for search but
-      #     redacted by +agent_fields+ never reaches the wire.
+      #     redacted by `agent_fields` never reaches the wire.
 
       # The Tools module declares `private` at the top of its helper
       # section (above), so module-level methods defined past that
@@ -5820,6 +5974,43 @@ module Parse
       module_function :execute_find_via_direct
 
       # @api private
+      # SEC-01: fetch a `call_method` instance receiver through the AGENT'S
+      # scope so ACL / CLP / tenant enforcement applies, instead of the
+      # master-backed default client a bare `klass.find(object_id)` uses.
+      # Returns a persisted Parse::Object instance, or nil when the row does
+      # not exist or the agent's scope may not read it (fail closed — the
+      # caller maps nil to "Object not found").
+      #
+      #   * session-token scope -> REST fetch_object carrying the token;
+      #     Parse Server enforces ACL/CLP server-side.
+      #   * acl_user:/acl_role: scope -> mongo-direct find (there is no REST
+      #     "act as user/role" affordance); the ACL simulation gates the row.
+      #   * master posture -> unscoped fetch (admin by design).
+      #
+      # A cross-tenant id is refused post-fetch (AccessDenied, not "not
+      # found") via {#assert_record_in_tenant_scope!}, matching get_object.
+      def fetch_call_method_receiver(agent, klass, class_name, object_id)
+        scope = resolve_tenant_scope!(agent, class_name)
+        result =
+          if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
+            where_id = ConstraintTranslator.translate({ "objectId" => object_id }, agent)
+            rows = execute_find_via_direct(agent, class_name, where: where_id, limit: 1)
+            rows && rows.first
+          else
+            response = agent.client.fetch_object(class_name, object_id, **agent.request_opts)
+            unless response.success?
+              return nil if response.object_not_found?
+              raise Parse::Error, "Fetch failed: #{response.error}"
+            end
+            response.result
+          end
+        return nil if result.nil? || (result.respond_to?(:empty?) && result.empty?)
+        assert_record_in_tenant_scope!(result, scope, class_name)
+        (klass || Parse::Object).build(result, class_name)
+      end
+      module_function :fetch_call_method_receiver
+
+      # @api private
       # Count variant of {#execute_find_via_direct}. Routes through
       # Parse::MongoDB.aggregate with a terminal $count stage. Returns
       # an Integer (the count), mirroring what Parse Server REST
@@ -5853,8 +6044,8 @@ module Parse
       end
 
       # @api private
-      # Coerce +fields+ to an array of strings and intersect with the
-      # class's +agent_fields+ allowlist. Raises {AccessDenied} when
+      # Coerce `fields` to an array of strings and intersect with the
+      # class's `agent_fields` allowlist. Raises {AccessDenied} when
       # the caller named a field outside the allowlist — refuse, not
       # silently strip, so the LLM gets a clear error rather than an
       # empty result it might retry forever.
@@ -5928,9 +6119,9 @@ module Parse
       end
 
       # @api private
-      # Validate that every facet's +path:+ entry is in the class's
-      # +agent_fields+ allowlist. Mutates +facets+ in place by
-      # ensuring each value is a Hash with a string +path+ (the form
+      # Validate that every facet's `path:` entry is in the class's
+      # `agent_fields` allowlist. Mutates `facets` in place by
+      # ensuring each value is a Hash with a string `path` (the form
       # Parse::AtlasSearch expects).
       def normalize_atlas_facet_paths!(class_name, facets)
         allowlist = Parse::Agent::MetadataRegistry.field_allowlist(class_name)
@@ -6055,7 +6246,7 @@ module Parse
 
       # @api private
       # Serialize a Parse::Object (or raw Hash) into the wire-format
-      # hash used by other tool envelopes. Falls through to +as_json+
+      # hash used by other tool envelopes. Falls through to `as_json`
       # for Parse objects and returns the input hash for raw-mode
       # results.
       def serialize_atlas_object(obj)
@@ -6070,8 +6261,8 @@ module Parse
       end
 
       # @api private
-      # Drop highlight entries whose +path+ is not in the
-      # +agent_fields+ allowlist. Highlight snippets carry verbatim
+      # Drop highlight entries whose `path` is not in the
+      # `agent_fields` allowlist. Highlight snippets carry verbatim
       # field content; without this filter, a field redacted from
       # the row would still leak through its highlight passage.
       def filter_atlas_highlights(highlights, permitted_fields)
