@@ -647,10 +647,18 @@ module Parse
       end
 
       # @!visibility private
-      # DNS rebinding re-check. Resolves `host` again and refuses if any
-      # currently-resolved address is private or differs from the first
-      # resolution. Best-effort: kernel resolver caches and a third
-      # resolution at connect-time are out of scope.
+      # DNS rebinding re-check, best-effort. After the connection is
+      # established, re-resolves `host` and refuses if any currently-resolved
+      # address is private/internal (in BLOCKED_CIDRS) — the SSRF shape where a
+      # host that first resolved to a public address later rebinds to an
+      # internal one. It deliberately does NOT require the re-resolved set to
+      # equal the first resolution (`prior_addrs`): legitimate round-robin / CDN
+      # hosts return different public IPs per lookup, and the HTTP client
+      # resolves the actual socket itself, so pinning to the first IPs here
+      # would add false positives without binding the real connection.
+      # `prior_addrs` only gates the check to the case where the initial
+      # resolution succeeded. Kernel resolver caches and a resolution at
+      # connect-time proper are out of scope.
       def assert_host_not_rebound!(host, prior_addrs)
         return if prior_addrs.nil? || prior_addrs.empty?
         current = resolve_addresses(host)
