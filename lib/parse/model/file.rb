@@ -536,6 +536,12 @@ module Parse
       # at the network layer.)
       # @raise [ArgumentError] on any disallowed input or unsafe target.
       def safe_open_url(url_string, max_bytes: nil)
+        # Validate the per-call streaming cap up front. A non-positive value is
+        # a caller error, not a "cap everything" instruction: 0 would reject any
+        # non-empty body, and a negative cap makes `max_bytes < size_cap` always
+        # true, driving size_cap negative so every non-empty response raises
+        # "exceeds". Fail fast with a clear message before any DNS/host work.
+        max_bytes = coerce_positive_max_bytes(max_bytes)
         uri = begin
           URI.parse(url_string)
         rescue URI::InvalidURIError => e
@@ -565,11 +571,11 @@ module Parse
         # tighter `max_bytes:` to abort even earlier (e.g. image fetch with
         # a per-request ceiling below Parse::File.max_remote_size). Only a
         # smaller value takes effect — a caller cannot loosen the global cap.
+        # `max_bytes` is already a validated positive Integer (or nil) here.
+        # Only a value below the global cap takes effect — a caller cannot
+        # loosen the global ceiling.
         size_cap = max_remote_size
-        if max_bytes
-          requested = Integer(max_bytes)
-          size_cap = requested if requested < size_cap
-        end
+        size_cap = max_bytes if max_bytes && max_bytes < size_cap
         timeout = remote_timeout
         uri.open(read_timeout: timeout,
                  open_timeout: timeout,
@@ -588,6 +594,25 @@ module Parse
                      raise ArgumentError, "Remote file exceeds the size cap (#{size_cap} bytes)"
                    end
                  })
+      end
+
+      # @!visibility private
+      # Coerce a caller-supplied `max_bytes:` to a positive Integer, or nil
+      # when unset. A non-numeric, zero, or negative value raises ArgumentError
+      # — the streaming cap is a positive byte ceiling, never a sentinel.
+      # @return [Integer, nil]
+      def coerce_positive_max_bytes(max_bytes)
+        return nil if max_bytes.nil?
+        requested =
+          begin
+            Integer(max_bytes)
+          rescue ArgumentError, TypeError
+            raise ArgumentError, "max_bytes must be a positive integer (got #{max_bytes.inspect})"
+          end
+        unless requested.positive?
+          raise ArgumentError, "max_bytes must be a positive integer (got #{requested})"
+        end
+        requested
       end
 
       # @!visibility private
