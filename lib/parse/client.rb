@@ -1136,7 +1136,19 @@ module Parse
         headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
       end
 
-      token = opts[:session_token]
+      raw_token = opts[:session_token]
+      # SEC-02: an EXPLICITLY-supplied session_token that is a blank /
+      # whitespace-only string is an unusable credential — NOT an invitation
+      # to fall back to the master key. Treat it as "no credential"
+      # (anonymous) and fail closed: suppress the master key and send no
+      # session header, so Parse Server applies public ACL/CLP instead of
+      # silently executing with master authority. The caller passed a token
+      # explicitly, so we also do NOT fall through to the ambient / bound
+      # token — that was their stated (empty) scope. `session_token: nil`
+      # (value literally nil) is unchanged: it means "not set", and still
+      # resolves via the ambient / bound fallback below.
+      explicit_blank_token = raw_token.is_a?(String) && raw_token.strip.empty?
+      token = explicit_blank_token ? nil : raw_token
       # When no explicit token was passed AND the caller didn't ask to send
       # the master key, fall through to (in order) the fiber-local ambient set
       # by `Parse.with_session`, then this client's own bound `@session_token`.
@@ -1145,7 +1157,7 @@ module Parse
       # nested inside a `with_session(user)` block (or on a token-bound client)
       # would silently downgrade. The ambient wins over the bound token so a
       # `with_session` override inside a user-scoped client still takes effect.
-      if token.nil? && !(explicit_master && opts[:use_master_key] == true)
+      if token.nil? && !explicit_blank_token && !(explicit_master && opts[:use_master_key] == true)
         ambient = Parse.current_session_token
         # A whitespace-only ambient must not count as present: otherwise it
         # blocks the bound-token fallback below and then fails the later
@@ -1153,7 +1165,10 @@ module Parse
         token = ambient if ambient.is_a?(String) && !ambient.strip.empty?
         token = @session_token if (token.nil? || token.to_s.strip.empty?) && @session_token
       end
-      if token.present?
+      if explicit_blank_token
+        # Fail closed: never send the master key for an unusable explicit token.
+        headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
+      elsif token.present?
         token = token.session_token if token.respond_to?(:session_token)
         headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
         headers[Parse::Protocol::SESSION_TOKEN] = token

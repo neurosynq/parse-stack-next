@@ -361,6 +361,7 @@ module Parse
       # @return [Parse::AtlasSearch::SearchResult]
       def search_with_stage(collection_name, search_stage, **options)
         require_available!
+        assert_search_stage_safe!(search_stage)
 
         read_preference = options.delete(:read_preference)
         resolution = resolve_scope!(options, method_name: :search)
@@ -689,6 +690,12 @@ module Parse
                            highlight_field: nil, filter: nil, sort: nil,
                            skip: 0, limit: 100, max_time_ms: nil,
                            read_preference: nil, class_name: nil, raw: false)
+        # Backstop the stage-safety check at the shared execution chokepoint
+        # so ANY path that runs a $search stage (not just search_with_stage)
+        # rejects a non-$search stage / returnStoredSource. The .search and
+        # .autocomplete callers build safe stages via SearchBuilder, so this
+        # only ever fires for a caller-supplied stage.
+        assert_search_stage_safe!(search_stage)
         pipeline = [search_stage]
 
         # Score projection.
@@ -976,6 +983,44 @@ module Parse
       def normalize_fields(fields)
         return nil if fields.nil?
         Array(fields).map(&:to_s)
+      end
+
+      # Validate a caller-supplied `$search` stage before it is executed
+      # by {.search_with_stage}. The SDK's own {SearchBuilder} always emits
+      # a safe stage, but `search_with_stage` is public and a caller can
+      # hand-roll one — so we refuse the shapes that would silently defeat
+      # ACL enforcement.
+      #
+      # The load-bearing check is `returnStoredSource`: with stored-source
+      # projection Atlas returns ONLY the index-stored fields. If `_rperm`
+      # is not among them, the post-`$search` ACL `$match` (and the
+      # post-fetch redaction) treat the row as public — `_rperm` absent is
+      # interpreted as "no restriction" — so an ACL-restricted document's
+      # stored fields leak. There is no per-document rehydration on this
+      # path, so the only safe answer is to reject the flag outright.
+      #
+      # @param search_stage [Hash] the `{ "$search" => {...} }` stage.
+      # @raise [InvalidSearchParameters] on a non-$search or unsafe stage.
+      def assert_search_stage_safe!(search_stage)
+        unless search_stage.is_a?(Hash)
+          raise InvalidSearchParameters,
+            "search_stage must be a Hash containing a $search stage"
+        end
+        body = search_stage["$search"] || search_stage[:"$search"]
+        if body.nil?
+          raise InvalidSearchParameters,
+            "search_stage must contain a $search stage (build it with a SearchBuilder)"
+        end
+        if body.is_a?(Hash)
+          stored = body["returnStoredSource"] || body[:returnStoredSource]
+          if stored
+            raise InvalidSearchParameters,
+              "returnStoredSource is not permitted in a $search stage passed to " \
+              "search_with_stage: Atlas stored-source projection can omit _rperm, " \
+              "which would defeat ACL enforcement on the returned documents."
+          end
+        end
+        search_stage
       end
 
       def convert_filter_for_mongodb(filter, collection_name, resolution: nil)

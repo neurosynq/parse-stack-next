@@ -1753,31 +1753,36 @@ module Parse
       end
       module_function :apply_tenant_scope_to_pipeline
 
-      # Default-deny cross-tenant joins. When a field-based tenant scope
-      # is active for the OUTER query, a `$lookup` / `$graphLookup` /
-      # `$unionWith` into a class that does NOT declare a COMPATIBLE
-      # `agent_tenant_scope` (same field) can surface rows from other
-      # tenants — the outer `$match` only scopes the outer collection, not
-      # the joined sub-pipeline. Until full scope propagation into join
-      # sub-pipelines lands, refuse such joins. A join target that declares
-      # `agent_tenant_scope` on the same field is allowed (it is at least
-      # tenant-aware); recursive value propagation is the follow-up.
+      # Default-deny joins under an active tenant scope. A field-based
+      # tenant scope only constrains the OUTER collection: the outer
+      # `$match` prepended by {#apply_tenant_scope_to_pipeline} does not
+      # reach into a `$lookup` / `$graphLookup` / `$unionWith`
+      # sub-pipeline, which Mongo evaluates in the JOINED collection's
+      # context with NO tenant predicate injected.
+      #
+      # An earlier version allowed a join when the target class declared
+      # the SAME `agent_tenant_scope` field, on the theory that a
+      # tenant-aware target was safe. It is not: nothing propagates the
+      # tenant *value* into the sub-pipeline, so an (even empty) join into
+      # a "compatible" class still returns rows for every tenant. Until
+      # value propagation into join sub-pipelines lands, refuse ANY join
+      # while a tenant scope is active — the only fail-closed contract.
       #
       # @param pipeline [Array<Hash>] the caller pipeline (pre-scope-prepend)
       # @param scope [Hash, nil] { field:, value: } from {#resolve_tenant_scope!}
-      # @raise [Parse::Agent::AccessDenied] on a join to a tenant-incompatible class
+      # @raise [Parse::Agent::AccessDenied] on any join under an active scope
       def assert_joins_tenant_safe!(pipeline, scope)
         return unless scope
         return unless pipeline.is_a?(Array)
         scope_field = scope[:field].to_s
         each_join_target(pipeline) do |target|
-          rule = Parse::Agent::MetadataRegistry.tenant_scope_rule(target)
-          next if rule && rule[:field].to_s == scope_field
           raise Parse::Agent::AccessDenied.new(
             target,
-            "Cross-tenant join refused: '#{target}' declares no agent_tenant_scope " \
-            "on '#{scope_field}', so joining it under an active tenant scope could " \
-            "surface rows from other tenants.",
+            "Join refused under an active tenant scope ('#{scope_field}'): the " \
+            "tenant predicate is not propagated into a $lookup/$graphLookup/" \
+            "$unionWith sub-pipeline, so the join could surface rows from other " \
+            "tenants. Run the join without an agent tenant scope, or constrain " \
+            "the joined class ('#{target}') explicitly.",
             kind: :tenant_join_denied,
           )
         end
@@ -1786,7 +1791,11 @@ module Parse
 
       # Yield each join-target collection name found in `$lookup` /
       # `$graphLookup` / `$unionWith` stages, recursing into `$facet`
-      # branches and `$lookup`/`$unionWith` sub-pipelines.
+      # branches and `$lookup`/`$unionWith` sub-pipelines. Handles BOTH
+      # the Hash form (`{ from:/coll: ..., pipeline: [...] }`) and the
+      # `$unionWith` String shorthand (`{ "$unionWith" => "Collection" }`)
+      # — the latter previously slipped past every join gate because the
+      # walkers only inspected Hash values.
       #
       # @param pipeline [Array<Hash>]
       # @yieldparam target [String] a join-target collection name
@@ -1797,11 +1806,17 @@ module Parse
           stage.each do |op, value|
             case op.to_s
             when "$lookup", "$graphLookup", "$unionWith"
-              next unless value.is_a?(Hash)
-              target = value["from"] || value[:from] || value["coll"] || value[:coll]
-              yield target.to_s if target
-              sub = value["pipeline"] || value[:pipeline]
-              each_join_target(sub, &block) if sub.is_a?(Array)
+              if value.is_a?(Hash)
+                target = value["from"] || value[:from] || value["coll"] || value[:coll]
+                yield target.to_s if target
+                sub = value["pipeline"] || value[:pipeline]
+                each_join_target(sub, &block) if sub.is_a?(Array)
+              elsif value.is_a?(String)
+                # String shorthand — only `$unionWith` accepts a bare
+                # collection name; harmless to accept the shape for all
+                # three since $lookup/$graphLookup never produce it.
+                yield value
+              end
             when "$facet"
               next unless value.is_a?(Hash)
               value.each_value { |branch| each_join_target(branch, &block) if branch.is_a?(Array) }
@@ -2260,8 +2275,16 @@ module Parse
         stage.each do |op, value|
           case op.to_s
           when "$lookup", "$graphLookup", "$unionWith"
-            target = value.is_a?(Hash) ?
-              (value["from"] || value[:from] || value["coll"] || value[:coll]) : nil
+            # `$unionWith` also accepts the String shorthand
+            # `{ "$unionWith" => "Collection" }`. Extract that target too,
+            # otherwise the underscore denylist, hidden?, class-filter
+            # allowlist, and CLP-find gates below silently skip it.
+            target =
+              if value.is_a?(Hash)
+                value["from"] || value[:from] || value["coll"] || value[:coll]
+              elsif value.is_a?(String)
+                value
+              end
             target_str = nil
             if target
               target_str = target.to_s
@@ -5141,6 +5164,29 @@ module Parse
             )
           end
         end
+        # SEC-01: an instance write/admin method under an acl_user:/acl_role:
+        # scope cannot be enforced. The receiver is fetched with READ scope
+        # (below), but the method body's save/destroy run on the object's
+        # default (master) client, and there is NO session token to bind as
+        # ambient — so an acl_user agent with mere read access to a row could
+        # mutate it with master authority (read -> write escalation). Session-
+        # scoped agents bind the token during invocation; master agents are
+        # admin-by-design. Only the tokenless acl_user/acl_role write case is
+        # unenforceable, so refuse it.
+        if method_info[:type] == :instance &&
+           (required_perm == :write || required_perm == :admin) &&
+           agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
+          raise Parse::Agent::AccessDenied.new(
+            class_name,
+            "Instance #{required_perm} method '#{class_name}.#{method_name}' cannot be " \
+            "invoked under an acl_user:/acl_role: scope: there is no session token to " \
+            "bind, so the method's writes could not be enforced against the caller's " \
+            "row ACL. Use a session-token-scoped (or master) agent for instance " \
+            "write/admin methods.",
+            kind: :unenforceable_scope,
+          )
+        end
+
         args = arguments || {}
         args = args.transform_keys(&:to_sym) if args.is_a?(Hash)
 
@@ -5202,7 +5248,10 @@ module Parse
           # since the same lookup will fail at execution time.
           if method_info[:type] == :instance
             raise "object_id required for instance method '#{method_name}'" unless object_id
-            obj_exists = !klass.find(object_id).nil?
+            # SEC-01: resolve existence through the AGENT'S scope, not the
+            # master default client — otherwise the dry-run is an existence
+            # oracle for rows outside the caller's ACL/tenant scope.
+            obj_exists = !fetch_call_method_receiver(agent, klass, class_name, object_id).nil?
             unless obj_exists
               raise "Object not found: #{class_name}##{object_id}"
             end
@@ -5237,13 +5286,33 @@ module Parse
 
         # Execute with timeout - user methods could be slow
         with_timeout(:call_method) do
-          result = if method_info[:type] == :instance
+          invoke = lambda do
+            if method_info[:type] == :instance
               raise "object_id required for instance method '#{method_name}'" unless object_id
-              obj = klass.find(object_id)
+              # SEC-01: fetch the receiver through the agent's scope (ACL/CLP/
+              # tenant enforced), NOT the master default client. Fails closed —
+              # a row the scope can't read surfaces as "not found".
+              obj = fetch_call_method_receiver(agent, klass, class_name, object_id)
               raise "Object not found: #{class_name}##{object_id}" unless obj
               call_with_args(obj, method_sym, args, agent: agent)
             else
               call_with_args(klass, method_sym, args, agent: agent)
+            end
+          end
+
+          # SEC-01: bind the agent's session token as the ambient session for
+          # the duration of the method body, so any save/destroy the method
+          # performs on the receiver (or an internally-loaded object) inherits
+          # the caller's principal and is enforced against ACL/CLP server-side,
+          # instead of silently running on the object's master default client.
+          # Master agents (no token) run unbound by design; acl_user/acl_role
+          # write/admin instance methods were already refused above.
+          token = agent.respond_to?(:session_token) ? agent.session_token : nil
+          result =
+            if token.is_a?(String) && !token.strip.empty?
+              Parse.with_session(token) { invoke.call }
+            else
+              invoke.call
             end
 
           {
@@ -5903,6 +5972,43 @@ module Parse
         raw_rows.map { |raw| Parse::MongoDB.convert_aggregation_document(raw) }
       end
       module_function :execute_find_via_direct
+
+      # @api private
+      # SEC-01: fetch a `call_method` instance receiver through the AGENT'S
+      # scope so ACL / CLP / tenant enforcement applies, instead of the
+      # master-backed default client a bare `klass.find(object_id)` uses.
+      # Returns a persisted Parse::Object instance, or nil when the row does
+      # not exist or the agent's scope may not read it (fail closed — the
+      # caller maps nil to "Object not found").
+      #
+      #   * session-token scope -> REST fetch_object carrying the token;
+      #     Parse Server enforces ACL/CLP server-side.
+      #   * acl_user:/acl_role: scope -> mongo-direct find (there is no REST
+      #     "act as user/role" affordance); the ACL simulation gates the row.
+      #   * master posture -> unscoped fetch (admin by design).
+      #
+      # A cross-tenant id is refused post-fetch (AccessDenied, not "not
+      # found") via {#assert_record_in_tenant_scope!}, matching get_object.
+      def fetch_call_method_receiver(agent, klass, class_name, object_id)
+        scope = resolve_tenant_scope!(agent, class_name)
+        result =
+          if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
+            where_id = ConstraintTranslator.translate({ "objectId" => object_id }, agent)
+            rows = execute_find_via_direct(agent, class_name, where: where_id, limit: 1)
+            rows && rows.first
+          else
+            response = agent.client.fetch_object(class_name, object_id, **agent.request_opts)
+            unless response.success?
+              return nil if response.object_not_found?
+              raise Parse::Error, "Fetch failed: #{response.error}"
+            end
+            response.result
+          end
+        return nil if result.nil? || (result.respond_to?(:empty?) && result.empty?)
+        assert_record_in_tenant_scope!(result, scope, class_name)
+        (klass || Parse::Object).build(result, class_name)
+      end
+      module_function :fetch_call_method_receiver
 
       # @api private
       # Count variant of {#execute_find_via_direct}. Routes through

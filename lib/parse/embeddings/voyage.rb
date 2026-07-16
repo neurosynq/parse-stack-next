@@ -10,8 +10,8 @@ module Parse
   module Embeddings
     # Voyage AI embeddings provider. Wraps `POST /v1/embeddings` for
     # text-only models and `POST /v1/multimodalembeddings` for the
-    # multimodal text+image models (text-input path only in v5.0; the
-    # image-input path lands with {Provider#embed_image} in v5.1).
+    # multimodal text+image models (text via {#embed_text}, images via
+    # {#embed_image}).
     #
     # Supported models:
     #
@@ -23,13 +23,13 @@ module Parse
     #   `voyage-code-3`.
     # * **domain models** — `voyage-finance-2`, `voyage-law-2`.
     # * **multimodal** — `voyage-multimodal-3` (1024-dim). Unified
-    #   text+image vector space at the network boundary. This provider
-    #   exposes the text-input path only: routes to
-    #   `/v1/multimodalembeddings` with a `{ inputs: [{ content:
-    #   [{ type: "text", text: … }] }] }` envelope. The same model will
-    #   accept image inputs in v5.1 when the `embed_image` hook ships;
-    #   text vectors stored today will sit in the same space as the
-    #   eventual image vectors (no re-embed required).
+    #   text+image vector space at the network boundary. Text inputs
+    #   route to `/v1/multimodalembeddings` with a `{ inputs: [{ content:
+    #   [{ type: "text", text: … }] }] }` envelope; image inputs go
+    #   through {#embed_image} as `image_url` rows (provider-side fetch,
+    #   v5.1) or `image_base64` rows (SDK-fetched bytes, v5.5). Text and
+    #   image vectors share the same space, so stored text vectors are
+    #   comparable against image vectors without re-embedding.
     #
     # @example registration
     #   Parse::Embeddings.register(:voyage,
@@ -336,8 +336,8 @@ module Parse
         # Voyage caps multimodal requests at the same per-request size
         # as the text endpoint. The text path goes through
         # `embed_text_batched` which chunks automatically; the image
-        # path has no chunker yet (every directive is a single URL in
-        # v5.1), so guard the direct-API caller against a silent 400.
+        # path has no chunker yet (every directive is a single image
+        # source), so guard the direct-API caller against a silent 400.
         if sources.length > @embed_batch_size
           raise ArgumentError,
                 "Parse::Embeddings::Voyage#embed_image: batch size #{sources.length} exceeds " \
@@ -432,12 +432,11 @@ module Parse
         body
       end
 
-      # Build the wire body for `/v1/multimodalembeddings`. The text
-      # path wraps each input string as a single `{type: "text", text:}`
-      # content row. Image inputs will land in v5.1 alongside
-      # {Provider#embed_image}; for now the provider is text-only and
-      # the multimodal envelope's `content` array always contains a
-      # single text row per input.
+      # Build the wire body for `/v1/multimodalembeddings` for TEXT
+      # inputs: each string wraps as a single `{type: "text", text:}`
+      # content row. Image inputs build their content rows inline in
+      # {#embed_image} (`image_url` / `image_base64`) and do not pass
+      # through here.
       def build_multimodal_body(strings, wire_input_type)
         body = {
           inputs: strings.map { |s| { content: [{ type: "text", text: s }] } },

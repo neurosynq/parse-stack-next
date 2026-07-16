@@ -78,7 +78,7 @@ module Parse
             source: "Parse::CreateLock",
             unavailable_error: Parse::CreateLockUnavailableError,
           )
-          return LockBackend.process_mutex(key).synchronize(&block)
+          return LockBackend.synchronize_process_mutex(key, &block)
         end
 
         owner = SecureRandom.uuid

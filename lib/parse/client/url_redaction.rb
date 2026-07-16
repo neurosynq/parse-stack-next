@@ -23,6 +23,7 @@ module Parse
       # from over-redaction. Compared case-insensitively.
       SAFE_QUERY_PARAMS = %w[
         keys
+        excludekeys
         redirectclassnameforkey
       ].freeze
 
@@ -51,11 +52,35 @@ module Parse
         end
       end
 
-      # @param name [String] a raw query-param name
+      # @param name [String] a raw (possibly percent-encoded) query-param name
       # @return [Boolean]
       def sensitive?(name)
-        return false if SAFE_QUERY_PARAMS.include?(name.downcase)
-        !SENSITIVE_NAME.match(name).nil?
+        decoded = decode_name(name)
+        return false if SAFE_QUERY_PARAMS.include?(decoded.downcase)
+        !SENSITIVE_NAME.match(decoded).nil?
+      end
+
+      # Percent-decode a query-param NAME so a credential carried under an
+      # encoded name is matched by its decoded spelling. Servers decode
+      # `session%54oken` to `sessionToken` before reading it, so matching
+      # the raw name alone lets an encoded credential name slip past
+      # redaction.
+      #
+      # ONLY ASCII escapes (`%00`–`%7F`, i.e. first hex digit 0–7) are
+      # decoded. Credential keywords are ASCII, so that is sufficient — and
+      # decoding a high byte (`%C3`, `%FF`) would splice a lone
+      # continuation/lead byte into the (UTF-8) name and yield an
+      # invalid-encoding string that raises in the downstream `#downcase` /
+      # `#match`. High-byte escapes are therefore left literal. `+` and
+      # other bytes are untouched (param names don't use form-encoding).
+      # The decoded form is used ONLY for the sensitivity decision;
+      # {.sanitize} still emits the original spelling.
+      #
+      # @param name [String] a raw query-param name
+      # @return [String] the ASCII-percent-decoded name (always valid if
+      #   +name+ was)
+      def decode_name(name)
+        name.gsub(/%([0-7][0-9A-Fa-f])/) { Regexp.last_match(1).to_i(16).chr }
       end
     end
   end

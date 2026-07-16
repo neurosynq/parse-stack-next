@@ -140,8 +140,21 @@ module Parse
   def self.with_session(token)
     resolved = token.respond_to?(:session_token) ? token.session_token : token
     resolved = resolved.to_s if resolved
+    # Capture BEFORE any raise so the `ensure` always restores the real
+    # previous ambient (never clobbers an enclosing with_session).
     previous = Fiber[SESSION_TOKEN_STATE_KEY]
-    Fiber[SESSION_TOKEN_STATE_KEY] = (resolved && !resolved.empty?) ? resolved : nil
+    # SEC-02: a present-but-blank (empty or whitespace) token is an unusable
+    # credential. The prior behavior stored a whitespace token as the ambient
+    # (only an exactly-empty string was treated as absent), and the request
+    # layer would then drop it and silently send the master key. Reject blank
+    # tokens loudly at the source instead. `nil` still means "no ambient".
+    if resolved.is_a?(String) && resolved.strip.empty?
+      raise ArgumentError,
+        "Parse.with_session was given a blank session token. A present-but-empty " \
+        "token is refused so the block cannot silently execute with master-key " \
+        "authority — pass a valid session token, or `nil` for no ambient session."
+    end
+    Fiber[SESSION_TOKEN_STATE_KEY] = resolved
     yield
   ensure
     Fiber[SESSION_TOKEN_STATE_KEY] = previous

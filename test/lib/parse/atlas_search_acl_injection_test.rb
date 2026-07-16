@@ -34,6 +34,17 @@ require "parse/atlas_search"
 #      Parse::MongoDB.aggregate, hiding the bug.
 #   7. protectedFields are stripped from result rows.
 #   8. _highlights paths matching protectedFields are dropped.
+
+# Model backing the block-mode filter-conversion regression test. A real
+# SDK model is required so the query's pointer constraint maps to its `_p_`
+# storage column (the conversion is schema-aware — see
+# Parse::Query#convert_field_for_direct_mongodb).
+class AtlasBlockModeDoc < Parse::Object
+  parse_class "AtlasBlockModeDoc"
+  property :title, :string
+  belongs_to :owner, as: :user
+end
+
 class AtlasSearchACLInjectionTest < Minitest::Test
   # @!visibility private
   # Fake Mongo::Collection. Captures whatever pipeline / options are
@@ -593,7 +604,121 @@ class AtlasSearchACLInjectionTest < Minitest::Test
     end
   end
 
+  # search_with_stage forwards a caller-supplied $search stage. A stage
+  # carrying returnStoredSource: true would make Atlas return only
+  # index-stored fields; if _rperm is not stored, the ACL $match treats
+  # the row as public (missing _rperm == unrestricted) and restricted
+  # documents leak. The stage must be rejected outright.
+  def test_search_with_stage_rejects_return_stored_source
+    stage = { "$search" => {
+      "index" => "default",
+      "text" => { "query" => "x", "path" => "title" },
+      "returnStoredSource" => true,
+    } }
+    err = assert_raises(Parse::AtlasSearch::InvalidSearchParameters) do
+      Parse::AtlasSearch.search_with_stage("Song", stage, master: true)
+    end
+    assert_match(/returnStoredSource/, err.message)
+    assert_nil pipeline_for("Song"), "an unsafe stage must not execute a pipeline"
+  end
+
+  def test_search_with_stage_rejects_non_search_stage
+    assert_raises(Parse::AtlasSearch::InvalidSearchParameters) do
+      Parse::AtlasSearch.search_with_stage("Song", { "$match" => { "x" => 1 } }, master: true)
+    end
+  end
+
+  def test_search_with_stage_accepts_plain_search_stage
+    stage = { "$search" => { "index" => "default", "text" => { "query" => "x", "path" => "title" } } }
+    Parse::AtlasSearch.search_with_stage("Song", stage, master: true) # must not raise
+    refute_nil pipeline_for("Song")
+  end
+
+  # Regression (#5): builder-block mode must convert the query's own
+  # constraints to Mongo storage form before folding them into the
+  # post-$search $match. A raw Parse::Pointer would fail BSON
+  # serialization; an unconverted pointer field would target `owner`
+  # instead of the `_p_owner` storage column.
+  def test_query_block_mode_converts_pointer_constraint_to_storage_form
+    require "parse/query"
+    seed_clp("AtlasBlockModeDoc", {
+      "find" => { "*" => true }, "get" => { "*" => true }, "count" => { "*" => true },
+    })
+    token = stub_session(user_id: "U1", role_names: [])
+    q = AtlasBlockModeDoc.query(owner: Parse::Pointer.new("_User", "U1"))
+    q.session_token = token
+    q.atlas_search { |s| s.text(query: "love", path: :title) }
+
+    pipeline = pipeline_for("AtlasBlockModeDoc")
+    refute_nil pipeline, "block-mode search must execute a pipeline"
+
+    assert no_parse_pointer?(pipeline),
+      "block-mode filter must not carry a raw Parse::Pointer into the pipeline (BSON-unsafe)"
+
+    filter_match = pipeline.reverse.find do |st|
+      st.is_a?(Hash) && st["$match"].is_a?(Hash) && st["$match"].key?("_p_owner")
+    end
+    refute_nil filter_match,
+      "owner pointer constraint must convert to the _p_owner storage column"
+    assert_equal "_User$U1", filter_match["$match"]["_p_owner"]
+  end
+
+  # The SAME conversion must apply on the options (non-block) API and on
+  # autocomplete — both merged raw REST-shape constraints before the fix.
+  def test_query_options_mode_converts_pointer_constraint_to_storage_form
+    require "parse/query"
+    seed_clp("AtlasBlockModeDoc", {
+      "find" => { "*" => true }, "get" => { "*" => true }, "count" => { "*" => true },
+    })
+    token = stub_session(user_id: "U1", role_names: [])
+    q = AtlasBlockModeDoc.query(owner: Parse::Pointer.new("_User", "U1"))
+    q.session_token = token
+    q.atlas_search("love", fields: [:title])
+
+    pipeline = pipeline_for("AtlasBlockModeDoc")
+    refute_nil pipeline, "options-mode search must execute a pipeline"
+    assert no_parse_pointer?(pipeline),
+      "options-mode filter must not carry a raw Parse::Pointer (BSON-unsafe)"
+    filter_match = pipeline.reverse.find do |st|
+      st.is_a?(Hash) && st["$match"].is_a?(Hash) && st["$match"].key?("_p_owner")
+    end
+    refute_nil filter_match, "owner pointer constraint must convert to _p_owner"
+    assert_equal "_User$U1", filter_match["$match"]["_p_owner"]
+  end
+
+  def test_query_autocomplete_mode_converts_pointer_constraint_to_storage_form
+    require "parse/query"
+    seed_clp("AtlasBlockModeDoc", {
+      "find" => { "*" => true }, "get" => { "*" => true }, "count" => { "*" => true },
+    })
+    token = stub_session(user_id: "U1", role_names: [])
+    q = AtlasBlockModeDoc.query(owner: Parse::Pointer.new("_User", "U1"))
+    q.session_token = token
+    q.atlas_autocomplete("lo", field: :title)
+
+    pipeline = pipeline_for("AtlasBlockModeDoc")
+    refute_nil pipeline, "autocomplete must execute a pipeline"
+    assert no_parse_pointer?(pipeline),
+      "autocomplete filter must not carry a raw Parse::Pointer (BSON-unsafe)"
+    filter_match = pipeline.reverse.find do |st|
+      st.is_a?(Hash) && st["$match"].is_a?(Hash) && st["$match"].key?("_p_owner")
+    end
+    refute_nil filter_match, "owner pointer constraint must convert to _p_owner in autocomplete"
+    assert_equal "_User$U1", filter_match["$match"]["_p_owner"]
+  end
+
   private
+
+  # Deep-walk: true iff no Parse::Pointer object survives anywhere in the
+  # structure (a raw Parse::Pointer in a $match fails BSON encoding).
+  def no_parse_pointer?(obj)
+    case obj
+    when Parse::Pointer then false
+    when Hash  then obj.each_pair.all? { |k, v| no_parse_pointer?(k) && no_parse_pointer?(v) }
+    when Array then obj.all? { |v| no_parse_pointer?(v) }
+    else true
+    end
+  end
 
   def capture_stderr
     old = $stderr

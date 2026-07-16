@@ -72,11 +72,13 @@ class QueryWithSessionMongoDirectRoutingTest < Minitest::Test
                  "with no scope and no ambient, the server-mode master fallback is unchanged")
   end
 
-  def test_whitespace_only_ambient_is_treated_as_absent
-    query = build_query
-    kwargs = Parse.with_session("   ") { auth_kwargs(query) }
-    assert_equal({ master: true }, kwargs,
-                 "a whitespace-only ambient must not be forwarded as a session token")
+  def test_whitespace_only_ambient_is_rejected_at_source
+    # SEC-02: with_session now refuses a blank/whitespace token outright, so a
+    # whitespace-only ambient can no longer be established (previously it was
+    # stored and later "treated as absent", degrading toward master).
+    assert_raises(ArgumentError) do
+      Parse.with_session("   ") { auth_kwargs(build_query) }
+    end
   end
 
   def test_ambient_does_not_leak_outside_the_block

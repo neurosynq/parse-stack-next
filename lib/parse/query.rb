@@ -524,6 +524,25 @@ module Parse
         # Normalize to symbol for comparison (handles both string and symbol keys)
         expr_sym = expression.respond_to?(:to_sym) ? expression.to_sym : expression
 
+        # SEC-06: privilege/auth control options must NOT be settable from an
+        # untrusted, string-keyed conditions hash. `use_master_key` via a
+        # forwarded params hash (e.g. `Query.new(Cls, {"use_master_key" =>
+        # true, "ownerId" => "victim"})`) is an ACL/CLP-bypass mass-
+        # assignment; `session` swaps the query's auth principal. Honor these
+        # two ONLY when the caller passed a Symbol key (code-authored). A
+        # string form is treated as an ordinary field constraint — fail-safe:
+        # it matches a literal field of that name and never elevates.
+        if !expression.is_a?(Symbol) && (expr_sym == :use_master_key || expr_sym == :session)
+          warn "[Parse::Query] Ignoring string-keyed control option " \
+               "#{expression.inspect}; auth/privilege options (:use_master_key, " \
+               ":session) are honored only as symbol keys to prevent " \
+               "mass-assignment from untrusted params. Treating it as a field " \
+               "constraint. Set it via the query method (e.g. `use_master_key: " \
+               "true` as a symbol) if you intended to control authentication."
+          add_constraint(expression, value)
+          next
+        end
+
         if expr_sym == :order
           order value
         elsif expr_sym == :keys
@@ -2543,13 +2562,23 @@ module Parse
         yield builder
 
         # Carry the query's existing constraints as the caller filter,
-        # exactly as the options branch does (same raw compiled shape,
-        # interpolated into a post-$search $match).
+        # interpolated into a post-$search $match. The constraints MUST be
+        # converted to Mongo storage form first: `compile_where` yields the
+        # Parse REST shape (pointer keys like `owner`, values that are live
+        # Parse::Pointer objects / Parse date dicts). Fed to a `$match`
+        # verbatim, a Parse::Pointer fails BSON serialization and dates/ids
+        # target the wrong field (`owner` vs `_p_owner`). `convert_-
+        # constraints_for_direct_mongodb` rewrites keys/values to storage
+        # form — the same conversion the mongo-direct path applies, and the
+        # one the pre-5.5.5 block path used before this branch was rewritten.
         filter = options[:filter]
         compiled_where = compile_where
         if compiled_where.present?
           regular_constraints = compiled_where.reject { |f, _| f == "__aggregation_pipeline" }
-          filter = (filter || {}).merge(regular_constraints) if regular_constraints.any?
+          if regular_constraints.any?
+            mongo_constraints = convert_constraints_for_direct_mongodb(regular_constraints)
+            filter = (filter || {}).merge(mongo_constraints)
+          end
         end
 
         search_opts = {
@@ -2569,11 +2598,18 @@ module Parse
         # Simple options API - delegate to AtlasSearch module
         raise ArgumentError, "query string is required when not using a block" if query.nil?
 
-        # Merge query constraints as filter
+        # Merge query constraints as filter. Convert to Mongo storage form
+        # first (same reasoning as the block branch above): compile_where
+        # yields the Parse REST shape (live Parse::Pointer objects, Parse
+        # date dicts, un-prefixed pointer field names) which a raw $match
+        # cannot serialize / would target the wrong column.
         compiled_where = compile_where
         if compiled_where.present?
           regular_constraints = compiled_where.reject { |f, _| f == "__aggregation_pipeline" }
-          options[:filter] = (options[:filter] || {}).merge(regular_constraints) if regular_constraints.any?
+          if regular_constraints.any?
+            mongo_constraints = convert_constraints_for_direct_mongodb(regular_constraints)
+            options[:filter] = (options[:filter] || {}).merge(mongo_constraints)
+          end
         end
 
         options[:class_name] = @table
@@ -2630,11 +2666,17 @@ module Parse
           "Call Parse::AtlasSearch.configure(enabled: true) after configuring Parse::MongoDB."
       end
 
-      # Merge query constraints as filter
+      # Merge query constraints as filter, converted to Mongo storage form
+      # first (see #atlas_search for the reasoning — a raw Parse::Pointer
+      # fails BSON serialization and un-prefixed pointer fields target the
+      # wrong column).
       compiled_where = compile_where
       if compiled_where.present?
         regular_constraints = compiled_where.reject { |f, _| f == "__aggregation_pipeline" }
-        options[:filter] = (options[:filter] || {}).merge(regular_constraints) if regular_constraints.any?
+        if regular_constraints.any?
+          mongo_constraints = convert_constraints_for_direct_mongodb(regular_constraints)
+          options[:filter] = (options[:filter] || {}).merge(mongo_constraints)
+        end
       end
 
       # Use query limit if set and no explicit limit provided

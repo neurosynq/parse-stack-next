@@ -237,7 +237,7 @@ module Parse
           # signature across the Redis and degraded paths. There is no
           # cross-process owner here — the Mutex IS the exclusion — so a
           # fresh UUID is purely for signature parity / local fencing.
-          return Parse::LockBackend.process_mutex(store_key).synchronize do
+          return Parse::LockBackend.synchronize_process_mutex(store_key) do
             yield SecureRandom.uuid
           end
         end
