@@ -1183,9 +1183,20 @@ module Parse
       # Wire format for each SSE event (note: trailing blank line is required
       # by the SSE spec):
       #
-      #   event: progress\n
+      #   event: message\n
       #   data: <json>\n
       #   \n
+      #
+      # EVERY frame — progress notifications, list-changed notifications,
+      # and the final JSON-RPC response alike — carries the event name
+      # `message`. MCP Streamable HTTP defines exactly one SSE event type
+      # for JSON-RPC traffic; clients discriminate by inspecting the
+      # envelope (`method` present => notification, `id` + `result`/`error`
+      # => response), NOT by the SSE event name. Earlier releases emitted
+      # `event: progress` and `event: response`, which real MCP clients
+      # silently discard — they match only the default `message` type — so
+      # the final response never arrived and the call appeared to hang.
+      # Do not reintroduce custom event names.
       #
       # @api private
       class SSEBody
@@ -1546,6 +1557,9 @@ module Parse
         # The `total` field is omitted (rather than nil) so the wire
         # shape matches the spec's optional-field convention.
         #
+        # Emitted as `event: message` — see the SSEBody class docs. The
+        # payload's `method` is what marks it as progress.
+        #
         # @param elapsed [Float] seconds elapsed since the stream started.
         # @return [String] SSE event string (includes trailing blank line).
         def build_progress_event(elapsed)
@@ -1557,15 +1571,14 @@ module Parse
               "progress"      => elapsed,
             },
           })
-          "event: progress\ndata: #{data}\n\n"
+          "event: message\ndata: #{data}\n\n"
         end
 
         # Format a `notifications/tools/list_changed` or
         # `notifications/prompts/list_changed` SSE event. Both
         # notifications have no `params` — the wire shape is just the
-        # JSON-RPC envelope with `method` set. SSE event name is
-        # "message" since this is not a progress notification (the
-        # progress event name is reserved for progress notifications).
+        # JSON-RPC envelope with `method` set. Emitted as `event: message`,
+        # like every other frame on this stream.
         #
         # @param method [String] full MCP method string.
         # @return [String] SSE event string (includes trailing blank line).
@@ -1599,7 +1612,7 @@ module Parse
             "method"  => "notifications/progress",
             "params"  => params,
           })
-          "event: progress\ndata: #{data}\n\n"
+          "event: message\ndata: #{data}\n\n"
         end
 
         # Build the callback the dispatcher block passes into
@@ -1631,12 +1644,17 @@ module Parse
           end
         end
 
-        # Format the final `response` SSE event.
+        # Format the final JSON-RPC response SSE event.
+        #
+        # Emitted as `event: message` (NOT `event: response`) — an MCP
+        # client matching only the default `message` type would otherwise
+        # discard the response and block until its own timeout. The
+        # envelope's `id` + `result`/`error` is what marks it final.
         #
         # @param body [Hash] JSON-RPC response envelope.
         # @return [String] SSE event string (includes trailing blank line).
         def build_response_event(body)
-          "event: response\ndata: #{JSON.generate(body)}\n\n"
+          "event: message\ndata: #{JSON.generate(body)}\n\n"
         end
 
         # Build an internal-error JSON-RPC envelope (id may be nil at this layer).
@@ -1755,9 +1773,9 @@ module Parse
           end
         end
 
-        # SSE wire form for a server→client notification. Event name "message"
-        # (not "progress"/"response", which are reserved for the request-scoped
-        # SSE path).
+        # SSE wire form for a server→client notification. Event name
+        # "message" — the single event type MCP Streamable HTTP defines for
+        # JSON-RPC traffic, matching the request-scoped SSE path.
         def format_event(notification)
           "event: message\ndata: #{JSON.generate(notification)}\n\n"
         end

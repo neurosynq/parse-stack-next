@@ -1,5 +1,23 @@
 ## parse-stack-next Changelog
 
+### 5.5.6
+
+#### MCP clients now receive the SSE response instead of hanging
+
+- **FIXED**: The Streamable HTTP SSE transport framed its events with custom
+  event names — `event: progress` for `notifications/progress` and
+  `event: response` for the final JSON-RPC response. MCP defines a single SSE
+  event type for JSON-RPC traffic, and clients match only the default
+  `message` type, so every frame the SDK emitted was silently discarded: tool
+  progress never surfaced, and, critically, the terminating response never
+  arrived, leaving the client blocked until its own timeout on any streaming
+  `tools/call`. All frames on both the request-scoped POST stream and the
+  server-to-client GET notification stream now carry `event: message`, and
+  clients discriminate from the JSON-RPC envelope (`method` present for a
+  notification, `id` plus `result`/`error` for a response) as the protocol
+  intends. Deployments that worked around this with a middleware rewriting
+  the event name can drop it.
+
 ### 5.5.5
 
 #### Agent `call_method` runs under the caller's scope, not the master key

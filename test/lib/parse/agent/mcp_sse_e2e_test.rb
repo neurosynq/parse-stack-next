@@ -39,13 +39,32 @@ end
 # Shared SSE parse helper
 # ---------------------------------------------------------------------------
 module SSETestHelpers
-  # Parse raw SSE text (may span many chunks) into [{event:, data:}] hashes.
+  # Parse raw SSE text (may span many chunks) into [{event:, data:, kind:}].
+  #
+  # `event:` is always the wire-mandated "message"; `kind:` is the
+  # payload-derived classification (see #sse_kind) that tests assert on,
+  # mirroring how a real MCP client discriminates frames.
   def parse_sse(raw)
     events = []
     raw.scan(/event:\s*(\S+)\r?\ndata:\s*(.+?)(?=\r?\n\r?\n|\z)/m) do |event, data|
-      events << { event: event.strip, data: data.strip }
+      clean = data.strip
+      events << { event: event.strip, data: clean, kind: sse_kind(clean) }
     end
     events
+  end
+
+  # Classify an SSE frame the way an MCP client does — from the envelope.
+  def sse_kind(data)
+    payload = begin
+      JSON.parse(data)
+    rescue StandardError
+      nil
+    end
+    return :unknown unless payload.is_a?(Hash)
+    return :progress if payload["method"] == "notifications/progress"
+    return :notification if payload.key?("method")
+    return :response if payload.key?("id") && (payload.key?("result") || payload.key?("error"))
+    :unknown
   end
 
   # Collect all streamed chunks from a Net::HTTP response into a single String.
@@ -261,7 +280,7 @@ class MCPSseE2eTest < Minitest::Test
     @@dispatch_delay = 0.6
 
     events, _headers, _raw = sse_post(tools_call_body)
-    progress_events = events.select { |e| e[:event] == "progress" }
+    progress_events = events.select { |e| e[:kind] == :progress }
 
     assert progress_events.size >= 2,
            "Expected >=2 progress events for 0.6s tool; got #{progress_events.size}"
@@ -273,7 +292,7 @@ class MCPSseE2eTest < Minitest::Test
     @@dispatch_delay = 0.6
 
     events, _headers, _raw = sse_post(tools_call_body)
-    progress_events = events.select { |e| e[:event] == "progress" }
+    progress_events = events.select { |e| e[:kind] == :progress }
 
     assert progress_events.size >= 1, "Need at least one progress event to check shape"
 
@@ -300,7 +319,7 @@ class MCPSseE2eTest < Minitest::Test
     @@dispatch_delay = 0.6
 
     events, _headers, _raw = sse_post(tools_call_body(progress_token: token))
-    progress_events = events.select { |e| e[:event] == "progress" }
+    progress_events = events.select { |e| e[:kind] == :progress }
 
     assert progress_events.size >= 1, "Need progress events to verify token"
 
@@ -322,7 +341,7 @@ class MCPSseE2eTest < Minitest::Test
     @@dispatch_delay = 0.3
 
     events, _headers, _raw = sse_post(tools_call_body(id: 42))
-    response_events = events.select { |e| e[:event] == "response" }
+    response_events = events.select { |e| e[:kind] == :response }
 
     assert_equal 1, response_events.size,
                  "Expected exactly one response event, got #{response_events.size}"
@@ -332,7 +351,7 @@ class MCPSseE2eTest < Minitest::Test
     @@dispatch_delay = 0.15
 
     events, _headers, _raw = sse_post(tools_call_body(id: 99))
-    response_event = events.find { |e| e[:event] == "response" }
+    response_event = events.find { |e| e[:kind] == :response }
     refute_nil response_event, "No response event found in SSE stream"
 
     data = JSON.parse(response_event[:data])
@@ -353,7 +372,7 @@ class MCPSseE2eTest < Minitest::Test
     @@dispatch_delay  = 0
 
     events, _headers, _raw = sse_post(tools_call_body(id: 7))
-    response_event = events.find { |e| e[:event] == "response" }
+    response_event = events.find { |e| e[:kind] == :response }
     refute_nil response_event
 
     data = JSON.parse(response_event[:data])
@@ -520,8 +539,8 @@ class MCPSseE2eTest < Minitest::Test
       Thread.new do
         events, _h, _r = sse_post(tools_call_body(id: 100 + i))
         results[i] = {
-          progress: events.count { |e| e[:event] == "progress" },
-          response: events.count { |e| e[:event] == "response" },
+          progress: events.count { |e| e[:kind] == :progress },
+          response: events.count { |e| e[:kind] == :response },
         }
       end
     end
@@ -545,8 +564,10 @@ class MCPSseE2eTest < Minitest::Test
 
     refute events.empty?, "Should have received at least one event"
     last_event = events.last
-    assert_equal "response", last_event[:event],
-                 "Final event must be 'response', got '#{last_event[:event]}'"
+    assert_equal :response, last_event[:kind],
+                 "Final frame must carry the JSON-RPC response envelope, got #{last_event[:kind].inspect}"
+    assert_equal "message", last_event[:event],
+                 "Final frame must use the wire event name 'message', got '#{last_event[:event]}'"
   end
 
   # ---------------------------------------------------------------------------
@@ -558,8 +579,8 @@ class MCPSseE2eTest < Minitest::Test
 
     events, _headers, _raw = sse_post(tools_call_body)
 
-    progress_indices = events.each_index.select { |i| events[i][:event] == "progress" }
-    response_index   = events.each_index.find   { |i| events[i][:event] == "response" }
+    progress_indices = events.each_index.select { |i| events[i][:kind] == :progress }
+    response_index   = events.each_index.find   { |i| events[i][:kind] == :response }
 
     refute_nil response_index, "No response event found"
     assert progress_indices.size >= 1, "Expected at least one progress event before response"
@@ -580,7 +601,7 @@ class MCPSseE2eTest < Minitest::Test
     # Do NOT supply a progressToken in the request
     events, _headers, _raw = sse_post(tools_call_body)
 
-    progress_events = events.select { |e| e[:event] == "progress" }
+    progress_events = events.select { |e| e[:kind] == :progress }
     assert progress_events.size >= 1, "Need at least one progress event"
 
     token = JSON.parse(progress_events.first[:data]).dig("params", "progressToken")

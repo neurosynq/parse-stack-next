@@ -181,15 +181,35 @@ class MCPStreamingTest < Minitest::Test
     chunks
   end
 
-  # Parse SSE event chunks. Returns an array of { event:, data: } hashes.
+  # Parse SSE event chunks. Returns an array of { event:, data:, kind: } hashes.
+  #
+  # `event:` is the raw wire event name, which is ALWAYS "message" — MCP
+  # Streamable HTTP defines one SSE event type for JSON-RPC traffic, and a
+  # client matching only the default `message` type discards anything else.
+  # `kind:` is the payload-derived classification tests actually assert on,
+  # mirroring how a real client discriminates: by the JSON-RPC envelope.
   def parse_sse_chunks(chunks)
     events = []
     chunks.each do |chunk|
       chunk.scan(/event:\s*(\S+)\ndata:\s*(.+?)(?=\n\n|\z)/m) do |event, data|
-        events << { event: event, data: data }
+        events << { event: event, data: data, kind: sse_kind(data) }
       end
     end
     events
+  end
+
+  # Classify an SSE frame the way an MCP client does — from the envelope.
+  def sse_kind(data)
+    payload = begin
+      JSON.parse(data)
+    rescue StandardError
+      nil
+    end
+    return :unknown unless payload.is_a?(Hash)
+    return :progress if payload["method"] == "notifications/progress"
+    return :notification if payload.key?("method")
+    return :response if payload.key?("id") && (payload.key?("result") || payload.key?("error"))
+    :unknown
   end
 
   # ---------------------------------------------------------------------------
@@ -260,12 +280,12 @@ class MCPStreamingTest < Minitest::Test
 
     events = parse_sse_chunks(chunks)
 
-    progress_events = events.select { |e| e[:event] == "progress" }
-    response_events = events.select { |e| e[:event] == "response" }
+    progress_events = events.select { |e| e[:kind] == :progress }
+    response_events = events.select { |e| e[:kind] == :response }
 
     assert progress_events.size >= 1,
            "Expected at least 1 progress event, got #{progress_events.size}. " \
-           "Events: #{events.map { |e| e[:event] }.inspect}"
+           "Events: #{events.map { |e| e[:kind] }.inspect}"
     assert_equal 1, response_events.size,
                  "Expected exactly 1 response event, got #{response_events.size}"
   end
@@ -292,7 +312,7 @@ class MCPStreamingTest < Minitest::Test
     chunks = drain_body(sse_body_obj)
 
     events = parse_sse_chunks(chunks)
-    response_event = events.find { |e| e[:event] == "response" }
+    response_event = events.find { |e| e[:kind] == :response }
     refute_nil response_event, "No response event in SSE stream"
 
     sse_parsed = JSON.parse(response_event[:data])
@@ -300,6 +320,53 @@ class MCPStreamingTest < Minitest::Test
     assert_equal plain_parsed["jsonrpc"], sse_parsed["jsonrpc"]
     assert_equal plain_parsed["id"],     sse_parsed["id"]
     assert_equal plain_parsed["result"], sse_parsed["result"]
+  end
+
+  # ---------------------------------------------------------------------------
+  # 5b. Wire event name is ALWAYS "message" (MCP Streamable HTTP)
+  #
+  # MCP defines a single SSE event type for JSON-RPC traffic. Clients match
+  # only the default `message` type and silently discard any other event
+  # name — so emitting `event: progress` / `event: response` (as releases
+  # through 5.5.5 did) made progress invisible and, fatally, made the final
+  # response never arrive: the client blocked until its own timeout.
+  # ---------------------------------------------------------------------------
+
+  def test_every_sse_frame_uses_the_message_event_name
+    StreamingDispatcherStub.delay = 0.25
+    app = streaming_app(heartbeat_interval: 0.05)
+    _s, _h, body = app.call(rack_env(accept: "text/event-stream"))
+    events = parse_sse_chunks(drain_body(body))
+
+    refute_empty events, "expected at least one SSE frame"
+
+    names = events.map { |e| e[:event] }.uniq
+    assert_equal ["message"], names,
+                 "every SSE frame must use event name 'message'; saw #{names.inspect}"
+
+    # And the stream must still carry both frame kinds — proving the rename
+    # did not simply collapse the stream into a single event type.
+    kinds = events.map { |e| e[:kind] }
+    assert_includes kinds, :progress, "expected progress notifications on the stream"
+    assert_includes kinds, :response, "expected a final JSON-RPC response frame"
+  end
+
+  def test_final_response_frame_is_discoverable_without_the_event_name
+    # Exactly how a real MCP client finds the response: scan `message`
+    # frames for the envelope carrying our request id plus result/error.
+    StreamingDispatcherStub.response = {
+      status: 200,
+      body: { "jsonrpc" => "2.0", "id" => 99, "result" => { "ok" => true } },
+    }
+    app = streaming_app(heartbeat_interval: 0.05)
+    _s, _h, body = app.call(rack_env(accept: "text/event-stream"))
+    events = parse_sse_chunks(drain_body(body))
+
+    match = events.select { |e| e[:event] == "message" }.map { |e| JSON.parse(e[:data]) }
+                  .find { |p| p["id"] == 99 && (p.key?("result") || p.key?("error")) }
+
+    refute_nil match, "a message-only client must be able to find the final response"
+    assert_equal({ "ok" => true }, match["result"])
   end
 
   # ---------------------------------------------------------------------------
@@ -389,7 +456,7 @@ class MCPStreamingTest < Minitest::Test
     chunks = drain_body(body)
 
     events = parse_sse_chunks(chunks)
-    progress_events = events.select { |e| e[:event] == "progress" }
+    progress_events = events.select { |e| e[:kind] == :progress }
     assert progress_events.size >= 1
 
     tool_progress = progress_events.find { |e| JSON.parse(e[:data]).dig("params", "total") == 10 }
@@ -419,7 +486,7 @@ class MCPStreamingTest < Minitest::Test
     chunks = drain_body(body)
 
     events = parse_sse_chunks(chunks)
-    progress_events = events.select { |e| e[:event] == "progress" }
+    progress_events = events.select { |e| e[:kind] == :progress }
 
     assert progress_events.size >= 1, "Expected at least one progress event"
 
@@ -476,7 +543,7 @@ class MCPStreamingTest < Minitest::Test
     chunks = drain_body(body)
 
     events = parse_sse_chunks(chunks)
-    progress = events.select { |e| e[:event] == "progress" }
+    progress = events.select { |e| e[:kind] == :progress }
 
     assert progress.size >= 1
 
@@ -697,7 +764,7 @@ class MCPStreamingTest < Minitest::Test
     # so we know all 3 ticks have been consumed (avoids a race where the
     # release happens before the heartbeat loop has drained the ticks).
     Timeout.timeout(5) do
-      sleep 0.01 until parse_sse_chunks(chunks).count { |e| e[:event] == "progress" } >= 3
+      sleep 0.01 until parse_sse_chunks(chunks).count { |e| e[:kind] == :progress } >= 3
     end
 
     # Release the dispatcher; it returns FIXED_RESPONSE. The worker is
@@ -717,12 +784,12 @@ class MCPStreamingTest < Minitest::Test
     end
 
     events = parse_sse_chunks(chunks)
-    progress_events = events.select { |e| e[:event] == "progress" }
-    response_events = events.select { |e| e[:event] == "response" }
+    progress_events = events.select { |e| e[:kind] == :progress }
+    response_events = events.select { |e| e[:kind] == :response }
 
     assert progress_events.size >= 2,
            "Expected >=2 heartbeat events from 3 ticks, got " \
-           "#{progress_events.size}. Events: #{events.map { |e| e[:event] }.inspect}"
+           "#{progress_events.size}. Events: #{events.map { |e| e[:kind] }.inspect}"
     assert_equal 1, response_events.size, "Expected exactly 1 response event"
 
     # Verify both worker and dispatcher threads are gone within 2s. After
@@ -1013,8 +1080,8 @@ class MCPStreamingTest < Minitest::Test
     chunks = drain_body(body)
 
     events = parse_sse_chunks(chunks)
-    progress_events = events.select { |e| e[:event] == "progress" }
-    response_events = events.select { |e| e[:event] == "response" }
+    progress_events = events.select { |e| e[:kind] == :progress }
+    response_events = events.select { |e| e[:kind] == :response }
 
     assert_equal 2, progress_events.size,
                  "Expected exactly 2 tool-progress events, got #{progress_events.size}"
@@ -1043,7 +1110,7 @@ class MCPStreamingTest < Minitest::Test
     chunks = drain_body(body)
 
     events = parse_sse_chunks(chunks)
-    progress = events.find { |e| e[:event] == "progress" }
+    progress = events.find { |e| e[:kind] == :progress }
     refute_nil progress
 
     data = JSON.parse(progress[:data])
@@ -1066,7 +1133,7 @@ class MCPStreamingTest < Minitest::Test
     chunks = drain_body(body)
 
     events = parse_sse_chunks(chunks)
-    progress_events = events.select { |e| e[:event] == "progress" }
+    progress_events = events.select { |e| e[:kind] == :progress }
 
     # Heartbeats are distinguished by their dedicated `parse-stack:heartbeat:*`
     # progressToken; tool reports use the request progressToken.
@@ -1104,7 +1171,7 @@ class MCPStreamingTest < Minitest::Test
     chunks = drain_body(body)
 
     events = parse_sse_chunks(chunks)
-    progress = events.find { |e| e[:event] == "progress" }
+    progress = events.find { |e| e[:kind] == :progress }
     refute_nil progress
 
     data = JSON.parse(progress[:data])
@@ -1129,7 +1196,7 @@ class MCPStreamingTest < Minitest::Test
     chunks = drain_body(body)
 
     events = parse_sse_chunks(chunks)
-    response = events.find { |e| e[:event] == "response" }
+    response = events.find { |e| e[:kind] == :response }
     refute_nil response, "Final response event must still arrive after callback edge cases"
     raising_call_done = true
     assert raising_call_done
@@ -1355,7 +1422,7 @@ class MCPStreamingTest < Minitest::Test
     _s, _h, body = app.call(rack_env(accept: "text/event-stream"))
     chunks = drain_body(body)
     events = parse_sse_chunks(chunks)
-    assert events.any? { |e| e[:event] == "response" },
+    assert events.any? { |e| e[:kind] == :response },
            "Stream must always end with a response event"
   end
 
@@ -1423,7 +1490,7 @@ class MCPStreamingTest < Minitest::Test
     end
     assert tools_changed.size >= 1,
            "Expected at least 1 tools/list_changed event after Tools.register, " \
-           "got #{tools_changed.size}. Events: #{events.map { |e| e[:event] }.inspect}"
+           "got #{tools_changed.size}. Events: #{events.map { |e| e[:kind] }.inspect}"
 
     payload = JSON.parse(tools_changed.first[:data])
     assert_equal "2.0",                              payload["jsonrpc"]
@@ -1521,7 +1588,7 @@ class MCPStreamingTest < Minitest::Test
     _s, _h, body = app.call(rack_env(body: request_body, accept: "text/event-stream"))
     chunks = drain_body(body)
 
-    progress_events = parse_sse_chunks(chunks).select { |e| e[:event] == "progress" }
+    progress_events = parse_sse_chunks(chunks).select { |e| e[:kind] == :progress }
     assert progress_events.size >= 1, "Expected at least one heartbeat"
 
     progress_events.each do |pe|
@@ -1539,7 +1606,7 @@ class MCPStreamingTest < Minitest::Test
     _s, _h, body = app.call(rack_env(accept: "text/event-stream"))
     chunks = drain_body(body)
 
-    progress_events = parse_sse_chunks(chunks).select { |e| e[:event] == "progress" }
+    progress_events = parse_sse_chunks(chunks).select { |e| e[:kind] == :progress }
     assert progress_events.size >= 1
 
     progress_events.each do |pe|
@@ -1557,7 +1624,7 @@ class MCPStreamingTest < Minitest::Test
     _s, _h, body = app.call(rack_env(accept: "text/event-stream"))
     chunks = drain_body(body)
 
-    progress = parse_sse_chunks(chunks).find { |e| e[:event] == "progress" }
+    progress = parse_sse_chunks(chunks).find { |e| e[:kind] == :progress }
     refute_nil progress
     params = JSON.parse(progress[:data])["params"]
     refute params.key?("total"),
