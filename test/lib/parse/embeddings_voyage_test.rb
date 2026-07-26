@@ -76,7 +76,7 @@ class EmbeddingsVoyageTest < Minitest::Test
 
   def test_defaults
     provider = build
-    assert_equal "voyage-3", provider.model_name
+    assert_equal "voyage-3.5", provider.model_name
     assert_equal 1024, provider.dimensions
     assert_equal 128, provider.embed_batch_size
     assert_equal 32_000, provider.max_input_tokens
@@ -90,7 +90,27 @@ class EmbeddingsVoyageTest < Minitest::Test
     assert_equal 1024, build(model: "voyage-4-large").dimensions
     assert_equal 1024, build(model: "voyage-4").dimensions
     assert_equal 1024, build(model: "voyage-4-lite").dimensions
-    assert_equal 1024, build(model: "voyage-4-nano").dimensions
+    # nano is open-weight and self-hosted only, so it can only be
+    # constructed against a non-hosted base_url.
+    assert_equal 1024, build(model: "voyage-4-nano", base_url: "https://vllm.internal/v1").dimensions
+  end
+
+  # voyage-4-nano is served by neither hosted endpoint. Refusing it up
+  # front beats an opaque provider 400.
+  def test_self_hosted_only_model_is_refused_on_hosted_endpoints
+    %i[voyage atlas].each do |endpoint|
+      key = endpoint == :atlas ? "al-test-key" : API_KEY
+      err = assert_raises(ArgumentError) do
+        Parse::Embeddings::Voyage.new(api_key: key, model: "voyage-4-nano", endpoint: endpoint)
+      end
+      assert_match(/open-weight and is not served by any hosted endpoint/, err.message)
+    end
+  end
+
+  def test_self_hosted_only_model_is_allowed_with_a_custom_base_url
+    provider = build(model: "voyage-4-nano", base_url: "https://vllm.internal/v1")
+    assert_equal :custom, provider.endpoint
+    assert_equal "voyage-4-nano", provider.model_name
   end
 
   def test_newly_supported_models
@@ -144,7 +164,7 @@ class EmbeddingsVoyageTest < Minitest::Test
 
     body = JSON.parse(captured_req.request_body)
     assert_equal ["alpha", "beta"], body["input"]
-    assert_equal "voyage-3", body["model"]
+    assert_equal "voyage-3.5", body["model"]
     # Voyage wire value for :search_query is "query"
     assert_equal "query", body["input_type"]
     assert_equal true, body["truncation"]
@@ -520,16 +540,17 @@ class EmbeddingsVoyageTest < Minitest::Test
     assert_equal 1, captured.length
     payload = captured.first.payload
     assert_equal "Parse::Embeddings::Voyage", payload[:provider]
-    assert_equal "voyage-3", payload[:model]
+    assert_equal "voyage-3.5", payload[:model]
     assert_equal :search_document, payload[:input_type]
     assert_equal 2, payload[:total_tokens]
   end
 
   private
 
+  # Deliberately does NOT pin a model: several tests here assert the
+  # constructor's default, which a hardcoded model would mask.
   def build(**overrides)
-    opts = { api_key: API_KEY, model: "voyage-3" }.merge(overrides)
-    Parse::Embeddings::Voyage.new(**opts)
+    Parse::Embeddings::Voyage.new(**{ api_key: API_KEY }.merge(overrides))
   end
 
   def stubbed_conn(stubs)

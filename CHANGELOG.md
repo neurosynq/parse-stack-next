@@ -79,6 +79,17 @@
   adapter enforces the 20 MB ceiling independently, so raising the global knob
   for another provider cannot push an oversized payload onto Voyage.
 
+#### Breaking
+
+- **BREAKING**: The Voyage provider's default model moves from `voyage-3` to
+  `voyage-3.5`. `voyage-3` is retired from the Atlas endpoint, so the old
+  default made an Atlas key fail at construction whenever no model was named.
+  Vectors from the two models are not comparable. **Migration:** code relying
+  on the default must pin `model: "voyage-3"` explicitly to keep existing
+  embeddings valid, or re-embed against the new default. A `:vector` property
+  that declares `model:` is unaffected — the new binding audit catches the
+  mismatch before any request rather than letting the two mix silently.
+
 #### Vector search no longer returns fewer results than requested
 
 - **FIXED**: `$vectorSearch` set its `limit` to `k`, but Atlas applies that
@@ -190,9 +201,10 @@
 - Deterministic result fill under highly selective ACLs would require the
   authorization predicate to run inside the Atlas prefilter rather than after
   it. The post-search `$match` remains the enforcement boundary regardless.
-- `DEFAULT_MODEL` remains `voyage-3`, which the Atlas endpoint does not serve.
-  An Atlas key used without naming a model fails at construction with a
-  message naming a current replacement rather than at request time.
+- `voyage-4-nano` is served by neither hosted endpoint — it is open-weight and
+  meant to be self-hosted. It is refused against Voyage's and Atlas's hosts
+  with a message pointing at a self-hosted `base_url:` or
+  `Parse::Embeddings::LocalHTTP`, and remains usable through either.
 
 ### Code Example
 

@@ -25,10 +25,48 @@ require "tmpdir"
 class EmbeddingsVoyageContractTest < Minitest::Test
   KEY = ENV["VOYAGE_CONTRACT_KEY"]
 
+  # Trial and free-tier keys are rate limited aggressively — 3 requests
+  # per minute per model is common. Without pacing, most of this suite
+  # would skip as "rate limited, contract not determined", which is
+  # honest but useless. Set VOYAGE_CONTRACT_RPM to the key's per-model
+  # limit and the suite throttles itself to produce real verdicts.
+  # Unset means no pacing, for keys with production quota.
+  #
+  # The budget is PER MODEL, so the clock is tracked per model and
+  # probes against different models never wait on each other.
+  RPM = ENV["VOYAGE_CONTRACT_RPM"].to_i
+  MIN_INTERVAL = RPM.positive? ? 60.0 / RPM : 0.0
+
+  @last_request_at = {}
+  class << self
+    attr_reader :last_request_at
+  end
+
   def setup
     skip "set VOYAGE_CONTRACT_KEY to run live Voyage contract tests" if KEY.nil? || KEY.empty?
     Parse::Embeddings.reset!
     @dir = Dir.mktmpdir("psnext-contract")
+  end
+
+  # Wait out this model's rate limit before issuing a request. Called
+  # immediately before every outbound call, including inside
+  # multi-request probes.
+  def pace!(model)
+    return if MIN_INTERVAL.zero?
+
+    now = -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+    if (last = self.class.last_request_at[model.to_s])
+      wait = MIN_INTERVAL - (now.call - last)
+      sleep(wait) if wait.positive?
+    end
+    self.class.last_request_at[model.to_s] = now.call
+  end
+
+  # An SDK-driven probe against a single model, paced and with
+  # transient failures classified as "could not determine".
+  def probe(model, context, &block)
+    pace!(model)
+    via_sdk(context, &block)
   end
 
   def teardown
@@ -45,8 +83,10 @@ class EmbeddingsVoyageContractTest < Minitest::Test
     expected = KEY.start_with?(Parse::Embeddings::Voyage::ATLAS_KEY_PREFIX) ? :atlas : :voyage
     assert_equal expected, provider.endpoint
 
-    vectors = provider.embed_text(["contract probe"])
-    assert_equal 1, vectors.length, "routing is wrong if this 403s"
+    probe("voyage-3.5", "routing probe") do
+      assert_equal 1, provider.embed_text(["contract probe"]).length,
+                   "routing is wrong if this 403s"
+    end
   end
 
   # ---- dimensions -------------------------------------------------------
@@ -56,9 +96,11 @@ class EmbeddingsVoyageContractTest < Minitest::Test
   def test_declared_native_dimensions_match_the_live_api
     mismatches = []
     contract_models.each do |model|
-      provider = build(model: model)
-      actual = provider.embed_text(["d"]).first.length
-      mismatches << "#{model}: declared #{provider.dimensions}, got #{actual}" if actual != provider.dimensions
+      probe(model, "dimension probe (#{model})") do
+        provider = build(model: model)
+        actual = provider.embed_text(["d"]).first.length
+        mismatches << "#{model}: declared #{provider.dimensions}, got #{actual}" if actual != provider.dimensions
+      end
     end
     assert_empty mismatches, "native dimension table has drifted:\n  #{mismatches.join("\n  ")}"
   end
@@ -68,8 +110,10 @@ class EmbeddingsVoyageContractTest < Minitest::Test
     model = "voyage-3.5"
     supported = Parse::Embeddings::Voyage::MODEL_SUPPORTED_DIMENSIONS.fetch(model)
     supported.each do |width|
-      actual = build(model: model, dimensions: width).embed_text(["m"]).first.length
-      assert_equal width, actual, "#{model} did not honor output_dimension #{width}"
+      probe(model, "matryoshka probe (#{width})") do
+        actual = build(model: model, dimensions: width).embed_text(["m"]).first.length
+        assert_equal width, actual, "#{model} did not honor output_dimension #{width}"
+      end
     end
   end
 
@@ -77,7 +121,7 @@ class EmbeddingsVoyageContractTest < Minitest::Test
 
   def test_response_envelope_shape_is_stable
     provider = build(model: "voyage-3.5")
-    vectors = provider.embed_text(%w[alpha beta], input_type: :search_document)
+    vectors = probe("voyage-3.5", "envelope probe") { provider.embed_text(%w[alpha beta], input_type: :search_document) }
     assert_equal 2, vectors.length
     assert vectors.all? { |v| v.is_a?(Array) && v.all?(Float) }
     assert_equal vectors[0].length, vectors[1].length
@@ -87,8 +131,8 @@ class EmbeddingsVoyageContractTest < Minitest::Test
 
   def test_asymmetric_input_types_are_accepted
     provider = build(model: "voyage-3.5")
-    q = provider.embed_text(["a query"], input_type: :search_query).first
-    d = provider.embed_text(["a document"], input_type: :search_document).first
+    q = probe("voyage-3.5", "input-type probe (query)") { provider.embed_text(["a query"], input_type: :search_query).first }
+    d = probe("voyage-3.5", "input-type probe (document)") { provider.embed_text(["a document"], input_type: :search_document).first }
     assert_equal q.length, d.length
   end
 
@@ -96,7 +140,7 @@ class EmbeddingsVoyageContractTest < Minitest::Test
 
   def test_multimodal_model_accepts_a_streamed_image
     provider = build(model: "voyage-multimodal-3")
-    vectors = provider.embed_image([Parse::Embeddings::MediaFile.image(write_png)])
+    vectors = probe("voyage-multimodal-3", "image probe") { provider.embed_image([Parse::Embeddings::MediaFile.image(write_png)]) }
     assert_equal 1, vectors.length
     assert_equal provider.dimensions, vectors.first.length
   end
@@ -104,7 +148,7 @@ class EmbeddingsVoyageContractTest < Minitest::Test
   def test_video_capable_model_accepts_a_streamed_mp4
     skip "ffmpeg not available" unless ffmpeg?
     provider = build(model: "voyage-multimodal-3.5")
-    vectors = provider.embed_video([Parse::Embeddings::MediaFile.video(write_mp4)])
+    vectors = probe("voyage-multimodal-3.5", "video probe") { provider.embed_video([Parse::Embeddings::MediaFile.video(write_mp4)]) }
     assert_equal 1, vectors.length
     assert_equal provider.dimensions, vectors.first.length
   end
@@ -144,9 +188,17 @@ class EmbeddingsVoyageContractTest < Minitest::Test
     # Bypass the SDK allowlist to ask the API directly.
     Parse::Embeddings.allowed_video_types = %w[video/webm video/mp4]
     provider = build(model: "voyage-multimodal-3.5")
-    assert_raises(Parse::Embeddings::Voyage::BadRequestError,
-                  Parse::Embeddings::InvalidResponseError) do
-      provider.embed_video([Parse::Embeddings::MediaFile.video(webm)])
+    # Deliberately not assert_raises: a RateLimitError would be reported
+    # as an unexpected-exception FAILURE rather than reaching via_sdk's
+    # "could not determine" skip.
+    probe("voyage-multimodal-3.5", "webm rejection probe") do
+      begin
+        provider.embed_video([Parse::Embeddings::MediaFile.video(webm)])
+        flunk "the API accepted a WebM payload — the MP4-only allowlist is too narrow"
+      rescue Parse::Embeddings::Voyage::BadRequestError,
+             Parse::Embeddings::InvalidResponseError
+        # Expected: the container is refused.
+      end
     end
   end
 
@@ -204,9 +256,21 @@ class EmbeddingsVoyageContractTest < Minitest::Test
       model_available?(model, "voyage availability probe")
     end
     assert_empty missing,
-                 "models kept out of ATLAS_UNAVAILABLE_MODELS' reach are gone from Voyage " \
-                 "too: #{missing.inspect} — they should be removed from the SDK entirely " \
-                 "rather than merely gated off Atlas."
+                 "ATLAS_UNAVAILABLE_MODELS means 'on Voyage but not Atlas'. These are gone " \
+                 "from Voyage too: #{missing.inspect} — they belong in " \
+                 "SELF_HOSTED_ONLY_MODELS or should be dropped entirely, not merely gated " \
+                 "off Atlas."
+  end
+
+  # The complement: open-weight models must be absent from BOTH hosted
+  # endpoints, or they are not self-host-only and the constant is wrong.
+  def test_self_hosted_only_models_are_absent_from_the_hosted_api
+    present = Parse::Embeddings::Voyage::SELF_HOSTED_ONLY_MODELS.select do |model|
+      model_available?(model, "self-hosted-only probe")
+    end
+    assert_empty present,
+                 "SELF_HOSTED_ONLY_MODELS are served by this hosted endpoint after all: " \
+                 "#{present.inspect} — the constructor is refusing a usable model."
   end
 
   # Routing's other half: a Voyage key must NOT authenticate against the
@@ -230,8 +294,14 @@ class EmbeddingsVoyageContractTest < Minitest::Test
     %w[voyage-3.5 voyage-4 voyage-code-3 voyage-multimodal-3]
   end
 
+  # `max_retries: 0` when pacing is configured: the provider's backoff
+  # (sub-second, then a couple of seconds) is far shorter than the
+  # ~20s a 3-RPM budget needs, so retries never succeed and each one
+  # silently spends another request the pacer has already accounted
+  # for. Failing immediately lets the pacer do the waiting instead.
   def build(model:, **opts)
-    Parse::Embeddings::Voyage.new(api_key: KEY, model: model, **opts)
+    defaults = MIN_INTERVAL.zero? ? {} : { max_retries: 0 }
+    Parse::Embeddings::Voyage.new(api_key: KEY, model: model, **defaults.merge(opts))
   end
 
   def atlas_key?
@@ -255,6 +325,7 @@ class EmbeddingsVoyageContractTest < Minitest::Test
   end
 
   def raw_post_to(host_base, path, body)
+    pace!(body[:model] || body["model"] || "unknown")
     require "net/http"
     require "uri"
     uri = URI("#{host_base}/#{path}")
@@ -274,17 +345,34 @@ class EmbeddingsVoyageContractTest < Minitest::Test
     [res.code.to_i, parsed]
   end
 
-  # Fail loudly on infrastructure errors so they are never mistaken for
-  # a contract verdict.
+  # Classify infrastructure conditions so they are never mistaken for a
+  # contract verdict — in either direction.
+  #
+  # A bad credential is a configuration error the operator must fix, so
+  # it fails. Rate limiting and 5xx are transient and say nothing about
+  # the contract, so they skip: failing there would cry wolf on a
+  # low-quota key, and passing would hide real drift. A skip is the
+  # honest "could not determine".
   def refute_infrastructure_failure(status, body, context)
     case status
     when 401, 403
-      flunk "#{context}: authentication failed (#{status}) — cannot judge the contract. #{body["detail"]}"
+      flunk "#{context}: authentication failed (#{status}) — check the key. #{body["detail"]}"
     when 429
-      flunk "#{context}: rate limited (429) — rerun. #{body["detail"]}"
+      skip "#{context}: rate limited (429); contract not determined. #{body["detail"]}"
     when 500..599
-      flunk "#{context}: server error (#{status}) — cannot judge the contract. #{body["detail"]}"
+      skip "#{context}: server error (#{status}); contract not determined. #{body["detail"]}"
     end
+  end
+
+  # Same classification for calls that go through the SDK, where a 429
+  # surfaces as an exception after the provider's own retries rather
+  # than as a status code.
+  def via_sdk(context)
+    yield
+  rescue Parse::Embeddings::Voyage::RateLimitError => e
+    skip "#{context}: rate limited; contract not determined. #{e.message}"
+  rescue Parse::Embeddings::Voyage::TransientError => e
+    skip "#{context}: transient provider failure; contract not determined. #{e.message}"
   end
 
   # A model is available iff the API answered 200 with data. Anything

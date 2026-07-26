@@ -115,7 +115,11 @@ module Parse
       # (request envelopes, response envelopes, error shapes) is
       # identical — only the host and the credential differ.
       ATLAS_BASE_URL      = "https://ai.mongodb.com/v1"
-      DEFAULT_MODEL       = "voyage-3"
+      # Bumped from `voyage-3` in 5.6.0: that model is retired from the
+      # Atlas endpoint, so an Atlas key used without naming a model
+      # failed at construction. `voyage-3.5` is served by both
+      # endpoints and shares the 1024 native width.
+      DEFAULT_MODEL       = "voyage-3.5"
       DEFAULT_TIMEOUT     = 30
       DEFAULT_OPEN_TIMEOUT = 5
       DEFAULT_MAX_RETRIES = 3
@@ -222,9 +226,19 @@ module Parse
       # "does not support video inputs" 400.
       VIDEO_MODELS = %w[voyage-multimodal-3.5].freeze
 
-      # Models the Atlas Embedding and Reranking API does not expose.
-      # They remain valid against {DEFAULT_BASE_URL}.
-      ATLAS_UNAVAILABLE_MODELS = %w[voyage-3 voyage-3-lite voyage-4-nano].freeze
+      # Models Voyage's hosted API serves but the Atlas Embedding and
+      # Reranking API does not. Verified against both endpoints.
+      ATLAS_UNAVAILABLE_MODELS = %w[voyage-3 voyage-3-lite].freeze
+
+      # Open-weight models that NO hosted endpoint serves — neither
+      # Voyage's nor Atlas's. `voyage-4-nano` ships under Apache 2.0 on
+      # Hugging Face and is meant to be self-hosted (vLLM / Ollama /
+      # llama.cpp), reached either through {LocalHTTP} or through this
+      # provider with an explicit `base_url:` pointing at the local
+      # server. Naming one against a hosted endpoint is always a
+      # mistake, so it is refused there rather than failing as an
+      # opaque provider 400.
+      SELF_HOSTED_ONLY_MODELS = %w[voyage-4-nano].freeze
 
       # Atlas model API keys carry this prefix and authenticate ONLY
       # against {ATLAS_BASE_URL}; Voyage's own endpoint rejects them
@@ -977,6 +991,16 @@ module Parse
       end
 
       def validate_model_for_endpoint!(model, endpoint)
+        # A custom base_url may well point at a self-hosted server, so
+        # only the two known hosted endpoints are policed.
+        if %i[voyage atlas].include?(endpoint) && SELF_HOSTED_ONLY_MODELS.include?(model)
+          raise ArgumentError,
+                "Parse::Embeddings::Voyage: model #{model.inspect} is open-weight and is not " \
+                "served by any hosted endpoint (neither #{DEFAULT_BASE_URL} nor " \
+                "#{ATLAS_BASE_URL}). Self-host it and pass an explicit base_url:, or use " \
+                "Parse::Embeddings::LocalHTTP."
+        end
+
         return unless endpoint == :atlas
         return unless ATLAS_UNAVAILABLE_MODELS.include?(model)
 
