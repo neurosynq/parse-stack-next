@@ -1,5 +1,230 @@
 ## parse-stack-next Changelog
 
+### 5.6.0
+
+#### Voyage embeddings reach the Atlas endpoint, video, and streamed media
+
+- **NEW**: The Voyage provider now targets MongoDB's Atlas Embedding and
+  Reranking API in addition to Voyage's own. The two serve the same models
+  over an identical wire contract but do not share credentials — an Atlas
+  model API key returns 403 from Voyage's host and vice versa. A key carrying
+  the Atlas prefix routes to `https://ai.mongodb.com/v1` automatically; pass
+  `endpoint: :atlas` or `:voyage` to be explicit, or a `base_url:` to override
+  both. A named endpoint that contradicts an explicit `base_url` is rejected
+  rather than silently reconciled, so a credential is never sent to a host the
+  caller did not intend. `#endpoint` and `#atlas?` report the resolved target.
+- **NEW**: Added `voyage-3.5`, `voyage-3.5-lite`, `voyage-code-2` (1536-dim),
+  and `voyage-multimodal-3.5`. Models the Atlas endpoint does not expose —
+  `voyage-3`, `voyage-3-lite`, `voyage-4-nano` — are refused at construction
+  when that endpoint is active, with an error naming a current replacement;
+  they remain valid against Voyage's own API.
+- **NEW**: `Parse::Embeddings::Voyage#embed_video` embeds video through
+  `voyage-multimodal-3.5`, the only model that accepts it. Text, image, and
+  video vectors share one space, so a stored text vector is comparable against
+  a video vector without re-embedding. `#modalities` reports `[:text, :image,
+  :video]` for that model and `[:text, :image]` for `voyage-multimodal-3`.
+- **NEW**: `Parse::Embeddings::MediaFile` wraps a local image or video and
+  streams it into the request body instead of buffering it. Serializing media
+  with `to_json` costs roughly 2.4x the file size resident — raw bytes, the
+  1.33x base64 copy, and the serialized document — which is enough to exhaust
+  a small dyno on a single moderate video. `MediaFile` reads only a 16-byte
+  header at construction; the payload is then base64-encoded into the socket
+  in fixed-size chunks by `Parse::Embeddings::StreamingBody`, so peak memory
+  is bounded by the chunk size regardless of file size and nothing spills to
+  disk. `Content-Length` is computed exactly so the request avoids chunked
+  transfer encoding, and the body replays byte-identically on retry. Passing a
+  URL instead keeps the SDK out of the transfer entirely.
+- **FIXED**: Corrected the model dimension table. The entire v4 family
+  defaults to 1024 — `voyage-4-large`'s 2048, `voyage-4-lite`'s 512, and
+  `voyage-4-nano`'s 256 were recorded as native widths when they are
+  Matryoshka options reached only by requesting them. Because the provider
+  validates the returned vector width against the declared one, both
+  `voyage-4-large` and `voyage-4-lite` raised
+  `Parse::Embeddings::InvalidResponseError` on every call. `voyage-4-nano` is
+  1024, and `voyage-finance-2` carries a 32,000-token context rather than
+  16,000.
+- **CHANGED**: The coarse "Matryoshka-capable models" gate is replaced by
+  per-model `MODEL_SUPPORTED_DIMENSIONS`. Any width on a model's ladder is now
+  accepted — including one wider than its default, which the old rule rejected
+  as "exceeds native" — and a width off the ladder is refused with the
+  supported set named. `output_dimension` is sent whenever the configured
+  width differs from the model's default, so `voyage-4-lite` at 512 and
+  `voyage-4-large` at 2048 both work.
+- **FIXED**: A caller-supplied URL can no longer capture a local file's bytes.
+  The streamed body previously marked each payload with a sentinel token and
+  located it by searching the serialized JSON, so a URL containing that token
+  matched first: the file's base64 was spliced into the URL slot and forwarded
+  to the provider as a URL to fetch, disclosing local file contents, while the
+  intended slot kept the literal token. Request bodies are now assembled
+  structurally — each fragment serialized independently and concatenated in
+  order — so payloads are placed by position and caller data is never
+  searched.
+- **FIXED**: Mixed `image_url` / `image_base64` batches no longer violate
+  Voyage's request contract, which requires a single representation per
+  request. A mixed batch is split into one request per representation and
+  reassembled into the caller's original order, preserving the 1:1 alignment
+  between inputs and returned vectors.
+- **FIXED**: Video validation no longer accepts containers the provider
+  rejects. MP4 is the only format Voyage supports, and WebM and QuickTime
+  payloads are refused by the API, so both are out of the default allowlist.
+  An `ftyp` box no longer implies MP4 on its own — QuickTime and the
+  audio-only profiles share the ISO base media container — so major brands are
+  matched explicitly and an unrecognized brand is refused rather than assumed.
+  Apple's audio-only `M4A` brand is excluded, closing a type confusion in
+  which an audio file passed as video.
+- **NEW**: `Parse::Embeddings.max_media_bytes` caps streamed media per file,
+  defaulting to the 20 MB Voyage documents. Streaming already prevents an
+  oversized file from exhausting memory, but the provider still rejects it, so
+  failing locally turns a wasted upload into an immediate error. The Voyage
+  adapter enforces the 20 MB ceiling independently, so raising the global knob
+  for another provider cannot push an oversized payload onto Voyage.
+
+#### Breaking
+
+- **BREAKING**: The Voyage provider's default model moves from `voyage-3` to
+  `voyage-3.5`. `voyage-3` is retired from the Atlas endpoint, so the old
+  default made an Atlas key fail at construction whenever no model was named.
+  Vectors from the two models are not comparable. **Migration:** code relying
+  on the default must pin `model: "voyage-3"` explicitly to keep existing
+  embeddings valid, or re-embed against the new default. A `:vector` property
+  that declares `model:` is unaffected — the new binding audit catches the
+  mismatch before any request rather than letting the two mix silently.
+
+#### Vector search no longer returns fewer results than requested
+
+- **FIXED**: `$vectorSearch` set its `limit` to `k`, but Atlas applies that
+  limit before the SDK's ACL `$match`, `protectedFields` redaction,
+  pointer-field filtering, and any caller-supplied `filter` — so a scoped
+  caller who could read 2 of the top 10 documents asked for 10 and received 2,
+  even when hundreds of readable matches existed further down the ranking.
+  The search now requests a wider internal candidate window, applies every
+  enforcement layer, and only then trims to `k`. The window is raised only
+  when something can actually drop rows, so a master-key call with no filter
+  keeps its previous one-for-one cost. A `candidate_limit:` option on
+  `VectorSearch.search` and `find_similar` tunes the window for principals
+  whose visibility is unusually narrow. This is a mitigation, not a guarantee:
+  a sufficiently selective ACL can still exhaust any finite window, which is
+  why the attrition counts below exist. HNSW width stays anchored to `k`, so
+  the wider window does not widen the ANN search.
+- **NEW**: `VectorSearch.search` emits a `parse.vector_search.search`
+  `ActiveSupport::Notifications` event carrying `candidate_limit`,
+  `num_candidates`, `post_filter_count`, `post_pointer_count`,
+  `returned_count`, `pointer_attrition`, and `underfilled`. The counts are
+  named for where they are measured — obtaining a true pre-`$match` count
+  would require a `$facet` — so an underfill is observable rather than silent.
+
+#### Vector properties are checked against the provider actually registered
+
+- **FIXED**: A `:vector` property's `model:` was recorded and never enforced.
+  Because models in the same family usually share a width (`voyage-3` and
+  `voyage-3.5` are both 1024), swapping the registered provider's model
+  silently mixed incomparable vectors into one index — no error, just
+  degraded recall, repairable only by re-embedding. `dimensions:` was
+  verified, but only against a vector the provider had already returned and
+  billed for. Both are now checked by `Parse::Embeddings::BindingAudit`
+  before any request is issued, on the managed-write path and the
+  query-embedding path alike. The audit runs ahead of the digest short-circuit
+  so an unchanged record still surfaces a drifted binding, and it fails closed:
+  a provider that cannot report `#model_name` or `#dimensions` is refused
+  rather than skipped, since a declaration that cannot be verified is not a
+  declaration that has been satisfied.
+- **NEW**: `Parse::Embeddings::BindingAudit.audit_all!` and
+  `.audit_all_or_raise!` check every declared binding at once, for a boot-time
+  or CI gate rather than waiting for the first save that happens to touch one.
+- **NEW**: `:vector` properties validate `similarity:` against the functions
+  Atlas accepts (`euclidean`, `cosine`, `dotProduct`) at declaration time
+  instead of surfacing a typo as an index error later.
+- **FIXED**: Hybrid search applies the same candidate window as the plain
+  vector search, so opting into hybrid no longer underfills where a straight
+  vector search would not. Each branch's limit is applied before ACL
+  enforcement and was narrower than the plain path's window.
+- **FIXED**: Hybrid search separates the rows each branch retains for fusion
+  from the rows Atlas considers before ACL. Conflating them meant the branch
+  limit was passed as the vector branch's `k` and then multiplied a second
+  time by the plain search's own window derivation — a hybrid `k: 10` asked
+  Atlas for 1,000 rows instead of the intended 100, an explicit
+  `candidate_limit: 250` became 2,500 on the client path while staying 250 on
+  the native path, and any `k` above 100 produced a branch `k` beyond
+  `VectorSearch::MAX_K` that failed outright. The fusion depth is now bounded
+  by `MAX_K` and the candidate window by Atlas's 10,000 ceiling, with both
+  paths using the same window. A `candidate_limit` outside that range is
+  refused rather than clamped, and `vector: { candidate_limit: }` is forwarded
+  through `hybrid_search`.
+- **FIXED**: The native `$rankFusion` pipeline trimmed to `k` in a `$limit`
+  stage that runs after its ACL `$match`, reintroducing the underfill the
+  candidate window exists to prevent. It now limits to the candidate window
+  and trims to `k` once enforcement has run.
+- **NEW**: A `parse.vector_search.hybrid` notification reports `method`,
+  `branch_depth`, `candidate_window`, `post_filter_count`, `returned_count`,
+  and `underfilled` for both fusion paths. `branch_depth` differs by method by
+  design: the client path enforces ACL inside each branch and can retain the
+  narrower fusion depth, while the native path enforces after `$rankFusion`
+  and must retain the full window. The value reported is the one that ran.
+- **NEW**: A `:vector` property wider than the Atlas vectorSearch index cap is
+  refused unless it declares `searchable: false`. `Parse::Vector` tolerates up
+  to 16384 dimensions while an Atlas index caps at 8192, so such a property
+  was previously declarable, storable, and permanently unsearchable, with the
+  failure appearing only at query time. The two limits remain distinct — they
+  govern storage and indexing respectively — but the combination now has to be
+  acknowledged.
+- **NEW**: `searchable: false` makes a `:vector` property genuinely
+  storage-only, whether it opted out to clear the index cap or by choice. It
+  is excluded from `find_similar` / `hybrid_search` field resolution, refused
+  with an explanation when named directly, and rejected by `agent_searchable`
+  at class load rather than at an agent's first query.
+
+#### Provider protocol
+
+- **NEW**: `Parse::Embeddings::Provider#embed_video` joins `#embed_image` in
+  the base protocol with the same `NotImplementedError` default, so video is a
+  declared capability rather than a Voyage-only method. `#supports_modality?`
+  answers the capability question without rescuing.
+- **NEW**: `rake test:contract` runs live, billable provider contract tests
+  that pin request routing, native dimensions, the Matryoshka ladder, accepted
+  media, size limits, model availability, and response shape. They skip unless
+  `VOYAGE_CONTRACT_KEY` is set and are excluded from both `rake test` and
+  `rake test:unit`, so no ordinary run becomes billable because a key happens
+  to be exported. Probes that assert a refusal issue raw requests rather than
+  going through the SDK — a local guard asserted against itself proves nothing
+  about the contract it encodes — and distinguish a genuine refusal from an
+  authentication, rate-limit, or 5xx failure so infrastructure trouble cannot
+  read as a contract verdict. Mocked tests assert what the SDK believes the
+  API does and therefore cannot detect provider drift: every dimension and
+  media-format correction in this release was invisible to a fully green
+  mocked suite.
+
+### Behavior Notes
+
+- Audio is not offered by any Voyage model, and neither PDF nor DOCX is
+  accepted as a content type. Render document pages to images and embed those;
+  the SDK does not perform that conversion.
+- Deterministic result fill under highly selective ACLs would require the
+  authorization predicate to run inside the Atlas prefilter rather than after
+  it. The post-search `$match` remains the enforcement boundary regardless.
+- `voyage-4-nano` is served by neither hosted endpoint — it is open-weight and
+  meant to be self-hosted. It is refused against Voyage's and Atlas's hosts
+  with a message pointing at a self-hosted `base_url:` or
+  `Parse::Embeddings::LocalHTTP`, and remains usable through either.
+
+### Code Example
+
+```ruby
+# Endpoint inferred from the key prefix — no base_url needed.
+provider = Parse::Embeddings::Voyage.new(
+  api_key: ENV.fetch("ATLAS_MODEL_API_KEY"),
+  model: "voyage-multimodal-3.5",
+)
+provider.endpoint    # => :atlas
+provider.modalities  # => [:text, :image, :video]
+
+# Local media streams into the request; the bytes are never held in memory.
+provider.embed_image([Parse::Embeddings::MediaFile.image("page.png")])
+provider.embed_video([Parse::Embeddings::MediaFile.video("demo.mp4")])
+
+# A URL keeps the SDK out of the transfer entirely — the provider fetches it.
+provider.embed_image(["https://cdn.example.com/page.png"])
+```
+
 ### 5.5.6
 
 #### MCP clients now receive the SSE response instead of hanging

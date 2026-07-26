@@ -105,6 +105,46 @@ class EmbeddingsTest < Minitest::Test
     assert_equal [:text], Parse::Embeddings::Provider.new.modalities
   end
 
+  # embed_video sits alongside embed_image in the base protocol with the
+  # same default posture, so video is a declared capability rather than
+  # a method that happens to exist on one adapter.
+  def test_embed_video_defaults_to_not_implemented
+    err = assert_raises(NotImplementedError) do
+      Parse::Embeddings::Provider.new.embed_video(["https://x/v.mp4"])
+    end
+    assert_match(/does not support video embedding/, err.message)
+  end
+
+  # The contract kwargs must be accepted by the base signature, or an
+  # override absorbing them via **opts would diverge from its parent.
+  def test_embed_video_accepts_the_contract_kwargs
+    assert_raises(NotImplementedError) do
+      Parse::Embeddings::Provider.new.embed_video(
+        [], input_type: :search_query, allow_insecure: true, dim: 256
+      )
+    end
+  end
+
+  def test_supports_modality_reflects_modalities
+    provider = Parse::Embeddings::Provider.new
+    assert provider.supports_modality?(:text)
+    refute provider.supports_modality?(:image)
+    refute provider.supports_modality?(:video)
+  end
+
+  def test_supports_modality_accepts_strings
+    assert Parse::Embeddings::Provider.new.supports_modality?("text")
+  end
+
+  def test_supports_modality_tracks_an_override
+    klass = Class.new(Parse::Embeddings::Provider) do
+      def modalities = %i[text image video]
+    end
+    provider = klass.new
+    assert provider.supports_modality?(:video)
+    assert provider.supports_modality?(:image)
+  end
+
   def test_error_class_hierarchy
     assert Parse::Embeddings::InvalidResponseError < Parse::Embeddings::Error
     assert Parse::Embeddings::Error < StandardError

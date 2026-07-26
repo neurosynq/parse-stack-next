@@ -73,7 +73,7 @@ class EmbeddingsVoyageImageTest < Minitest::Test
       provider.embed_image(["https://1.1.1.1/img.jpg", 12345])
     end
     assert_match(/sources\[1\] must be a URL String/, err.message)
-    assert_match(/FetchedImage/, err.message)
+    assert_match(/MediaFile/, err.message)
   end
 
   def test_embed_image_rejects_unknown_input_type

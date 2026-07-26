@@ -133,10 +133,17 @@ end
 # `*disruptive*` tests are EXCLUDED here: they stop/restart the shared
 # Parse Server container, which would flake any other test loaded into the
 # same process. Run them on their own via `rake test:integration:disruptive`.
+#
+# `*contract*` tests are EXCLUDED because they issue real, billable
+# provider requests whenever the relevant credential happens to be in the
+# environment. A default `rake test` must never become live and billable
+# as a side effect of an exported key. Run them via `rake test:contract`.
 Rake::TestTask.new do |t|
   ENV['PARSE_TEST_USE_DOCKER'] = 'true'
   t.libs << "lib/parse/stack"
-  t.test_files = FileList["test/lib/**/*_test.rb"].exclude("test/lib/**/*disruptive*")
+  t.test_files = FileList["test/lib/**/*_test.rb"]
+                   .exclude("test/lib/**/*disruptive*")
+                   .exclude("test/lib/**/*contract_test.rb")
   t.warning = false
   t.verbose = true
 end
@@ -230,7 +237,16 @@ namespace :test do
     files = FileList["test/lib/**/*_test.rb"]
               .exclude("test/lib/**/*integration_test.rb")
               .exclude("test/lib/**/*disruptive*")
+              .exclude("test/lib/**/*contract_test.rb")
     run_test_files!("Unit tests", files, log: "tmp/unit-progress.log")
+  end
+
+  desc "Run LIVE provider contract tests (billable, needs credentials). " \
+       "Skips every assertion unless the relevant *_CONTRACT_KEY is set. " \
+       "Intended for a nightly or manual run — PR runs stay mocked."
+  task :contract do
+    files = FileList["test/lib/**/*contract_test.rb"]
+    run_test_files!("Contract tests", files, log: "tmp/contract-progress.log")
   end
 
   namespace :integration do

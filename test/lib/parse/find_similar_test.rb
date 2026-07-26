@@ -61,7 +61,7 @@ class FindSimilarTest < Minitest::Test
     err = assert_raises(Parse::Core::VectorSearchable::NoVectorProperty) do
       NoVecDoc.find_similar(vector: [0.1, 0.2, 0.3])
     end
-    assert_match(/no :vector property/, err.message)
+    assert_match(/no searchable :vector property/, err.message)
   end
 
   def test_multiple_vector_properties_require_field
@@ -393,12 +393,34 @@ class FindSimilarTest < Minitest::Test
     end
   end
 
-  def test_text_overload_validates_returned_vector_dimensions
-    # Register a provider whose dimension disagrees with the declared
-    # property (4 vs 8). The dimension-mismatch check downstream should
-    # catch it before search runs.
+  # A provider that disagrees with the declaration is refused by the
+  # binding audit before the query is embedded — no spend, no request.
+  def test_text_overload_refuses_a_provider_that_contradicts_the_declaration
     provider = Parse::Embeddings::Fixture.new(dimensions: 8, model_name: "fix-mismatch")
     with_registered_provider(:fix_textvec, provider) do
+      stub_index_catalog(@catalog_stub) do
+        err = assert_raises(Parse::Embeddings::BindingAudit::BindingMismatch) do
+          TextVecDoc.find_similar(text: "ruby parse")
+        end
+        assert_match(/declares model: "fix-4"/, err.message)
+        assert_match(/running "fix-mismatch"/, err.message)
+      end
+    end
+  end
+
+  # Same model and advertised width as declared, but the returned
+  # vector is a different length. Only the post-embed validation can
+  # catch that, and it must still run.
+  class LyingWidthProvider < Parse::Embeddings::Provider
+    def dimensions = 4
+    def model_name = "fix-4"
+    def embed_text(strings, input_type: :search_document)
+      strings.map { Array.new(8, 0.25) }
+    end
+  end
+
+  def test_text_overload_validates_returned_vector_dimensions
+    with_registered_provider(:fix_textvec, LyingWidthProvider.new) do
       stub_index_catalog(@catalog_stub) do
         err = assert_raises(Parse::VectorSearch::InvalidQueryVector) do
           TextVecDoc.find_similar(text: "ruby parse")

@@ -15,28 +15,69 @@ module Parse
     #
     # Supported models:
     #
-    # * **v4 family** — `voyage-4-large` (MoE flagship, Matryoshka-capable),
-    #   `voyage-4`, `voyage-4-lite`, `voyage-4-nano` (Apache 2.0,
-    #   open-weight on Hugging Face — also runnable through
-    #   {LocalHTTP} when self-hosted on vLLM / Ollama / llama.cpp).
-    # * **v3 family** — `voyage-3-large`, `voyage-3`, `voyage-3-lite`,
-    #   `voyage-code-3`.
+    # * **v4 family** — `voyage-4-large`, `voyage-4`, `voyage-4-lite`,
+    #   `voyage-4-nano` (Apache 2.0, open-weight on Hugging Face — also
+    #   runnable through {LocalHTTP} when self-hosted on vLLM / Ollama /
+    #   llama.cpp).
+    # * **v3 family** — `voyage-3-large`, `voyage-3.5`,
+    #   `voyage-3.5-lite`, `voyage-3`, `voyage-3-lite`.
+    # * **code models** — `voyage-code-3`, `voyage-code-2` (1536-dim).
     # * **domain models** — `voyage-finance-2`, `voyage-law-2`.
-    # * **multimodal** — `voyage-multimodal-3` (1024-dim). Unified
-    #   text+image vector space at the network boundary. Text inputs
-    #   route to `/v1/multimodalembeddings` with a `{ inputs: [{ content:
-    #   [{ type: "text", text: … }] }] }` envelope; image inputs go
-    #   through {#embed_image} as `image_url` rows (provider-side fetch,
-    #   v5.1) or `image_base64` rows (SDK-fetched bytes, v5.5). Text and
-    #   image vectors share the same space, so stored text vectors are
-    #   comparable against image vectors without re-embedding.
+    # * **multimodal** — `voyage-multimodal-3` (text+image) and
+    #   `voyage-multimodal-3.5` (text+image+video). Unified vector
+    #   space at the network boundary: text routes to
+    #   `/v1/multimodalembeddings` with a `{ inputs: [{ content:
+    #   [{ type: "text", text: … }] }] }` envelope, images go through
+    #   {#embed_image}, video through {#embed_video}. All three share
+    #   the same space, so stored text vectors are comparable against
+    #   image and video vectors without re-embedding.
+    #
+    # Audio is not offered by any Voyage model, and neither PDF nor
+    # DOCX is accepted as a content type — render document pages to
+    # images and embed those instead.
+    #
+    # Most models expose a Matryoshka ladder
+    # ({MODEL_SUPPORTED_DIMENSIONS}); note that the whole v4 family
+    # DEFAULTS to 1024 and reaches 2048 or 256 only when `dimensions:`
+    # asks for it.
+    #
+    # == Endpoints
+    #
+    # The same models are served by Voyage's own API and by MongoDB's
+    # Atlas Embedding and Reranking API. The wire contract is
+    # identical; the credentials are not interchangeable, and Voyage
+    # returns a 403 explaining as much if they are crossed. An Atlas
+    # model API key is recognized by its {ATLAS_KEY_PREFIX} and routes
+    # to {ATLAS_BASE_URL} automatically — pass `endpoint:` to be
+    # explicit. A few older models are absent from Atlas; see
+    # {ATLAS_UNAVAILABLE_MODELS}.
+    #
+    # == Memory
+    #
+    # Local images and video should be wrapped with
+    # {Parse::Embeddings::MediaFile}, which streams the file into the
+    # request body {StreamingBody::READ_CHUNK} bytes at a time. Passing
+    # a URL instead keeps the SDK out of the transfer entirely — the
+    # provider does the fetch. Only {ImageFetch::FetchedImage} holds a
+    # payload in memory, so prefer it for small images only.
     #
     # @example registration
     #   Parse::Embeddings.register(:voyage,
     #     Parse::Embeddings::Voyage.new(
     #       api_key: ENV.fetch("VOYAGE_API_KEY"),
-    #       model:   "voyage-3",
+    #       model:   "voyage-3.5",
     #     ))
+    #
+    # @example Atlas model API key (endpoint inferred from the prefix)
+    #   Parse::Embeddings.register(:voyage,
+    #     Parse::Embeddings::Voyage.new(
+    #       api_key: ENV.fetch("ATLAS_MODEL_API_KEY"),  # "al-…"
+    #       model:   "voyage-multimodal-3.5",
+    #     ))
+    #
+    # @example streaming local media
+    #   provider.embed_image([Parse::Embeddings::MediaFile.image("page.png")])
+    #   provider.embed_video([Parse::Embeddings::MediaFile.video("demo.mp4")])
     #
     # == Asymmetric input types
     #
@@ -69,7 +110,16 @@ module Parse
       class TransientError < Error; end
 
       DEFAULT_BASE_URL    = "https://api.voyageai.com/v1"
-      DEFAULT_MODEL       = "voyage-3"
+      # MongoDB's Atlas Embedding and Reranking API re-exposes the same
+      # Voyage models under a MongoDB-operated host. The wire contract
+      # (request envelopes, response envelopes, error shapes) is
+      # identical — only the host and the credential differ.
+      ATLAS_BASE_URL      = "https://ai.mongodb.com/v1"
+      # Bumped from `voyage-3` in 5.6.0: that model is retired from the
+      # Atlas endpoint, so an Atlas key used without naming a model
+      # failed at construction. `voyage-3.5` is served by both
+      # endpoints and shares the 1024 native width.
+      DEFAULT_MODEL       = "voyage-3.5"
       DEFAULT_TIMEOUT     = 30
       DEFAULT_OPEN_TIMEOUT = 5
       DEFAULT_MAX_RETRIES = 3
@@ -77,49 +127,124 @@ module Parse
       DEFAULT_BATCH_SIZE  = 128
       MAX_RESPONSE_BYTES  = 16 * 1024 * 1024
 
-      # Native vector widths per model. The v4 family is Voyage's
-      # current flagship line (MoE for `voyage-4-large`, open-weight
-      # nano under Apache 2.0). `voyage-4-large` supports Matryoshka
-      # truncation via the constructor's `dimensions:` override.
+      # Default (native) vector width per model — the width returned
+      # when `output_dimension` is omitted from the request.
+      #
+      # NOTE: the whole v4 family defaults to 1024, NOT to a
+      # per-tier width. `voyage-4-large` reaches 2048 and
+      # `voyage-4-lite` reaches 512 only by explicitly requesting them
+      # via `output_dimension` (the constructor's `dimensions:`
+      # override) — those are Matryoshka options, not native widths.
+      # Verified against the live API for every model reachable
+      # through {ATLAS_BASE_URL}; see {MODEL_SUPPORTED_DIMENSIONS}.
       MODEL_DEFAULT_DIMENSIONS = {
-        "voyage-4-large"      => 2048,
-        "voyage-4"            => 1024,
-        "voyage-4-lite"       => 512,
-        "voyage-4-nano"       => 256,
-        "voyage-3-large"      => 1024,
-        "voyage-3"            => 1024,
-        "voyage-3-lite"       => 512,
-        "voyage-code-3"       => 1024,
-        "voyage-finance-2"    => 1024,
-        "voyage-law-2"        => 1024,
-        "voyage-multimodal-3" => 1024,
+        "voyage-4-large"        => 1024,
+        "voyage-4"              => 1024,
+        "voyage-4-lite"         => 1024,
+        "voyage-4-nano"         => 1024,
+        "voyage-3-large"        => 1024,
+        "voyage-3.5"            => 1024,
+        "voyage-3.5-lite"       => 1024,
+        "voyage-3"              => 1024,
+        "voyage-3-lite"         => 512,
+        "voyage-code-3"         => 1024,
+        "voyage-code-2"         => 1536,
+        "voyage-finance-2"      => 1024,
+        "voyage-law-2"          => 1024,
+        "voyage-multimodal-3"   => 1024,
+        "voyage-multimodal-3.5" => 1024,
       }.freeze
+
+      # Every width a model's Matryoshka head will actually return.
+      # A model whose list has a single entry accepts no
+      # `output_dimension` override at all — requesting one is a 400.
+      #
+      # This replaces the older "Matryoshka-capable models" boolean
+      # gate, which was too coarse: the v4 family, `voyage-3-large`,
+      # the v3.5 family, and `voyage-code-3` all accept the full
+      # 256/512/1024/2048 ladder, and `voyage-multimodal-3.5` accepts
+      # it too while `voyage-multimodal-3` does not.
+      MODEL_SUPPORTED_DIMENSIONS = {
+        "voyage-4-large"        => [256, 512, 1024, 2048],
+        "voyage-4"              => [256, 512, 1024, 2048],
+        "voyage-4-lite"         => [256, 512, 1024, 2048],
+        "voyage-4-nano"         => [256, 512, 1024, 2048],
+        "voyage-3-large"        => [256, 512, 1024, 2048],
+        "voyage-3.5"            => [256, 512, 1024, 2048],
+        "voyage-3.5-lite"       => [256, 512, 1024, 2048],
+        "voyage-3"              => [1024],
+        "voyage-3-lite"         => [512],
+        "voyage-code-3"         => [256, 512, 1024, 2048],
+        "voyage-code-2"         => [1536],
+        "voyage-finance-2"      => [1024],
+        "voyage-law-2"          => [1024],
+        "voyage-multimodal-3"   => [1024],
+        "voyage-multimodal-3.5" => [256, 512, 1024, 2048],
+      }.freeze
+
+      # Back-compat alias: the set of models accepting any
+      # `output_dimension` other than their native width. Derived from
+      # {MODEL_SUPPORTED_DIMENSIONS} rather than hand-maintained.
+      MATRYOSHKA_MODELS =
+        MODEL_SUPPORTED_DIMENSIONS.select { |_m, dims| dims.length > 1 }.keys.freeze
 
       MODEL_MAX_INPUT_TOKENS = {
-        "voyage-4-large"      => 32_000,
-        "voyage-4"            => 32_000,
-        "voyage-4-lite"       => 32_000,
-        "voyage-4-nano"       => 32_000,
-        "voyage-3-large"      => 32_000,
-        "voyage-3"            => 32_000,
-        "voyage-3-lite"       => 32_000,
-        "voyage-code-3"       => 32_000,
-        "voyage-finance-2"    => 16_000,
-        "voyage-law-2"        => 16_000,
-        "voyage-multimodal-3" => 32_000,
+        "voyage-4-large"        => 32_000,
+        "voyage-4"              => 32_000,
+        "voyage-4-lite"         => 32_000,
+        "voyage-4-nano"         => 32_000,
+        "voyage-3-large"        => 32_000,
+        "voyage-3.5"            => 32_000,
+        "voyage-3.5-lite"       => 32_000,
+        "voyage-3"              => 32_000,
+        "voyage-3-lite"         => 32_000,
+        "voyage-code-3"         => 32_000,
+        "voyage-code-2"         => 16_000,
+        "voyage-finance-2"      => 32_000,
+        "voyage-law-2"          => 16_000,
+        "voyage-multimodal-3"   => 32_000,
+        "voyage-multimodal-3.5" => 32_000,
       }.freeze
-
-      # Models that accept Voyage's `output_dimension` Matryoshka
-      # truncation parameter. Sending the field for other models is
-      # rejected with a 400 by Voyage, so we gate it explicitly.
-      MATRYOSHKA_MODELS = %w[voyage-4-large].freeze
 
       # Models that route to `/v1/multimodalembeddings` with the
       # `{ inputs: [{ content: [...] }] }` envelope rather than the
       # standard `/v1/embeddings` `{ input: [String] }` envelope.
       # Text-only inputs from this provider are wrapped as
       # `{ type: "text", text: s }` content rows.
-      MULTIMODAL_MODELS = %w[voyage-multimodal-3].freeze
+      MULTIMODAL_MODELS = %w[voyage-multimodal-3 voyage-multimodal-3.5].freeze
+
+      # Voyage's documented hard ceiling for a single image or video.
+      # {Parse::Embeddings.max_media_bytes} is a global convenience
+      # knob that may be lowered for any reason — but raising it above
+      # this cannot make Voyage accept a larger file, so the adapter
+      # enforces its own limit independently.
+      MAX_MEDIA_BYTES = 20 * 1024 * 1024
+
+      # Multimodal models that additionally accept video content rows
+      # (`video_url` / `video_base64`) via {#embed_video}.
+      # `voyage-multimodal-3` rejects video with an explicit
+      # "does not support video inputs" 400.
+      VIDEO_MODELS = %w[voyage-multimodal-3.5].freeze
+
+      # Models Voyage's hosted API serves but the Atlas Embedding and
+      # Reranking API does not. Verified against both endpoints.
+      ATLAS_UNAVAILABLE_MODELS = %w[voyage-3 voyage-3-lite].freeze
+
+      # Open-weight models that NO hosted endpoint serves — neither
+      # Voyage's nor Atlas's. `voyage-4-nano` ships under Apache 2.0 on
+      # Hugging Face and is meant to be self-hosted (vLLM / Ollama /
+      # llama.cpp), reached either through {LocalHTTP} or through this
+      # provider with an explicit `base_url:` pointing at the local
+      # server. Naming one against a hosted endpoint is always a
+      # mistake, so it is refused there rather than failing as an
+      # opaque provider 400.
+      SELF_HOSTED_ONLY_MODELS = %w[voyage-4-nano].freeze
+
+      # Atlas model API keys carry this prefix and authenticate ONLY
+      # against {ATLAS_BASE_URL}; Voyage's own endpoint rejects them
+      # with a 403. Used to infer the endpoint when the caller does
+      # not name one explicitly.
+      ATLAS_KEY_PREFIX = "al-"
 
       # Map SDK-canonical input_type symbols to Voyage wire strings.
       # `:classification` / `:clustering` map to `nil` (omitted) since
@@ -134,8 +259,15 @@ module Parse
 
       # @param api_key [String] required. Sent as `Authorization: Bearer …`.
       # @param model [String] one of {MODEL_DEFAULT_DIMENSIONS}'s keys.
-      # @param base_url [String] override. Must be HTTPS unless
-      #   `allow_insecure_base_url: true`.
+      # @param endpoint [Symbol] `:auto` (default), `:voyage`, or
+      #   `:atlas`. Selects the default `base_url` and enables
+      #   endpoint-specific model validation. `:auto` infers `:atlas`
+      #   when `api_key` carries the {ATLAS_KEY_PREFIX}, else
+      #   `:voyage`. An explicit `base_url:` always wins; the endpoint
+      #   is then inferred from its host.
+      # @param base_url [String, nil] override. Must be HTTPS unless
+      #   `allow_insecure_base_url: true`. Defaults to the resolved
+      #   endpoint's host.
       # @param timeout [Integer] read timeout, seconds.
       # @param open_timeout [Integer] connect timeout, seconds.
       # @param max_retries [Integer] retry attempts on 429/5xx/timeouts.
@@ -155,7 +287,8 @@ module Parse
       def initialize(
         api_key:,
         model: DEFAULT_MODEL,
-        base_url: DEFAULT_BASE_URL,
+        endpoint: :auto,
+        base_url: nil,
         timeout: DEFAULT_TIMEOUT,
         open_timeout: DEFAULT_OPEN_TIMEOUT,
         max_retries: DEFAULT_MAX_RETRIES,
@@ -168,6 +301,9 @@ module Parse
       )
         validate_api_key!(api_key)
         validate_model!(model)
+        resolved_endpoint = resolve_endpoint!(endpoint, api_key, base_url)
+        base_url ||= resolved_endpoint == :atlas ? ATLAS_BASE_URL : DEFAULT_BASE_URL
+        validate_model_for_endpoint!(model, resolved_endpoint)
         sanitized_base_url = validate_base_url!(base_url, allow_insecure_base_url)
         validate_positive_integer!(:timeout, timeout)
         validate_positive_integer!(:open_timeout, open_timeout)
@@ -185,6 +321,7 @@ module Parse
 
         @api_key = api_key
         @model = model
+        @endpoint = resolved_endpoint
         @dimensions = dimensions || MODEL_DEFAULT_DIMENSIONS.fetch(model)
         @base_url = sanitized_base_url
         @timeout = timeout
@@ -202,6 +339,18 @@ module Parse
 
       def model_name
         @model
+      end
+
+      # @return [Symbol] `:atlas` when this provider targets MongoDB's
+      #   Atlas Embedding and Reranking API, `:voyage` when it targets
+      #   Voyage's own API, `:custom` for any other host.
+      def endpoint
+        @endpoint
+      end
+
+      # @return [Boolean] true when routed through {ATLAS_BASE_URL}.
+      def atlas?
+        @endpoint == :atlas
       end
 
       def embed_batch_size
@@ -272,10 +421,13 @@ module Parse
         end
       end
 
-      # @return [Array<Symbol>] Voyage's multimodal models support
-      #   `[:text, :image]`; text-only models report `[:text]`.
+      # @return [Array<Symbol>] `[:text, :image, :video]` for
+      #   `voyage-multimodal-3.5`, `[:text, :image]` for
+      #   `voyage-multimodal-3`, and `[:text]` for text-only models.
+      #   Audio is not offered by any Voyage model.
       def modalities
-        MULTIMODAL_MODELS.include?(@model) ? %i[text image] : [:text]
+        return [:text] unless MULTIMODAL_MODELS.include?(@model)
+        VIDEO_MODELS.include?(@model) ? %i[text image video] : %i[text image]
       end
 
       # Embed a batch of images through Voyage's
@@ -315,76 +467,42 @@ module Parse
       #   validator; permit `http://` for local-dev CDN proxies.
       # @return [Array<Array<Float>>] vectors aligned 1:1 with `sources`.
       def embed_image(sources, input_type: :search_document, allow_insecure: false)
-        unless MULTIMODAL_MODELS.include?(@model)
-          raise BadRequestError,
-                "Parse::Embeddings::Voyage#embed_image: model #{@model.inspect} does not " \
-                "accept image inputs. Configure the provider with a multimodal model " \
-                "(supported: #{MULTIMODAL_MODELS.inspect})."
-        end
-        unless sources.is_a?(Array)
-          raise ArgumentError,
-                "Parse::Embeddings::Voyage#embed_image expects Array of image URLs " \
-                "(got #{sources.class})."
-        end
-        return [] if sources.empty?
+        embed_media(sources, kind: :image, input_type: input_type,
+                             allow_insecure: allow_insecure)
+      end
 
-        unless INPUT_TYPE_WIRE_VALUES.key?(input_type)
-          raise ArgumentError,
-                "Parse::Embeddings::Voyage#embed_image input_type #{input_type.inspect} not in " \
-                "#{INPUT_TYPE_WIRE_VALUES.keys.inspect}."
-        end
-        # Voyage caps multimodal requests at the same per-request size
-        # as the text endpoint. The text path goes through
-        # `embed_text_batched` which chunks automatically; the image
-        # path has no chunker yet (every directive is a single image
-        # source), so guard the direct-API caller against a silent 400.
-        if sources.length > @embed_batch_size
-          raise ArgumentError,
-                "Parse::Embeddings::Voyage#embed_image: batch size #{sources.length} exceeds " \
-                "the configured cap #{@embed_batch_size} (Voyage per-request max: 128). " \
-                "Split the input and call embed_image once per chunk."
-        end
-
-        # Validate every URL up-front so a malformed entry in slot N
-        # does not get past validation while slots 0..N-1 are already
-        # in the wire body. URL entries forward the validator's
-        # canonicalized URL (never the caller's raw input); fetched-
-        # bytes entries skip URL validation (the bytes were already
-        # downloaded + verified by ImageFetch) and forward as base64.
-        content_rows = sources.each_with_index.map do |src, i|
-          if src.is_a?(Parse::Embeddings::ImageFetch::FetchedImage)
-            { content: [{ type: "image_base64", image_base64: src.to_data_uri }] }
-          elsif src.is_a?(String)
-            canonical = Parse::Embeddings.validate_image_url!(src, allow_insecure: allow_insecure)
-            { content: [{ type: "image_url", image_url: canonical }] }
-          else
-            raise ArgumentError,
-                  "Parse::Embeddings::Voyage#embed_image sources[#{i}] must be a URL String " \
-                  "or Parse::Embeddings::ImageFetch::FetchedImage (got #{src.class})."
-          end
-        end
-
-        wire_input_type = INPUT_TYPE_WIRE_VALUES[input_type]
-        body = {
-          inputs: content_rows,
-          model: @model,
-          truncation: @truncation,
-        }
-        body[:input_type] = wire_input_type if wire_input_type
-
-        instrument_embed(sources.length, input_type, modality: :image) do |emit_payload|
-          payload = post_embeddings(body, path: "multimodalembeddings")
-          if payload.is_a?(Hash) && payload["usage"].is_a?(Hash)
-            tt = payload["usage"]["total_tokens"]
-            emit_payload[:total_tokens] = tt if tt.is_a?(Integer) && tt >= 0
-          end
-          vectors = extract_vectors!(payload, sources.length)
-          validate_response!(sources.length, vectors)
-        end
+      # Embed a batch of videos through
+      # `/v1/multimodalembeddings`. Mirrors {#embed_image}'s source
+      # forms and security posture exactly:
+      #
+      # * **String URL** — forwarded as a `{ type: "video_url",
+      #   video_url: … }` content row after
+      #   {Parse::Embeddings.validate_image_url!} canonicalizes and
+      #   screens it. The provider issues the fetch, so the
+      #   `trust_provider_url_fetch` sentinel IS required and the SDK
+      #   never downloads the video.
+      # * **{Parse::Embeddings::MediaFile}** — a local file, streamed
+      #   into the request body as a `{ type: "video_base64",
+      #   video_base64: "data:…" }` row without ever being held in
+      #   memory. No URL validation and no sentinel, because nothing is
+      #   fetched.
+      #
+      # **Video-capable model required.** Only {VIDEO_MODELS} accept
+      # video; `voyage-multimodal-3` rejects it server-side, so this
+      # raises {BadRequestError} before any network call.
+      #
+      # @param sources [Array<String, Parse::Embeddings::MediaFile>]
+      #   video URLs and/or file-backed wrappers (forms may be mixed).
+      # @param input_type [Symbol] one of {INPUT_TYPE_WIRE_VALUES}'s keys.
+      # @param allow_insecure [Boolean] forwarded to the URL validator.
+      # @return [Array<Array<Float>>] vectors aligned 1:1 with `sources`.
+      def embed_video(sources, input_type: :search_document, allow_insecure: false)
+        embed_media(sources, kind: :video, input_type: input_type,
+                             allow_insecure: allow_insecure)
       end
 
       def inspect_attrs
-        super.merge(base: safe_base_host, retries: @max_retries)
+        super.merge(base: safe_base_host, endpoint: @endpoint, retries: @max_retries)
       end
 
       protected
@@ -421,14 +539,7 @@ module Parse
         # treats absent and `null` identically (unconditioned head),
         # but absent is the spec-correct form for non-retrieval intent.
         body[:input_type] = wire_input_type if wire_input_type
-        # `output_dimension` is only valid for the Matryoshka-capable
-        # models. Forward when the configured model is in the
-        # Matryoshka set and the active dimensions differ from native.
-        # Sending it elsewhere would yield a 400.
-        if MATRYOSHKA_MODELS.include?(@model) &&
-           @dimensions != MODEL_DEFAULT_DIMENSIONS.fetch(@model)
-          body[:output_dimension] = @dimensions
-        end
+        apply_output_dimension!(body)
         body
       end
 
@@ -447,7 +558,239 @@ module Parse
         # forward it for parity with the text path so callers get the
         # same fail-on-overlength behavior across models.
         body[:truncation] = @truncation
+        apply_output_dimension!(body)
         body
+      end
+
+      # Forward `output_dimension` only when the configured width
+      # differs from the model's native default. Sending it to a model
+      # with a single supported width is a 400, and sending the native
+      # width needlessly is redundant — so both are omitted.
+      #
+      # The constructor has already rejected any width outside
+      # {MODEL_SUPPORTED_DIMENSIONS}, so no re-validation is needed.
+      def apply_output_dimension!(body)
+        return body if @dimensions == MODEL_DEFAULT_DIMENSIONS.fetch(@model)
+        body[:output_dimension] = @dimensions
+        body
+      end
+
+      # Everything modality-specific about a non-text input, in one
+      # table. `models` names the constant gating which models accept
+      # the modality; `url` / `base64` are the wire content-type keys.
+      #
+      # Adding a modality (audio, when Voyage ships it) is a row here
+      # plus a {Parse::Embeddings::MediaFile} constructor and a
+      # one-line `embed_audio` delegating to {#embed_media} — the
+      # streaming body, row builder, batching, URL validation, and
+      # instrumentation are all modality-agnostic already.
+      MEDIA_MODALITIES = {
+        image: { url: "image_url", base64: "image_base64",
+                 models: :MULTIMODAL_MODELS, noun: "image" },
+        video: { url: "video_url", base64: "video_base64",
+                 models: :VIDEO_MODELS, noun: "video" },
+      }.freeze
+
+      # Shared implementation behind {#embed_image} and {#embed_video}.
+      #
+      # @param kind [Symbol] a {MEDIA_MODALITIES} key.
+      # @return [Array<Array<Float>>] vectors aligned 1:1 with `sources`.
+      def embed_media(sources, kind:, input_type:, allow_insecure:)
+        spec = MEDIA_MODALITIES.fetch(kind)
+        capable = self.class.const_get(spec[:models])
+        caller_name = "embed_#{kind}"
+
+        unless capable.include?(@model)
+          raise BadRequestError,
+                "Parse::Embeddings::Voyage##{caller_name}: model #{@model.inspect} does not " \
+                "accept #{spec[:noun]} inputs. Configure the provider with a capable model " \
+                "(supported: #{capable.inspect})."
+        end
+        unless sources.is_a?(Array)
+          raise ArgumentError,
+                "Parse::Embeddings::Voyage##{caller_name} expects Array of #{spec[:noun]} " \
+                "URLs (got #{sources.class})."
+        end
+        return [] if sources.empty?
+
+        unless INPUT_TYPE_WIRE_VALUES.key?(input_type)
+          raise ArgumentError,
+                "Parse::Embeddings::Voyage##{caller_name} input_type #{input_type.inspect} " \
+                "not in #{INPUT_TYPE_WIRE_VALUES.keys.inspect}."
+        end
+        # Voyage caps multimodal requests at the same per-request size
+        # as the text endpoint. The text path chunks automatically; the
+        # media path has no chunker (every directive is a single
+        # source), so guard the direct-API caller against a silent 400.
+        if sources.length > @embed_batch_size
+          raise ArgumentError,
+                "Parse::Embeddings::Voyage##{caller_name}: batch size #{sources.length} " \
+                "exceeds the configured cap #{@embed_batch_size} (Voyage per-request max: " \
+                "128). Split the input and call #{caller_name} once per chunk."
+        end
+
+        rows = build_media_rows(
+          sources, kind: kind, allow_insecure: allow_insecure, caller_name: caller_name
+        )
+        wire_input_type = INPUT_TYPE_WIRE_VALUES[input_type]
+
+        # Voyage requires a single representation per request: "each
+        # request should use either image_base64/video_base64 or
+        # image_url/video_url exclusively, not both." A mixed batch is
+        # therefore split into one request per representation and
+        # reassembled in the caller's original order, so the 1:1
+        # alignment this method promises still holds.
+        groups = rows.each_with_index.group_by { |row, _i| row_representation(row) }
+        return dispatch_media(rows, input_type, wire_input_type, kind) if groups.size == 1
+
+        results = Array.new(rows.length)
+        groups.each_value do |pairs|
+          subset = pairs.map(&:first)
+          vectors = dispatch_media(subset, input_type, wire_input_type, kind)
+          pairs.each_with_index { |(_row, original_index), n| results[original_index] = vectors[n] }
+        end
+        results
+      end
+
+      # Issue one multimodal request for a set of same-representation
+      # rows and return the vectors in row order.
+      def dispatch_media(rows, input_type, wire_input_type, kind)
+        body = build_request_body(rows, wire_input_type)
+
+        instrument_embed(rows.length, input_type, modality: kind) do |emit_payload|
+          payload = post_embeddings(body, path: "multimodalembeddings")
+          if payload.is_a?(Hash) && payload["usage"].is_a?(Hash)
+            tt = payload["usage"]["total_tokens"]
+            emit_payload[:total_tokens] = tt if tt.is_a?(Integer) && tt >= 0
+          end
+          vectors = extract_vectors!(payload, rows.length)
+          validate_response!(rows.length, vectors)
+        end
+      end
+
+      # Build `inputs[].content[]` row descriptors for a batch of media
+      # sources, accepting URL Strings, in-memory
+      # {ImageFetch::FetchedImage} wrappers, and file-backed
+      # {MediaFile} wrappers.
+      #
+      # Every URL is validated up-front so a malformed entry in slot N
+      # cannot get past validation while slots 0..N-1 are already in
+      # the wire body — no partial forwarding.
+      #
+      # Returns descriptors rather than finished Hashes so
+      # {#build_request_body} can assemble the JSON structurally. A
+      # streamed row is `{ stream: MediaFile, key: String }`; every
+      # other row is a ready-to-serialize Hash.
+      #
+      # @return [Array<Hash>] one descriptor per source, in order.
+      def build_media_rows(sources, kind:, allow_insecure:, caller_name:)
+        spec = MEDIA_MODALITIES.fetch(kind)
+        url_key = spec[:url]
+        b64_key = spec[:base64]
+
+        sources.each_with_index.map do |src, i|
+          case src
+          when Parse::Embeddings::MediaFile
+            unless src.kind == kind
+              raise ArgumentError,
+                    "Parse::Embeddings::Voyage##{caller_name} sources[#{i}] is a " \
+                    "#{src.kind} MediaFile; expected #{kind}."
+            end
+            enforce_media_size!(src.byte_size, i, caller_name, src.path)
+            { stream: src, key: b64_key }
+          when Parse::Embeddings::ImageFetch::FetchedImage
+            # The only in-memory wrapper the SDK ships is for images.
+            unless kind == :image
+              raise ArgumentError,
+                    "Parse::Embeddings::Voyage##{caller_name} sources[#{i}] is a FetchedImage; " \
+                    "wrap #{spec[:noun]} sources with Parse::Embeddings::MediaFile.#{kind}."
+            end
+            enforce_media_size!(src.bytes.bytesize, i, caller_name)
+            { content: [{ type: b64_key, b64_key => src.to_data_uri }] }
+          when String
+            canonical = Parse::Embeddings.validate_image_url!(src, allow_insecure: allow_insecure)
+            { content: [{ type: url_key, url_key => canonical }] }
+          else
+            raise ArgumentError,
+                  "Parse::Embeddings::Voyage##{caller_name} sources[#{i}] must be a URL String " \
+                  "or a Parse::Embeddings::MediaFile (got #{src.class})."
+          end
+        end
+      end
+
+      # Refuse a payload Voyage will reject anyway. Enforced here
+      # rather than relying on {Parse::Embeddings.max_media_bytes},
+      # which callers may legitimately raise for other providers.
+      def enforce_media_size!(bytes, index, caller_name, path = nil)
+        return if bytes <= MAX_MEDIA_BYTES
+
+        where = path ? " (#{path})" : ""
+        raise BadRequestError,
+              "Parse::Embeddings::Voyage##{caller_name} sources[#{index}]#{where} is " \
+              "#{bytes} bytes, over Voyage's #{MAX_MEDIA_BYTES}-byte per-file limit. " \
+              "Downscale or re-encode before embedding."
+      end
+
+      # Which wire representation a row descriptor uses. Voyage
+      # requires a single representation per request, so this is what
+      # {#embed_media} partitions on.
+      def row_representation(row)
+        return :base64 if row[:stream]
+        type = row.dig(:content, 0, :type).to_s
+        type.end_with?("_base64") ? :base64 : :url
+      end
+
+      # Assemble the request body for a set of row descriptors.
+      #
+      # With no streamed rows this returns a plain Hash, serialized
+      # later by {#post_embeddings}. With them it returns a
+      # {StreamingBody} whose JSON is built **structurally** — each
+      # fragment is serialized independently and concatenated in
+      # order, so the file payloads are spliced by position rather than
+      # by searching the serialized document.
+      #
+      # Building it structurally is a correctness requirement, not a
+      # style preference: an earlier version emitted a sentinel token
+      # and located it with `String#split`, which let a caller-supplied
+      # URL containing that token capture a local file's bytes and ship
+      # them to the provider as a URL to fetch.
+      def build_request_body(rows, wire_input_type)
+        trailer = { model: @model, truncation: @truncation }
+        trailer[:input_type] = wire_input_type if wire_input_type
+        apply_output_dimension!(trailer)
+
+        return { inputs: rows }.merge(trailer) unless rows.any? { |r| r[:stream] }
+
+        segments = [+'{"inputs":[']
+        rows.each_with_index do |row, i|
+          segments << "," if i.positive?
+          if (media = row[:stream])
+            key = row[:key]
+            # Open the JSON string, emit the data: prefix, stream the
+            # payload, then close it. Base64 needs no escaping, and the
+            # prefix is escaped by #to_json before its closing quote is
+            # trimmed.
+            segments << %({"content":[{"type":#{key.to_json},#{key.to_json}:)
+            segments << json_string_prefix(media.data_uri_prefix)
+            segments << media.stream_segment
+            segments << %("}]})
+          else
+            segments << row.to_json
+          end
+        end
+        segments << "]"
+        trailer.each { |k, v| segments << ",#{k.to_s.to_json}:#{v.to_json}" }
+        segments << "}"
+
+        Parse::Embeddings::StreamingBody.new(segments)
+      end
+
+      # A JSON string literal with its opening quote and escaped
+      # contents but no closing quote, so a streamed payload can be
+      # appended before the string is closed.
+      def json_string_prefix(str)
+        encoded = str.to_json
+        encoded[0...-1]
       end
 
       def post_embeddings(body, path: "embeddings")
@@ -456,7 +799,18 @@ module Parse
           attempts += 1
           begin
             response = @connection.post(path) do |req|
-              req.body = body.to_json
+              if body.is_a?(Parse::Embeddings::StreamingBody)
+                # Faraday's net_http adapter routes an IO-shaped body
+                # to Net::HTTP#body_stream. Rewind so a retry replays
+                # from the start, and set Content-Length explicitly —
+                # without it Net::HTTP falls back to chunked transfer
+                # encoding, which some API gateways reject.
+                body.rewind
+                req.headers["Content-Length"] = body.size.to_s
+                req.body = body
+              else
+                req.body = body.to_json
+              end
             end
           rescue Faraday::TimeoutError, Faraday::ConnectionFailed => e
             if attempts > @max_retries
@@ -586,16 +940,75 @@ module Parse
           raise ArgumentError,
                 "Parse::Embeddings::Voyage: dimensions must be a positive Integer (got #{dimensions.inspect})."
         end
-        native = MODEL_DEFAULT_DIMENSIONS.fetch(model)
-        if dimensions > native
-          raise ArgumentError,
-                "Parse::Embeddings::Voyage: dimensions #{dimensions} exceeds native #{native} for #{model}."
-        end
-        if !MATRYOSHKA_MODELS.include?(model) && dimensions != native
+        supported = MODEL_SUPPORTED_DIMENSIONS.fetch(model)
+        return if supported.include?(dimensions)
+
+        if supported.length == 1
           raise ArgumentError,
                 "Parse::Embeddings::Voyage: model #{model.inspect} does not support custom dimensions " \
-                "(Matryoshka-capable models: #{MATRYOSHKA_MODELS.inspect})."
+                "(only #{supported.first} is available)."
         end
+        raise ArgumentError,
+              "Parse::Embeddings::Voyage: dimensions #{dimensions} is not supported by #{model} " \
+              "(supported: #{supported.inspect})."
+      end
+
+      # Resolve the target endpoint. An explicit `base_url:` always
+      # wins — the endpoint is then inferred from its host so that
+      # model validation still applies to a caller who points at Atlas
+      # by URL rather than by name.
+      def resolve_endpoint!(endpoint, api_key, base_url)
+        unless %i[auto voyage atlas].include?(endpoint)
+          raise ArgumentError,
+                "Parse::Embeddings::Voyage: endpoint must be :auto, :voyage, or :atlas " \
+                "(got #{endpoint.inspect})."
+        end
+
+        if base_url
+          host = begin
+            URI.parse(base_url).host
+          rescue URI::InvalidURIError
+            nil
+          end
+          inferred =
+            case host
+            when URI.parse(ATLAS_BASE_URL).host then :atlas
+            when URI.parse(DEFAULT_BASE_URL).host then :voyage
+            else :custom
+            end
+          # A named endpoint that contradicts the URL is a
+          # configuration error, not something to silently reconcile.
+          if endpoint != :auto && inferred != :custom && inferred != endpoint
+            raise ArgumentError,
+                  "Parse::Embeddings::Voyage: endpoint #{endpoint.inspect} contradicts " \
+                  "base_url host #{host.inspect}. Pass one or the other."
+          end
+          return endpoint == :auto ? inferred : endpoint
+        end
+
+        return endpoint unless endpoint == :auto
+        api_key.start_with?(ATLAS_KEY_PREFIX) ? :atlas : :voyage
+      end
+
+      def validate_model_for_endpoint!(model, endpoint)
+        # A custom base_url may well point at a self-hosted server, so
+        # only the two known hosted endpoints are policed.
+        if %i[voyage atlas].include?(endpoint) && SELF_HOSTED_ONLY_MODELS.include?(model)
+          raise ArgumentError,
+                "Parse::Embeddings::Voyage: model #{model.inspect} is open-weight and is not " \
+                "served by any hosted endpoint (neither #{DEFAULT_BASE_URL} nor " \
+                "#{ATLAS_BASE_URL}). Self-host it and pass an explicit base_url:, or use " \
+                "Parse::Embeddings::LocalHTTP."
+        end
+
+        return unless endpoint == :atlas
+        return unless ATLAS_UNAVAILABLE_MODELS.include?(model)
+
+        raise ArgumentError,
+              "Parse::Embeddings::Voyage: model #{model.inspect} is not available on the Atlas " \
+              "Embedding and Reranking API (#{ATLAS_BASE_URL}). Atlas-unavailable models: " \
+              "#{ATLAS_UNAVAILABLE_MODELS.inspect}. Use a current model such as \"voyage-3.5\" " \
+              "or \"voyage-4\", or target Voyage's own API with endpoint: :voyage."
       end
 
       def validate_base_url!(base_url, allow_insecure)

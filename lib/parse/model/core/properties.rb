@@ -159,6 +159,11 @@ module Parse
 
       # @return [Hash] per-property metadata for `:vector`-typed fields.
       # Maps property names (symbols) to a frozen options hash:
+      # Similarity functions Atlas vectorSearch accepts. Validated at
+      # declaration time so a typo surfaces when the class loads rather
+      # than as an Atlas index error much later.
+      VECTOR_SIMILARITIES = %w[euclidean cosine dotProduct].freeze
+
       # `{ dimensions: Integer, provider: Symbol, model: String, similarity: Symbol }`.
       # `dimensions:` is required; the rest are optional and only carry
       # meaning for the embedding provider plumbing layered above this
@@ -396,11 +401,42 @@ module Parse
                   "Property #{self}##{key} :vector dimensions #{dims} exceeds max " \
                   "#{Parse::Vector::MAX_DIMENSIONS}."
           end
+
+          # `searchable:` separates "can be stored" from "can be
+          # indexed". Parse::Vector tolerates up to 16384 dims, but
+          # Atlas caps a vectorSearch index at 8192 — so without this,
+          # a wider property is declarable, storable, and permanently
+          # unsearchable, with the failure surfacing only at query
+          # time. Default true: a :vector property exists to be
+          # searched, and opting out should be the deliberate act.
+          searchable = opts.key?(:searchable) ? opts[:searchable] : true
+          unless [true, false].include?(searchable)
+            raise ArgumentError,
+                  "Property #{self}##{key} :vector `searchable:` must be true or false " \
+                  "(got #{searchable.inspect})."
+          end
+          if searchable && defined?(Parse::VectorSearch) &&
+             dims > Parse::VectorSearch::MAX_DIMENSIONS
+            raise ArgumentError,
+                  "Property #{self}##{key} :vector dimensions #{dims} exceeds the Atlas " \
+                  "vectorSearch index cap (#{Parse::VectorSearch::MAX_DIMENSIONS}); such a " \
+                  "vector can be stored but never searched. Reduce dimensions, or declare " \
+                  "`searchable: false` to acknowledge it is storage-only."
+          end
+
+          similarity = opts[:similarity]
+          if similarity && !VECTOR_SIMILARITIES.include?(similarity.to_s)
+            raise ArgumentError,
+                  "Property #{self}##{key} :vector `similarity:` must be one of " \
+                  "#{VECTOR_SIMILARITIES.inspect} (got #{similarity.inspect})."
+          end
+
           vector_properties[key] = {
             dimensions: dims,
             provider: opts[:provider],
             model: opts[:model],
-            similarity: opts[:similarity],
+            similarity: similarity,
+            searchable: searchable,
           }.freeze
 
           validates_each key do |record, attribute, value|
