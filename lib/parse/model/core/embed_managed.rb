@@ -642,6 +642,20 @@ module Parse
       # `Parse::Embeddings.validate_image_url!`, and call
       # `Provider#embed_image`. Digest tracking elides the provider
       # call when the source has not changed since last save.
+      # @!visibility private
+      # Run the shared binding validator when the declared provider is
+      # actually registered. Delegates to
+      # {Parse::Embeddings::BindingAudit} so the lazy path and the
+      # explicit `audit_all!` path apply identical rules.
+      def self.audit_binding!(klass, directive)
+        provider = begin
+          Parse::Embeddings.provider(directive.provider_name)
+        rescue Parse::Embeddings::ProviderNotRegistered
+          return
+        end
+        Parse::Embeddings::BindingAudit.verify!(klass, directive.into, provider)
+      end
+
       def self.recompute_embedding!(record, directive)
         input = build_source_input(record, directive)
         stored_digest = record.public_send(directive.digest_field)
@@ -657,6 +671,18 @@ module Parse
           end
           return
         end
+
+        # Audit the binding BEFORE the digest early-return, not after.
+        # A drifted `model:` is a configuration fault, not a property of
+        # this particular record: if the check sat behind the digest
+        # gate, an unchanged record would skip it and the mismatch would
+        # stay invisible until some unrelated record happened to be
+        # edited. Saving any record with this directive should surface
+        # it. Skipped silently when the provider is not registered — the
+        # resolution below still raises for records that actually embed,
+        # so an unchanged save keeps its existing no-provider-needed
+        # behavior.
+        audit_binding!(record.class, directive)
 
         digest = digest_for(input)
         return if stored_digest == digest && target_present

@@ -207,10 +207,35 @@ class EmbedManagedTest < Minitest::Test
     refute_equal doc_one.body_embedding_digest, doc_two.body_embedding_digest
   end
 
-  def test_recompute_raises_when_provider_returns_wrong_dimensions
+  # A provider whose ADVERTISED width disagrees with the declaration is
+  # caught by the binding audit before the request is issued, so the
+  # mismatch never costs a paid call.
+  def test_recompute_raises_before_calling_a_provider_of_the_wrong_width
     Parse::Embeddings.reset!
-    # Fixture configured to return 8-dim vectors against a 4-dim property.
     Parse::Embeddings.register(:fixture4, Parse::Embeddings::Fixture.new(dimensions: 8))
+
+    doc = EmbedDoc.new(title: "hi", body: "there")
+    err = assert_raises(Parse::Embeddings::BindingAudit::BindingMismatch) do
+      Parse::Core::EmbedManaged.recompute_embedding!(doc, directive_for(EmbedDoc, :body_embedding))
+    end
+    assert_match(/declares dimensions: 4/, err.message)
+    assert_match(/emits 8-dim/, err.message)
+  end
+
+  # A provider that advertises the right width but RETURNS a different
+  # one cannot be caught up front — the post-call check is what stops a
+  # wrong-width vector from reaching the property.
+  class LyingWidthProvider < Parse::Embeddings::Provider
+    def dimensions = 4
+    def model_name = "liar-4"
+    def embed_text(strings, input_type: :search_document)
+      strings.map { Array.new(8, 0.5) }
+    end
+  end
+
+  def test_recompute_raises_when_provider_returns_a_width_it_did_not_advertise
+    Parse::Embeddings.reset!
+    Parse::Embeddings.register(:fixture4, LyingWidthProvider.new)
 
     doc = EmbedDoc.new(title: "hi", body: "there")
     err = assert_raises(Parse::Embeddings::InvalidResponseError) do

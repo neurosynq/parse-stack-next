@@ -57,11 +57,14 @@ class EmbeddingsVoyageTest < Minitest::Test
     assert_match(/does not support custom dimensions/, err.message)
   end
 
-  def test_rejects_oversized_dimensions_on_matryoshka_model
+  def test_rejects_unsupported_dimensions_on_matryoshka_model
     err = assert_raises(ArgumentError) do
       build(model: "voyage-4-large", dimensions: 4096)
     end
-    assert_match(/exceeds native/, err.message)
+    assert_match(/is not supported by voyage-4-large/, err.message)
+    # A width that is not on the Matryoshka ladder is refused even when
+    # it is smaller than the largest supported width.
+    assert_raises(ArgumentError) { build(model: "voyage-4-large", dimensions: 768) }
   end
 
   def test_accepts_dimensions_override_on_matryoshka_model
@@ -81,11 +84,28 @@ class EmbeddingsVoyageTest < Minitest::Test
     assert provider.supports_input_type?
   end
 
+  # The whole v4 family defaults to 1024. The wider/narrower widths are
+  # Matryoshka options reached via `dimensions:`, not native defaults.
   def test_v4_family_dimensions
-    assert_equal 2048, build(model: "voyage-4-large").dimensions
+    assert_equal 1024, build(model: "voyage-4-large").dimensions
     assert_equal 1024, build(model: "voyage-4").dimensions
-    assert_equal 512, build(model: "voyage-4-lite").dimensions
-    assert_equal 256, build(model: "voyage-4-nano").dimensions
+    assert_equal 1024, build(model: "voyage-4-lite").dimensions
+    assert_equal 1024, build(model: "voyage-4-nano").dimensions
+  end
+
+  def test_newly_supported_models
+    assert_equal 1024, build(model: "voyage-3.5").dimensions
+    assert_equal 1024, build(model: "voyage-3.5-lite").dimensions
+    assert_equal 1536, build(model: "voyage-code-2").dimensions
+    assert_equal 1024, build(model: "voyage-multimodal-3.5").dimensions
+  end
+
+  def test_matryoshka_widths_are_per_model
+    assert_equal 2048, build(model: "voyage-4-lite", dimensions: 2048).dimensions
+    assert_equal 256, build(model: "voyage-code-3", dimensions: 256).dimensions
+    # Single-width models reject any override, including a wider one.
+    err = assert_raises(ArgumentError) { build(model: "voyage-code-2", dimensions: 1024) }
+    assert_match(/does not support custom dimensions/, err.message)
   end
 
   def test_lite_model_dimensions
@@ -93,8 +113,9 @@ class EmbeddingsVoyageTest < Minitest::Test
   end
 
   def test_domain_model_max_tokens
-    assert_equal 16_000, build(model: "voyage-finance-2").max_input_tokens
+    assert_equal 32_000, build(model: "voyage-finance-2").max_input_tokens
     assert_equal 16_000, build(model: "voyage-law-2").max_input_tokens
+    assert_equal 16_000, build(model: "voyage-code-2").max_input_tokens
   end
 
   # ---- inspect never leaks api_key -------------------------------------
@@ -182,13 +203,13 @@ class EmbeddingsVoyageTest < Minitest::Test
     stubs = Faraday::Adapter::Test::Stubs.new do |stub|
       stub.post("/v1/embeddings") do |env|
         captured_req = env
-        [200, { "Content-Type" => "application/json" }, fake_response(1, 1024)]
+        [200, { "Content-Type" => "application/json" }, fake_response(1, 2048)]
       end
     end
-    provider = build(model: "voyage-4-large", dimensions: 1024, connection: stubbed_conn(stubs))
+    provider = build(model: "voyage-4-large", dimensions: 2048, connection: stubbed_conn(stubs))
     provider.embed_text(["x"])
     body = JSON.parse(captured_req.request_body)
-    assert_equal 1024, body["output_dimension"]
+    assert_equal 2048, body["output_dimension"]
   end
 
   def test_omits_output_dimension_when_matching_native_width
@@ -196,7 +217,7 @@ class EmbeddingsVoyageTest < Minitest::Test
     stubs = Faraday::Adapter::Test::Stubs.new do |stub|
       stub.post("/v1/embeddings") do |env|
         captured_req = env
-        [200, { "Content-Type" => "application/json" }, fake_response(1, 2048)]
+        [200, { "Content-Type" => "application/json" }, fake_response(1, 1024)]
       end
     end
     provider = build(model: "voyage-4-large", connection: stubbed_conn(stubs))

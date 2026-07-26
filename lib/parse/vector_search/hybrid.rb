@@ -66,6 +66,22 @@ module Parse
       # uses a comparable internal oversample.
       DEFAULT_OVERSAMPLE_MULTIPLIER = 5
 
+      # Emitted once per {.search}, mirroring
+      # {Parse::VectorSearch::AS_NOTIFICATION_NAME} so hybrid attrition
+      # is observable through the same subscriber. Carries `method`
+      # (`:rrf_client` / `:rrf_native`), `branch_depth`,
+      # `candidate_window`, `post_filter_count`, `returned_count`, and
+      # `underfilled`.
+      #
+      # `branch_depth` is the rows each branch actually retained, and it
+      # legitimately DIFFERS between the two methods: the client path
+      # enforces ACL inside each branch, so it can retain the narrower
+      # fusion depth, while the native path enforces after
+      # `$rankFusion` and must therefore retain the full candidate
+      # window. Exact parity is not achievable while that ordering
+      # difference exists, so the number reported is the one that ran.
+      AS_NOTIFICATION_NAME = "parse.vector_search.hybrid"
+
       # Hard ceiling on the fused result count, matching
       # {Parse::VectorSearch::MAX_K}.
       MAX_K = Parse::VectorSearch::MAX_K
@@ -220,7 +236,14 @@ module Parse
           end
           k_constant = fusion[:k_constant] || DEFAULT_K_CONSTANT
           weights    = fusion[:weights]
-          oversample = [k_int * DEFAULT_OVERSAMPLE_MULTIPLIER, k_int].max
+          # Two distinct numbers, deliberately not one. `fusion_depth` is
+          # how many rows each branch RETAINS for RRF (bounded by
+          # VectorSearch::MAX_K, since it becomes a branch `k`);
+          # `candidate_window` is how many rows Atlas CONSIDERS before
+          # ACL enforcement (bounded by 10_000). Collapsing them lets
+          # the window be multiplied twice — once here and again inside
+          # VectorSearch.search — and lets a branch `k` exceed MAX_K.
+          fusion_depth, candidate_window = resolve_windows(k_int, vec[:candidate_limit])
 
           # NOTE (deviation from plan §8.3): the default fuses CLIENT-SIDE.
           # The native single-roundtrip `$rankFusion` path is OPT-IN
@@ -234,18 +257,93 @@ module Parse
           # native AND the cluster supports it. Native still falls back to
           # the client path on any execution error.
           if method == :rrf_native && rank_fusion_supported?(collection_name)
-            fused = run_native(collection_name, lex, vec, oversample,
+            # The native pipeline enforces ACL AFTER fusion, so its
+            # per-branch limit is the pre-ACL depth: the candidate
+            # window, not the fusion depth.
+            fused = run_native(collection_name, lex, vec, candidate_window,
                                k_constant: k_constant, weights: weights, scope_opts: scope_opts)
-            return fused.first(k_int) if fused
+            if fused
+              trimmed = fused.first(k_int)
+              # Native retains the full candidate window per branch,
+              # NOT the client path's fusion depth: its ACL `$match`
+              # runs after `$rankFusion`, so the branch limit and the
+              # pre-ACL window are necessarily the same number. Report
+              # what actually executed rather than the client figure.
+              emit_hybrid_stats(collection_name: collection_name, k: k_int,
+                                method: :rrf_native, branch_depth: candidate_window,
+                                candidate_window: candidate_window,
+                                post_filter_count: fused.length,
+                                returned_count: trimmed.length)
+              return trimmed
+            end
           end
 
-          lexical_rows = run_lexical(collection_name, lex, oversample, scope_opts)
-          vector_rows  = run_vector(collection_name, vec, oversample, scope_opts)
-          rrf({ lexical: lexical_rows, vector: vector_rows },
-              k_constant: k_constant, weights: weights).first(k_int)
+          lexical_rows = run_lexical(collection_name, lex, fusion_depth, scope_opts)
+          vector_rows  = run_vector(collection_name, vec, fusion_depth, candidate_window, scope_opts)
+          fused = rrf({ lexical: lexical_rows, vector: vector_rows },
+                      k_constant: k_constant, weights: weights)
+          trimmed = fused.first(k_int)
+          emit_hybrid_stats(collection_name: collection_name, k: k_int,
+                            method: :rrf_client, branch_depth: fusion_depth,
+                            candidate_window: candidate_window,
+                            post_filter_count: fused.length,
+                            returned_count: trimmed.length)
+          trimmed
         end
 
         private
+
+        # Resolve the two windows.
+        #
+        # * `candidate_window` — rows Atlas considers before ACL. Never
+        #   narrower than the plain search's window, so opting into
+        #   hybrid cannot make ACL underfill worse than a straight
+        #   vector search. Bounded by Atlas's 10_000 ceiling.
+        # * `fusion_depth` — rows each branch retains for RRF. This
+        #   becomes a branch `k`, so it is additionally bounded by
+        #   VectorSearch::MAX_K; without that bound a hybrid `k` above
+        #   100 produces a branch `k` the plain search refuses outright.
+        #
+        # An out-of-range explicit `candidate_limit` is REFUSED rather
+        # than clamped: silently shrinking a caller's stated window
+        # would hide the very underfill they were trying to avoid.
+        #
+        # @return [Array(Integer, Integer)] `[fusion_depth, candidate_window]`
+        def resolve_windows(k_int, candidate_limit)
+          window =
+            if candidate_limit
+              limit = Integer(candidate_limit)
+              if limit < k_int
+                raise ArgumentError,
+                      "hybrid search: vector[:candidate_limit] (#{limit}) must be >= k (#{k_int})."
+              end
+              if limit > Parse::VectorSearch::MAX_CANDIDATE_LIMIT
+                raise ArgumentError,
+                      "hybrid search: vector[:candidate_limit] (#{limit}) exceeds the Atlas " \
+                      "ceiling (#{Parse::VectorSearch::MAX_CANDIDATE_LIMIT})."
+              end
+              limit
+            else
+              multiplier = [DEFAULT_OVERSAMPLE_MULTIPLIER,
+                            Parse::VectorSearch::DEFAULT_CANDIDATE_MULTIPLIER].max
+              [[k_int * multiplier, k_int].max,
+               Parse::VectorSearch::MAX_CANDIDATE_LIMIT].min
+            end
+
+          depth = [[window, Parse::VectorSearch::MAX_K].min, k_int].max
+          [depth, window]
+        end
+
+        # Mirrors the plain search's attrition telemetry. `post_filter_count`
+        # is the fused row count after each branch has enforced ACL/CLP;
+        # `underfilled` means the caller received fewer than `k`.
+        def emit_hybrid_stats(**payload)
+          return unless defined?(ActiveSupport::Notifications)
+
+          payload[:underfilled] = payload[:returned_count] < payload[:k]
+          ActiveSupport::Notifications.instrument(AS_NOTIFICATION_NAME, payload)
+          nil
+        end
 
         # -- client-side branch execution --------------------------------
 
@@ -263,12 +361,16 @@ module Parse
           )
         end
 
-        def run_vector(collection_name, vec, oversample, scope_opts)
+        def run_vector(collection_name, vec, fusion_depth, candidate_window, scope_opts)
           Parse::VectorSearch.search(
             collection_name,
             field: vec[:field],
             query_vector: vec[:query_vector],
-            k: oversample,
+            # `k` is what this branch keeps; `candidate_limit` is the
+            # pre-ACL window. Passing the window as `k` and letting the
+            # plain search derive its own would multiply it twice.
+            k: fusion_depth,
+            candidate_limit: candidate_window,
             num_candidates: vec[:num_candidates],
             filter: vec[:filter],
             vector_filter: vec[:vector_filter],
@@ -312,11 +414,17 @@ module Parse
           fusion = symbolize(fusion || {})
           lex = symbolize(lexical || {})
           vec = symbolize(vector || {})
-          oversample = [Integer(k) * DEFAULT_OVERSAMPLE_MULTIPLIER, Integer(k)].max
+          # Same resolution the live path uses, so the shape this
+          # returns is the shape that actually executes.
+          _depth, candidate_window = resolve_windows(Integer(k), vec[:candidate_limit])
           resolution = Parse::ACLScope.resolve!(scope_opts.dup, method_name: :"VectorSearch::Hybrid.search")
-          native_pipeline_for(lex, vec, oversample, resolution,
+          # `limit:` must match {#run_native}'s — the final `$limit` runs
+          # AFTER the ACL `$match`, so trimming to `k` there would
+          # reintroduce the underfill the window exists to prevent. The
+          # trim to `k` happens client-side once enforcement is done.
+          native_pipeline_for(lex, vec, candidate_window, resolution,
                               k_constant: fusion[:k_constant] || DEFAULT_K_CONSTANT,
-                              weights: fusion[:weights], limit: Integer(k))
+                              weights: fusion[:weights], limit: candidate_window)
         end
 
         def native_pipeline_for(lex, vec, oversample, resolution, k_constant:, weights:, limit:)

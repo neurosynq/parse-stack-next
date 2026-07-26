@@ -149,6 +149,12 @@ module Parse
       #   (fields must be declared `type: "filter"` in the index).
       # @param index [String, nil] explicit vectorSearch index name.
       #   Skips auto-discovery when given.
+      # @param candidate_limit [Integer, nil] rows Atlas returns before
+      #   ACL / filter / pointer-field enforcement runs; the result is
+      #   trimmed to `k` afterwards. Defaults to a multiple of `k` for
+      #   any caller subject to enforcement, so heavy ACL attrition
+      #   does not silently return fewer than `k` rows. Raise it when
+      #   a principal can read only a small fraction of the class.
       # @param num_candidates [Integer, nil] HNSW search width.
       # @param max_time_ms [Integer, nil] server-side timeout.
       # @param raw [Boolean] when true return the raw Mongo documents
@@ -192,7 +198,8 @@ module Parse
       #   deadline on the embed step.
       def find_similar(vector: nil, text: nil, k: 10, field: nil, filter: nil,
                        vector_filter: nil, index: nil,
-                       num_candidates: nil, max_time_ms: nil, raw: false,
+                       num_candidates: nil, candidate_limit: nil,
+                       max_time_ms: nil, raw: false,
                        **scope_opts)
         if vector.nil? && text.nil?
           raise ArgumentError,
@@ -222,6 +229,7 @@ module Parse
           query_vector: query_vector,
           k: k,
           num_candidates: num_candidates,
+          candidate_limit: candidate_limit,
           filter: filter,
           vector_filter: vector_filter,
           index: index_name,
@@ -314,6 +322,7 @@ module Parse
             query_vector: qv, field: field_sym, index: vector_index,
             num_candidates: vec[:num_candidates], filter: vec[:filter],
             vector_filter: vec[:vector_filter],
+            candidate_limit: vec[:candidate_limit],
           },
           k: k,
           fusion: fusion,
@@ -327,9 +336,22 @@ module Parse
       private
 
       def resolve_vector_field!(field)
-        declared = vector_properties.keys
+        # A property declared `searchable: false` is storage-only. That
+        # may be because it exceeds the Atlas index cap, or simply
+        # because the author opted it out. Either way, including it in
+        # resolution would let a caller reach a field no index serves,
+        # so it is excluded from auto-resolution entirely and refused
+        # with an explanation when named outright.
+        all_declared = vector_properties.keys
+        declared = all_declared.reject { |f| vector_properties[f][:searchable] == false }
+
         if field
           sym = field.to_sym
+          if all_declared.include?(sym) && !declared.include?(sym)
+            raise NoVectorProperty,
+                  "#{self}.find_similar: field :#{sym} is declared `searchable: false` " \
+                  "(storage-only, not eligible for search) and cannot be searched."
+          end
           unless declared.include?(sym)
             raise NoVectorProperty,
                   "#{self}.find_similar: field :#{sym} is not a :vector property " \
@@ -342,7 +364,7 @@ module Parse
         end
         if declared.empty?
           raise NoVectorProperty,
-                "#{self}.find_similar: no :vector property declared on this class."
+                "#{self}.find_similar: no searchable :vector property declared on this class."
         end
         raise AmbiguousVectorField,
               "#{self}.find_similar: class declares multiple :vector properties " \
@@ -383,6 +405,11 @@ module Parse
                 "on the property, or pass an explicit `vector:`."
         end
         provider = Parse::Embeddings.provider(provider_name)
+        # A query embedded by a different model than the stored vectors
+        # returns plausible-looking nonsense rather than an error, so
+        # the binding is verified here too — before the spend cap is
+        # charged and before any provider round-trip.
+        Parse::Embeddings::BindingAudit.verify!(self, resolved_field, provider)
         # Spend cap: every query-embed path (find_similar(text:),
         # hybrid_search(text:), Retrieval.retrieve) funnels through this
         # method, so charging here closes the "direct callers bypass the

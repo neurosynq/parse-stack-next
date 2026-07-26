@@ -247,6 +247,9 @@ module Parse
           @configuration = nil
           @allowed_image_hosts = nil
           @allowed_image_types = nil
+          @allowed_video_types = nil
+          @max_media_bytes = nil
+          BindingAudit.reset!
           @trust_provider_url_fetch = nil
         end
       end
@@ -321,6 +324,54 @@ module Parse
       # @return [Array<String>] MIME allowlist for the bytes-fetch path (frozen).
       def allowed_image_types
         @allowed_image_types ||= ImageFetch::DEFAULT_ALLOWED_IMAGE_TYPES
+      end
+
+      # Configure the MIME types {VideoSource.verify!} accepts after
+      # magic-byte sniffing. Defaults to
+      # {VideoSource::DEFAULT_ALLOWED_VIDEO_TYPES}, which is MP4 only —
+      # the sole container Voyage accepts. As with images, the sniffed
+      # type — never the `Content-Type` header — is what gets checked.
+      #
+      # Widening this does NOT widen what a provider accepts: the
+      # Voyage adapter still enforces its own format and size limits.
+      #
+      # @param types [Array<String>] MIME type strings.
+      # @return [Array<String>]
+      def allowed_video_types=(types)
+        unless types.is_a?(Array) && !types.empty? &&
+               types.all? { |t| t.is_a?(String) && t.include?("/") }
+          raise ArgumentError,
+                "Parse::Embeddings.allowed_video_types= expects a non-empty Array of " \
+                "MIME type Strings (got #{types.inspect})."
+        end
+        CONFIG_MUTEX.synchronize { @allowed_video_types = types.dup.freeze }
+      end
+
+      # @return [Array<String>] MIME allowlist for video bytes (frozen).
+      def allowed_video_types
+        @allowed_video_types ||= VideoSource::DEFAULT_ALLOWED_VIDEO_TYPES
+      end
+
+      # Per-file ceiling for streamed media, checked by
+      # {MediaFile}. Voyage documents 20 MB per image and 20 MB per
+      # video; the default matches. Streaming keeps an oversized file
+      # from exhausting memory, but the provider still rejects it, so
+      # failing locally turns a wasted upload into an immediate error.
+      #
+      # @param bytes [Integer] positive byte count.
+      # @return [Integer]
+      def max_media_bytes=(bytes)
+        unless bytes.is_a?(Integer) && bytes.positive?
+          raise ArgumentError,
+                "Parse::Embeddings.max_media_bytes= expects a positive Integer " \
+                "(got #{bytes.inspect})."
+        end
+        CONFIG_MUTEX.synchronize { @max_media_bytes = bytes }
+      end
+
+      # @return [Integer] per-file ceiling for {MediaFile}, in bytes.
+      def max_media_bytes
+        @max_media_bytes ||= MediaFile::DEFAULT_MAX_MEDIA_BYTES
       end
 
       # Sentinel-gated opt-in for forwarding image URLs to embedding
@@ -590,5 +641,9 @@ require_relative "embeddings/qwen"
 require_relative "embeddings/local_http"
 require_relative "embeddings/spend_cap"
 require_relative "embeddings/image_fetch"
+require_relative "embeddings/video_source"
+require_relative "embeddings/streaming_body"
+require_relative "embeddings/media_file"
+require_relative "embeddings/binding_audit"
 require_relative "embeddings/cache"
 require_relative "embeddings/batch_embedder"

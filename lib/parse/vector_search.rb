@@ -95,6 +95,44 @@ module Parse
     # one. Atlas's guidance: numCandidates ≥ 10 × limit, ≤ 10_000.
     DEFAULT_NUM_CANDIDATES_MULTIPLIER = 20
 
+    # How far past `k` the `$vectorSearch.limit` is raised when
+    # something downstream can drop rows (ACL enforcement, a
+    # caller-supplied `filter`, `protectedFields`, or pointer-field
+    # filtering). Atlas applies `limit` BEFORE any of those run, so
+    # without overfetching a caller who can read 2 of the top 10 asks
+    # for 10 and receives 2 — even when hundreds of readable matches
+    # exist further down the ranking.
+    #
+    # This is a mitigation, not a guarantee: a sufficiently selective
+    # ACL can still exhaust any finite candidate window. Deterministic
+    # fill would require `_rperm` declared as `type: "filter"` in the
+    # Atlas index (so the prefilter enforces visibility) or iterative
+    # candidate expansion. The instrumentation emitted by {.search}
+    # exists so an underfill is observable rather than silent.
+    DEFAULT_CANDIDATE_MULTIPLIER = 10
+
+    # Ceiling on the internally-raised candidate window. Atlas caps
+    # `numCandidates` at 10_000 and `numCandidates` must be >= `limit`,
+    # so the candidate window cannot usefully exceed that.
+    MAX_CANDIDATE_LIMIT = 10_000
+
+    # Emitted once per {.search}. The counts are deliberately named for
+    # where they are actually measured — there is no cheap way to learn
+    # how many rows `$vectorSearch` emitted before the server-side
+    # `$match` stages ran, so no field claims to be that number:
+    #
+    # * `candidate_limit` / `num_candidates` — the requested window.
+    # * `post_filter_count` — rows returned by the pipeline, i.e. after
+    #   the server-side ACL `$match` and any caller `filter`.
+    # * `post_pointer_count` — rows left after client-side redaction and
+    #   pointer-field filtering.
+    # * `returned_count` — rows handed back, after trimming to `k`.
+    # * `underfilled` — the caller received fewer than `k`.
+    #
+    # Obtaining a true pre-`$match` count would require a `$facet`, at
+    # the cost of a second pass over the candidate set.
+    AS_NOTIFICATION_NAME = "parse.vector_search.search"
+
     # Accepted {.index_drift_policy} values.
     INDEX_DRIFT_POLICIES = %i[warn raise ignore].freeze
 
@@ -165,8 +203,9 @@ module Parse
       #   `_vscore` rather than `_score` so hybrid pipelines with
       #   Atlas Search don't collide on the same key).
       def search(collection_name, field:, query_vector:, k: 10,
-                 num_candidates: nil, filter: nil, vector_filter: nil,
-                 index: nil, max_time_ms: nil, **scope_opts)
+                 num_candidates: nil, candidate_limit: nil, filter: nil,
+                 vector_filter: nil, index: nil, max_time_ms: nil, **scope_opts)
+        candidate_limit_override = candidate_limit
         require_available!
         index_name = (index || @default_index)
         if index_name.nil? || index_name.to_s.empty?
@@ -195,12 +234,62 @@ module Parse
           raise ArgumentError, "k must be in 1..#{MAX_K} (got #{k_int})."
         end
 
-        num_candidates_int = (num_candidates || (k_int * DEFAULT_NUM_CANDIDATES_MULTIPLIER)).to_i
-        if num_candidates_int < k_int
-          raise ArgumentError, "num_candidates (#{num_candidates_int}) must be >= k (#{k_int})."
+        # Anything that can drop rows AFTER Atlas has already applied
+        # `limit` forces an overfetch, otherwise the caller silently
+        # receives fewer than `k`. Master mode with no caller filter
+        # has no attrition, so it keeps the old one-for-one cost.
+        attrition_possible = !resolution.master? || !(filter.nil? || filter.empty?)
+        candidate_limit =
+          if candidate_limit_override
+            Integer(candidate_limit_override)
+          elsif attrition_possible
+            [k_int * DEFAULT_CANDIDATE_MULTIPLIER, MAX_CANDIDATE_LIMIT].min
+          else
+            k_int
+          end
+        if candidate_limit < k_int
+          raise ArgumentError,
+                "candidate_limit (#{candidate_limit}) must be >= k (#{k_int})."
         end
-        if num_candidates_int > 10_000
-          raise ArgumentError, "num_candidates capped at 10000 by Atlas (got #{num_candidates_int})."
+        if candidate_limit > MAX_CANDIDATE_LIMIT
+          raise ArgumentError,
+                "candidate_limit capped at #{MAX_CANDIDATE_LIMIT} by Atlas (got #{candidate_limit})."
+        end
+
+        # ANN width stays anchored to `k`, NOT to the raised window.
+        # Deriving it from `candidate_limit` would multiply twice and
+        # silently widen the HNSW search by the candidate multiplier —
+        # a scoped k=10 would jump from 200 to 2000 candidates. The
+        # window only needs numCandidates to be at least as large as
+        # `limit`, so take whichever is greater.
+        derived_num_candidates =
+          [k_int * DEFAULT_NUM_CANDIDATES_MULTIPLIER, candidate_limit].max
+        num_candidates_int = (num_candidates || derived_num_candidates).to_i
+        num_candidates_int = MAX_CANDIDATE_LIMIT if num_candidates_int > MAX_CANDIDATE_LIMIT &&
+                                                    num_candidates.nil?
+
+        # A caller-supplied num_candidates that predates the candidate
+        # window used to be valid whenever it was >= k. Clamping the
+        # implicit window down to it keeps those calls working rather
+        # than turning them into a new ArgumentError. An EXPLICIT
+        # candidate_limit still conflicts loudly — that combination can
+        # only be a mistake.
+        if num_candidates && num_candidates_int < candidate_limit
+          if candidate_limit_override
+            raise ArgumentError,
+                  "num_candidates (#{num_candidates_int}) must be >= candidate_limit " \
+                  "(#{candidate_limit})."
+          end
+          candidate_limit = [num_candidates_int, k_int].max
+        end
+
+        if num_candidates_int < k_int
+          raise ArgumentError,
+                "num_candidates (#{num_candidates_int}) must be >= k (#{k_int})."
+        end
+        if num_candidates_int > MAX_CANDIDATE_LIMIT
+          raise ArgumentError,
+                "num_candidates capped at #{MAX_CANDIDATE_LIMIT} by Atlas (got #{num_candidates_int})."
         end
 
         validated_vector = validate_query_vector!(query_vector)
@@ -223,7 +312,9 @@ module Parse
           "path"          => path,
           "queryVector"   => validated_vector,
           "numCandidates" => num_candidates_int,
-          "limit"         => k_int,
+          # Deliberately the raised candidate window, not `k` — the
+          # result set is trimmed to `k` after enforcement runs.
+          "limit"         => candidate_limit,
         }
         vs_stage["filter"] = vector_filter if vector_filter && !vector_filter.empty?
         pipeline = [{ "$vectorSearch" => vs_stage }]
@@ -248,6 +339,9 @@ module Parse
         pipeline << { "$match" => filter } if filter
 
         raw_results = run_pipeline!(collection_name, pipeline, max_time_ms: max_time_ms)
+        # Already past the server-side ACL `$match` and any caller
+        # `filter` — NOT the number $vectorSearch emitted.
+        post_filter_count = raw_results.length
 
         # Post-fetch enforcement: walk the rows the same way
         # Parse::MongoDB.aggregate would. Master mode skips every
@@ -266,7 +360,38 @@ module Parse
         # every mode, master included, so `_hashed_password` /
         # `_session_token` can never surface through this entry point.
         raw_results.map! { |doc| Parse::PipelineSecurity.strip_internal_fields(doc) }
+
+        # Trim only AFTER every enforcement layer has run — that
+        # ordering is the whole point of the raised candidate window.
+        post_pointer_count = raw_results.length
+        raw_results = raw_results.first(k_int) if post_pointer_count > k_int
+
+        emit_search_stats(
+          collection_name: collection_name, k: k_int,
+          candidate_limit: candidate_limit, num_candidates: num_candidates_int,
+          post_filter_count: post_filter_count, post_pointer_count: post_pointer_count,
+          returned_count: raw_results.length, master: resolution.master?,
+        )
+
         raw_results
+      end
+
+      # @!visibility private
+      # Emit per-search counts so ACL/filter attrition is observable.
+      # `underfilled` means the caller received fewer rows than they
+      # asked for — the signal worth alerting on, since it means either
+      # the candidate window was too small for this principal or the
+      # collection simply ran out of matches. Distinguishing those two
+      # would need a pre-`$match` count, which this deliberately does
+      # not fabricate.
+      def emit_search_stats(**payload)
+        return unless defined?(ActiveSupport::Notifications)
+
+        payload[:pointer_attrition] =
+          payload[:post_filter_count] - payload[:post_pointer_count]
+        payload[:underfilled] = payload[:returned_count] < payload[:k]
+        ActiveSupport::Notifications.instrument(AS_NOTIFICATION_NAME, payload)
+        nil
       end
 
       # Validate a query vector. Public so callers (and tests) can

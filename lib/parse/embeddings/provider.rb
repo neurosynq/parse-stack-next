@@ -24,6 +24,7 @@ module Parse
     # Subclasses MAY override:
     #
     # * {#embed_image}      — v5.1 (multimodal); default `NotImplementedError`
+    # * {#embed_video}      — v5.6 (multimodal); default `NotImplementedError`
     # * {#embed_batch_size} — provider-recommended batch size hint
     # * {#max_input_tokens} — chunker hint
     # * {#normalize?}       — whether output is unit-normalized
@@ -74,6 +75,44 @@ module Parse
       # @raise [NotImplementedError] image embedding is a v5.1+ feature.
       def embed_image(sources, input_type: :search_document, allow_insecure: false, **opts)
         raise NotImplementedError, "#{self.class} does not support image embedding"
+      end
+
+      # Embed video sources. Same contract and default posture as
+      # {#embed_image}: providers that do not offer video leave this
+      # raising, and callers discover support through {#modalities}
+      # rather than by rescuing.
+      #
+      # Video payloads are large enough that holding one in memory is a
+      # real operational risk, so the two source forms concrete
+      # providers should accept are:
+      #
+      # * a URL String, forwarded for provider-side fetch after
+      #   {Parse::Embeddings.validate_image_url!} screens it (the SDK
+      #   never downloads the video), and
+      # * a {Parse::Embeddings::MediaFile}, streamed into the request
+      #   body by {Parse::Embeddings::StreamingBody} without ever being
+      #   fully resident.
+      #
+      # Concrete overrides must accept `allow_insecure:` explicitly or
+      # absorb it via `**opts` — see {#embed_image} for why.
+      #
+      # @param sources [Array<String, Parse::Embeddings::MediaFile>]
+      # @param input_type [Symbol] `:search_query` or `:search_document`.
+      # @param allow_insecure [Boolean] forwarded to the URL validator.
+      # @param opts [Hash] provider-specific options.
+      # @return [Array<Array<Float>>] vectors aligned 1:1 with `sources`.
+      # @raise [NotImplementedError] unless the provider offers video.
+      def embed_video(sources, input_type: :search_document, allow_insecure: false, **opts)
+        raise NotImplementedError, "#{self.class} does not support video embedding"
+      end
+
+      # @return [Boolean] whether this provider accepts `modality`.
+      #   Prefer this over rescuing {NotImplementedError} — it answers
+      #   the question without issuing a call.
+      #
+      # @param modality [Symbol] one of `:text`, `:image`, `:video`.
+      def supports_modality?(modality)
+        modalities.include?(modality.to_sym)
       end
 
       # Batched text embedding. Splits `strings` into chunks of size

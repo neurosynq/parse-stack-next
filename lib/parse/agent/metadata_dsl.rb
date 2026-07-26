@@ -634,6 +634,16 @@ module Parse
                   "agent_searchable field: :#{field_sym} is not a declared :vector property " \
                   "on #{parse_class_name} (declared: #{vector_properties.keys.inspect})."
           end
+          # A storage-only property is not eligible for search, so the
+          # tool this registers could never run. Refuse at class load
+          # rather than at the first agent query.
+          if respond_to?(:vector_properties) &&
+             vector_properties.dig(field_sym, :searchable) == false
+            raise ArgumentError,
+                  "agent_searchable field: :#{field_sym} on #{parse_class_name} is declared " \
+                  "`searchable: false` (storage-only, not eligible for search) and cannot " \
+                  "back a search tool."
+          end
           filters = Array(filter_fields).map(&:to_sym)
           @agent_searchable_field = field_sym
           @agent_searchable_filter_fields = filters
