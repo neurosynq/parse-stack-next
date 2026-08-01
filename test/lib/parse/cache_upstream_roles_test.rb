@@ -317,6 +317,27 @@ class CacheUpstreamRolesTest < Minitest::Test
                  "the SDK's own role-plane keys must never be mistaken for a shared Parse Server database"
   end
 
+  # An application may legitimately be named "parse-stack". Its role keys are
+  # then `parse-stack:role:<userId>`, which any filter that rejects keys under
+  # the `parse-stack:` prefix would discard, reporting a shared database as
+  # isolated. The scanner matches the upstream key SHAPE instead, so the app
+  # id is irrelevant.
+  def test_verify_upstream_isolation_detects_an_app_named_like_our_own_prefix
+    backend = build_backend_scanning(["parse-stack:role:user123"])
+    assert_equal false, backend.verify_upstream_isolation!(on_degraded: :proceed),
+                 "an app id equal to our keyspace root must not hide a shared database"
+  end
+
+  # The alternative fix, rejecting only `parse-stack:v1:`, would break here:
+  # `version:` is a constructor parameter, so a keyspace on any other version
+  # would have its own role keys counted as Parse Server's, which is the false
+  # positive the filter exists to prevent.
+  def test_verify_upstream_isolation_ignores_our_role_keys_on_a_nondefault_version
+    backend = build_backend_scanning(["parse-stack:v9:abc123:_:role:userA"])
+    assert_equal true, backend.verify_upstream_isolation!,
+                 "our own role-plane keys must be ignored regardless of keyspace version"
+  end
+
   # A real Parse Server key must still be detected even when this SDK's own
   # role-plane keys are present on the same database.
   def test_verify_upstream_isolation_still_detects_sharing_alongside_its_own_keys

@@ -162,10 +162,11 @@ module Parse
         # startup stall.
         8.times do
           cursor, keys = client.scan(cursor, match: pattern, count: 100)
-          # Callers that use a broad pattern are responsible for excluding this
-          # SDK's own keys before they reach here. `Parse::Cache::Redis` wraps
-          # its client in a scanner that strips anything under the keyspace
-          # root, so the filtering lives next to the wiring rather than being
+          # Callers that use a broad pattern are responsible for filtering out
+          # anything that is not a genuine Parse Server entry before it reaches
+          # here. `Parse::Cache::Redis` wraps its client in a scanner that
+          # keeps only keys matching the upstream `<appId>:role:<userId>`
+          # shape, so the filtering lives next to the wiring rather than being
           # duplicated in both places.
           return true unless keys.empty?
           break if cursor == "0"

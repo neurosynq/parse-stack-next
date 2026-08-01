@@ -157,10 +157,12 @@ module Parse
         #   operators to ignore the warning.
         #
         # The fix keeps the broad `"*"` wildcard (so this still catches ANY
-        # app's cached role, not one we'd have to already know the id of) but
-        # filters this SDK's own `parse-stack:`-rooted keys out of what the
-        # scanner hands back, so `shares_database_with?` never sees them and
-        # can only match a genuine Parse Server entry.
+        # app's cached role, not one we'd have to already know the id of) and
+        # keeps only keys matching Parse Server's own three-segment
+        # `<appId>:role:<userId>` shape, so `shares_database_with?` can only
+        # ever see a genuine upstream entry. See {ExcludeOwnKeysScanner} for
+        # why the filter matches the upstream shape rather than rejecting a
+        # `parse-stack:` prefix.
         reader = UpstreamRoles.new(client: upstream_client, app_id: "*")
         # The probe scans OUR database for THEIR key pattern, so it needs a
         # scannable client rather than this Moneta-shaped wrapper.
@@ -470,19 +472,42 @@ module Parse
       private
 
       # Redis-rb-shaped decorator used only by {#verify_upstream_isolation!}.
-      # Wraps the raw scan-capable client and strips this SDK's own keys
-      # (everything rooted under `Parse::Cache::Keyspace::ROOT`, i.e.
-      # `"parse-stack:"`) out of every SCAN batch before
+      # Wraps the raw scan-capable client and keeps only Parse-Server-shaped
+      # role keys in each SCAN batch before
       # `UpstreamRoles#shares_database_with?` ever sees it. That is what lets
       # the isolation probe use a broad, app-id-less `"*"` pattern (catching
-      # ANY app's Parse-Server-shaped role cache key) without the glob also
-      # matching this SDK's own role-plane keys
-      # (`parse-stack:v1:<scope>:<ns>:role:<userId>`), which would otherwise
-      # make the probe report "shared" as soon as the role plane held
-      # anything, on a database that is in fact isolated.
+      # ANY app's role cache key without having to know its app id) while the
+      # same glob would otherwise also match this SDK's own role-plane keys
+      # (`parse-stack:<version>:<scope>:<ns>:role:<userId>`), making the probe
+      # report "shared" as soon as the role plane held anything, on a database
+      # that is in fact isolated.
       class ExcludeOwnKeysScanner
-        OWN_PREFIX = "#{Keyspace::ROOT}:"
-        private_constant :OWN_PREFIX
+        # Parse Server writes exactly `<appId>:role:<userId>`: three
+        # colon-separated segments, with `role` in the middle and neither
+        # outer segment containing a colon.
+        #
+        # This keeps only keys of that shape, rather than rejecting keys that
+        # look like ours. The difference matters because the two are not
+        # complements. Rejecting anything under `parse-stack:` drops a genuine
+        # upstream key when the Parse application is itself named
+        # `parse-stack`, since `parse-stack:role:U1` starts with that prefix,
+        # and the probe then reports a shared database as isolated: the exact
+        # false negative this scanner was added to prevent, just reachable
+        # through an app id instead of through a glob.
+        #
+        # Narrowing the rejection to `parse-stack:v1:` would fix that one case
+        # and break another. `v1` is {Parse::Cache::Keyspace::VERSION}, but the
+        # version is a constructor parameter, so a keyspace built with any
+        # other value would no longer be excluded and its role-plane keys would
+        # be counted as Parse Server's. Matching the upstream shape depends on
+        # nothing this SDK can reconfigure.
+        #
+        # Our own role-plane keys are
+        # `parse-stack:<version>:<scope>:<namespace>:role:<userId>`, six
+        # segments, so they can never satisfy the anchored three-segment
+        # pattern no matter how the keyspace is configured.
+        UPSTREAM_ROLE_KEY = /\A[^:]+:role:[^:]+\z/.freeze
+        private_constant :UPSTREAM_ROLE_KEY
 
         def initialize(client)
           @client = client
@@ -490,7 +515,7 @@ module Parse
 
         def scan(cursor, match:, count: 100)
           cursor, keys = @client.scan(cursor, match: match, count: count)
-          [cursor, keys.reject { |k| k.start_with?(OWN_PREFIX) }]
+          [cursor, keys.select { |k| UPSTREAM_ROLE_KEY.match?(k.to_s) }]
         end
       end
       private_constant :ExcludeOwnKeysScanner

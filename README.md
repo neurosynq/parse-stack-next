@@ -796,6 +796,59 @@ the same way an SDK write does. This requires the webhook endpoint to be
 registered and reachable from Parse Server; where it is not, the TTL remains the
 only bound on staleness.
 
+#### Client-owned authorization meets a process-global MongoDB connection
+
+Authorization is per client as of 5.7. The MongoDB connection is not:
+`Parse::MongoDB.configure` sets one URI, one database, and one driver client
+for the whole process, and that stays true until 6.0. Each half is safe on its
+own and the combination is not.
+
+A second client would resolve its session token correctly, against its own
+Parse application, and build a correct `_rperm` allow-set for one of its users.
+The resulting pipeline would then run against the *other* application's
+database, where those user ids and role names are matched against rows they
+have nothing to do with. Any collision is a cross-application read, and
+nothing about it looks like a failure. It looks like a query that returned few
+rows.
+
+`Parse::MongoDB` therefore records the application it was configured for, and
+`Parse::MongoDB.verify_client!` refuses any mongo-direct query whose
+authorization came from a client belonging to a different one, raising
+`Parse::MongoDB::ClientMismatch`. The check runs on every `aggregate`, which
+is the single path all scoped direct reads funnel through.
+
+In practice this fires when the default client is replaced after MongoDB was
+configured:
+
+```ruby
+Parse.setup(application_id: "appA", ...)
+Parse::MongoDB.configure(uri: ENV.fetch("DATABASE_URI"))   # bound to appA
+
+Parse.setup(application_id: "appB", ...)                   # default is now appB
+
+# Resolves against appB, would read appA's database. Refused.
+Post.query.results_direct(session_token: token)
+# => Parse::MongoDB::ClientMismatch
+```
+
+Two cases deliberately proceed rather than raise. A connection configured
+before this existed, or in a process that set up MongoDB before Parse, records
+no binding and has nothing to compare. A caller that cannot be identified,
+which includes master-mode and public-fallback resolutions produced before
+`Parse.setup`, is likewise unchecked. Single-application deployments are
+unaffected in every case.
+
+Note the current limit: no public direct-read entry point accepts a `client:`
+argument yet, so authorization always resolves through `Parse.client` and the
+guard compares the binding against that. A secondary client cannot presently
+be made to authorize a mongo-direct read at all, which is why the scenario
+above is the reachable one.
+
+If you genuinely need two applications in one process, give each its own
+process, or route the second one's reads through REST, where Parse Server
+enforces ACLs itself. The guard becomes unnecessary in 6.0, when the
+connection becomes client-owned.
+
 #### `:parse_cache_url`
 
 Parse Server keeps its own role cache, writing the transitive closure for a user
