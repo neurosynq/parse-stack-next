@@ -665,8 +665,11 @@ module Parse
           loop do
             cursor, keys = redis.scan(cursor, match: pattern, count: 1000)
             unless keys.empty?
-              unlink ? redis.unlink(*keys) : redis.del(*keys)
-              deleted += keys.size
+              removed = unlink ? redis.unlink(*keys) : redis.del(*keys)
+              # Keys can disappear between SCAN and UNLINK/DEL. Redis reports
+              # how many it actually removed; using the scanned batch size
+              # overstates both this return value and parse.cache.evict.
+              deleted += removed.to_i
             end
             break if cursor == "0"
           end

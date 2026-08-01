@@ -75,6 +75,50 @@ class CLPScopeTest < Minitest::Test
            "acl_role-only agents have no user_id to satisfy pointerFields"
   end
 
+  def test_access_evaluation_uses_parse_server_clp_branch_order
+    Parse::CLPScope.__cache_put("Doc", clp: {
+                                         "get" => { "*" => true },
+                                         "update" => { "requiresAuthentication" => true },
+                                         "delete" => {},
+                                         "readUserFields" => ["owner"],
+                                         "writeUserFields" => ["owner"],
+                                       })
+
+    public_get = Parse::CLPScope.evaluate_access(
+      "Doc", :get, claims: ["*"], authenticated: false,
+    )
+    assert public_get.allowed?
+    refute public_get.row_check_required?, "a public base branch bypasses pointer filtering"
+
+    authenticated_update = Parse::CLPScope.evaluate_access(
+      "Doc", :update, claims: ["*", "u_alice"], authenticated: true,
+                      user_id: "u_alice",
+    )
+    assert authenticated_update.allowed?
+    assert authenticated_update.row_check_required?,
+           "requiresAuthentication does not bypass writeUserFields"
+
+    pointer_fallback = Parse::CLPScope.evaluate_access(
+      "Doc", :delete, claims: ["*", "u_alice"], authenticated: true,
+                      user_id: "u_alice",
+    )
+    assert pointer_fallback.allowed?, "an empty op map can fall back to grouped user fields"
+    assert pointer_fallback.row_check_required?
+  end
+
+  def test_access_evaluation_needs_concrete_user_for_pointer_branch
+    Parse::CLPScope.__cache_put("Doc", clp: {
+                                         "get" => { "requiresAuthentication" => true },
+                                         "readUserFields" => ["owner"],
+                                       })
+    result = Parse::CLPScope.evaluate_access(
+      "Doc", :get, claims: ["*", "role:Admin"], authenticated: true,
+    )
+
+    assert result.unknown?
+    assert_equal :concrete_user_required, result.reason
+  end
+
   def test_empty_op_map_denies_everything_but_master_key
     Parse::CLPScope.__cache_put("Song", clp: { "delete" => {} })
     refute Parse::CLPScope.permits?("Song", :delete, ["*", "u_alice", "role:Admin"])
@@ -288,6 +332,19 @@ class CLPScopeTest < Minitest::Test
     assert_empty result
   end
 
+  def test_filter_by_pointer_fields_rejects_non_user_and_non_pointer_lookalikes
+    docs = [
+      { "objectId" => "missing-type", "owner" => { "className" => "_User", "objectId" => "u_a" } },
+      { "objectId" => "object", "owner" => { "__type" => "Object", "className" => "_User", "objectId" => "u_a" } },
+      { "objectId" => "role", "owner" => { "__type" => "Pointer", "className" => "_Role", "objectId" => "u_a" } },
+      { "objectId" => "mongo-role", "_p_owner" => "_Role$u_a" },
+      { "objectId" => "valid", "owner" => { "__type" => "Pointer", "className" => "_User", "objectId" => "u_a" } },
+    ]
+
+    result = Parse::CLPScope.filter_by_pointer_fields(docs, ["owner"], "u_a")
+    assert_equal ["valid"], result.map { |doc| doc["objectId"] }
+  end
+
   # -------- cache + invalidate ---------------------------------------
 
   def test_cache_invalidate_drops_entry
@@ -302,6 +359,25 @@ class CLPScopeTest < Minitest::Test
     Parse::CLPScope.__cache_put("B", clp: {})
     Parse::CLPScope.reset_cache!
     assert_equal 0, Parse::CLPScope.cache_stats[:size]
+  end
+
+  def test_cache_is_scoped_by_parse_application
+    client_a = Parse::Client.new(
+      server_url: "http://localhost:1337/parse",
+      application_id: "app-a",
+      api_key: "test",
+    )
+    client_b = Parse::Client.new(
+      server_url: "http://localhost:1337/parse",
+      application_id: "app-b",
+      api_key: "test",
+    )
+    Parse::CLPScope.__cache_put("SharedName", clp: { "get" => { "*" => true } }, client: client_a)
+    Parse::CLPScope.__cache_put("SharedName", clp: { "get" => {} }, client: client_b)
+
+    assert Parse::CLPScope.permits?("SharedName", :get, ["*"], client: client_a)
+    refute Parse::CLPScope.permits?("SharedName", :get, ["*"], client: client_b)
+    assert_equal 2, Parse::CLPScope.cache_stats[:size]
   end
 
   # -------- assert_permitted! ----------------------------------------

@@ -55,6 +55,13 @@ module Parse
     class ScopedView
       include Parse::Cache::MonetaSurface
 
+      # Safe defaults for callers that create a plane implicitly, most notably
+      # the webhook invalidation handlers. Keep these aligned with
+      # Parse::Authorization::Context's defaults: the first accessor call
+      # memoizes the plane and therefore fixes its generation lifetime.
+      DEFAULT_IDENTITY_TTL = 3600
+      DEFAULT_ROLE_TTL = 30
+
       # @return [Parse::Cache::Keyspace] this view's key layout. Fixed at
       #   construction; there is no setter, so a view can never be rebound to
       #   a different keyspace after the fact.
@@ -182,15 +189,17 @@ module Parse
       # `roles` / `upstream_roles`, and never shared between two views over
       # the same backend.
 
-      # @param ttl [Integer, nil]
+      # @param ttl [Integer, nil] default entry TTL; explicitly pass nil only
+      #   for a deliberately permanent plane.
       # @return [Parse::Cache::SubCache]
-      def identity(ttl: nil)
+      def identity(ttl: DEFAULT_IDENTITY_TTL)
         @identity ||= Parse::Cache::SubCache.new(store: self, keyspace: @keyspace, family: :idn, ttl: ttl)
       end
 
-      # @param ttl [Integer, nil]
+      # @param ttl [Integer, nil] default entry TTL; explicitly pass nil only
+      #   for a deliberately permanent plane.
       # @return [Parse::Cache::SubCache]
-      def roles(ttl: nil)
+      def roles(ttl: DEFAULT_ROLE_TTL)
         @roles ||= Parse::Cache::SubCache.new(store: self, keyspace: @keyspace, family: :role, ttl: ttl)
       end
 

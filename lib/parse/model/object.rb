@@ -1350,6 +1350,12 @@ module Parse
       # the trust signal here.
       trusted = @_trusted_init == true
       @_trusted_init = nil
+      input_hash = opts.is_a?(Hash) ? opts : nil
+      input_had_acl = input_hash && %w[ACL acl].any? do |key|
+        input_hash.key?(key) || input_hash.key?(key.to_sym)
+      end
+      input_had_id = input_hash && (input_hash.key?(Parse::Model::OBJECT_ID) || input_hash.key?(:objectId) ||
+                                    input_hash.key?(:id) || input_hash.key?(Parse::Model::ID))
       acl_owner_override = nil
       if opts.is_a?(String) #then it's the objectId
         @id = opts.to_s
@@ -1396,6 +1402,31 @@ module Parse
       end
       @_acl_pristine = !acl_was_user_supplied
       @_acl_owner_override = acl_owner_override
+
+      # Record where our ACL knowledge came from. `acl.nil?` alone is not
+      # enough: it can mean a genuinely ACL-less (therefore public) server
+      # row, but it also describes an id-only pointer or a selective response
+      # that never fetched ACL. Conversely, a custom class may stamp its local
+      # default ACL while hydrating a full server row whose ACL was absent.
+      # Access inspection uses this evidence to distinguish those cases.
+      @_authorization_acl_state = if trusted
+          if has_selective_keys? && !input_had_acl
+            :unknown
+          elsif input_had_acl
+            self.acl.nil? ? :absent : :present
+          else
+            :absent
+          end
+        elsif opts.is_a?(String) || input_had_id
+          :unknown
+        elsif input_had_acl
+          self.acl.nil? ? :unknown : :local
+        elsif self.class.builtin_acl_default_active?
+          :unknown
+        else
+          :local
+        end
+      @_authorization_acl_tracking_ready = true
 
       # One-time per-class permissive-default warning. Fires only when the
       # effective policy is :public or :owner_else_public.
@@ -1614,6 +1645,39 @@ module Parse
       # Convert remote_key to symbol for consistent comparison
       remote_key = self.field_map[key]&.to_sym
       @_fetched_keys.include?(key) || (remote_key && @_fetched_keys.include?(remote_key))
+    end
+
+    # Describes whether the in-memory ACL is authoritative enough for local
+    # access inspection. `:absent` means a full trusted server response omitted
+    # ACL (Parse Server's public default); `:present` and `:local` have a usable
+    # ACL value; `:unknown` covers pointers and incomplete hydration.
+    #
+    # @return [Symbol] `:present`, `:absent`, `:local`, or `:unknown`.
+    # @api private
+    def authorization_acl_state
+      @_authorization_acl_state || :unknown
+    end
+
+    # Update ACL evidence after `fetch!` applies a server response to an
+    # existing instance. Save/update responses are deliberately excluded: they
+    # are deltas and omission there says nothing about the stored ACL.
+    # @param attributes [Hash] trusted server response.
+    # @param partial [Boolean] whether a selective key fetch produced it.
+    # @api private
+    def record_authorization_hydration!(attributes, partial: false)
+      return unless attributes.is_a?(Hash)
+      has_acl = %w[ACL acl].any? do |key|
+        attributes.key?(key) || attributes.key?(key.to_sym)
+      end
+      @_authorization_acl_state = if has_acl
+          self.acl.nil? ? :absent : :present
+        elsif partial
+          :unknown
+        else
+          :absent
+        end
+      @_authorization_acl_tracking_ready = true
+      @_authorization_acl_state
     end
 
     # Returns the nested fetched keys map for building nested objects.
@@ -1984,6 +2048,9 @@ module Parse
         @_acl_snapshot_before_change = @acl ? Parse::ACL.new(@acl.as_json) : Parse::ACL.new
       end
       @_acl_pristine = false if defined?(@_acl_pristine)
+      if defined?(@_authorization_acl_tracking_ready) && @_authorization_acl_tracking_ready
+        @_authorization_acl_state = :local
+      end
       super
     end
 

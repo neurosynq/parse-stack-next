@@ -18,10 +18,10 @@ class PropertyEnumDescriptionsTest < Minitest::Test
                                 organization: "Member of the org as a whole",
                               }
     property :account_level, :string, _enum: {
-                               basic: "Default tier",
-                               paid: "Active paid subscription",
-                               complimentary: "Granted by support; non-billable",
-                             }
+                                        basic: "Default tier",
+                                        paid: "Active paid subscription",
+                                        complimentary: "Granted by support; non-billable",
+                                      }
     property :active, :boolean
     property :title, :string
   end

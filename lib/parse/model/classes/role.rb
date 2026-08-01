@@ -191,6 +191,9 @@ module Parse
       #   scope (subject to `_Role` CLP). The scope is forwarded
       #   verbatim to {Parse::MongoDB.role_names_for_user}; CLP denial
       #   raises {Parse::CLPScope::Denied}.
+      # @param strict [Boolean] re-raise REST role-query failures instead of
+      #   returning the closure resolved before the failure. Access inspection
+      #   uses this to distinguish no membership from unavailable evidence.
       # @return [Set<String>] role names (no `role:` prefix) the user
       #   transitively inherits permissions from, including direct
       #   memberships. Empty set for anonymous or no-membership users.
@@ -207,7 +210,8 @@ module Parse
       # @example
       #   names = Parse::Role.all_for_user(user, master: true)  # admin/analytics
       #   names = Parse::Role.all_for_user(user, as: current_user)  # scope-checked
-      def all_for_user(user, max_depth: 10, master: false, as: nil, client: nil)
+      def all_for_user(user, max_depth: 10, master: false, as: nil, client: nil,
+                             strict: false)
         names = Set.new
         return names if user.nil? || max_depth <= 0
 
@@ -253,11 +257,17 @@ module Parse
 
         begin
           direct_roles = role_query_all({ users: user_pointer }, client: client)
-        rescue
+        rescue StandardError
+          raise if strict
           return names
         end
 
-        result = expand_inheritance_upward(direct_roles, max_depth: max_depth, client: client)
+        result = expand_inheritance_upward(
+          direct_roles,
+          max_depth: max_depth,
+          client: client,
+          strict: strict,
+        )
         ActiveSupport::Notifications.instrument(
           "parse.role.expand",
           direction: :forward, target_id: user_pointer.id,
@@ -355,7 +365,8 @@ module Parse
         query.results
       end
 
-      def expand_inheritance_upward(starting_roles, max_depth: 10, client: nil)
+      def expand_inheritance_upward(starting_roles, max_depth: 10, client: nil,
+                                                    strict: false)
         names = Set.new
         visited_ids = Set.new
         frontier = []
@@ -375,7 +386,8 @@ module Parse
             next if role.nil? || role.id.nil?
             begin
               parents = role_query_all({ roles: role }, client: client)
-            rescue
+            rescue StandardError
+              raise if strict
               next
             end
             parents.each do |parent|
@@ -787,37 +799,56 @@ module Parse
 
     private :hydrate_users_under_scope
 
-    # Return whether an authenticated member of this role can read `object`
-    # under its effective `get` CLP and object-level ACL. Public access, a
-    # missing ACL (which Parse Server treats as public), authentication, a
-    # direct role grant, and grants inherited from parent roles are all
-    # honored. User-specific and pointer-field CLPs fail closed because a role
-    # does not identify an individual member.
+    # Inspect one effective object permission for a hypothetical authenticated
+    # member of this role. User-specific, pointer-specific, and `_User` self
+    # rules remain unknown because a role does not identify a concrete member.
     #
     # @param object [Parse::Object] the Parse object to check.
-    # @return [Boolean] whether both CLP and ACL grant this role read access.
-    def can_read?(object)
-      effective_access?(object, :read)
+    # @param operation [Symbol] `:read`, `:write`, or `:delete`.
+    # @return [Parse::Access::Decision]
+    def access_decision(object, operation, client: nil, authenticated: nil,
+                                           max_role_depth: 10)
+      require_relative "../../access" unless defined?(Parse::Access)
+      Parse::Access.check(
+        principal: self,
+        object: object,
+        operation: operation,
+        client: client,
+        authenticated: authenticated,
+        max_role_depth: max_role_depth,
+      )
     end
 
-    # Return whether an authenticated member of this role can write `object`
-    # under its effective `update` CLP and object-level ACL. See {#can_read?}
-    # for the inheritance semantics.
-    #
-    # @param object [Parse::Object] the Parse object to check.
-    # @return [Boolean] whether both CLP and ACL grant this role write access.
-    def can_write?(object)
-      effective_access?(object, :write)
+    # Inspect read, write, and delete while sharing one parent-role lookup.
+    # @return [Hash<Symbol, Parse::Access::Decision>]
+    def access_decisions(object, client: nil, authenticated: nil, max_role_depth: 10)
+      require_relative "../../access" unless defined?(Parse::Access)
+      Parse::Access.check_all(
+        principal: self,
+        object: object,
+        client: client,
+        authenticated: authenticated,
+        max_role_depth: max_role_depth,
+      )
     end
 
-    # Return whether an authenticated member of this role can delete `object`
-    # under its effective `delete` CLP and object-level ACL write permission. See
-    # {#can_read?} for the inheritance semantics.
-    #
-    # @param object [Parse::Object] the Parse object to check.
-    # @return [Boolean] whether both CLP and ACL grant this role delete access.
-    def can_delete?(object)
-      effective_access?(object, :delete)
+    # Return whether the role-derived policy definitively grants read access.
+    # Unknown states fail closed.
+    # @return [Boolean]
+    def can_read?(object, **options)
+      access_decision(object, :read, **options).allowed?
+    end
+
+    # Return whether the role-derived policy definitively grants update access.
+    # @return [Boolean]
+    def can_write?(object, **options)
+      access_decision(object, :write, **options).allowed?
+    end
+
+    # Return whether the role-derived policy definitively grants delete access.
+    # @return [Boolean]
+    def can_delete?(object, **options)
+      access_decision(object, :delete, **options).allowed?
     end
 
     # Get the set of role names whose presence in a `_rperm` array
@@ -852,8 +883,12 @@ module Parse
     #   resolved against a specific client: walking the role graph on the
     #   default application would then mix one application's identity with
     #   another's role names.
-    def all_parent_role_names(max_depth: 10, client: nil)
-      Parse::Role.expand_inheritance_upward([self], max_depth: max_depth, client: client)
+    # @param strict [Boolean] re-raise role-query failures rather than returning
+    #   a partial parent closure.
+    def all_parent_role_names(max_depth: 10, client: nil, strict: false)
+      Parse::Role.expand_inheritance_upward(
+        [self], max_depth: max_depth, client: client, strict: strict,
+      )
     end
 
     # Get all child roles recursively. Cycle-safe; see {#all_users}.
@@ -892,71 +927,6 @@ module Parse
     end
 
     private
-
-    # Evaluate one operation for this role. Public and direct grants are
-    # answered before consulting the role graph; parent roles are resolved
-    # only when either ACL or CLP still needs them. Every layer fails closed.
-    def effective_access?(object, operation)
-      return false unless object.is_a?(Parse::Object)
-
-      object_acl = object.acl
-      permission_keys = if operation == :read
-          object_acl&.readable_by
-        else
-          object_acl&.writable_by
-        end
-      permission_keys = Array(permission_keys).map(&:to_s)
-      clp_operation = case operation
-        when :read then :get
-        when :write then :update
-        when :delete then :delete
-        end
-      permission_strings = [Parse::ACL::PUBLIC]
-      permission_strings << "role:#{name}" if name.present?
-
-      acl_permits = object_acl.nil? || permission_keys.any? { |key| permission_strings.include?(key) }
-      clp_permits = Parse::CLPScope.permits?(
-        object.parse_class, clp_operation, clp_permission_strings(permission_strings)
-      )
-      if acl_permits && clp_permits
-        return false if clp_requires_user?(object, clp_operation)
-        return true
-      end
-
-      role_permission_keys = permission_keys.select { |key| key.start_with?("role:") }
-      return false if (!acl_permits && role_permission_keys.empty?) || !id.present?
-
-      role_names = begin
-          all_parent_role_names(client: client)
-        rescue StandardError
-          Set.new
-        end
-      role_names.each do |role_name|
-        permission_strings << "role:#{role_name}" if role_name.present?
-      end
-      permission_strings.uniq!
-
-      acl_permits = object_acl.nil? || permission_keys.any? { |key| permission_strings.include?(key) }
-      clp_permits = Parse::CLPScope.permits?(
-        object.parse_class, clp_operation, clp_permission_strings(permission_strings)
-      )
-      acl_permits && clp_permits && !clp_requires_user?(object, clp_operation)
-    end
-
-    # Role membership implies authentication even though a role-only check has
-    # no concrete user objectId. Add a deliberately invalid objectId sentinel
-    # for CLP's `requiresAuthentication` branch only; ACL matching continues to
-    # use the real public/role permission strings above.
-    def clp_permission_strings(permission_strings)
-      permission_strings + ["__parse_authenticated_role_member__"]
-    end
-
-    # A role-only principal cannot prove an object-level pointer permission;
-    # those permissions depend on the identity of a particular role member.
-    def clp_requires_user?(object, clp_operation)
-      Parse::CLPScope.pointer_fields_for(object.parse_class, clp_operation).present? ||
-        Parse::CLPScope.user_fields_for(object.parse_class, clp_operation).present?
-    end
 
     # @!visibility private
     # Refuses a `_Role.roles` mutation that would point a role at itself.

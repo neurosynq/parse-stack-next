@@ -177,6 +177,15 @@ class CacheUpstreamRolesTest < Minitest::Test
     assert_equal Set.new(["Admin"]), @reader.roles_for(USER)
   end
 
+  def test_remaining_ttl_above_configured_ttl_is_rejected
+    # This is below max_ttl_ms and therefore reaches the epoch gate. Treating
+    # 45s remaining as an entry with a 30s starting TTL would derive a write
+    # time 15s in the future and incorrectly pass an invalidation epoch.
+    @plane.touch_epoch(Time.now.to_f + 1)
+    seed(["role:Admin"], ttl_ms: 45_000)
+    assert_nil @reader.roles_for(USER)
+  end
+
   def test_without_a_plane_the_epoch_gate_is_skipped
     reader = Parse::Cache::UpstreamRoles.new(client: @redis, app_id: APP)
     seed(["role:Admin"])

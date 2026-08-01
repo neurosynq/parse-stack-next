@@ -61,8 +61,8 @@ class CacheScopedViewTest < Minitest::Test
       ["0", @data.keys.select { |k| File.fnmatch(match, k, File::FNM_NOESCAPE) }]
     end
 
-    def unlink(*keys) = keys.each { |k| @data.delete(k) }
-    def del(*keys) = keys.each { |k| @data.delete(k) }
+    def unlink(*keys) = keys.count { |k| !@data.delete(k).nil? }
+    def del(*keys) = unlink(*keys)
 
     def set(key, value, nx: false, ex: nil)
       return nil if nx && @data.key?(key)
@@ -309,6 +309,26 @@ class CacheScopedViewTest < Minitest::Test
     assert_nil view[key]
   end
 
+  def test_delete_matching_reports_only_keys_redis_actually_removed
+    node_class = Class.new(FakeRedisNode) do
+      def unlink(*keys)
+        delete(keys.first) unless keys.empty? # Vanishes after SCAN, before UNLINK.
+        super
+      end
+    end
+    node = node_class.new
+    backend = Parse::Cache::Redis.new(url: "redis://localhost:6379/0")
+    backend.instance_variable_set(:@pool, Parse::Cache::Pool.new(size: 1) { node })
+    view = backend.scoped(keyspace)
+    2.times do |i|
+      key = view.keyspace.cache_key("https://x/#{i}", auth: :anon)
+      view.store(key, "value-#{i}", {})
+    end
+
+    assert_equal 1, view.delete_matching(view.keyspace.pattern),
+                 "the count must come from UNLINK, not the preceding SCAN batch"
+  end
+
   def test_delete_matching_is_inert_on_nil_or_empty_pattern
     backend, = build_backend
     view = backend.scoped(keyspace)
@@ -329,6 +349,18 @@ class CacheScopedViewTest < Minitest::Test
     # Memoized: repeated calls on the SAME view return the SAME instance.
     assert_same view_a.identity, view_a.identity
     assert_same view_a.roles, view_a.roles
+  end
+
+  def test_implicit_planes_use_authorization_safe_default_ttls
+    backend, = build_backend
+    view = backend.scoped(keyspace)
+
+    assert_equal Parse::Authorization::Context::DEFAULT_IDENTITY_TTL *
+                 Parse::Cache::SubCache::GENERATION_TTL_FACTOR,
+                 view.identity.generation_ttl
+    assert_equal Parse::Authorization::Context::DEFAULT_ROLE_TTL *
+                 Parse::Cache::SubCache::GENERATION_TTL_FACTOR,
+                 view.roles.generation_ttl
   end
 
   def test_identity_and_roles_are_bound_to_their_own_views_keyspace

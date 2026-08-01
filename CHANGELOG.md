@@ -33,11 +33,11 @@
   passed as `cache:` is still cleared in full because it has no notion of key
   scoping. Opting in is what fixes it. This is stated plainly because a reader
   who upgrades and changes nothing else is still exposed.
-- **NEW**: `Parse::Cache::Redis#clear` accepts `family:` and `tenant:` to
-  narrow a clear to one key family or one cache tenant, and
-  `#delete_matching(pattern)` evicts by glob. A pattern outside the wrapper's
-  own keyspace is a no-op rather than an unscoped scan, so the narrower API
-  cannot become a back door to the blast radius the keyspace exists to close.
+- **NEW**: The keyspace-bound `Parse::Cache::ScopedView` exposed as
+  `client.sdk_cache` accepts `family:` and `tenant:` on `#clear`, and
+  `#delete_matching(pattern)` evicts by glob. A pattern outside the view's own
+  keyspace is a no-op rather than an unscoped scan, so the narrower API cannot
+  become a back door to the blast radius the keyspace exists to close.
 - **CHANGED**: Scoped eviction issues `UNLINK` rather than `DEL` when the
   client exposes it, so reclaiming a large eviction runs on a Redis background
   thread instead of stalling the server, falling back to `DEL` on older
@@ -189,13 +189,22 @@
 #### Users and roles can inspect effective object access
 
 - **NEW**: `Parse::User` and `Parse::Role` expose `can_read?`, `can_write?`,
-  and `can_delete?` predicates for any `Parse::Object`, including `_User` and
-  `_Role` records. Each predicate combines the target object's ACL with its
-  class's `get`, `update`, or `delete` CLP; delete access uses the ACL's write
-  grant. User checks include direct grants and recursively inherited roles,
-  while role checks include the role itself and its parent roles. Missing ACLs
-  retain Parse Server's public default, and unresolved role membership or CLP
-  conditions that a role alone cannot prove fail closed.
+  and `can_delete?` predicates backed by the new `Parse::Access.check` policy
+  preflight. Each check combines the target ACL with its class's `get`,
+  `update`, or `delete` CLP; delete uses the ACL write grant. Direct and
+  inherited user/role grants are supported, as are Parse Server's
+  `pointerFields`, `readUserFields`, and `writeUserFields` branch semantics.
+  `Parse::Access::Decision` and the instance `access_decision` /
+  `access_decisions` helpers expose `allowed`, `denied`, or `unknown` results;
+  the boolean predicates accept only a definite allow and otherwise fail
+  closed. Full rows with no ACL retain Parse Server's public default, while
+  pointers, partial rows, unresolved schema/role evidence, and unsupported
+  system-class rules remain unknown. `_User` reads and mutations honor Parse
+  Server's self-access rules, and role-only checks cannot claim a concrete
+  member's pointer or `_User` self permission. CLP cache entries are isolated
+  by Parse application so identically named classes cannot leak policy across
+  clients. These helpers are advisory—the eventual Parse Server request is
+  still authoritative.
 
 #### Test infrastructure
 

@@ -78,7 +78,9 @@ class VectorSearchHybridTest < Minitest::Test
   # Run `blk` with Parse::MongoDB.collection stubbed to a FakeColl whose
   # aggregate runs `behavior`.
   def with_probe_collection(behavior)
-    Parse::MongoDB.stub(:collection, ->(_name, **_o) { FakeColl.new(behavior) }) { yield }
+    Parse::MongoDB.stub(:verify_client!, nil) do
+      Parse::MongoDB.stub(:collection, ->(_name, **_o) { FakeColl.new(behavior) }) { yield }
+    end
   end
 
   def test_probe_returns_true_when_stage_recognized
@@ -107,6 +109,69 @@ class VectorSearchHybridTest < Minitest::Test
       H.rank_fusion_supported?("Song")
     end
     assert_equal 1, calls, "second probe should hit the cache"
+  end
+
+  def test_probe_forwards_and_verifies_the_authorizing_client
+    client = Object.new
+    verified = nil
+    forwarded = nil
+    Parse::MongoDB.stub(:verify_client!, ->(value) { verified = value }) do
+      Parse::MongoDB.stub(:collection, lambda { |_name, authorizing_client: nil|
+        forwarded = authorizing_client
+        FakeColl.new(-> { [] })
+      }) do
+        assert_equal true, H.rank_fusion_supported?("Song", authorizing_client: client)
+      end
+    end
+
+    assert_same client, verified
+    assert_same client, forwarded
+  end
+
+  def test_probe_does_not_cache_a_client_binding_mismatch_as_supported
+    calls = 0
+    Parse::MongoDB.stub(:verify_client!, lambda { |_client|
+      calls += 1
+      raise Parse::MongoDB::ClientMismatch, "wrong application"
+    }) do
+      2.times do
+        assert_raises(Parse::MongoDB::ClientMismatch) do
+          H.rank_fusion_supported?("Song", authorizing_client: Object.new)
+        end
+      end
+    end
+
+    assert_equal 2, calls, "a binding failure must be retried, not cached as a capability verdict"
+  end
+
+  def test_native_search_probes_with_the_resolved_client
+    client = Object.new
+    resolution = Struct.new(:client).new(client)
+    probed_with = nil
+    Parse::MongoDB.stub(:require_gem!, nil) do
+      Parse::MongoDB.stub(:available?, true) do
+        Parse::ACLScope.stub(:resolve!, resolution) do
+          H.stub(:rank_fusion_supported?, lambda { |_collection, authorizing_client: nil|
+            probed_with = authorizing_client
+            false
+          }) do
+            Parse::AtlasSearch.stub(:search, ->(*_a, **_k) { [] }) do
+              Parse::VectorSearch.stub(:search, ->(*_a, **_k) { [] }) do
+                H.search(
+                  "Song",
+                  lexical: { query: "rain" },
+                  vector: { query_vector: [0.1], field: "embedding" },
+                  fusion: { method: :rrf_native },
+                  client: client,
+                )
+              end
+            end
+          end
+        end
+      end
+    end
+
+    assert_same client, probed_with
   end
 
   # ----- native pipeline shape (security-relevant) -----

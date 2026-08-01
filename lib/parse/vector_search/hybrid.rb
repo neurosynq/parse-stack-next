@@ -156,14 +156,21 @@ module Parse
         # cached per collection for {PROBE_CACHE_TTL}.
         #
         # @param collection [String] Parse class / Mongo collection name.
+        # @param authorizing_client [Parse::Client, nil] client whose
+        #   application binding must be checked before probing.
         # @return [Boolean]
-        def rank_fusion_supported?(collection)
+        def rank_fusion_supported?(collection, authorizing_client: nil)
+          # Check on every call, including cache hits. Otherwise a verdict
+          # cached by application A could bypass the unidentified/mismatched
+          # caller guard when application B asks about the same collection.
+          Parse::MongoDB.verify_client!(authorizing_client)
+
           key = collection.to_s
           now = monotonic
           cached = probe_cache_get(key, now)
           return cached unless cached.nil?
 
-          supported = run_probe(key)
+          supported = run_probe(key, authorizing_client: authorizing_client)
           probe_cache_put(key, supported, now)
           supported
         end
@@ -256,25 +263,34 @@ module Parse
           # two-aggregate client path unless a caller explicitly opts into
           # native AND the cluster supports it. Native still falls back to
           # the client path on any execution error.
-          if method == :rrf_native && rank_fusion_supported?(collection_name)
-            # The native pipeline enforces ACL AFTER fusion, so its
-            # per-branch limit is the pre-ACL depth: the candidate
-            # window, not the fusion depth.
-            fused = run_native(collection_name, lex, vec, candidate_window,
-                               k_constant: k_constant, weights: weights, scope_opts: scope_opts)
-            if fused
-              trimmed = fused.first(k_int)
-              # Native retains the full candidate window per branch,
-              # NOT the client path's fusion depth: its ACL `$match`
-              # runs after `$rankFusion`, so the branch limit and the
-              # pre-ACL window are necessarily the same number. Report
-              # what actually executed rather than the client figure.
-              emit_hybrid_stats(collection_name: collection_name, k: k_int,
-                                method: :rrf_native, branch_depth: candidate_window,
-                                candidate_window: candidate_window,
-                                post_filter_count: fused.length,
-                                returned_count: trimmed.length)
-              return trimmed
+          if method == :rrf_native
+            native_resolution = Parse::ACLScope.resolve!(
+              scope_opts.dup, method_name: :"VectorSearch::Hybrid.search",
+            )
+            if rank_fusion_supported?(
+              collection_name,
+              authorizing_client: Parse::ACLScope.client_of(native_resolution),
+            )
+              # The native pipeline enforces ACL AFTER fusion, so its
+              # per-branch limit is the pre-ACL depth: the candidate
+              # window, not the fusion depth.
+              fused = run_native(collection_name, lex, vec, candidate_window,
+                                 k_constant: k_constant, weights: weights, scope_opts: scope_opts,
+                                 resolution: native_resolution)
+              if fused
+                trimmed = fused.first(k_int)
+                # Native retains the full candidate window per branch,
+                # NOT the client path's fusion depth: its ACL `$match`
+                # runs after `$rankFusion`, so the branch limit and the
+                # pre-ACL window are necessarily the same number. Report
+                # what actually executed rather than the client figure.
+                emit_hybrid_stats(collection_name: collection_name, k: k_int,
+                                  method: :rrf_native, branch_depth: candidate_window,
+                                  candidate_window: candidate_window,
+                                  post_filter_count: fused.length,
+                                  returned_count: trimmed.length)
+                return trimmed
+              end
             end
           end
 
@@ -440,8 +456,8 @@ module Parse
           pipeline
         end
 
-        def run_native(collection_name, lex, vec, oversample, k_constant:, weights:, scope_opts:)
-          resolution = Parse::ACLScope.resolve!(scope_opts.dup, method_name: :"VectorSearch::Hybrid.search")
+        def run_native(collection_name, lex, vec, oversample, k_constant:, weights:, scope_opts:, resolution: nil)
+          resolution ||= Parse::ACLScope.resolve!(scope_opts.dup, method_name: :"VectorSearch::Hybrid.search")
           assert_clp_find!(collection_name, resolution)
           pointer_fields = resolve_pointer_fields!(collection_name, resolution)
           protected_fields = Parse::CLPScope.protected_fields_for(
@@ -544,11 +560,17 @@ module Parse
         # -- the $rankFusion support probe -------------------------------
 
         # Capability probe only: runs `$rankFusion` with an empty input and a
-        # `$limit 0`, so it reads no rows and needs no authorization scope.
-        def run_probe(collection_name)
-          coll = Parse::MongoDB.collection(collection_name)
+        # `$limit 0`, so it reads no rows. It still carries the authorizing
+        # client because the process-global MongoDB connection must enforce
+        # its application binding even for a zero-row probe.
+        def run_probe(collection_name, authorizing_client: nil)
+          coll = Parse::MongoDB.collection(collection_name, authorizing_client: authorizing_client)
           coll.aggregate([{ "$rankFusion" => { "input" => {} } }, { "$limit" => 0 }]).to_a
           true
+        rescue Parse::MongoDB::ClientMismatch
+          # A binding violation is not evidence that the stage exists. It is a
+          # security boundary and must reach the caller without being cached.
+          raise
         rescue StandardError => e
           # "Unknown aggregation stage $rankFusion" (or an unrecognized-
           # operator variant) means the cluster predates native support.

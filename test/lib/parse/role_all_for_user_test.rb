@@ -154,6 +154,15 @@ class RoleAllForUserTest < Minitest::Test
     assert_equal Set.new, Parse::Role.all_for_user(@user_pointer)
   end
 
+  def test_lookup_failure_raises_in_strict_mode
+    failure = ->(**) { raise IOError, "simulated Parse Server outage" }
+    Parse::Role.stub(:all, failure) do
+      assert_raises(IOError) do
+        Parse::Role.all_for_user(@user_pointer, strict: true)
+      end
+    end
+  end
+
   def test_string_user_id_is_coerced_to_pointer
     member = Role.new("R1", "Member")
     # Box the captured kwargs so the closure assignment lands in the
@@ -223,6 +232,18 @@ class RoleAllParentRoleNamesTest < Minitest::Test
   def test_nil_id_returns_empty_set
     role = Parse::Role.new(name: "DangerousButUnsaved")
     assert_equal Set.new, role.all_parent_role_names
+  end
+
+  def test_parent_lookup_failure_raises_in_strict_mode
+    role = Parse::Role.new(name: "Admin")
+    role.id = "R1"
+    failure = ->(**) { raise IOError, "simulated Parse Server outage" }
+
+    Parse::Role.stub(:all, failure) do
+      assert_raises(IOError) do
+        role.all_parent_role_names(strict: true)
+      end
+    end
   end
 end
 

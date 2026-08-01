@@ -116,6 +116,11 @@ module Parse
       # from what remains of the configured TTL.
       def fresh?(pttl_ms)
         return true if @roles_plane.nil?
+        # A remaining TTL larger than the configured starting TTL cannot be
+        # aged with this reader's assumptions. Subtracting it would produce a
+        # negative elapsed time and a future write timestamp, which could pass
+        # the epoch gate and re-admit a pre-invalidation entry. Fail closed.
+        return false if pttl_ms > @upstream_ttl_ms
         elapsed_ms = @upstream_ttl_ms - pttl_ms
         written_at = Time.now.to_f - (elapsed_ms / 1000.0)
         @roles_plane.fresh_since_epoch?(written_at)

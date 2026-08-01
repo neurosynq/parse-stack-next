@@ -44,6 +44,31 @@ module Parse
     # branch on `kind` before dereferencing.
     CacheEntry = Struct.new(:kind, :clp, :fetched_at, keyword_init: true)
 
+    # Result of evaluating a single CLP branch for object-access inspection.
+    # This is intentionally richer than {permits?}: Parse Server only applies
+    # pointer permissions when no public/user/role branch already grants the
+    # operation, and callers must then inspect the target row before answering.
+    AccessEvaluation = Struct.new(
+      :status, :via, :pointer_fields, :role_claims, :reason,
+      keyword_init: true,
+    ) do
+      def allowed?
+        status == :allowed
+      end
+
+      def denied?
+        status == :denied
+      end
+
+      def unknown?
+        status == :unknown
+      end
+
+      def row_check_required?
+        status == :allowed && pointer_fields&.any?
+      end
+    end
+
     # Positive-cache TTL (seconds): how long a successful schema fetch
     # is reused. Mirrors the previous module-level `@cache_ttl` knob;
     # kept identical to preserve backwards-compatible cache behavior.
@@ -64,11 +89,11 @@ module Parse
     class << self
       attr_accessor :cache_ttl, :schema_client
 
-      def permits?(class_name, op, permission_strings)
+      def permits?(class_name, op, permission_strings, client: nil)
         return true if permission_strings.nil?  # master-key bypass
         return true unless OPERATIONS.include?(op)
 
-        entry = fetch(class_name)
+        entry = fetch(class_name, client: client)
         # `fetch` never returns nil now — it returns an `:unresolvable`
         # CacheEntry on failure so callers must branch on `kind`.
         case entry.kind
@@ -120,14 +145,14 @@ module Parse
         false
       end
 
-      def assert_permitted!(class_name, op, permission_strings)
-        return if permits?(class_name, op, permission_strings)
+      def assert_permitted!(class_name, op, permission_strings, client: nil)
+        return if permits?(class_name, op, permission_strings, client: client)
         raise Denied.new(class_name, op,
                          "CLP refuses #{op} on '#{class_name}' for the current scope.")
       end
 
-      def pointer_fields_for(class_name, op)
-        entry = fetch(class_name)
+      def pointer_fields_for(class_name, op, client: nil)
+        entry = fetch(class_name, client: client)
         # No CLP at all, or schema unresolvable: there's no
         # pointerFields constraint to apply. (For :unresolvable the
         # caller's `permits?` already failed closed; this helper just
@@ -151,14 +176,14 @@ module Parse
       # @param op [Symbol] CLP operation.
       # @return [Array<String>, nil] pointer field names, or nil when the
       #   operation has no corresponding user-field constraint.
-      def user_fields_for(class_name, op)
+      def user_fields_for(class_name, op, client: nil)
         key = case op.to_sym
           when :find, :get, :count then "readUserFields"
-          when :update, :delete then "writeUserFields"
+          when :create, :update, :delete then "writeUserFields"
           end
         return nil if key.nil?
 
-        entry = fetch(class_name)
+        entry = fetch(class_name, client: client)
         return nil if entry.kind == :no_clp || entry.kind == :unresolvable
 
         fields = entry.clp[key] || entry.clp[key.to_sym]
@@ -166,10 +191,99 @@ module Parse
         arr.empty? ? nil : arr
       end
 
-      def protected_fields_for(class_name, permission_strings)
+      # Evaluate the same mutually-exclusive CLP branches Parse Server uses
+      # before applying a query to a particular row. Public, direct-user, and
+      # role grants bypass pointer constraints. `requiresAuthentication` does
+      # not: when pointer/user fields exist, a concrete authenticated `_User`
+      # id must still match the row.
+      #
+      # Unlike {permits?}, schema lookup failures are reported as `:unknown`
+      # rather than collapsed into a denial. Authorization-enforcing callers
+      # can still fail closed by accepting only {AccessEvaluation#allowed?}.
+      #
+      # @param class_name [String] Parse class name.
+      # @param op [Symbol] one of {OPERATIONS}.
+      # @param claims [Enumerable<String>] public, user, and role claims.
+      # @param authenticated [Boolean] whether authentication is established.
+      # @param user_id [String, nil] concrete authenticated `_User.objectId`.
+      # @param client [Parse::Client] application whose schema owns the CLP.
+      # @return [AccessEvaluation]
+      def evaluate_access(class_name, op, claims:, authenticated:, user_id: nil, client: nil)
+        op = op.to_sym
+        unless OPERATIONS.include?(op)
+          return access_evaluation(:unknown, reason: :unsupported_operation)
+        end
+
+        entry = fetch(class_name, client: client)
+        case entry.kind
+        when :unresolvable
+          return access_evaluation(:unknown, reason: :clp_unresolvable)
+        when :no_clp
+          return access_evaluation(:allowed, via: :public_default)
+        end
+
+        op_map = entry.clp[op.to_s] || entry.clp[op]
+        # Parse Server treats an omitted operation map as public. Because that
+        # is already a base grant, grouped pointer fields do not narrow it.
+        return access_evaluation(:allowed, via: :public_default) if op_map.nil?
+        unless op_map.is_a?(Hash)
+          return access_evaluation(:unknown, reason: :malformed_clp)
+        end
+
+        claim_set = claims.is_a?(Set) ? claims : Set.new(Array(claims).map(&:to_s))
+        role_claims = op_map.each_with_object([]) do |(principal, allowed), memo|
+          key = principal.to_s
+          memo << key if allowed == true && key.start_with?("role:")
+        end.freeze
+
+        if op_map["*"] == true || op_map[:"*"] == true
+          return access_evaluation(:allowed, via: :public, role_claims: role_claims)
+        end
+
+        direct_claim = op_map.find do |principal, allowed|
+          key = principal.to_s
+          allowed == true && key != "*" && key != "requiresAuthentication" &&
+            key != "pointerFields" && claim_set.include?(key)
+        end
+        if direct_claim
+          return access_evaluation(
+                   :allowed,
+                   via: direct_claim.first.to_s.start_with?("role:") ? :role : :user,
+                   role_claims: role_claims,
+                 )
+        end
+
+        pointer_fields = pointer_fields_from(entry.clp, op)
+        requires_authentication =
+          op_map["requiresAuthentication"] == true || op_map[:requiresAuthentication] == true
+
+        if pointer_fields.any?
+          if authenticated == true && !user_id.to_s.empty?
+            return access_evaluation(
+                     :allowed,
+                     via: :pointer,
+                     pointer_fields: pointer_fields,
+                     role_claims: role_claims,
+                   )
+          end
+
+          status = authenticated == true ? :unknown : :denied
+          reason = authenticated == true ? :concrete_user_required : :authentication_required
+          return access_evaluation(status, role_claims: role_claims, reason: reason)
+        end
+
+        if requires_authentication && authenticated == true
+          return access_evaluation(:allowed, via: :authenticated, role_claims: role_claims)
+        end
+
+        reason = requires_authentication ? :authentication_required : :clp_denied
+        access_evaluation(:denied, role_claims: role_claims, reason: reason)
+      end
+
+      def protected_fields_for(class_name, permission_strings, client: nil)
         return EMPTY_SET if permission_strings.nil?
 
-        entry = fetch(class_name)
+        entry = fetch(class_name, client: client)
         # No CLP / unresolvable: nothing to strip. For :unresolvable,
         # `permits?` already refused the query, so this branch is only
         # reached when callers ask for the protected-fields set directly
@@ -205,8 +319,15 @@ module Parse
         documents.select { |doc| any_pointer_matches?(doc, pointer_fields, user_id.to_s) }
       end
 
-      def invalidate!(class_name)
-        @cache_mutex.synchronize { @cache.delete(class_name.to_s) }
+      def invalidate!(class_name, client: nil)
+        class_key = class_name.to_s
+        @cache_mutex.synchronize do
+          if client
+            @cache.delete(cache_key(class_key, client))
+          else
+            @cache.delete_if { |(_scope, cached_class), _entry| cached_class == class_key }
+          end
+        end
         nil
       end
 
@@ -221,7 +342,11 @@ module Parse
 
       def cache_stats
         @cache_mutex.synchronize do
-          { size: @cache.size, class_names: @cache.keys.sort }
+          {
+            size: @cache.size,
+            class_names: @cache.keys.map(&:last).uniq.sort,
+            scopes: @cache.keys.map(&:first).uniq.sort,
+          }
         end
       end
 
@@ -230,11 +355,11 @@ module Parse
       # `:no_clp` (matches the public-default semantics Parse Server
       # exposes when no CLP is configured); a non-empty `clp` is
       # recorded as `:cached_clp` (the standard happy path).
-      def __cache_put(class_name, clp:)
+      def __cache_put(class_name, clp:, client: nil)
         normalized = clp || {}
         kind = normalized.empty? ? :no_clp : :cached_clp
         entry = CacheEntry.new(kind: kind, clp: normalized, fetched_at: monotonic_now)
-        @cache_mutex.synchronize { @cache[class_name.to_s] = entry }
+        @cache_mutex.synchronize { @cache[cache_key(class_name, client)] = entry }
         entry
       end
 
@@ -258,22 +383,24 @@ module Parse
       # An empty `class_name` short-circuits to an `:unresolvable`
       # entry — `permits?` will refuse the call rather than dispatching
       # `schema("")` to the upstream client.
-      def fetch(class_name)
-        key = class_name.to_s
-        return unresolvable_entry if key.empty?
+      def fetch(class_name, client: nil)
+        class_key = class_name.to_s
+        return unresolvable_entry if class_key.empty?
+
+        resolved_client = client || schema_client || default_client_safe
+        key = cache_key(class_key, resolved_client)
 
         cached = @cache_mutex.synchronize { @cache[key] }
         return cached if cached && !stale?(cached)
 
-        client = schema_client || default_client_safe
-        entry = if client.nil?
+        entry = if resolved_client.nil?
             # No client configured (Parse.setup never called, etc.) —
             # treat as unresolvable so we fail closed instead of
             # crashing inside the begin block with NoMethodError.
             unresolvable_entry
           else
             begin
-              response = client.schema(key)
+              response = resolved_client.schema(class_key)
               if response&.success?
                 schema = response.result || {}
                 clp = schema["classLevelPermissions"] || {}
@@ -342,6 +469,46 @@ module Parse
         Parse::Client.client(:default)
       end
 
+      # Cache CLP by Parse application, not merely by class name. Two clients
+      # can legitimately point at different applications that both contain a
+      # `Document` class with unrelated permissions.
+      def cache_key(class_name, client = nil)
+        resolved_client = client || schema_client || default_client_safe
+        scope = if resolved_client.nil?
+            "client:none"
+          elsif resolved_client.respond_to?(:server_url) &&
+                resolved_client.respond_to?(:application_id)
+            "app:#{resolved_client.server_url}\u0000#{resolved_client.application_id}"
+          else
+            "client:#{resolved_client.object_id}"
+          end
+        [scope.freeze, class_name.to_s.freeze].freeze
+      end
+
+      def access_evaluation(status, via: nil, pointer_fields: EMPTY_SET,
+                                    role_claims: EMPTY_SET, reason: nil)
+        AccessEvaluation.new(
+          status: status,
+          via: via,
+          pointer_fields: Array(pointer_fields).map(&:to_s).uniq.freeze,
+          role_claims: Array(role_claims).map(&:to_s).uniq.freeze,
+          reason: reason,
+        ).freeze
+      end
+
+      def pointer_fields_from(clp, op)
+        op_map = clp[op.to_s] || clp[op]
+        per_operation = if op_map.is_a?(Hash)
+            op_map["pointerFields"] || op_map[:pointerFields]
+          end
+        grouped_key = case op.to_sym
+          when :find, :get, :count then "readUserFields"
+          when :create, :update, :delete then "writeUserFields"
+          end
+        grouped = grouped_key && (clp[grouped_key] || clp[grouped_key.to_sym])
+        (Array(per_operation) + Array(grouped)).map(&:to_s).reject(&:empty?).uniq.freeze
+      end
+
       def user_identity?(entry)
         s = entry.to_s
         s != "*" && !s.start_with?("role:")
@@ -363,19 +530,25 @@ module Parse
         pointer_fields.any? do |field|
           val = doc[field] || doc[field.to_sym]
           if val.is_a?(Hash)
-            return true if val["objectId"] == user_id || val[:objectId] == user_id
+            return true if user_pointer_matches?(val, user_id)
           elsif val.is_a?(Array)
-            return true if val.any? do |v|
-              v.is_a?(Hash) && (v["objectId"] == user_id || v[:objectId] == user_id)
-            end
+            return true if val.any? { |v| user_pointer_matches?(v, user_id) }
           end
           mongo_val = doc["_p_#{field}"] || doc[:"_p_#{field}"]
           if mongo_val.is_a?(String) && mongo_val.include?("$")
-            _cls, oid = mongo_val.split("$", 2)
-            return true if oid == user_id
+            klass, oid = mongo_val.split("$", 2)
+            return true if klass == Parse::Model::CLASS_USER && oid == user_id
           end
           false
         end
+      end
+
+      def user_pointer_matches?(value, user_id)
+        return false unless value.is_a?(Hash)
+        type = value["__type"] || value[:__type]
+        klass = value["className"] || value[:className]
+        oid = value["objectId"] || value[:objectId]
+        type == Parse::Model::TYPE_POINTER && klass == Parse::Model::CLASS_USER && oid == user_id
       end
     end
 
