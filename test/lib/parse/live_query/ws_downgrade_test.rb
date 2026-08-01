@@ -27,10 +27,10 @@ class TestLiveQueryWsDowngrade < Minitest::Test
   # `Client#parse_client_value(:server_url)` returns it.
   def install_parse_client(server_url)
     fake = Object.new
-    fake.define_singleton_method(:server_url)     { server_url }
+    fake.define_singleton_method(:server_url) { server_url }
     fake.define_singleton_method(:application_id) { "app" }
-    fake.define_singleton_method(:api_key)        { "key" }
-    fake.define_singleton_method(:master_key)     { nil }
+    fake.define_singleton_method(:api_key) { "key" }
+    fake.define_singleton_method(:master_key) { nil }
     Parse::Client.clients[:default] = fake
   end
 

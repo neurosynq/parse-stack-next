@@ -197,6 +197,7 @@ class MassAssignmentProtectionTest < Minitest::Test
       self.parse_class = "InitTrackerTestClass"
       property :title, :string
       attr_accessor :init_log
+
       def initialize(*args)
         super
         @init_log = "ran"

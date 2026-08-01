@@ -245,7 +245,7 @@ module Parse
           dropped = opts.keys.map(&:to_sym) - forwarded
           unless dropped.empty?
             warn "[#{self}] property #{key.inspect} resolves to a pointer association; " \
-                 "ignoring unsupported option(s) #{dropped.map(&:inspect).join(', ')} " \
+                 "ignoring unsupported option(s) #{dropped.map(&:inspect).join(", ")} " \
                  "(not available on belongs_to)."
           end
           return belongs_to(key, bt_opts)
@@ -447,7 +447,7 @@ module Parse
               expected = record.class.vector_properties.dig(attribute, :dimensions)
               if expected && value.dimensions != expected
                 record.errors.add(attribute,
-                  "field :#{attribute} expected #{expected} dimensions, got #{value.dimensions}.")
+                                  "field :#{attribute} expected #{expected} dimensions, got #{value.dimensions}.")
               end
             end
           end # validates_each

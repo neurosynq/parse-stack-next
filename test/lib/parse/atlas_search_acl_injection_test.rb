@@ -54,6 +54,7 @@ class AtlasSearchACLInjectionTest < Minitest::Test
   # Atlas Search immediately materializes via .to_a).
   class FakeCollection
     attr_reader :pipelines, :options
+
     def initialize
       @pipelines = []
       @options = []
@@ -95,10 +96,10 @@ class AtlasSearchACLInjectionTest < Minitest::Test
     # protectedFields) call seed_clp themselves; __cache_put just
     # overwrites this seed.
     Parse::CLPScope.__cache_put("Song", clp: {
-      "find" => { "*" => true },
-      "get" => { "*" => true },
-      "count" => { "*" => true },
-    })
+                                          "find" => { "*" => true },
+                                          "get" => { "*" => true },
+                                          "count" => { "*" => true },
+                                        })
 
     @collections = Hash.new { |h, k| h[k] = FakeCollection.new }
 
@@ -106,7 +107,9 @@ class AtlasSearchACLInjectionTest < Minitest::Test
     Parse::MongoDB.define_singleton_method(:available?) { true }
     @original_collection = Parse::MongoDB.method(:collection)
     collections = @collections
-    Parse::MongoDB.define_singleton_method(:collection) do |name|
+    # `collection` takes `authorizing_client:` so the binding guard can see
+    # which client authorized the read; accept and ignore it here.
+    Parse::MongoDB.define_singleton_method(:collection) do |name, **_opts|
       collections[name.to_s]
     end
   end
@@ -347,7 +350,7 @@ class AtlasSearchACLInjectionTest < Minitest::Test
     Parse::AtlasSearch.allow_raw = true
     token = stub_session(user_id: "U1", role_names: [])
     result = Parse::AtlasSearch.search("Song", "hi", session_token: token, raw: true,
-                                       class_name: "Song")
+                                                     class_name: "Song")
     rows = result.raw_results
     assert_equal 1, rows.length
     refute rows.first.key?("lyrics"),
@@ -714,7 +717,7 @@ class AtlasSearchACLInjectionTest < Minitest::Test
   def no_parse_pointer?(obj)
     case obj
     when Parse::Pointer then false
-    when Hash  then obj.each_pair.all? { |k, v| no_parse_pointer?(k) && no_parse_pointer?(v) }
+    when Hash then obj.each_pair.all? { |k, v| no_parse_pointer?(k) && no_parse_pointer?(v) }
     when Array then obj.all? { |v| no_parse_pointer?(v) }
     else true
     end

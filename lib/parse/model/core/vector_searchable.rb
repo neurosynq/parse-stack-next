@@ -65,6 +65,7 @@ module Parse
       class IndexDriftError < StandardError
         # @return [Array<String>] human-readable drift findings.
         attr_reader :findings
+
         def initialize(message, findings: [])
           @findings = findings
           super(message)
@@ -213,8 +214,7 @@ module Parse
         resolved_field = resolve_vector_field!(field)
         declared_dims = vector_properties.dig(resolved_field, :dimensions)
 
-        query_vector =
-          if text.nil?
+        query_vector = if text.nil?
             coerce_query_vector(vector)
           else
             embed_query_text!(text, resolved_field)
@@ -292,8 +292,7 @@ module Parse
         declared_dims = vector_properties.dig(field_sym, :dimensions)
 
         qv = query_vector || vec[:query_vector]
-        qv =
-          if qv.nil?
+        qv = if qv.nil?
             unless text.is_a?(String) && !text.strip.empty?
               raise ArgumentError,
                     "#{self}.hybrid_search: pass `text:` (to embed) or a `query_vector:`."
@@ -432,7 +431,7 @@ module Parse
       def coerce_query_vector(vector)
         case vector
         when Parse::Vector then vector.to_a
-        when Array         then vector
+        when Array then vector
         else
           raise Parse::VectorSearch::InvalidQueryVector,
                 "vector: must be an Array<Float> or Parse::Vector (got #{vector.class})."

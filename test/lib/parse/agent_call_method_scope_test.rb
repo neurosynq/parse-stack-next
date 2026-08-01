@@ -17,12 +17,14 @@ class AgentCallMethodScopeTest < Minitest::Test
     def read_title
       title
     end
+
     agent_method :read_title, permission: :readonly
 
     def retitle(title: nil)
       self.title = title
       "ok"
     end
+
     agent_method :retitle, permission: :write
   end
 
@@ -105,8 +107,8 @@ class AgentCallMethodScopeTest < Minitest::Test
   # enforced (no session token to bind) and must be refused before execution.
   def test_acl_role_instance_write_method_is_refused
     Parse::CLPScope.__cache_put("Sec01Doc", clp: {
-      "find" => { "*" => true }, "update" => { "*" => true },
-    })
+                                              "find" => { "*" => true }, "update" => { "*" => true },
+                                            })
     # Canned role resolution so construction / CLP gate don't hit the network.
     resolved = Parse::ACLScope::Resolution.new(
       mode: :role, permission_strings: ["role:editors"], user_id: nil,
@@ -120,8 +122,8 @@ class AgentCallMethodScopeTest < Minitest::Test
       agent = Parse::Agent.new(acl_role: "editors", client: master_client, permissions: :write)
       err = assert_raises(Parse::Agent::AccessDenied) do
         Parse::Agent::Tools.call_method(agent, class_name: "Sec01Doc",
-                                        method_name: "retitle", object_id: "o1",
-                                        arguments: { title: "x" })
+                                               method_name: "retitle", object_id: "o1",
+                                               arguments: { title: "x" })
       end
       assert_equal :unenforceable_scope, err.kind
     end

@@ -93,9 +93,9 @@ module Parse
       # @raise [ArgumentError] when validation rules fail (no fields,
       #   unknown field, parallel arrays, relation field, etc.)
       def mongo_index(*fields, unique: false, sparse: false, partial: nil,
-                      expire_after: nil, name: nil)
+                               expire_after: nil, name: nil)
         register_index(fields, key_value: 1, unique: unique, sparse: sparse,
-                       partial: partial, expire_after: expire_after, name: name)
+                               partial: partial, expire_after: expire_after, name: name)
       end
 
       # Declare a UNIQUE index on the exact dedup tuple that
@@ -175,7 +175,7 @@ module Parse
       # which `2dsphere` indexes natively.
       def mongo_geo_index(field, sparse: false, name: nil)
         register_index([field], key_value: "2dsphere", unique: false,
-                       sparse: sparse, partial: nil, expire_after: nil, name: name)
+                                sparse: sparse, partial: nil, expire_after: nil, name: name)
       end
 
       # Declare an index on a Parse Relation's join collection. Relations
@@ -277,7 +277,7 @@ module Parse
       private
 
       def register_index(fields, key_value:, unique:, sparse:, partial:,
-                         expire_after:, name:)
+                                 expire_after:, name:)
         fields = fields.flatten.map(&:to_sym)
         if fields.empty?
           raise ArgumentError, "#{self}.mongo_index requires at least one field name"
@@ -304,13 +304,13 @@ module Parse
         assert_at_most_one_array_field!(fields, wire_keys)
 
         declaration = {
-          keys:          wire_keys,
-          options:       {
+          keys: wire_keys,
+          options: {
             unique: unique, sparse: sparse,
             partial_filter: partial, expire_after: expire_after, name: name,
           }.reject { |_, v| v.nil? || v == false }.freeze,
-          declared_for:  fields.dup.freeze,
-          collection:    nil, # nil sentinel means "use the model's parse_class"
+          declared_for: fields.dup.freeze,
+          collection: nil, # nil sentinel means "use the model's parse_class"
         }.freeze
 
         # Idempotent redeclaration (same class re-opened or sub-class
@@ -325,10 +325,10 @@ module Parse
       # model's `parse_class`.
       def register_relation_index(collection, column, source:)
         decl = {
-          keys:         { column => 1 }.freeze,
-          options:      {}.freeze,
+          keys: { column => 1 }.freeze,
+          options: {}.freeze,
           declared_for: [source].freeze,
-          collection:   collection,
+          collection: collection,
         }.freeze
         append_index_declaration(decl)
       end
@@ -343,10 +343,10 @@ module Parse
       # column (which `mongo_relation_index` continues to reject).
       def register_relation_dedup_index(collection, source:)
         decl = {
-          keys:         { "owningId" => 1, "relatedId" => 1 }.freeze,
-          options:      { unique: true }.freeze,
+          keys: { "owningId" => 1, "relatedId" => 1 }.freeze,
+          options: { unique: true }.freeze,
           declared_for: [source].freeze,
-          collection:   collection,
+          collection: collection,
         }.freeze
         append_index_declaration(decl)
       end

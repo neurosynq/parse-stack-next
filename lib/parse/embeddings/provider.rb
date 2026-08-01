@@ -245,7 +245,7 @@ module Parse
       def inspect_attrs
         out = {}
         out[:model] = safe_call(:model_name)
-        out[:dim]   = safe_call(:dimensions)
+        out[:dim] = safe_call(:dimensions)
         out.compact
       end
 

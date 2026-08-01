@@ -30,7 +30,7 @@ class MCPIntegrationTest < Minitest::Test
       Parse.setup(
         server_url: "http://localhost:1337/parse",
         application_id: "test-app-id",
-        api_key:        "test-api-key",
+        api_key: "test-api-key",
       )
     end
 
@@ -49,7 +49,6 @@ class MCPIntegrationTest < Minitest::Test
     else
       @mcp_stub_was_active = false
     end
-
   end
 
   def teardown
@@ -75,15 +74,15 @@ class MCPIntegrationTest < Minitest::Test
     raw = body.is_a?(String) ? body : JSON.generate(body)
     env = {
       "REQUEST_METHOD" => "POST",
-      "CONTENT_TYPE"   => "application/json",
-      "rack.input"     => StringIO.new(raw),
-      "rack.errors"    => $stderr,
+      "CONTENT_TYPE" => "application/json",
+      "rack.input" => StringIO.new(raw),
+      "rack.errors" => $stderr,
     }.merge(headers)
 
     kwargs = { agent_factory: agent_factory }
     kwargs[:max_body_size] = max_body_size if max_body_size
 
-    app    = Parse::Agent::MCPRackApp.new(**kwargs)
+    app = Parse::Agent::MCPRackApp.new(**kwargs)
     status, hdrs, chunks = app.call(env)
     parsed = JSON.parse(chunks.join)
     [status, hdrs, parsed]
@@ -94,10 +93,10 @@ class MCPIntegrationTest < Minitest::Test
   # injected rate-limiters are exercised correctly.
   def stubbed_agent(rate_limiter: nil)
     agent = if rate_limiter
-      Parse::Agent.new(rate_limiter: rate_limiter)
-    else
-      Parse::Agent.new
-    end
+        Parse::Agent.new(rate_limiter: rate_limiter)
+      else
+        Parse::Agent.new
+      end
 
     agent.define_singleton_method(:execute) do |tool_name, **kwargs|
       # Honor the rate limiter so tests that inject a shared limiter work.
@@ -112,8 +111,8 @@ class MCPIntegrationTest < Minitest::Test
             custom: [{ name: "Song", type: "Custom", description: "Music tracks", fields: 5 }],
             built_in: [{ name: "_User", type: "System", description: "Auth users", fields: 10 }],
             classes: [
-              { name: "Song",  type: "Custom", description: "Music tracks" },
-              { name: "_User", type: "System", description: "Auth users"   },
+              { name: "Song", type: "Custom", description: "Music tracks" },
+              { name: "_User", type: "System", description: "Auth users" },
             ],
           },
         }
@@ -146,8 +145,8 @@ class MCPIntegrationTest < Minitest::Test
 
     assert_equal 200, status
     assert_equal "application/json", hdrs["Content-Type"]
-    assert_equal "2.0",  body["jsonrpc"]
-    assert_equal 1,      body["id"]
+    assert_equal "2.0", body["jsonrpc"]
+    assert_equal 1, body["id"]
     result = body["result"]
     assert_equal Parse::Agent::MCPDispatcher::PROTOCOL_VERSION, result["protocolVersion"]
     assert result.key?("capabilities")
@@ -163,8 +162,8 @@ class MCPIntegrationTest < Minitest::Test
 
     assert_equal 200, status
     assert_equal "2.0", body["jsonrpc"]
-    assert_equal 2,     body["id"]
-    assert_equal({},    body["result"])
+    assert_equal 2, body["id"]
+    assert_equal({}, body["result"])
   end
 
   def test_tools_list_returns_mcp_format
@@ -179,7 +178,7 @@ class MCPIntegrationTest < Minitest::Test
     assert tools.size > 0, "Should return at least one tool"
     # Each tool must have at minimum name and inputSchema (MCP format)
     tools.each do |t|
-      assert t.key?("name"),        "Tool missing 'name': #{t.inspect}"
+      assert t.key?("name"), "Tool missing 'name': #{t.inspect}"
       assert t.key?("inputSchema"), "Tool missing 'inputSchema': #{t.inspect}"
     end
   end
@@ -188,9 +187,9 @@ class MCPIntegrationTest < Minitest::Test
     status, _hdrs, body = post_mcp(
       {
         "jsonrpc" => "2.0",
-        "id"      => 4,
-        "method"  => "tools/call",
-        "params"  => { "name" => "get_all_schemas", "arguments" => {} },
+        "id" => 4,
+        "method" => "tools/call",
+        "params" => { "name" => "get_all_schemas", "arguments" => {} },
       },
       agent_factory: permissive_factory,
     )
@@ -214,9 +213,9 @@ class MCPIntegrationTest < Minitest::Test
     status, _hdrs, body = post_mcp(
       {
         "jsonrpc" => "2.0",
-        "id"      => 5,
-        "method"  => "tools/call",
-        "params"  => { "name" => "query_class", "arguments" => { "class_name" => "Song" } },
+        "id" => 5,
+        "method" => "tools/call",
+        "params" => { "name" => "query_class", "arguments" => { "class_name" => "Song" } },
       },
       agent_factory: ->(_env) { agent },
     )
@@ -247,9 +246,9 @@ class MCPIntegrationTest < Minitest::Test
     status, _hdrs, body = post_mcp(
       {
         "jsonrpc" => "2.0",
-        "id"      => 7,
-        "method"  => "prompts/get",
-        "params"  => { "name" => "parse_conventions", "arguments" => {} },
+        "id" => 7,
+        "method" => "prompts/get",
+        "params" => { "name" => "parse_conventions", "arguments" => {} },
       },
       agent_factory: permissive_factory,
     )
@@ -293,8 +292,8 @@ class MCPIntegrationTest < Minitest::Test
     raw = JSON.generate({ "jsonrpc" => "2.0", "id" => 9, "method" => "ping" })
     env = {
       "REQUEST_METHOD" => "POST",
-      "CONTENT_TYPE"   => "application/json",
-      "rack.input"     => StringIO.new(raw),
+      "CONTENT_TYPE" => "application/json",
+      "rack.input" => StringIO.new(raw),
     }
     status, _hdrs, chunks = app.call(env)
     assert_equal 200, status
@@ -309,9 +308,9 @@ class MCPIntegrationTest < Minitest::Test
 
     assert_equal 401, status
     assert_equal "application/json", hdrs["Content-Type"]
-    assert_equal "2.0",        body["jsonrpc"]
-    assert_nil                 body["id"]
-    assert_equal(-32_001,      body.dig("error", "code"))
+    assert_equal "2.0", body["jsonrpc"]
+    assert_nil body["id"]
+    assert_equal(-32_001, body.dig("error", "code"))
     assert_equal "Unauthorized", body.dig("error", "message")
     # No exception detail must leak
     refute_includes body.to_json, "bad bearer token"
@@ -412,7 +411,7 @@ class MCPIntegrationTest < Minitest::Test
     assert_equal 400, status
     assert_equal "application/json", hdrs["Content-Type"]
     assert_equal "2.0", body["jsonrpc"]
-    assert_nil          body["id"]
+    assert_nil body["id"]
     assert_equal(-32_700, body.dig("error", "code"))
     assert_includes body.dig("error", "message"), "Parse error"
   end
@@ -468,9 +467,9 @@ class MCPIntegrationTest < Minitest::Test
     status, _hdrs, body = post_mcp(
       {
         "jsonrpc" => "2.0",
-        "id"      => 23,
-        "method"  => "prompts/get",
-        "params"  => { "name" => "nonexistent_prompt_xyz", "arguments" => {} },
+        "id" => 23,
+        "method" => "prompts/get",
+        "params" => { "name" => "nonexistent_prompt_xyz", "arguments" => {} },
       },
       agent_factory: permissive_factory,
     )
@@ -537,9 +536,9 @@ class MCPIntegrationTest < Minitest::Test
       status, _hdrs, body = post_mcp(
         {
           "jsonrpc" => "2.0",
-          "id"      => 40 + i,
-          "method"  => "tools/call",
-          "params"  => { "name" => "get_all_schemas", "arguments" => {} },
+          "id" => 40 + i,
+          "method" => "tools/call",
+          "params" => { "name" => "get_all_schemas", "arguments" => {} },
         },
         agent_factory: factory,
       )
@@ -554,9 +553,9 @@ class MCPIntegrationTest < Minitest::Test
     status4, _hdrs4, body4 = post_mcp(
       {
         "jsonrpc" => "2.0",
-        "id"      => 43,
-        "method"  => "tools/call",
-        "params"  => { "name" => "get_all_schemas", "arguments" => {} },
+        "id" => 43,
+        "method" => "tools/call",
+        "params" => { "name" => "get_all_schemas", "arguments" => {} },
       },
       agent_factory: factory,
     )
@@ -575,10 +574,10 @@ class MCPIntegrationTest < Minitest::Test
 
   def test_registered_custom_prompt_appears_in_prompts_list
     Parse::Agent::Prompts.register(
-      name:        "test_custom_prompt",
+      name: "test_custom_prompt",
       description: "A custom test prompt",
-      arguments:   [{ "name" => "widget_id", "description" => "ID of the widget", "required" => true }],
-      renderer:    ->(args) { "Do something with widget #{args['widget_id']}" },
+      arguments: [{ "name" => "widget_id", "description" => "ID of the widget", "required" => true }],
+      renderer: ->(args) { "Do something with widget #{args["widget_id"]}" },
     )
 
     status, _hdrs, body = post_mcp(
@@ -588,7 +587,7 @@ class MCPIntegrationTest < Minitest::Test
 
     assert_equal 200, status
     prompts = body.dig("result", "prompts")
-    names   = prompts.map { |p| p["name"] }
+    names = prompts.map { |p| p["name"] }
     assert_includes names, "test_custom_prompt", "Custom prompt should appear in prompts/list"
     entry = prompts.find { |p| p["name"] == "test_custom_prompt" }
     assert_equal "A custom test prompt", entry["description"]
@@ -596,18 +595,18 @@ class MCPIntegrationTest < Minitest::Test
 
   def test_registered_custom_prompt_renders_via_prompts_get
     Parse::Agent::Prompts.register(
-      name:        "test_custom_prompt",
+      name: "test_custom_prompt",
       description: "A custom test prompt",
-      arguments:   [{ "name" => "widget_id", "description" => "ID of the widget", "required" => true }],
-      renderer:    ->(args) { "Do something with widget #{args['widget_id']}" },
+      arguments: [{ "name" => "widget_id", "description" => "ID of the widget", "required" => true }],
+      renderer: ->(args) { "Do something with widget #{args["widget_id"]}" },
     )
 
     status, _hdrs, body = post_mcp(
       {
         "jsonrpc" => "2.0",
-        "id"      => 51,
-        "method"  => "prompts/get",
-        "params"  => { "name" => "test_custom_prompt", "arguments" => { "widget_id" => "wgt42" } },
+        "id" => 51,
+        "method" => "prompts/get",
+        "params" => { "name" => "test_custom_prompt", "arguments" => { "widget_id" => "wgt42" } },
       },
       agent_factory: permissive_factory,
     )
@@ -621,18 +620,18 @@ class MCPIntegrationTest < Minitest::Test
 
   def test_custom_prompt_with_hash_renderer_returns_description
     Parse::Agent::Prompts.register(
-      name:        "hash_renderer_prompt",
+      name: "hash_renderer_prompt",
       description: "Uses a hash renderer",
-      arguments:   [],
-      renderer:    ->(_args) { { description: "Custom description text", text: "Custom message text" } },
+      arguments: [],
+      renderer: ->(_args) { { description: "Custom description text", text: "Custom message text" } },
     )
 
     status, _hdrs, body = post_mcp(
       {
         "jsonrpc" => "2.0",
-        "id"      => 52,
-        "method"  => "prompts/get",
-        "params"  => { "name" => "hash_renderer_prompt", "arguments" => {} },
+        "id" => 52,
+        "method" => "prompts/get",
+        "params" => { "name" => "hash_renderer_prompt", "arguments" => {} },
       },
       agent_factory: permissive_factory,
     )
@@ -645,10 +644,10 @@ class MCPIntegrationTest < Minitest::Test
 
   def test_reset_registry_removes_custom_prompts
     Parse::Agent::Prompts.register(
-      name:        "temp_prompt",
+      name: "temp_prompt",
       description: "Temporary",
-      arguments:   [],
-      renderer:    ->(_args) { "temp" },
+      arguments: [],
+      renderer: ->(_args) { "temp" },
     )
 
     # Verify it's there before reset
@@ -683,10 +682,10 @@ class MCPIntegrationTest < Minitest::Test
 
     # Build a Rack env that carries the wrong API key
     env_bad = {
-      "REQUEST_METHOD"      => "POST",
-      "CONTENT_TYPE"        => "application/json",
-      "HTTP_X_MCP_API_KEY"  => "wrong-key",
-      "rack.input"          => StringIO.new("{}"),
+      "REQUEST_METHOD" => "POST",
+      "CONTENT_TYPE" => "application/json",
+      "HTTP_X_MCP_API_KEY" => "wrong-key",
+      "rack.input" => StringIO.new("{}"),
     }
 
     assert_raises(Parse::Agent::Unauthorized) do
@@ -698,10 +697,10 @@ class MCPIntegrationTest < Minitest::Test
     server = Parse::Agent::MCPServer.new(port: 9993, api_key: "correct-key")
 
     env_good = {
-      "REQUEST_METHOD"      => "POST",
-      "CONTENT_TYPE"        => "application/json",
-      "HTTP_X_MCP_API_KEY"  => "correct-key",
-      "rack.input"          => StringIO.new("{}"),
+      "REQUEST_METHOD" => "POST",
+      "CONTENT_TYPE" => "application/json",
+      "HTTP_X_MCP_API_KEY" => "correct-key",
+      "rack.input" => StringIO.new("{}"),
     }
 
     a = server.send(:agent_factory, env_good)
@@ -724,9 +723,9 @@ class MCPIntegrationTest < Minitest::Test
       server = Parse::Agent::MCPServer.new(port: 9994, api_key: nil)
 
       env_any = {
-        "REQUEST_METHOD"     => "POST",
-        "CONTENT_TYPE"       => "application/json",
-        "rack.input"         => StringIO.new("{}"),
+        "REQUEST_METHOD" => "POST",
+        "CONTENT_TYPE" => "application/json",
+        "rack.input" => StringIO.new("{}"),
       }
 
       result = server.send(:agent_factory, env_any)
@@ -779,9 +778,9 @@ class MCPIntegrationTest < Minitest::Test
     server = Parse::Agent::MCPServer.new(port: 9998, rate_limiter: custom_limiter)
 
     env_good = {
-      "REQUEST_METHOD"  => "POST",
-      "CONTENT_TYPE"    => "application/json",
-      "rack.input"      => StringIO.new("{}"),
+      "REQUEST_METHOD" => "POST",
+      "CONTENT_TYPE" => "application/json",
+      "rack.input" => StringIO.new("{}"),
     }
 
     a = server.send(:agent_factory, env_good)
@@ -806,7 +805,7 @@ class MCPIntegrationTest < Minitest::Test
         agent_factory: permissive_factory,
       )
       assert_equal "2.0", body["jsonrpc"],
-                   "Response for #{m['method']} must carry jsonrpc: '2.0'"
+                   "Response for #{m["method"]} must carry jsonrpc: '2.0'"
     end
   end
 

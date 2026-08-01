@@ -36,7 +36,7 @@ class TestExplainPublicWarn < Minitest::Test
   end
 
   def test_warns_for_explicit_non_master_on_restricted_server
-    q = query_with(client: FakeClient.new("9.9.0", false), use_master_key: false)
+    q = query_with(client: FakeClient.new("9.10.0", false), use_master_key: false)
     assert warned?(q), "should warn for non-master explain on PS 9.x"
   end
 
@@ -46,13 +46,13 @@ class TestExplainPublicWarn < Minitest::Test
   end
 
   def test_no_warn_for_explicit_master
-    q = query_with(client: FakeClient.new("9.9.0", false), use_master_key: true)
+    q = query_with(client: FakeClient.new("9.10.0", false), use_master_key: true)
     refute warned?(q), "master explain should not warn"
   end
 
   def test_no_warn_for_master_default_unspecified
     # use_master_key nil (the common master-default case) → no spurious warn.
-    q = query_with(client: FakeClient.new("9.9.0", false))
+    q = query_with(client: FakeClient.new("9.10.0", false))
     refute warned?(q)
   end
 
@@ -67,7 +67,7 @@ class TestExplainPublicWarn < Minitest::Test
   end
 
   def test_one_shot_latch
-    q = query_with(client: FakeClient.new("9.9.0", false), use_master_key: false)
+    q = query_with(client: FakeClient.new("9.10.0", false), use_master_key: false)
     assert warned?(q)
     # Second call is a no-op; latch stays set and nothing raises.
     assert warned?(q)

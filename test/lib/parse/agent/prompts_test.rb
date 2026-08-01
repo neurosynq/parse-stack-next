@@ -26,9 +26,9 @@ class PromptsTest < Minitest::Test
 
   def test_list_entries_have_string_keys
     entry = P.list.first
-    assert entry.key?("name"),        "entry should have string key 'name'"
+    assert entry.key?("name"), "entry should have string key 'name'"
     assert entry.key?("description"), "entry should have string key 'description'"
-    assert entry.key?("arguments"),   "entry should have string key 'arguments'"
+    assert entry.key?("arguments"), "entry should have string key 'arguments'"
   end
 
   def test_list_with_registered_prompt_includes_custom
@@ -108,10 +108,10 @@ class PromptsTest < Minitest::Test
 
   def test_render_find_relationship
     result = P.render("find_relationship",
-      "parent_class"  => "Team",
-      "parent_id"     => "abc123",
-      "child_class"   => "_User",
-      "pointer_field" => "team")
+                      "parent_class" => "Team",
+                      "parent_id" => "abc123",
+                      "child_class" => "_User",
+                      "pointer_field" => "team")
     text = result["messages"].first["content"]["text"]
     assert_includes text, "Team"
     assert_includes text, "abc123"
@@ -120,8 +120,8 @@ class PromptsTest < Minitest::Test
 
   def test_render_created_in_range_without_until
     result = P.render("created_in_range",
-      "class_name" => "Event",
-      "since"      => "2024-01-01T00:00:00Z")
+                      "class_name" => "Event",
+                      "since" => "2024-01-01T00:00:00Z")
     text = result["messages"].first["content"]["text"]
     assert_includes text, "Event"
     refute_includes text, "and before"
@@ -129,9 +129,9 @@ class PromptsTest < Minitest::Test
 
   def test_render_created_in_range_with_until
     result = P.render("created_in_range",
-      "class_name" => "Event",
-      "since"      => "2024-01-01T00:00:00Z",
-      "until"      => "2024-12-31T23:59:59Z")
+                      "class_name" => "Event",
+                      "since" => "2024-01-01T00:00:00Z",
+                      "until" => "2024-12-31T23:59:59Z")
     text = result["messages"].first["content"]["text"]
     assert_includes text, "and before"
   end
@@ -162,18 +162,18 @@ class PromptsTest < Minitest::Test
   def test_render_find_relationship_invalid_object_id_raises
     assert_raises(Parse::Agent::ValidationError) do
       P.render("find_relationship",
-        "parent_class"  => "Team",
-        "parent_id"     => "has spaces!",
-        "child_class"   => "_User",
-        "pointer_field" => "team")
+               "parent_class" => "Team",
+               "parent_id" => "has spaces!",
+               "child_class" => "_User",
+               "pointer_field" => "team")
     end
   end
 
   def test_render_created_in_range_invalid_iso8601_raises
     assert_raises(Parse::Agent::ValidationError) do
       P.render("created_in_range",
-        "class_name" => "Event",
-        "since"      => "not-a-date")
+               "class_name" => "Event",
+               "since" => "not-a-date")
     end
   end
 
@@ -188,22 +188,22 @@ class PromptsTest < Minitest::Test
   # -------------------------------------------------------------------------
 
   def test_register_adds_custom_prompt
-    P.register(name: "greet", description: "Greet", renderer: ->(args) { "Hello #{args['who']}" })
+    P.register(name: "greet", description: "Greet", renderer: ->(args) { "Hello #{args["who"]}" })
     result = P.render("greet", "who" => "World")
     assert_equal "Hello World", result["messages"].first["content"]["text"]
   end
 
   def test_register_replaces_same_name_prompt
-    P.register(name: "greet", description: "First",  renderer: ->(_) { "first" })
+    P.register(name: "greet", description: "First", renderer: ->(_) { "first" })
     P.register(name: "greet", description: "Second", renderer: ->(_) { "second" })
     assert_equal "second", P.render("greet")["messages"].first["content"]["text"]
   end
 
   def test_register_renderer_returning_hash_uses_description_and_text
     P.register(
-      name:        "rich",
+      name: "rich",
       description: "Rich prompt",
-      renderer:    ->(_) { { description: "Custom desc", text: "Custom text" } }
+      renderer: ->(_) { { description: "Custom desc", text: "Custom text" } },
     )
     result = P.render("rich")
     assert_equal "Custom desc", result["description"]
@@ -215,19 +215,19 @@ class PromptsTest < Minitest::Test
   # -------------------------------------------------------------------------
 
   def test_validate_identifier_accepts_valid_names
-    assert_equal "Song",  V.validate_identifier!("Song",  "class_name")
+    assert_equal "Song", V.validate_identifier!("Song", "class_name")
     assert_equal "_User", V.validate_identifier!("_User", "class_name")
     assert_equal "my_field2", V.validate_identifier!("my_field2", "field")
   end
 
   def test_validate_identifier_rejects_empty
-    assert_raises(Parse::Agent::ValidationError) { V.validate_identifier!(nil,  "f") }
-    assert_raises(Parse::Agent::ValidationError) { V.validate_identifier!("",   "f") }
+    assert_raises(Parse::Agent::ValidationError) { V.validate_identifier!(nil, "f") }
+    assert_raises(Parse::Agent::ValidationError) { V.validate_identifier!("", "f") }
   end
 
   def test_validate_identifier_rejects_bad_chars
     assert_raises(Parse::Agent::ValidationError) { V.validate_identifier!("bad name", "f") }
-    assert_raises(Parse::Agent::ValidationError) { V.validate_identifier!("1bad",     "f") }
+    assert_raises(Parse::Agent::ValidationError) { V.validate_identifier!("1bad", "f") }
   end
 
   def test_validate_object_id_accepts_alphanumeric
@@ -247,7 +247,7 @@ class PromptsTest < Minitest::Test
 
   def test_validate_iso8601_returns_nil_when_optional_and_absent
     assert_nil V.validate_iso8601!(nil, "ts", required: false)
-    assert_nil V.validate_iso8601!("",  "ts", required: false)
+    assert_nil V.validate_iso8601!("", "ts", required: false)
   end
 
   def test_validate_iso8601_raises_when_required_and_absent

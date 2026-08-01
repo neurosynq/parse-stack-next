@@ -29,7 +29,7 @@ class ToolsSchemaValidityTest < Minitest::Test
     offenders = []
     TOOLS.each do |tool_name, defn|
       walk_array_props(defn.dig(:parameters), []) do |path, node|
-        offenders << "#{tool_name}: #{path.join('.')} -> #{node.inspect}" unless node.key?(:items)
+        offenders << "#{tool_name}: #{path.join(".")} -> #{node.inspect}" unless node.key?(:items)
       end
     end
     assert_empty offenders,
@@ -44,7 +44,7 @@ class ToolsSchemaValidityTest < Minitest::Test
     TOOLS.each do |tool_name, defn|
       assert_equal tool_name.to_s, defn[:name], "#{tool_name} :name mismatch"
       refute_nil defn[:description], "#{tool_name} missing :description"
-      refute_nil defn[:parameters],  "#{tool_name} missing :parameters"
+      refute_nil defn[:parameters], "#{tool_name} missing :parameters"
     end
   end
 
@@ -69,7 +69,7 @@ class ToolsSchemaValidityTest < Minitest::Test
       schema = defn[:output_schema]
       next if schema.nil?
       walk_array_props(schema, []) do |path, node|
-        offenders << "#{tool_name}: output_schema.#{path.join('.')} -> #{node.inspect}" unless node.key?(:items)
+        offenders << "#{tool_name}: output_schema.#{path.join(".")} -> #{node.inspect}" unless node.key?(:items)
       end
     end
     assert_empty offenders,
@@ -91,12 +91,11 @@ class ToolsSchemaValidityTest < Minitest::Test
   def test_required_only_references_declared_properties
     offenders = []
     TOOLS.each do |tool_name, defn|
-      params   = defn[:parameters]
+      params = defn[:parameters]
       required = params[:required] || []
       declared = (params[:properties] || {}).keys.map(&:to_s)
       required.each do |r|
-        offenders << "#{tool_name}: required key #{r.inspect} not in properties #{declared.inspect}" \
-          unless declared.include?(r.to_s)
+        offenders << "#{tool_name}: required key #{r.inspect} not in properties #{declared.inspect}" unless declared.include?(r.to_s)
       end
     end
     assert_empty offenders, "Tools list `required` keys with no matching property:\n  " + offenders.join("\n  ")

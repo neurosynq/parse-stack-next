@@ -11,6 +11,7 @@ require "minitest/autorun"
 class WebhookHandlerReturnTest < Minitest::Test
   class HandlerReturnObject < Parse::Object
     property :name
+
     def autofetch!(*args); end
   end
 
@@ -41,7 +42,7 @@ class WebhookHandlerReturnTest < Minitest::Test
     end
 
     assert_equal "early-bob", call_fn("withReturn", "who" => "bob")
-    assert_equal "late",      call_fn("withReturn")
+    assert_equal "late", call_fn("withReturn")
   end
 
   def test_return_can_short_circuit_before_later_work
@@ -51,7 +52,7 @@ class WebhookHandlerReturnTest < Minitest::Test
     end
 
     assert_equal({ error: "denied" }, call_fn("guard"))
-    assert_equal({ ok: true },        call_fn("guard", "allowed" => true))
+    assert_equal({ ok: true }, call_fn("guard", "allowed" => true))
   end
 
   def test_legacy_last_expression_value_still_works
@@ -133,7 +134,7 @@ class WebhookHandlerReturnTest < Minitest::Test
       return "p=#{payload.params["v"]} extra=#{extra.inspect}"
     end
 
-    assert_equal 'p=1 extra=nil', call_fn("twoArg", "v" => 1)
+    assert_equal "p=1 extra=nil", call_fn("twoArg", "v" => 1)
   end
 
   def test_before_save_return_false_halts_save

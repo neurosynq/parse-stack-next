@@ -116,6 +116,7 @@ class EmbeddingsBindingAuditTest < Minitest::Test
   # provider write same-width embeddings that are never checked at all.
   class NoModelNameProvider < Parse::Embeddings::Provider
     def dimensions = 4
+
     def embed_text(strings, input_type: :search_document)
       strings.map { Array.new(4, 0.5) }
     end
@@ -134,6 +135,7 @@ class EmbeddingsBindingAuditTest < Minitest::Test
   class NilModelNameProvider < Parse::Embeddings::Provider
     def dimensions = 4
     def model_name = nil
+
     def embed_text(strings, input_type: :search_document)
       strings.map { Array.new(4, 0.5) }
     end
@@ -150,6 +152,7 @@ class EmbeddingsBindingAuditTest < Minitest::Test
 
   class NoDimensionsProvider < Parse::Embeddings::Provider
     def model_name = "fx-4"
+
     def embed_text(strings, input_type: :search_document)
       strings.map { Array.new(4, 0.5) }
     end

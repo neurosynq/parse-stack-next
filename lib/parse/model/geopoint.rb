@@ -109,6 +109,7 @@ module Parse
       km = 0 if km.nil?
       [@latitude, @longitude, km, :km]
     end
+
     alias_method :max_km, :max_kilometers
 
     # Helper method for performing geo-queries with a radial radians

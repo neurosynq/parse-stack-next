@@ -20,8 +20,8 @@ require_relative "../../test_helper"
 class TestFileWireFormat < Minitest::Test
   def setup
     @original_trusted_hosts = Parse::File.instance_variable_get(:@trusted_url_hosts)
-    @original_policy        = Parse::File.instance_variable_get(:@untrusted_url_policy)
-    @original_warned        = Parse::File.instance_variable_get(:@warned_untrusted_hosts)
+    @original_policy = Parse::File.instance_variable_get(:@untrusted_url_policy)
+    @original_warned = Parse::File.instance_variable_get(:@warned_untrusted_hosts)
     Parse::File.trusted_url_hosts = ["bucket.s3.amazonaws.com", "files.parsetfss.com"]
     Parse::File.untrusted_url_policy = :raise
   end
@@ -63,8 +63,8 @@ class TestFileWireFormat < Minitest::Test
   def test_parse_file_predicate_recognizes_typed_canonical_hash
     h = {
       "__type" => "File",
-      "name"   => "img.png",
-      "url"    => "https://files.parsetfss.com/abc/img.png",
+      "name" => "img.png",
+      "url" => "https://files.parsetfss.com/abc/img.png",
     }
     assert h.parse_file?
   end
@@ -75,8 +75,8 @@ class TestFileWireFormat < Minitest::Test
     # presigned URL doesn't break parse_file? recognition.
     h = {
       "__type" => "File",
-      "name"   => "img.png",
-      "url"    => "https://bucket.s3.amazonaws.com/img.png?X-Amz-Signature=abc",
+      "name" => "img.png",
+      "url" => "https://bucket.s3.amazonaws.com/img.png?X-Amz-Signature=abc",
     }
     assert h.parse_file?, "parse_file? must handle presigned URL query strings"
   end
@@ -89,8 +89,8 @@ class TestFileWireFormat < Minitest::Test
   def test_parse_file_predicate_rejects_typed_canonical_with_basename_mismatch
     h = {
       "__type" => "File",
-      "name"   => "img.png",
-      "url"    => "https://files.parsetfss.com/abc/tampered.png",
+      "name" => "img.png",
+      "url" => "https://files.parsetfss.com/abc/tampered.png",
     }
     refute h.parse_file?
   end
@@ -101,7 +101,7 @@ class TestFileWireFormat < Minitest::Test
     # the canonical shape.
     h = {
       "name" => "foo",
-      "url"  => "https://example.com/x",
+      "url" => "https://example.com/x",
       "extra" => "bar",
     }
     refute h.parse_file?

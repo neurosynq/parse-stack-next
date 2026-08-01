@@ -35,14 +35,14 @@ class ClientRestRolesIntegrationTest < Minitest::Test
   def setup
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
     super
-    @admin_user,    @admin_password    = seed_client_user("role_admin")
-    @member_user,   @member_password   = seed_client_user("role_member")
+    @admin_user, @admin_password = seed_client_user("role_admin")
+    @member_user, @member_password = seed_client_user("role_member")
     @outsider_user, @outsider_password = seed_client_user("role_outsider")
 
     # Roles are created under master key (CLP on _Role is master-only
     # by default in Parse Server, regardless of role suffixes).
     with_master_key do
-      @admin_role  = Parse::Role.find_or_create(role_name("Admin"))
+      @admin_role = Parse::Role.find_or_create(role_name("Admin"))
       @admin_role.add_users(@admin_user).save
       @member_role = Parse::Role.find_or_create(role_name("Member"))
       @member_role.add_users(@member_user).save

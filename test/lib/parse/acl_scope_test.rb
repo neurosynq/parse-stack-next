@@ -562,8 +562,8 @@ class TestACLScope < Minitest::Test
 
   def test_rewrite_lookup_raises_when_joined_class_clp_denies_find
     Parse::CLPScope.__cache_put("AdminOnly", clp: {
-      "find" => { "role:Admin" => true },
-    })
+                                               "find" => { "role:Admin" => true },
+                                             })
     pipe = [{ "$lookup" => {
       "from" => "AdminOnly", "localField" => "x", "foreignField" => "_id", "as" => "y",
     } }]
@@ -594,8 +594,8 @@ class TestACLScope < Minitest::Test
 
   def test_rewrite_union_with_string_shorthand_raises_when_clp_denies
     Parse::CLPScope.__cache_put("AdminOnly", clp: {
-      "find" => { "role:Admin" => true },
-    })
+                                               "find" => { "role:Admin" => true },
+                                             })
     pipe = [{ "$unionWith" => "AdminOnly" }]
     res = Parse::ACLScope.resolve!(
       { acl_user: Parse::Pointer.new("_User", "alice") },
@@ -608,8 +608,8 @@ class TestACLScope < Minitest::Test
 
   def test_rewrite_union_with_hash_form_raises_when_clp_denies
     Parse::CLPScope.__cache_put("AdminOnly", clp: {
-      "find" => { "role:Admin" => true },
-    })
+                                               "find" => { "role:Admin" => true },
+                                             })
     pipe = [{ "$unionWith" => { "coll" => "AdminOnly", "pipeline" => [{ "$match" => { "x" => 1 } }] } }]
     res = Parse::ACLScope.resolve!(
       { acl_user: Parse::Pointer.new("_User", "alice") },
@@ -622,8 +622,8 @@ class TestACLScope < Minitest::Test
 
   def test_rewrite_graph_lookup_raises_when_clp_denies
     Parse::CLPScope.__cache_put("AdminOnly", clp: {
-      "find" => { "role:Admin" => true },
-    })
+                                               "find" => { "role:Admin" => true },
+                                             })
     pipe = [{ "$graphLookup" => {
       "from" => "AdminOnly", "startWith" => "$x",
       "connectFromField" => "x", "connectToField" => "_id", "as" => "y",
@@ -642,8 +642,8 @@ class TestACLScope < Minitest::Test
     # short-circuits rewrite_pipeline before the gate is ever invoked.
     # This locks in the master-key passthrough contract.
     Parse::CLPScope.__cache_put("AdminOnly", clp: {
-      "find" => { "role:Admin" => true },
-    })
+                                               "find" => { "role:Admin" => true },
+                                             })
     pipe = [{ "$lookup" => {
       "from" => "AdminOnly", "localField" => "x", "foreignField" => "_id", "as" => "y",
     } }]
@@ -659,8 +659,8 @@ class TestACLScope < Minitest::Test
     # raise — the requesting scope's authority doesn't elevate just
     # because the outer hop landed on a public class.
     Parse::CLPScope.__cache_put("AdminOnly", clp: {
-      "find" => { "role:Admin" => true },
-    })
+                                               "find" => { "role:Admin" => true },
+                                             })
     pipe = [{ "$lookup" => {
       "from" => "PublicJoin",
       "pipeline" => [{ "$lookup" => {

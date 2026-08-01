@@ -56,10 +56,10 @@ module SSETestHelpers
   # Classify an SSE frame the way an MCP client does — from the envelope.
   def sse_kind(data)
     payload = begin
-      JSON.parse(data)
-    rescue StandardError
-      nil
-    end
+        JSON.parse(data)
+      rescue StandardError
+        nil
+      end
     return :unknown unless payload.is_a?(Hash)
     return :progress if payload["method"] == "notifications/progress"
     return :notification if payload.key?("method")
@@ -78,9 +78,9 @@ module SSETestHelpers
   def tools_call_body(id: 1, progress_token: nil, tool: "ping", args: {})
     body = {
       "jsonrpc" => "2.0",
-      "id"      => id,
-      "method"  => "tools/call",
-      "params"  => { "name" => tool, "arguments" => args },
+      "id" => id,
+      "method" => "tools/call",
+      "params" => { "name" => tool, "arguments" => args },
     }
     if progress_token
       body["params"]["_meta"] = { "progressToken" => progress_token }
@@ -92,7 +92,7 @@ module SSETestHelpers
   def build_post(path = "/", body_str:, accept: "application/json")
     req = Net::HTTP::Post.new(path, {
       "Content-Type" => "application/json",
-      "Accept"       => accept,
+      "Accept" => accept,
     })
     req.body = body_str
     req
@@ -117,8 +117,8 @@ class MCPSseE2eTest < Minitest::Test
   # when all tests are loaded into the same Minitest process.
   def self.install_dispatcher_stub!
     return if @stub_installed
-    @orig_dispatcher  = Parse::Agent::MCPDispatcher.method(:call)
-    @stub_installed   = true
+    @orig_dispatcher = Parse::Agent::MCPDispatcher.method(:call)
+    @stub_installed = true
 
     Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil, subscription_manager: nil, **_extra|
       d = MCPSseE2eTest.class_variable_get(:@@dispatch_delay)
@@ -134,7 +134,7 @@ class MCPSseE2eTest < Minitest::Test
     orig = @orig_dispatcher
     Parse::Agent::MCPDispatcher.define_singleton_method(:call, &orig)
     @orig_dispatcher = nil
-    @stub_installed  = false
+    @stub_installed = false
   end
 
   def self.stub_installed?
@@ -148,15 +148,15 @@ class MCPSseE2eTest < Minitest::Test
 
     unless Parse::Client.client?
       Parse.setup(
-        server_url:     "http://localhost:1337/parse",
+        server_url: "http://localhost:1337/parse",
         application_id: "test-app-id",
-        api_key:        "test-api-key",
+        api_key: "test-api-key",
       )
     end
 
     MCPSseE2eTest.install_dispatcher_stub!
 
-    @@dispatch_delay  = 0
+    @@dispatch_delay = 0
     @@dispatch_result = nil
 
     # Pick an ephemeral port
@@ -165,9 +165,9 @@ class MCPSseE2eTest < Minitest::Test
 
     # The rack app: streaming: true, very fast heartbeat for tests
     @rack_app = Parse::Agent::MCPRackApp.new(
-      streaming:          true,
+      streaming: true,
       heartbeat_interval: 0.1,
-      agent_factory:      method(:build_stubbed_agent),
+      agent_factory: method(:build_stubbed_agent),
     )
 
     # Spin up Puma — Puma 8 expects a Puma::Events instance as second arg.
@@ -250,7 +250,7 @@ class MCPSseE2eTest < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_sse_response_has_correct_content_type
-    @@dispatch_delay  = 0.3
+    @@dispatch_delay = 0.3
     _events, headers, _raw = sse_post(tools_call_body)
 
     # Puma may lowercase header names; normalise
@@ -298,10 +298,10 @@ class MCPSseE2eTest < Minitest::Test
 
     progress_events.each do |pe|
       data = JSON.parse(pe[:data])
-      assert_equal "2.0",                    data["jsonrpc"]
+      assert_equal "2.0", data["jsonrpc"]
       assert_equal "notifications/progress", data["method"]
       assert data["params"].key?("progressToken"), "Missing progressToken"
-      assert data["params"].key?("progress"),      "Missing progress counter"
+      assert data["params"].key?("progress"), "Missing progress counter"
       assert_kind_of Numeric, data["params"]["progress"]
     end
   end
@@ -325,7 +325,7 @@ class MCPSseE2eTest < Minitest::Test
 
     progress_events.each do |pe|
       data = JSON.parse(pe[:data])
-      tok  = data.dig("params", "progressToken")
+      tok = data.dig("params", "progressToken")
       refute_equal token, tok,
                    "Heartbeat must NOT reuse the client's progressToken (would violate per-token monotonicity)"
       assert_match(/\Aparse-stack:heartbeat:/, tok,
@@ -355,8 +355,8 @@ class MCPSseE2eTest < Minitest::Test
     refute_nil response_event, "No response event found in SSE stream"
 
     data = JSON.parse(response_event[:data])
-    assert_equal "2.0",  data["jsonrpc"]
-    assert_equal 99,     data["id"]
+    assert_equal "2.0", data["jsonrpc"]
+    assert_equal 99, data["id"]
     assert data.key?("result") || data.key?("error"),
            "Response envelope must have result or error key"
   end
@@ -365,11 +365,11 @@ class MCPSseE2eTest < Minitest::Test
     # Override stub to return a deterministic body
     fixed_body = {
       "jsonrpc" => "2.0",
-      "id"      => 7,
-      "result"  => { "tools" => [{ "name" => "ping" }] },
+      "id" => 7,
+      "result" => { "tools" => [{ "name" => "ping" }] },
     }
     @@dispatch_result = { status: 200, body: fixed_body }
-    @@dispatch_delay  = 0
+    @@dispatch_delay = 0
 
     events, _headers, _raw = sse_post(tools_call_body(id: 7))
     response_event = events.find { |e| e[:kind] == :response }
@@ -413,7 +413,7 @@ class MCPSseE2eTest < Minitest::Test
     Net::HTTP.start(@host, @port) do |http|
       req = Net::HTTP::Post.new("/", {
         "Content-Type" => "text/plain",
-        "Accept"       => "text/event-stream",
+        "Accept" => "text/event-stream",
       })
       req.body = "hello"
       resp = http.request(req)
@@ -429,19 +429,19 @@ class MCPSseE2eTest < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_streaming_false_app_returns_plain_json_for_sse_accept
-    @@dispatch_delay  = 0
+    @@dispatch_delay = 0
     @@dispatch_result = nil
 
     plain_rack_app = Parse::Agent::MCPRackApp.new(
-      streaming:          false,
-      agent_factory:      method(:build_stubbed_agent),
+      streaming: false,
+      agent_factory: method(:build_stubbed_agent),
     )
 
     # Spin up a second Puma instance on a different port
-    port2    = ephemeral_port
-    puma2    = Puma::Server.new(plain_rack_app, Puma::Events.new)
+    port2 = ephemeral_port
+    puma2 = Puma::Server.new(plain_rack_app, Puma::Events.new)
     puma2.add_tcp_listener(@host, port2)
-    thread2  = puma2.run
+    thread2 = puma2.run
     wait_for_server(@host, port2)
 
     begin
@@ -449,9 +449,9 @@ class MCPSseE2eTest < Minitest::Test
       Net::HTTP.start(@host, port2) do |http|
         req = build_post("/", body_str: tools_call_body, accept: "text/event-stream")
         resp = http.request(req)
-        status  = resp.code.to_i
+        status = resp.code.to_i
         headers = resp.to_hash.transform_values(&:first)
-        body    = JSON.parse(resp.body)
+        body = JSON.parse(resp.body)
       end
 
       assert_equal 200, status
@@ -580,7 +580,7 @@ class MCPSseE2eTest < Minitest::Test
     events, _headers, _raw = sse_post(tools_call_body)
 
     progress_indices = events.each_index.select { |i| events[i][:kind] == :progress }
-    response_index   = events.each_index.find   { |i| events[i][:kind] == :response }
+    response_index = events.each_index.find { |i| events[i][:kind] == :response }
 
     refute_nil response_index, "No response event found"
     assert progress_indices.size >= 1, "Expected at least one progress event before response"
@@ -605,7 +605,7 @@ class MCPSseE2eTest < Minitest::Test
     assert progress_events.size >= 1, "Need at least one progress event"
 
     token = JSON.parse(progress_events.first[:data]).dig("params", "progressToken")
-    refute_nil   token, "progressToken must be present even when not supplied by client"
+    refute_nil token, "progressToken must be present even when not supplied by client"
     refute_empty token.to_s
     # Should look like a UUID (36 chars) or similar
     assert token.to_s.length >= 8,

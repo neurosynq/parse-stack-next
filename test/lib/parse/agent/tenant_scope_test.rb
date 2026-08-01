@@ -43,22 +43,22 @@ class AgentTenantScopeTest < Minitest::Test
   # Build a minimal fake Parse client that stubs find_objects and
   # aggregate_pipeline, recording every call for assertions.
   def build_fake_client(find_rows: [], agg_rows: [], fetch_row: nil, find_success: true)
-    client       = Object.new
-    @find_calls  = []
-    @agg_calls   = []
+    client = Object.new
+    @find_calls = []
+    @agg_calls = []
     @fetch_calls = []
 
-    find_calls  = @find_calls
-    agg_calls   = @agg_calls
+    find_calls = @find_calls
+    agg_calls = @agg_calls
     fetch_calls = @fetch_calls
 
     client.define_singleton_method(:find_objects) do |class_name, query, **_opts|
       find_calls << { class_name: class_name, query: query }
       r = Object.new
       r.define_singleton_method(:success?) { find_success }
-      r.define_singleton_method(:error)   { "injected failure" }
+      r.define_singleton_method(:error) { "injected failure" }
       r.define_singleton_method(:results) { find_rows }
-      r.define_singleton_method(:count)   { find_rows.size }
+      r.define_singleton_method(:count) { find_rows.size }
       r
     end
 
@@ -66,7 +66,7 @@ class AgentTenantScopeTest < Minitest::Test
       agg_calls << { class_name: class_name, pipeline: pipeline }
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { agg_rows }
+      r.define_singleton_method(:results) { agg_rows }
       r
     end
 
@@ -74,9 +74,9 @@ class AgentTenantScopeTest < Minitest::Test
       client.define_singleton_method(:fetch_object) do |class_name, object_id, query: {}, **_opts|
         fetch_calls << { class_name: class_name, object_id: object_id, query: query }
         r = Object.new
-        r.define_singleton_method(:success?)         { true }
+        r.define_singleton_method(:success?) { true }
         r.define_singleton_method(:object_not_found?) { false }
-        r.define_singleton_method(:result)           { fetch_row }
+        r.define_singleton_method(:result) { fetch_row }
         r
       end
     end
@@ -130,7 +130,7 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_query_class_injects_scope_into_where
     rows = [{ "objectId" => "aaa", SCOPE_FIELD_WIRE => "org1", "amount" => 50 }]
-    fc   = build_fake_client(find_rows: rows)
+    fc = build_fake_client(find_rows: rows)
     agent = make_agent(tenant_id: "org1", fake_client: fc)
 
     result = agent.execute(:query_class, class_name: "TenantOrder")
@@ -148,11 +148,11 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_query_class_merges_scope_with_existing_where
     rows = [{ "objectId" => "bbb", SCOPE_FIELD_WIRE => "org1", "amount" => 99 }]
-    fc   = build_fake_client(find_rows: rows)
+    fc = build_fake_client(find_rows: rows)
     agent = make_agent(tenant_id: "org1", fake_client: fc)
 
     result = agent.execute(:query_class, class_name: "TenantOrder",
-                           where: { "amount" => { "$gt" => 10 } })
+                                         where: { "amount" => { "$gt" => 10 } })
     assert result[:success], result.inspect
 
     where_hash = JSON.parse(@find_calls.first[:query][:where])
@@ -163,11 +163,11 @@ class AgentTenantScopeTest < Minitest::Test
   def test_query_class_passes_through_matching_caller_scope_value
     # Caller supplies the same org_id value (snake_case key) — this is OK (case 2: pass-through).
     rows = [{ "objectId" => "ccc", SCOPE_FIELD_WIRE => "org1" }]
-    fc   = build_fake_client(find_rows: rows)
+    fc = build_fake_client(find_rows: rows)
     agent = make_agent(tenant_id: "org1", fake_client: fc)
 
     result = agent.execute(:query_class, class_name: "TenantOrder",
-                           where: { SCOPE_FIELD_RUBY => "org1" })
+                                         where: { SCOPE_FIELD_RUBY => "org1" })
     assert result[:success], result.inspect
 
     where_hash = JSON.parse(@find_calls.first[:query][:where])
@@ -176,11 +176,11 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_query_class_refuses_spoofed_scope_value
     # Caller tries to override org_id with a different tenant's value.
-    fc    = build_fake_client(find_rows: [])
+    fc = build_fake_client(find_rows: [])
     agent = make_agent(tenant_id: "org1", fake_client: fc)
 
     result = agent.execute(:query_class, class_name: "TenantOrder",
-                           where: { "org_id" => "org_evil" })
+                                         where: { "org_id" => "org_evil" })
     refute result[:success]
     assert_equal :access_denied, result[:error_code],
                  "Spoofed scope field must yield :access_denied"
@@ -191,11 +191,11 @@ class AgentTenantScopeTest < Minitest::Test
     # LLM passes the field using the camelCase wire-format key (orgId instead of
     # org_id). Without the camelCase check this would be treated as case-1
     # (absent) and allow both keys into ConstraintTranslator simultaneously.
-    fc    = build_fake_client(find_rows: [])
+    fc = build_fake_client(find_rows: [])
     agent = make_agent(tenant_id: "org1", fake_client: fc)
 
     result = agent.execute(:query_class, class_name: "TenantOrder",
-                           where: { "orgId" => "org_evil" })
+                                         where: { "orgId" => "org_evil" })
     refute result[:success]
     assert_equal :access_denied, result[:error_code],
                  "camelCase spoofed scope key must yield :access_denied"
@@ -206,11 +206,11 @@ class AgentTenantScopeTest < Minitest::Test
     # Caller supplies the correct org_id value using the camelCase wire-format key.
     # This is valid (case-2 pass-through) — just an unusual key format.
     rows = [{ "objectId" => "ccc2", SCOPE_FIELD_WIRE => "org1" }]
-    fc   = build_fake_client(find_rows: rows)
+    fc = build_fake_client(find_rows: rows)
     agent = make_agent(tenant_id: "org1", fake_client: fc)
 
     result = agent.execute(:query_class, class_name: "TenantOrder",
-                           where: { "orgId" => "org1" })
+                                         where: { "orgId" => "org1" })
     assert result[:success], result.inspect
 
     where_hash = JSON.parse(@find_calls.first[:query][:where])
@@ -219,18 +219,18 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_query_class_refuses_nil_scope_operator_on_scoped_field
     # LLM passes $ne operator — also a case-3 refusal.
-    fc    = build_fake_client(find_rows: [])
+    fc = build_fake_client(find_rows: [])
     agent = make_agent(tenant_id: "org1", fake_client: fc)
 
     result = agent.execute(:query_class, class_name: "TenantOrder",
-                           where: { "org_id" => { "$ne" => "org1" } })
+                                         where: { "org_id" => { "$ne" => "org1" } })
     refute result[:success]
     assert_equal :access_denied, result[:error_code]
   end
 
   def test_query_class_refuses_unbound_agent_on_scoped_class
     # Agent has no tenant_id — should be refused.
-    fc    = build_fake_client(find_rows: [])
+    fc = build_fake_client(find_rows: [])
     agent = make_agent(tenant_id: nil, fake_client: fc)
 
     result = agent.execute(:query_class, class_name: "TenantOrder")
@@ -244,13 +244,13 @@ class AgentTenantScopeTest < Minitest::Test
   # ============================================================
 
   def test_count_objects_injects_scope
-    fc    = build_fake_client(find_rows: [])
+    fc = build_fake_client(find_rows: [])
     agent = make_agent(tenant_id: "org2", fake_client: fc)
 
     result = agent.execute(:count_objects, class_name: "TenantOrder")
     assert result[:success], result.inspect
 
-    sent       = @find_calls.first
+    sent = @find_calls.first
     where_json = sent[:query][:where]
     refute_nil where_json
     where_hash = JSON.parse(where_json)
@@ -258,7 +258,7 @@ class AgentTenantScopeTest < Minitest::Test
   end
 
   def test_count_objects_refuses_unbound_agent
-    fc    = build_fake_client(find_rows: [])
+    fc = build_fake_client(find_rows: [])
     agent = make_agent(tenant_id: nil, fake_client: fc)
 
     result = agent.execute(:count_objects, class_name: "TenantOrder")
@@ -320,7 +320,7 @@ class AgentTenantScopeTest < Minitest::Test
       { "objectId" => "a1", "org_id" => "org1" },
       { "objectId" => "a2", "org_id" => "org1" },
     ]
-    fc    = build_fake_client(find_rows: rows)
+    fc = build_fake_client(find_rows: rows)
     agent = make_agent(tenant_id: "org1", fake_client: fc)
 
     result = agent.execute(:get_objects, class_name: "TenantOrder", ids: ["a1", "a2"])
@@ -333,7 +333,7 @@ class AgentTenantScopeTest < Minitest::Test
       { "objectId" => "b1", "org_id" => "org1" },
       { "objectId" => "b2", "org_id" => "org2" },
     ]
-    fc    = build_fake_client(find_rows: rows)
+    fc = build_fake_client(find_rows: rows)
     agent = make_agent(tenant_id: "org1", fake_client: fc)
 
     result = agent.execute(:get_objects, class_name: "TenantOrder", ids: ["b1", "b2"])
@@ -343,7 +343,7 @@ class AgentTenantScopeTest < Minitest::Test
   end
 
   def test_get_objects_refuses_unbound_agent
-    fc    = build_fake_client(find_rows: [])
+    fc = build_fake_client(find_rows: [])
     agent = make_agent(tenant_id: nil, fake_client: fc)
 
     result = agent.execute(:get_objects, class_name: "TenantOrder", ids: ["c1"])
@@ -357,7 +357,7 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_aggregate_prepends_match_stage_at_index_0
     rows = [{ "total" => 100 }]
-    fc   = build_fake_client(agg_rows: rows)
+    fc = build_fake_client(agg_rows: rows)
     agent = make_agent(tenant_id: "org3", fake_client: fc)
 
     pipeline = [{ "$group" => { "_id" => nil, "total" => { "$sum" => "$amount" } } },
@@ -367,7 +367,7 @@ class AgentTenantScopeTest < Minitest::Test
     assert result[:success], result.inspect
 
     sent_pipeline = @agg_calls.first[:pipeline]
-    first_stage   = sent_pipeline.first
+    first_stage = sent_pipeline.first
     assert first_stage.key?("$match"),
            "First stage must be a $match (got #{first_stage.keys.first.inspect})"
     # Pipeline $match uses the camelCase wire key (orgId for org_id)
@@ -375,11 +375,11 @@ class AgentTenantScopeTest < Minitest::Test
   end
 
   def test_aggregate_refuses_unbound_agent
-    fc    = build_fake_client(agg_rows: [])
+    fc = build_fake_client(agg_rows: [])
     agent = make_agent(tenant_id: nil, fake_client: fc)
 
     result = agent.execute(:aggregate, class_name: "TenantOrder",
-                           pipeline: [{ "$limit" => 5 }])
+                                       pipeline: [{ "$limit" => 5 }])
     refute result[:success]
     assert_equal :access_denied, result[:error_code]
   end
@@ -390,13 +390,13 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_get_sample_objects_injects_scope
     rows = [{ "objectId" => "s1", "org_id" => "org4" }]
-    fc   = build_fake_client(find_rows: rows)
+    fc = build_fake_client(find_rows: rows)
     agent = make_agent(tenant_id: "org4", fake_client: fc)
 
     result = agent.execute(:get_sample_objects, class_name: "TenantOrder", limit: 5)
     assert result[:success], result.inspect
 
-    sent       = @find_calls.first
+    sent = @find_calls.first
     where_json = sent[:query][:where]
     refute_nil where_json, "Expected :where to be injected for samples"
     where_hash = JSON.parse(where_json)
@@ -404,7 +404,7 @@ class AgentTenantScopeTest < Minitest::Test
   end
 
   def test_get_sample_objects_refuses_unbound_agent
-    fc    = build_fake_client(find_rows: [])
+    fc = build_fake_client(find_rows: [])
     agent = make_agent(tenant_id: nil, fake_client: fc)
 
     result = agent.execute(:get_sample_objects, class_name: "TenantOrder")
@@ -418,13 +418,13 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_export_data_query_mode_injects_scope
     rows = [{ "objectId" => "e1", "org_id" => "org5", "amount" => 10 }]
-    fc   = build_fake_client(find_rows: rows)
+    fc = build_fake_client(find_rows: rows)
     agent = make_agent(tenant_id: "org5", fake_client: fc)
 
     result = agent.execute(:export_data, class_name: "TenantOrder", format: "csv")
     assert result[:success], result.inspect
 
-    sent       = @find_calls.first
+    sent = @find_calls.first
     where_json = sent[:query][:where]
     refute_nil where_json
     where_hash = JSON.parse(where_json)
@@ -437,7 +437,7 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_export_data_aggregate_mode_prepends_match
     rows = [{ "total" => 200 }]
-    fc   = build_fake_client(agg_rows: rows)
+    fc = build_fake_client(agg_rows: rows)
     agent = make_agent(tenant_id: "org6", fake_client: fc)
 
     pipeline = [{ "$group" => { "_id" => nil, "total" => { "$sum" => "$amount" } } },
@@ -447,7 +447,7 @@ class AgentTenantScopeTest < Minitest::Test
     assert result[:success], result.inspect
 
     sent_pipeline = @agg_calls.first[:pipeline]
-    first_stage   = sent_pipeline.first
+    first_stage = sent_pipeline.first
     assert first_stage.key?("$match"),
            "First stage must be $match for scoped aggregate export"
     assert_equal "org6", first_stage["$match"][SCOPE_FIELD_WIRE]
@@ -459,7 +459,7 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_bypass_admin_agent_skips_scope_on_scoped_report_class
     rows = [{ "objectId" => "r1", "org_id" => "any_tenant", "name" => "Q4 Report" }]
-    fc   = build_fake_client(find_rows: rows)
+    fc = build_fake_client(find_rows: rows)
     # TenantReport has bypass: agent.permissions == :admin
     agent = make_agent(tenant_id: nil, permissions: :admin, fake_client: fc)
 
@@ -474,7 +474,7 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_non_admin_agent_is_still_scoped_on_bypass_class
     rows = [{ "objectId" => "r2", "org_id" => "org7", "name" => "Monthly" }]
-    fc   = build_fake_client(find_rows: rows)
+    fc = build_fake_client(find_rows: rows)
     agent = make_agent(tenant_id: "org7", permissions: :readonly, fake_client: fc)
 
     result = agent.execute(:query_class, class_name: "TenantReport")
@@ -486,7 +486,7 @@ class AgentTenantScopeTest < Minitest::Test
   end
 
   def test_nil_tenant_non_admin_refused_on_bypass_class
-    fc    = build_fake_client(find_rows: [])
+    fc = build_fake_client(find_rows: [])
     agent = make_agent(tenant_id: nil, permissions: :readonly, fake_client: fc)
 
     result = agent.execute(:query_class, class_name: "TenantReport")
@@ -501,7 +501,7 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_unscoped_class_passes_through_without_scope
     rows = [{ "objectId" => "p1", "name" => "Widget" }]
-    fc   = build_fake_client(find_rows: rows)
+    fc = build_fake_client(find_rows: rows)
     # Even nil tenant_id is fine for an unscoped class.
     agent = make_agent(tenant_id: nil, fake_client: fc)
 
@@ -515,7 +515,7 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_unscoped_class_with_tenant_bound_agent_passes_through
     rows = [{ "objectId" => "p2", "name" => "Gadget" }]
-    fc   = build_fake_client(find_rows: rows)
+    fc = build_fake_client(find_rows: rows)
     agent = make_agent(tenant_id: "org99", fake_client: fc)
 
     result = agent.execute(:query_class, class_name: "TenantProduct")
@@ -571,22 +571,22 @@ class AgentTenantScopeTest < Minitest::Test
   # ============================================================
 
   def test_apply_scope_injects_when_field_absent
-    scope  = { field: :org_id, value: "orgA" }
+    scope = { field: :org_id, value: "orgA" }
     result = Parse::Agent::Tools.apply_tenant_scope_to_where(nil, scope, "Klass")
     assert_equal "orgA", result["org_id"]
   end
 
   def test_apply_scope_passes_through_matching_string_key
-    scope  = { field: :org_id, value: "orgA" }
-    where  = { "org_id" => "orgA", "amount" => 5 }
+    scope = { field: :org_id, value: "orgA" }
+    where = { "org_id" => "orgA", "amount" => 5 }
     result = Parse::Agent::Tools.apply_tenant_scope_to_where(where, scope, "Klass")
-    assert_equal "orgA",  result["org_id"]
-    assert_equal 5,       result["amount"]
+    assert_equal "orgA", result["org_id"]
+    assert_equal 5, result["amount"]
   end
 
   def test_apply_scope_passes_through_matching_symbol_key
-    scope  = { field: :org_id, value: "orgA" }
-    where  = { org_id: "orgA" }
+    scope = { field: :org_id, value: "orgA" }
+    where = { org_id: "orgA" }
     result = Parse::Agent::Tools.apply_tenant_scope_to_where(where, scope, "Klass")
     # Symbol key passes through — correct value is present
     assert_equal "orgA", result[:org_id]
@@ -616,17 +616,17 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_apply_scope_passes_through_matching_camelcase_string_key
     # Caller passes the camelCase wire-format key with the correct value — case 2.
-    scope  = { field: :org_id, value: "orgA" }
-    where  = { "orgId" => "orgA", "amount" => 5 }
+    scope = { field: :org_id, value: "orgA" }
+    where = { "orgId" => "orgA", "amount" => 5 }
     result = Parse::Agent::Tools.apply_tenant_scope_to_where(where, scope, "Klass")
     assert_equal "orgA", result["orgId"]
-    assert_equal 5,      result["amount"]
+    assert_equal 5, result["amount"]
   end
 
   def test_apply_scope_passes_through_matching_camelcase_symbol_key
     # Caller uses camelCase symbol key — case 2.
-    scope  = { field: :org_id, value: "orgA" }
-    where  = { orgId: "orgA" }
+    scope = { field: :org_id, value: "orgA" }
+    where = { orgId: "orgA" }
     result = Parse::Agent::Tools.apply_tenant_scope_to_where(where, scope, "Klass")
     assert_equal "orgA", result[:orgId]
   end
@@ -636,9 +636,9 @@ class AgentTenantScopeTest < Minitest::Test
   # ============================================================
 
   def test_apply_scope_to_pipeline_prepends_match
-    scope    = { field: :org_id, value: "orgB" }
+    scope = { field: :org_id, value: "orgB" }
     pipeline = [{ "$group" => { "_id" => "$status" } }, { "$limit" => 5 }]
-    result   = Parse::Agent::Tools.apply_tenant_scope_to_pipeline(pipeline, scope)
+    result = Parse::Agent::Tools.apply_tenant_scope_to_pipeline(pipeline, scope)
 
     assert_equal 3, result.size
     assert result.first.key?("$match")
@@ -651,7 +651,7 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_apply_scope_to_pipeline_noop_when_no_scope
     pipeline = [{ "$limit" => 5 }]
-    result   = Parse::Agent::Tools.apply_tenant_scope_to_pipeline(pipeline, nil)
+    result = Parse::Agent::Tools.apply_tenant_scope_to_pipeline(pipeline, nil)
     assert_equal pipeline, result
   end
 
@@ -660,13 +660,13 @@ class AgentTenantScopeTest < Minitest::Test
   # ============================================================
 
   def test_assert_record_passes_for_matching_field
-    scope  = { field: :org_id, value: "orgC" }
+    scope = { field: :org_id, value: "orgC" }
     record = { "objectId" => "x1", "org_id" => "orgC" }
     assert_silent { Parse::Agent::Tools.assert_record_in_tenant_scope!(record, scope, "Klass") }
   end
 
   def test_assert_record_raises_for_mismatched_field
-    scope  = { field: :org_id, value: "orgC" }
+    scope = { field: :org_id, value: "orgC" }
     record = { "objectId" => "x2", "org_id" => "orgD" }
     assert_raises(Parse::Agent::AccessDenied) do
       Parse::Agent::Tools.assert_record_in_tenant_scope!(record, scope, "Klass")
@@ -674,7 +674,7 @@ class AgentTenantScopeTest < Minitest::Test
   end
 
   def test_assert_record_raises_for_missing_field
-    scope  = { field: :org_id, value: "orgC" }
+    scope = { field: :org_id, value: "orgC" }
     record = { "objectId" => "x3" }
     assert_raises(Parse::Agent::AccessDenied) do
       Parse::Agent::Tools.assert_record_in_tenant_scope!(record, scope, "Klass")
@@ -689,13 +689,13 @@ class AgentTenantScopeTest < Minitest::Test
   def test_assert_record_passes_for_camelcase_wire_field
     # Parse Server returns camelCase field names on the wire (orgId, not org_id).
     # assert_record_in_tenant_scope! must accept this real-world format.
-    scope  = { field: :org_id, value: "orgC" }
+    scope = { field: :org_id, value: "orgC" }
     record = { "objectId" => "x5", "orgId" => "orgC" }
     assert_silent { Parse::Agent::Tools.assert_record_in_tenant_scope!(record, scope, "Klass") }
   end
 
   def test_assert_record_raises_for_camelcase_wire_field_mismatch
-    scope  = { field: :org_id, value: "orgC" }
+    scope = { field: :org_id, value: "orgC" }
     record = { "objectId" => "x6", "orgId" => "orgD" }
     assert_raises(Parse::Agent::AccessDenied) do
       Parse::Agent::Tools.assert_record_in_tenant_scope!(record, scope, "Klass")
@@ -712,16 +712,17 @@ class AgentTenantScopeTest < Minitest::Test
     parse_class "TenantAliased"
     property :org_id, :string
   end
+
   TenantAliased.field_map[:org_id] = :tenant
 
   def test_assert_record_passes_for_field_map_alias_column
-    scope  = { field: :org_id, value: "orgC" }
+    scope = { field: :org_id, value: "orgC" }
     record = { "objectId" => "x7", "tenant" => "orgC" }
     assert_silent { Parse::Agent::Tools.assert_record_in_tenant_scope!(record, scope, "TenantAliased") }
   end
 
   def test_assert_record_raises_for_field_map_alias_mismatch
-    scope  = { field: :org_id, value: "orgC" }
+    scope = { field: :org_id, value: "orgC" }
     record = { "objectId" => "x8", "tenant" => "orgD" }
     assert_raises(Parse::Agent::AccessDenied) do
       Parse::Agent::Tools.assert_record_in_tenant_scope!(record, scope, "TenantAliased")
@@ -729,7 +730,7 @@ class AgentTenantScopeTest < Minitest::Test
   end
 
   def test_assert_record_raises_for_field_map_alias_missing
-    scope  = { field: :org_id, value: "orgC" }
+    scope = { field: :org_id, value: "orgC" }
     record = { "objectId" => "x9" }
     assert_raises(Parse::Agent::AccessDenied) do
       Parse::Agent::Tools.assert_record_in_tenant_scope!(record, scope, "TenantAliased")
@@ -738,7 +739,7 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_assert_record_unregistered_class_falls_back_to_camel
     # find_class -> nil for an unknown class: the snake/camel pair must still work.
-    scope  = { field: :org_id, value: "orgC" }
+    scope = { field: :org_id, value: "orgC" }
     record = { "objectId" => "x10", "orgId" => "orgC" }
     assert_silent { Parse::Agent::Tools.assert_record_in_tenant_scope!(record, scope, "TotallyUnknownClassXYZ") }
   end
@@ -826,7 +827,7 @@ class AgentTenantScopeTest < Minitest::Test
 
   def test_join_in_lookup_subpipeline_is_caught
     pipeline = [{ "$lookup" => { "from" => "TenantOrder", "as" => "o",
-                                 "pipeline" => [{ "$unionWith" => { "coll" => "TenantProduct" } }] } }]
+                                "pipeline" => [{ "$unionWith" => { "coll" => "TenantProduct" } }] } }]
     assert_raises(Parse::Agent::AccessDenied) { assert_joins(pipeline) }
   end
 

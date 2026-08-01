@@ -155,7 +155,7 @@ class AtlasSearchIndexManagerTest < Minitest::Test
     sequences = [
       [{ "name" => "song_search", "queryable" => false, "status" => "BUILDING" }],
       [{ "name" => "song_search", "queryable" => false, "status" => "BUILDING" }],
-      [{ "name" => "song_search", "queryable" => true,  "status" => "READY" }],
+      [{ "name" => "song_search", "queryable" => true, "status" => "READY" }],
     ]
     with_list_indexes_stub(sequences) do |flags|
       assert_equal :ready, IM.wait_for_ready("Song", "song_search", timeout: 5, interval: 0)

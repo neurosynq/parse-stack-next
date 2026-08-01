@@ -47,7 +47,7 @@ class NotifCollector
 
   def initialize
     @events = []
-    @mutex  = Mutex.new
+    @mutex = Mutex.new
     @subscriber = nil
   end
 
@@ -91,14 +91,14 @@ class NotificationsIntegrationTest < Minitest::Test
     collector = NotifCollector.new
     Parse::Agent::Tools.reset_registry!
     Parse::Agent.refuse_collscan = false
-    Parse::Agent.expose_explain  = false
+    Parse::Agent.expose_explain = false
     collector.subscribe!
     yield collector
   ensure
     collector&.unsubscribe!
     Parse::Agent::Tools.reset_registry!
     Parse::Agent.refuse_collscan = false
-    Parse::Agent.expose_explain  = false
+    Parse::Agent.expose_explain = false
   end
 
   # =========================================================================
@@ -106,8 +106,7 @@ class NotificationsIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_get_all_schemas_fires_notification_with_correct_payload
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_notif_collector do |collector|
@@ -135,8 +134,7 @@ class NotificationsIntegrationTest < Minitest::Test
   end
 
   def test_get_all_schemas_notification_duration_is_positive
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_notif_collector do |collector|
@@ -154,8 +152,7 @@ class NotificationsIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_query_class_args_keys_strips_sensitive_keys
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     items = nil
     with_parse_server do
@@ -167,10 +164,9 @@ class NotificationsIntegrationTest < Minitest::Test
       with_notif_collector do |collector|
         agent = Parse::Agent.new(permissions: :readonly)
         agent.execute(:query_class,
-          class_name: "MCPNotificationItem",
-          where: { "label" => item.label },
-          limit: 1,
-        )
+                      class_name: "MCPNotificationItem",
+                      where: { "label" => item.label },
+                      limit: 1)
 
         events = collector.events_for(:query_class)
         assert events.size >= 1
@@ -191,16 +187,14 @@ class NotificationsIntegrationTest < Minitest::Test
   end
 
   def test_query_class_args_keys_does_not_contain_other_sensitive_keys
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_notif_collector do |collector|
         agent = Parse::Agent.new(permissions: :readonly)
         agent.execute(:query_class,
-          class_name: "MCPNotificationItem",
-          limit: 1,
-        )
+                      class_name: "MCPNotificationItem",
+                      limit: 1)
         events = collector.events_for(:query_class)
         assert events.size >= 1
 
@@ -218,8 +212,7 @@ class NotificationsIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_registered_tool_notification_fires_with_correct_tool_name
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_notif_collector do |collector|
@@ -250,8 +243,7 @@ class NotificationsIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_nonexistent_class_query_fires_error_notification
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_notif_collector do |collector|
@@ -284,8 +276,7 @@ class NotificationsIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_security_error_pipeline_fires_notification_and_is_re_raised
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     items = nil
     with_parse_server do
@@ -298,9 +289,8 @@ class NotificationsIntegrationTest < Minitest::Test
         assert_raises(Parse::Agent::PipelineValidator::PipelineSecurityError) do
           agent = Parse::Agent.new(permissions: :readonly)
           agent.execute(:aggregate,
-            class_name: "MCPNotificationItem",
-            pipeline: [{ "$out" => "hacked_collection" }],
-          )
+                        class_name: "MCPNotificationItem",
+                        pipeline: [{ "$out" => "hacked_collection" }])
         end
 
         events = collector.events_for(:aggregate)
@@ -325,8 +315,7 @@ class NotificationsIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_concurrent_calls_all_fire_notifications
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     thread_count = 5
 
@@ -357,8 +346,7 @@ class NotificationsIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_master_key_agent_auth_metadata_in_notification
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_notif_collector do |collector|
@@ -379,8 +367,7 @@ class NotificationsIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_session_token_agent_auth_metadata_in_notification
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_notif_collector do |collector|
@@ -403,8 +390,7 @@ class NotificationsIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_multiple_successive_calls_emit_distinct_notifications
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_notif_collector do |collector|
@@ -429,8 +415,7 @@ class NotificationsIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_notification_fires_even_when_tool_result_is_failure
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_notif_collector do |collector|
@@ -454,8 +439,7 @@ class NotificationsIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_notification_includes_agent_permissions_level
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_notif_collector do |collector|

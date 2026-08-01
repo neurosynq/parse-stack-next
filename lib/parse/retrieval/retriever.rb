@@ -224,8 +224,7 @@ module Parse
       chunker ||= default_chunker
       text_wire = wire_name(klass, resolved_text_field)
 
-      raw_hits =
-        if hybrid
+      raw_hits = if hybrid
           fetch_hybrid_hits(klass, query, k, field, filter, merged_vector_filter,
                             tenant_scope, hybrid, scope_opts)
         else
@@ -253,8 +252,8 @@ module Parse
                           tenant_scope, hybrid, scope_opts)
       cfg = hybrid.is_a?(Hash) ? hybrid : {}
       lexical = (cfg[:lexical] || cfg["lexical"] || {}).dup
-      vector  = (cfg[:vector]  || cfg["vector"]  || {}).dup
-      fusion  = cfg[:fusion] || cfg["fusion"]
+      vector = (cfg[:vector] || cfg["vector"] || {}).dup
+      fusion = cfg[:fusion] || cfg["fusion"]
 
       lexical[:query] ||= query
       # Tenant scope must be AUTHORITATIVE in BOTH branches. The previous
@@ -278,8 +277,7 @@ module Parse
 
     # @!visibility private
     def resolve_class!(klass)
-      resolved =
-        case klass
+      resolved = case klass
         when nil
           nil
         when Class

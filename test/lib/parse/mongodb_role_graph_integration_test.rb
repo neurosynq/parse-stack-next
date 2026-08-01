@@ -7,20 +7,32 @@ require "securerandom"
 # CORRECTNESS assertion — without it, a direction-inverted $graphLookup
 # would silently ship and only surface as an ACL bug under load.
 #
-# Requires: Docker stack from scripts/docker/docker-compose.test.yml AND
-# Parse::MongoDB.configure(uri: ANALYTICS_DATABASE_URI, enabled: true).
+# Requires: Docker stack from scripts/docker/docker-compose.test.yml.
+#
+# The Mongo URI comes from `PARSE_TEST_MONGO_URI`, matching every other
+# mongo-direct integration file, and falls back to the same Docker default
+# they use. `ANALYTICS_DATABASE_URI` is still honored as an override.
+#
+# This file previously gated ONLY on `ANALYTICS_DATABASE_URI`, which is a
+# production variable name (first entry of `Parse::MongoDB::ENV_URI_KEYS`)
+# that the test stack never sets. Both tests therefore skipped on every
+# run while the per-file reporter still printed PASS, so the correctness
+# assertion above was never actually evaluated.
 class MongoDBRoleGraphIntegrationTest < Minitest::Test
   include ParseStackIntegrationTest
+
+  MONGODB_URI = ENV["ANALYTICS_DATABASE_URI"] ||
+                ENV["PARSE_TEST_MONGO_URI"] ||
+                "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"
 
   def setup
     @test_users = []
     @test_roles = []
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
-    skip "Mongo-direct integration tests require ANALYTICS_DATABASE_URI" unless ENV["ANALYTICS_DATABASE_URI"]
     super
     @original_master_key = Parse.client.master_key if Parse::Client.client?
     Parse::MongoDB.configure(
-      uri: ENV["ANALYTICS_DATABASE_URI"],
+      uri: MONGODB_URI,
       enabled: true,
       verify_role: false,
     )

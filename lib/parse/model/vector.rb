@@ -57,6 +57,7 @@ module Parse
     def dimensions
       @values.length
     end
+
     alias_method :length, :dimensions
     alias_method :size, :dimensions
 
@@ -84,10 +85,11 @@ module Parse
     def ==(other)
       case other
       when Parse::Vector then @values == other.values
-      when Array         then @values == other
+      when Array then @values == other
       else false
       end
     end
+
     alias_method :eql?, :==
 
     def hash

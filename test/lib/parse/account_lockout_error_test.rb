@@ -49,8 +49,7 @@ class AccountLockoutErrorTest < Minitest::Test
   # =========================================================================
 
   def test_account_lockout_caught_by_authentication_error_rescue
-    raised =
-      begin
+    raised = begin
         raise Parse::Error::AccountLockoutError, "locked"
       rescue Parse::Error::AuthenticationError => e
         e
@@ -60,8 +59,7 @@ class AccountLockoutErrorTest < Minitest::Test
   end
 
   def test_account_lockout_caught_by_bare_rescue
-    raised =
-      begin
+    raised = begin
         raise Parse::Error::AccountLockoutError, "locked"
       rescue => e
         e
@@ -79,7 +77,7 @@ class AccountLockoutErrorTest < Minitest::Test
     # Seed the rate-limit table directly so the test has no timing dependency.
     limiter.send(:login_rate_limits)["alice"] = {
       failures: 5,
-      locked_until: Time.now + 300
+      locked_until: Time.now + 300,
     }
 
     assert_raises(Parse::Error::AccountLockoutError) do
@@ -91,7 +89,7 @@ class AccountLockoutErrorTest < Minitest::Test
     limiter = make_limiter
     limiter.send(:login_rate_limits)["bob"] = {
       failures: 5,
-      locked_until: Time.now + 300
+      locked_until: Time.now + 300,
     }
 
     error = assert_raises(Parse::Error::AccountLockoutError) do
@@ -104,7 +102,7 @@ class AccountLockoutErrorTest < Minitest::Test
     limiter = make_limiter
     limiter.send(:login_rate_limits)["carol"] = {
       failures: 5,
-      locked_until: Time.now + 300
+      locked_until: Time.now + 300,
     }
 
     error = assert_raises(Parse::Error::AccountLockoutError) do
@@ -124,7 +122,7 @@ class AccountLockoutErrorTest < Minitest::Test
     limiter = make_limiter
     limiter.send(:login_rate_limits)["dave"] = {
       failures: 5,
-      locked_until: Time.now - 1  # already expired
+      locked_until: Time.now - 1,  # already expired
     }
 
     # Must not raise; should return nil.

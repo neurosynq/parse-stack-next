@@ -92,7 +92,7 @@ class WebhookSessionTokenCaptureTest < Minitest::Test
     assert_nil p.session_token
     refute p.session_token?
     assert_nil p.user_client, "no token => no scoped client"
-    assert_nil p.user_agent,  "no token => no scoped agent"
+    assert_nil p.user_agent, "no token => no scoped agent"
   end
 
   def test_user_present_without_token_yields_nil

@@ -138,7 +138,7 @@ class EmbeddingsBatchEmbedderTest < Minitest::Test
       failures: [ScriptedProvider::FatalError.new("flaky")],
     )
     vectors = fast_embedder(provider, retry_on: [ScriptedProvider::FatalError])
-              .embed_text(%w[a])
+      .embed_text(%w[a])
     assert_equal 1, vectors.length
   end
 

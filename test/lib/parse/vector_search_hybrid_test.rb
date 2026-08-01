@@ -78,7 +78,9 @@ class VectorSearchHybridTest < Minitest::Test
   # Run `blk` with Parse::MongoDB.collection stubbed to a FakeColl whose
   # aggregate runs `behavior`.
   def with_probe_collection(behavior)
-    Parse::MongoDB.stub(:collection, ->(_name) { FakeColl.new(behavior) }) { yield }
+    Parse::MongoDB.stub(:verify_client!, nil) do
+      Parse::MongoDB.stub(:collection, ->(_name, **_o) { FakeColl.new(behavior) }) { yield }
+    end
   end
 
   def test_probe_returns_true_when_stage_recognized
@@ -109,13 +111,76 @@ class VectorSearchHybridTest < Minitest::Test
     assert_equal 1, calls, "second probe should hit the cache"
   end
 
+  def test_probe_forwards_and_verifies_the_authorizing_client
+    client = Object.new
+    verified = nil
+    forwarded = nil
+    Parse::MongoDB.stub(:verify_client!, ->(value) { verified = value }) do
+      Parse::MongoDB.stub(:collection, lambda { |_name, authorizing_client: nil|
+        forwarded = authorizing_client
+        FakeColl.new(-> { [] })
+      }) do
+        assert_equal true, H.rank_fusion_supported?("Song", authorizing_client: client)
+      end
+    end
+
+    assert_same client, verified
+    assert_same client, forwarded
+  end
+
+  def test_probe_does_not_cache_a_client_binding_mismatch_as_supported
+    calls = 0
+    Parse::MongoDB.stub(:verify_client!, lambda { |_client|
+      calls += 1
+      raise Parse::MongoDB::ClientMismatch, "wrong application"
+    }) do
+      2.times do
+        assert_raises(Parse::MongoDB::ClientMismatch) do
+          H.rank_fusion_supported?("Song", authorizing_client: Object.new)
+        end
+      end
+    end
+
+    assert_equal 2, calls, "a binding failure must be retried, not cached as a capability verdict"
+  end
+
+  def test_native_search_probes_with_the_resolved_client
+    client = Object.new
+    resolution = Struct.new(:client).new(client)
+    probed_with = nil
+    Parse::MongoDB.stub(:require_gem!, nil) do
+      Parse::MongoDB.stub(:available?, true) do
+        Parse::ACLScope.stub(:resolve!, resolution) do
+          H.stub(:rank_fusion_supported?, lambda { |_collection, authorizing_client: nil|
+            probed_with = authorizing_client
+            false
+          }) do
+            Parse::AtlasSearch.stub(:search, ->(*_a, **_k) { [] }) do
+              Parse::VectorSearch.stub(:search, ->(*_a, **_k) { [] }) do
+                H.search(
+                  "Song",
+                  lexical: { query: "rain" },
+                  vector: { query_vector: [0.1], field: "embedding" },
+                  fusion: { method: :rrf_native },
+                  client: client,
+                )
+              end
+            end
+          end
+        end
+      end
+    end
+
+    assert_same client, probed_with
+  end
+
   # ----- native pipeline shape (security-relevant) -----
 
   def test_native_pipeline_is_stage0_rankfusion_with_subpipelines
     pipe = H.send(:native_pipeline, "Song",
-      lexical: { query: "rain", index: "song_search" },
-      vector: { query_vector: [0.1, 0.2], field: "embedding", index: "song_idx", num_candidates: 40 },
-      k: 5, fusion: { weights: { lexical: 0.4, vector: 0.6 } }, master: true)
+                  lexical: { query: "rain", index: "song_search" },
+                  vector: { query_vector: [0.1, 0.2], field: "embedding", index: "song_idx", num_candidates: 40 },
+                  k: 5, fusion: { weights: { lexical: 0.4, vector: 0.6 } }, master: true)
     assert_equal "$rankFusion", pipe.first.keys.first
     inputs = pipe.first["$rankFusion"]["input"]["pipelines"]
     assert_equal "$vectorSearch", inputs["vector"].first.keys.first
@@ -134,9 +199,9 @@ class VectorSearchHybridTest < Minitest::Test
     Parse::ACLScope.stub(:resolve!, ->(*) { fake_resolution }) do
       Parse::ACLScope.stub(:match_stage_for, ->(_r) { { "$match" => { "_rperm" => { "$in" => %w[u1] } } } }) do
         pipe = H.send(:native_pipeline, "Song",
-          lexical: { query: "x", index: "i" },
-          vector: { query_vector: [0.1], field: "e", index: "vi" },
-          k: 3, session_token: "tok")
+                      lexical: { query: "x", index: "i" },
+                      vector: { query_vector: [0.1], field: "e", index: "vi" },
+                      k: 3, session_token: "tok")
         assert(pipe.any? { |s| s["$match"] && s["$match"].key?("_rperm") },
                "scoped native pipeline must contain an ACL _rperm $match")
       end
@@ -147,7 +212,7 @@ class VectorSearchHybridTest < Minitest::Test
 
   def test_search_default_fuses_client_side_without_probing
     lexical_rows = [{ "_id" => "a", "_score" => 5.0 }, { "_id" => "b", "_score" => 4.0 }]
-    vector_rows  = [{ "_id" => "b", "_vscore" => 0.9 }, { "_id" => "c", "_vscore" => 0.8 }]
+    vector_rows = [{ "_id" => "b", "_vscore" => 0.9 }, { "_id" => "c", "_vscore" => 0.8 }]
     probed = false
     Parse::MongoDB.stub(:require_gem!, nil) do
       Parse::MongoDB.stub(:available?, true) do
@@ -155,9 +220,9 @@ class VectorSearchHybridTest < Minitest::Test
           Parse::AtlasSearch.stub(:search, ->(*_a, **_k) { lexical_rows }) do
             Parse::VectorSearch.stub(:search, ->(*_a, **_k) { vector_rows }) do
               out = H.search("Song",
-                lexical: { query: "rain" },
-                vector: { query_vector: [0.1, 0.2], field: "embedding", index: "idx" },
-                k: 10)
+                             lexical: { query: "rain" },
+                             vector: { query_vector: [0.1, 0.2], field: "embedding", index: "idx" },
+                             k: 10)
               assert_equal %w[b a c], out.map { |r| r["_id"] }
             end
           end
@@ -291,7 +356,7 @@ class VectorSearchHybridTest < Minitest::Test
         end
         assert_raises(ArgumentError) do
           H.search("Song", lexical: { query: "x" }, vector: { query_vector: [0.1], field: "e" },
-                   k: 5, fusion: { method: :bogus })
+                           k: 5, fusion: { method: :bogus })
         end
       end
     end
@@ -312,7 +377,9 @@ class VectorSearchHybridTest < Minitest::Test
   # $vectorSearch stage can be inspected.
   class CapturingColl
     attr_reader :pipelines
+
     def initialize = @pipelines = []
+
     def aggregate(pipeline, _opts = {})
       @pipelines << pipeline
       []
@@ -330,7 +397,7 @@ class VectorSearchHybridTest < Minitest::Test
 
     Parse::MongoDB.stub(:require_gem!, nil) do
       Parse::MongoDB.stub(:available?, true) do
-        Parse::MongoDB.stub(:collection, ->(_n) { coll }) do
+        Parse::MongoDB.stub(:collection, ->(_n, **_o) { coll }) do
           Parse::ACLScope.stub(:resolve!, ->(*, **) { resolution }) do
             Parse::ACLScope.stub(:match_stage_for, ->(_r) { nil }) do
               Parse::CLPScope.stub(:permits?, ->(*) { true }) do
@@ -358,7 +425,7 @@ class VectorSearchHybridTest < Minitest::Test
   # stubbed, optionally capturing the kwargs the vector branch receives.
   def run_hybrid(k:, vector_capture: nil, vector_extra: {})
     lexical_rows = [{ "_id" => "a", "_score" => 5.0 }]
-    vector_rows  = [{ "_id" => "b", "_vscore" => 0.9 }]
+    vector_rows = [{ "_id" => "b", "_vscore" => 0.9 }]
     Parse::MongoDB.stub(:require_gem!, nil) do
       Parse::MongoDB.stub(:available?, true) do
         Parse::AtlasSearch.stub(:search, ->(*_a, **_k) { lexical_rows }) do

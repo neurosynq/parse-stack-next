@@ -73,8 +73,8 @@ class AgentDescribeTest < Minitest::Test
       Parse::Agent.new(classes: { only: [DescribePost, DescribeAccount], except: [Parse::Session] })
     end
     classes = agent.describe[:classes]
-    assert_includes classes[:only],   "DescribePost"
-    assert_includes classes[:only],   "DescribeAccount"
+    assert_includes classes[:only], "DescribePost"
+    assert_includes classes[:only], "DescribeAccount"
     assert_includes classes[:except], "_Session"
   end
 
@@ -145,9 +145,9 @@ class AgentDescribeTest < Minitest::Test
 
   def test_describe_for_accepts_class_constant_string_and_symbol
     agent = silence_master_key { Parse::Agent.new }
-    by_const  = agent.describe_for(DescribePost)
+    by_const = agent.describe_for(DescribePost)
     by_string = agent.describe_for("DescribePost")
-    assert_equal by_const[:class_name],  by_string[:class_name]
+    assert_equal by_const[:class_name], by_string[:class_name]
     assert_equal "DescribePost", by_const[:class_name]
   end
 

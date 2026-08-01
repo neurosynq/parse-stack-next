@@ -46,8 +46,8 @@ class MCPLMStudioEvaluator
         function: {
           name: tool["name"],
           description: tool["description"],
-          parameters: tool["inputSchema"]
-        }
+          parameters: tool["inputSchema"],
+        },
       }
     end
 
@@ -68,8 +68,8 @@ class MCPLMStudioEvaluator
       method: "tools/call",
       params: {
         name: tool_name,
-        arguments: arguments
-      }
+        arguments: arguments,
+      },
     })
 
     response = http.request(request)
@@ -95,7 +95,7 @@ class MCPLMStudioEvaluator
       model: "qwen2.5-32b-instruct",
       messages: @conversation,
       temperature: 0.1,
-      max_tokens: 2000
+      max_tokens: 2000,
     }
 
     # Add tools if available and requested
@@ -155,7 +155,7 @@ class MCPLMStudioEvaluator
       tool_results << {
         role: "tool",
         tool_call_id: tool_call["id"],
-        content: JSON.generate(result)
+        content: JSON.generate(result),
       }
     end
 
@@ -184,7 +184,7 @@ class MCPLMStudioEvaluator
     # Add system message
     @conversation = [{
       role: "system",
-      content: <<~SYSTEM
+      content: <<~SYSTEM,
         You are a helpful assistant with access to a Parse database.
         Use the available tools to answer questions about the data.
         Always start by getting the schema if you need to understand the database structure.

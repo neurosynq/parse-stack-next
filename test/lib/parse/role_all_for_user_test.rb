@@ -86,7 +86,7 @@ class RoleAllForUserTest < Minitest::Test
 
   def test_single_parent_role_via_upward_walk
     member = Role.new("R1", "Member")
-    admin  = Role.new("R2", "Admin")
+    admin = Role.new("R2", "Admin")
     # Admin.roles contains Member -> Member's users inherit Admin's
     # permissions, i.e. Admin is a PARENT in the upward walk.
     stub_role_graph(direct_for_user: [member], parents_for: { member => [admin] })
@@ -152,6 +152,15 @@ class RoleAllForUserTest < Minitest::Test
       raise StandardError, "simulated Parse Server outage"
     end
     assert_equal Set.new, Parse::Role.all_for_user(@user_pointer)
+  end
+
+  def test_lookup_failure_raises_in_strict_mode
+    failure = ->(**) { raise IOError, "simulated Parse Server outage" }
+    Parse::Role.stub(:all, failure) do
+      assert_raises(IOError) do
+        Parse::Role.all_for_user(@user_pointer, strict: true)
+      end
+    end
   end
 
   def test_string_user_id_is_coerced_to_pointer
@@ -223,6 +232,18 @@ class RoleAllParentRoleNamesTest < Minitest::Test
   def test_nil_id_returns_empty_set
     role = Parse::Role.new(name: "DangerousButUnsaved")
     assert_equal Set.new, role.all_parent_role_names
+  end
+
+  def test_parent_lookup_failure_raises_in_strict_mode
+    role = Parse::Role.new(name: "Admin")
+    role.id = "R1"
+    failure = ->(**) { raise IOError, "simulated Parse Server outage" }
+
+    Parse::Role.stub(:all, failure) do
+      assert_raises(IOError) do
+        role.all_parent_role_names(strict: true)
+      end
+    end
   end
 end
 

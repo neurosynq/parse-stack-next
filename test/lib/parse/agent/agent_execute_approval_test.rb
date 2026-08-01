@@ -31,6 +31,7 @@ class AgentExecuteApprovalTest < Minitest::Test
   # Records review calls and returns a fixed decision.
   class RecordingGate < Parse::Agent::ApprovalGate
     attr_reader :calls
+
     def initialize(decision)
       @decision = decision
       @calls = []
@@ -55,8 +56,7 @@ class AgentExecuteApprovalTest < Minitest::Test
 
   def teardown
     Parse::Agent.require_approval_for = @saved
-    @saved_write_env ? ENV["PARSE_AGENT_ALLOW_WRITE_TOOLS"] = @saved_write_env
-                     : ENV.delete("PARSE_AGENT_ALLOW_WRITE_TOOLS")
+    @saved_write_env ? ENV["PARSE_AGENT_ALLOW_WRITE_TOOLS"] = @saved_write_env : ENV.delete("PARSE_AGENT_ALLOW_WRITE_TOOLS")
   end
 
   def admin_agent(gate)

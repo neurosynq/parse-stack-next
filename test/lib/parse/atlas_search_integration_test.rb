@@ -495,7 +495,7 @@ class AtlasSearchIntegrationTest < Minitest::Test
       end
     end
     warn "[AtlasSearchIntegrationTest] Atlas Search probe failed at #{ATLAS_URI} " \
-         "after #{attempts} attempts: #{last_error.class}: #{last_error.message}"
+      "after #{attempts} attempts: #{last_error.class}: #{last_error.message}"
     false
   end
 

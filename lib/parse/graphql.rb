@@ -26,11 +26,11 @@ module Parse
       def available?
         return @gem_available if defined?(@gem_available)
         @gem_available = begin
-          require "graphql"
-          true
-        rescue LoadError
-          false
-        end
+            require "graphql"
+            true
+          rescue LoadError
+            false
+          end
       end
 
       # Force-reset the cached availability flag. Test-only.

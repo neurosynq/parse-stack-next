@@ -493,6 +493,7 @@ module Parse
       end
       nil
     end
+
     private_class_method :walk_for_protected_ref!
 
     # @!visibility private
@@ -532,6 +533,7 @@ module Parse
         walk_for_denied!(value, depth: 1, stage_idx: idx)
       end
     end
+
     private_class_method :validate_stage!
 
     # @!visibility private
@@ -674,6 +676,7 @@ module Parse
       # Other primitives (Integer, etc.) are always safe.
       nil
     end
+
     private_class_method :walk_for_denied!
   end
 end

@@ -388,8 +388,7 @@ module Parse
         params = Faraday::Utils.parse_query(query_string.to_s) || {}
         body = { "_method" => "GET" }
         params.each do |key, value|
-          body[key] =
-            begin
+          body[key] = begin
               JSON.parse(value)
             rescue JSON::ParserError, TypeError
               value

@@ -5,7 +5,7 @@ require_relative "../../../test_helper"
 class GbdPost < Parse::Object
   parse_class "GbdPost"
   property :category, :string
-  property :score,    :integer
+  property :score, :integer
 end
 
 # ── Unit tests: no server required ───────────────────────────────────────────

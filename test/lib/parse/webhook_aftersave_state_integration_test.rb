@@ -38,10 +38,10 @@ class WebhookStatePost < Parse::Object
   end
   self.model_callbacks = []
 
-  before_save   :__record_before_save
+  before_save :__record_before_save
   before_create :__record_before_create
-  after_create  :__record_after_create
-  after_save    :__record_after_save
+  after_create :__record_after_create
+  after_save :__record_after_save
 
   def __record(hook)
     self.class.model_callbacks << {

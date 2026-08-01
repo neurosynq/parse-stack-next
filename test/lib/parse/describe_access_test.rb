@@ -15,8 +15,8 @@ class DescribeAccessFullSurface < Parse::Object
   protect_fields "*", [:secret]
 
   set_class_access(
-    find:   :public,
-    get:    :public,
+    find: :public,
+    get: :public,
     create: :authenticated,
     update: "Admin",
     delete: :master,
@@ -30,6 +30,7 @@ end
 class DescribeAccessBareClass < Parse::Object
   parse_class "DescribeAccessBareClass"
   property :name, :string
+
   def autofetch!(*); nil; end
 end
 
@@ -39,6 +40,7 @@ class DescribeAccessMultiword < Parse::Object
   property :internal_note, :string
   guard :internal_note, :master_only
   protect_fields "*", [:internal_note]
+
   def autofetch!(*); nil; end
 end
 
@@ -72,7 +74,7 @@ class DescribeAccessTest < Minitest::Test
 
   def test_field_guards_surface_in_write_column
     assert_equal :master_only, @access[:fields][:owner][:write]
-    assert_equal :immutable,   @access[:fields][:slug][:write]
+    assert_equal :immutable, @access[:fields][:slug][:write]
   end
 
   def test_protected_fields_surface_in_read_column_as_hidden_from

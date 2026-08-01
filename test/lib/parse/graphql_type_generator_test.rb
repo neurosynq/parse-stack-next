@@ -197,7 +197,7 @@ class GraphQLTypeGeneratorTest < Minitest::Test
     end
     assert_equal Parse::GraphQL::Types::JSON, type.fields["tags"].type.unwrap
     assert_match(/tags.*emitting as JSON scalar/, captured.string,
-      "weakly-typed :array column should warn the author")
+                 "weakly-typed :array column should warn the author")
   end
 
   # ----------------------------------------------------------------
@@ -266,6 +266,7 @@ class GraphQLTypeGeneratorTest < Minitest::Test
       parse_class "GqlGenMyThing"
       property :name, :string
     end
+
     class GqlGenMy_Thing < Parse::Object
       parse_class "GqlGen_My_Thing"
       property :name, :string

@@ -30,7 +30,7 @@ class DateParsingIntegrationTest < Minitest::Test
         # Create record with valid date
         record = DateTestRecord.new(
           name: "Valid Date Test",
-          event_date: "2025-12-04T15:15:05.446Z"
+          event_date: "2025-12-04T15:15:05.446Z",
         )
         assert record.save, "Should save record with valid date"
         assert_instance_of Parse::Date, record.event_date
@@ -55,7 +55,7 @@ class DateParsingIntegrationTest < Minitest::Test
         # Create record with nil date
         record = DateTestRecord.new(
           name: "Nil Date Test",
-          event_date: nil
+          event_date: nil,
         )
         assert record.save, "Should save record with nil date"
         assert_nil record.event_date
@@ -77,7 +77,7 @@ class DateParsingIntegrationTest < Minitest::Test
         # Create record with valid date first
         record = DateTestRecord.new(
           name: "Empty String Update Test",
-          event_date: Time.now.utc
+          event_date: Time.now.utc,
         )
         assert record.save, "Should save record with valid date"
         assert_instance_of Parse::Date, record.event_date
@@ -105,7 +105,7 @@ class DateParsingIntegrationTest < Minitest::Test
         # Create record with valid date first
         record = DateTestRecord.new(
           name: "Whitespace Update Test",
-          event_date: Time.now.utc
+          event_date: Time.now.utc,
         )
         assert record.save, "Should save record with valid date"
 
@@ -132,7 +132,7 @@ class DateParsingIntegrationTest < Minitest::Test
         # Create record with whitespace-padded date string
         record = DateTestRecord.new(
           name: "Whitespace Trimming Test",
-          event_date: "  2025-06-15T10:30:00.000Z  "
+          event_date: "  2025-06-15T10:30:00.000Z  ",
         )
         assert record.save, "Should save record with whitespace-padded date"
         assert_instance_of Parse::Date, record.event_date
@@ -157,7 +157,7 @@ class DateParsingIntegrationTest < Minitest::Test
       with_timeout(10, "date hash with empty iso") do
         # Test setting date via hash format with empty iso
         record = DateTestRecord.new(
-          name: "Empty ISO Hash Test"
+          name: "Empty ISO Hash Test",
         )
         record.event_date = { "__type" => "Date", "iso" => "" }
         assert_nil record.event_date, "Hash with empty iso should result in nil"
@@ -180,7 +180,7 @@ class DateParsingIntegrationTest < Minitest::Test
       with_timeout(10, "date hash with whitespace iso") do
         # Test setting date via hash format with whitespace iso
         record = DateTestRecord.new(
-          name: "Whitespace ISO Hash Test"
+          name: "Whitespace ISO Hash Test",
         )
         record.event_date = { "__type" => "Date", "iso" => "   " }
         assert_nil record.event_date, "Hash with whitespace iso should result in nil"
@@ -203,7 +203,7 @@ class DateParsingIntegrationTest < Minitest::Test
       with_timeout(10, "date hash with missing iso") do
         # Test setting date via hash format with missing iso key
         record = DateTestRecord.new(
-          name: "Missing ISO Hash Test"
+          name: "Missing ISO Hash Test",
         )
         record.event_date = { "__type" => "Date" }
         assert_nil record.event_date, "Hash with missing iso should result in nil"
@@ -226,7 +226,7 @@ class DateParsingIntegrationTest < Minitest::Test
       with_timeout(10, "date hash with valid iso and whitespace") do
         # Test setting date via hash format with whitespace around valid iso
         record = DateTestRecord.new(
-          name: "Valid ISO with Whitespace Test"
+          name: "Valid ISO with Whitespace Test",
         )
         record.event_date = { "__type" => "Date", "iso" => "  2025-07-20T08:00:00.000Z  " }
         assert_instance_of Parse::Date, record.event_date
@@ -254,19 +254,19 @@ class DateParsingIntegrationTest < Minitest::Test
         # Create records with various date states
         record_with_date = DateTestRecord.new(
           name: "Has Date",
-          event_date: Time.now.utc
+          event_date: Time.now.utc,
         )
         assert record_with_date.save
 
         record_without_date = DateTestRecord.new(
           name: "No Date",
-          event_date: ""
+          event_date: "",
         )
         assert record_without_date.save
 
         record_whitespace_date = DateTestRecord.new(
           name: "Whitespace Date",
-          event_date: "   "
+          event_date: "   ",
         )
         assert record_whitespace_date.save
 
@@ -298,7 +298,7 @@ class DateParsingIntegrationTest < Minitest::Test
           name: "Mixed Dates Test",
           event_date: "2025-12-04T15:15:05.446Z",
           start_date: "",
-          end_date: "   "
+          end_date: "   ",
         )
 
         assert_instance_of Parse::Date, record.event_date

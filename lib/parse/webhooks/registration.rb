@@ -33,10 +33,10 @@ module Parse
       def assert_webhook_url_safe!(url)
         raise ArgumentError, "Webhook URL is required" if url.nil? || url.to_s.empty?
         uri = begin
-          URI.parse(url.to_s)
-        rescue URI::InvalidURIError => e
-          raise ArgumentError, "Invalid webhook URL: #{e.message}"
-        end
+            URI.parse(url.to_s)
+          rescue URI::InvalidURIError => e
+            raise ArgumentError, "Invalid webhook URL: #{e.message}"
+          end
         unless %w[http https].include?(uri.scheme)
           raise ArgumentError, "Webhook URL must be http(s) (got #{uri.scheme.inspect})"
         end

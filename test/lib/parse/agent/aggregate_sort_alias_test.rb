@@ -29,21 +29,21 @@ class AggregateSortAliasTest < Minitest::Test
     # The canonical top-K pattern: count is a computed alias from $group.
     enforce([
       { "$group" => { "_id" => "$status", "count" => { "$sum" => 1 } } },
-      { "$sort"  => { "count" => -1 } },
+      { "$sort" => { "count" => -1 } },
     ])
   end
 
   def test_addfields_alias_then_sort_alias_allowed
     enforce([
       { "$addFields" => { "score" => { "$add" => [1, 2] } } },
-      { "$sort"      => { "score" => -1 } },
+      { "$sort" => { "score" => -1 } },
     ])
   end
 
   def test_project_alias_then_sort_alias_allowed
     enforce([
       { "$project" => { "status" => 1, "label" => "$status" } },
-      { "$sort"    => { "label" => 1 } },
+      { "$sort" => { "label" => 1 } },
     ])
   end
 
@@ -53,7 +53,7 @@ class AggregateSortAliasTest < Minitest::Test
     assert_raises(Parse::Agent::AccessDenied) do
       enforce([
         { "$project" => { "x" => "$secret" } },
-        { "$sort"    => { "x" => 1 } },
+        { "$sort" => { "x" => 1 } },
       ])
     end
   end

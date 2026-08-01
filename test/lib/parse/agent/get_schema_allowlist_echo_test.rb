@@ -36,16 +36,16 @@ class GetSchemaAllowlistEchoTest < Minitest::Test
   def test_enriched_schema_sets_agent_fields_in_wire_format
     server_schema = {
       "className" => "GSEAllowlisted",
-      "fields"    => {
-        "objectId"    => { "type" => "String" },
-        "createdAt"   => { "type" => "Date" },
-        "updatedAt"   => { "type" => "Date" },
-        "ACL"         => { "type" => "ACL" },
-        "name"        => { "type" => "String" },
-        "status"      => { "type" => "String" },
+      "fields" => {
+        "objectId" => { "type" => "String" },
+        "createdAt" => { "type" => "Date" },
+        "updatedAt" => { "type" => "Date" },
+        "ACL" => { "type" => "ACL" },
+        "name" => { "type" => "String" },
+        "status" => { "type" => "String" },
         "memberCount" => { "type" => "Number" },
-        "iconImage"   => { "type" => "String" },
-        "legacyBlob"  => { "type" => "Object" },
+        "iconImage" => { "type" => "String" },
+        "legacyBlob" => { "type" => "Object" },
       },
     }
     result = Parse::Agent::MetadataRegistry.enriched_schema("GSEAllowlisted", server_schema)
@@ -73,7 +73,7 @@ class GetSchemaAllowlistEchoTest < Minitest::Test
   def test_enriched_schema_omits_echoes_when_no_allowlist_declared
     server_schema = {
       "className" => "GSEUnfiltered",
-      "fields"    => { "name" => { "type" => "String" } },
+      "fields" => { "name" => { "type" => "String" } },
     }
     result = Parse::Agent::MetadataRegistry.enriched_schema("GSEUnfiltered", server_schema)
     refute result.key?("agent_fields"), "agent_fields echo must be omitted when not declared"
@@ -86,13 +86,13 @@ class GetSchemaAllowlistEchoTest < Minitest::Test
   def test_format_schema_surfaces_agent_fields_at_top_level
     server_schema = {
       "className" => "GSEAllowlisted",
-      "fields"    => {
-        "name"        => { "type" => "String" },
-        "status"      => { "type" => "String" },
+      "fields" => {
+        "name" => { "type" => "String" },
+        "status" => { "type" => "String" },
         "memberCount" => { "type" => "Number" },
       },
     }
-    enriched  = Parse::Agent::MetadataRegistry.enriched_schema("GSEAllowlisted", server_schema)
+    enriched = Parse::Agent::MetadataRegistry.enriched_schema("GSEAllowlisted", server_schema)
     formatted = Parse::Agent::ResultFormatter.format_schema(enriched)
     assert formatted[:agent_fields].is_a?(Array)
     assert_includes formatted[:agent_fields], "name"
@@ -100,7 +100,7 @@ class GetSchemaAllowlistEchoTest < Minitest::Test
 
   def test_format_schema_surfaces_agent_join_fields_at_top_level
     server_schema = { "className" => "GSEAllowlisted", "fields" => {} }
-    enriched  = Parse::Agent::MetadataRegistry.enriched_schema("GSEAllowlisted", server_schema)
+    enriched = Parse::Agent::MetadataRegistry.enriched_schema("GSEAllowlisted", server_schema)
     formatted = Parse::Agent::ResultFormatter.format_schema(enriched)
     assert formatted[:agent_join_fields].is_a?(Array)
     assert_includes formatted[:agent_join_fields], "name"
@@ -110,9 +110,9 @@ class GetSchemaAllowlistEchoTest < Minitest::Test
   def test_format_schema_omits_echoes_for_unfiltered_class
     server_schema = {
       "className" => "GSEUnfiltered",
-      "fields"    => { "name" => { "type" => "String" } },
+      "fields" => { "name" => { "type" => "String" } },
     }
-    enriched  = Parse::Agent::MetadataRegistry.enriched_schema("GSEUnfiltered", server_schema)
+    enriched = Parse::Agent::MetadataRegistry.enriched_schema("GSEUnfiltered", server_schema)
     formatted = Parse::Agent::ResultFormatter.format_schema(enriched)
     refute formatted.key?(:agent_fields), "echo must not appear when no allowlist is declared"
     refute formatted.key?(:agent_join_fields)
@@ -125,8 +125,8 @@ class GetSchemaAllowlistEchoTest < Minitest::Test
   def test_existing_field_trimming_is_unaffected_by_echo
     server_schema = {
       "className" => "GSEAllowlisted",
-      "fields"    => {
-        "name"       => { "type" => "String" },
+      "fields" => {
+        "name" => { "type" => "String" },
         "legacyBlob" => { "type" => "Object" },
       },
     }

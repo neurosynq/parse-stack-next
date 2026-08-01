@@ -58,7 +58,7 @@ class MongoDBIndexesIntegrationTest < Minitest::Test
   # Writer URI must be string-distinct from the reader (operator-safety
   # check in `configure_writer`). Same target connection, different
   # appName so the Mongo driver opens an independent client.
-  WRITER_URI  = MONGODB_URI + "&appName=parse-stack-writer-tests"
+  WRITER_URI = MONGODB_URI + "&appName=parse-stack-writer-tests"
 
   def setup_mongodb_full!
     require "mongo"
@@ -127,7 +127,7 @@ class MongoDBIndexesIntegrationTest < Minitest::Test
     skip "mongo unavailable" unless setup_mongodb_full!
     begin
       results = IxIntegCar.apply_indexes!
-      result  = results["IxIntegCar"]
+      result = results["IxIntegCar"]
       assert_equal 5, result[:created].size, "all 5 declared indexes should be created"
       assert_empty result[:conflicts]
       refute result[:capacity_blocked]
@@ -151,7 +151,7 @@ class MongoDBIndexesIntegrationTest < Minitest::Test
     docker_required
     skip "mongo unavailable" unless setup_mongodb_full!
     begin
-      first  = IxIntegCar.apply_indexes!["IxIntegCar"]
+      first = IxIntegCar.apply_indexes!["IxIntegCar"]
       second = IxIntegCar.apply_indexes!["IxIntegCar"]
       assert_equal 5, first[:created].size
       assert_equal 0, second[:created].size, "second apply must create nothing"
@@ -217,10 +217,10 @@ class MongoDBIndexesIntegrationTest < Minitest::Test
     docker_required
     skip "mongo unavailable" unless setup_mongodb_full!
     begin
-      first  = Parse::MongoDB.create_index("IxIntegBare", { slug: 1 })
+      first = Parse::MongoDB.create_index("IxIntegBare", { slug: 1 })
       second = Parse::MongoDB.create_index("IxIntegBare", { slug: 1 })
       assert_equal :created, first
-      assert_equal :exists,  second
+      assert_equal :exists, second
     ensure
       teardown_mongodb_full!
     end
@@ -346,9 +346,9 @@ class MongoDBIndexesIntegrationTest < Minitest::Test
       3.times { Parse::MongoDB.collection("IxIntegCar").find({}).to_a }
 
       # `describe(:indexes, ..., usage: true)` forwards `master:` to
-       # `Parse::MongoDB.index_stats`, which is admin-only and requires
-       # the explicit opt-in. Without `master: true` the section reports
-       # `usage_available: false` and counter fields are absent.
+      # `Parse::MongoDB.index_stats`, which is admin-only and requires
+      # the explicit opt-in. Without `master: true` the section reports
+      # `usage_available: false` and counter fields are absent.
       data = IxIntegCar.describe(:indexes, network: true, usage: true, master: true)
       ix = data[:indexes]
       assert ix[:available]
@@ -370,7 +370,7 @@ class MongoDBIndexesIntegrationTest < Minitest::Test
     skip "mongo unavailable" unless setup_mongodb_full!
     begin
       results = IxIntegRefAuto.apply_indexes!
-      result  = results["IxIntegRefAuto"]
+      result = results["IxIntegRefAuto"]
       assert_equal 1, result[:created].size,
         "parse_reference must auto-register and apply exactly one unique-sparse index"
 

@@ -311,7 +311,7 @@ class EmbeddingsCohereTest < Minitest::Test
       stub.post("/v1/embed") { |_| [400, {}, '{"message":"bad"}'] }
     end
     provider = build(
-      base_url:   "https://customer-private-proxy.example.com/cohere/v1",
+      base_url: "https://customer-private-proxy.example.com/cohere/v1",
       connection: stubbed_conn(stubs),
     )
     err = assert_raises(Parse::Embeddings::Cohere::BadRequestError) { provider.embed_text(["a"]) }

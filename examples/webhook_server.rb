@@ -30,8 +30,8 @@ require "parse-stack-next"
 # ---------------------------------------------------------------------------
 Parse.setup(
   server_url: ENV.fetch("PARSE_SERVER_URL", "http://localhost:1337/parse"),
-  app_id:     ENV.fetch("PARSE_APP_ID"),
-  api_key:    ENV.fetch("PARSE_REST_KEY"),
+  app_id: ENV.fetch("PARSE_APP_ID"),
+  api_key: ENV.fetch("PARSE_REST_KEY"),
   master_key: ENV.fetch("PARSE_MASTER_KEY"),
 )
 
@@ -56,7 +56,7 @@ class Post < Parse::Object
   # NON-Ruby client they run here only if a beforeSave/afterSave webhook is
   # registered for Post. Registering beforeSave enables BOTH before_save and
   # before_create; afterSave enables both after_save and after_create.
-  before_save  :normalize_slug
+  before_save :normalize_slug
   before_create { self.published = false } # created drafts start unpublished
   after_create :enqueue_welcome           # see note on afterSave below
 

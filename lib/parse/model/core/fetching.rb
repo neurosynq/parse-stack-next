@@ -203,6 +203,8 @@ module Parse
 
         # Apply attributes from server (only keys in result get updated)
         apply_attributes!(result, dirty_track: false)
+        record_authorization_hydration!(result, partial: is_partial_fetch) if
+          respond_to?(:record_authorization_hydration!)
 
         begin
           clear_changes!

@@ -26,8 +26,8 @@ class MCPNotificationsTest < Minitest::Test
   def rack_env(body:, session_id: nil, method: "POST")
     env = {
       "REQUEST_METHOD" => method,
-      "CONTENT_TYPE"   => "application/json",
-      "rack.input"     => StringIO.new(body),
+      "CONTENT_TYPE" => "application/json",
+      "rack.input" => StringIO.new(body),
     }
     env["HTTP_MCP_SESSION_ID"] = session_id if session_id
     env

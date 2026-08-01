@@ -74,8 +74,7 @@ class NetworkFailureDisruptiveTest < Minitest::Test
     # A create during the outage must also fail loudly (returns false /
     # raises) rather than silently appearing to succeed.
     blocked = DisruptiveProbe.new(label: "during-outage")
-    created_during_outage =
-      begin
+    created_during_outage = begin
         blocked.save
       rescue *OUTAGE_ERRORS
         false

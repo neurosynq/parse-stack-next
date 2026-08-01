@@ -265,7 +265,8 @@ class WebhookRackCallTest < Minitest::Test
     Parse::Webhooks.allow_unauthenticated = true
     capture_io do
       _status, _headers, body = Parse::Webhooks.call(
-        build_env_with_content_type("application/jsonp"))
+        build_env_with_content_type("application/jsonp")
+      )
       payload = JSON.parse(body.join)
       assert_equal "Invalid content-type format. Should be application/json.",
                    payload["error"]
@@ -276,7 +277,8 @@ class WebhookRackCallTest < Minitest::Test
     Parse::Webhooks.allow_unauthenticated = true
     capture_io do
       _status, _headers, body = Parse::Webhooks.call(
-        build_env_with_content_type("text/application/json"))
+        build_env_with_content_type("text/application/json")
+      )
       payload = JSON.parse(body.join)
       assert_equal "Invalid content-type format. Should be application/json.",
                    payload["error"]
@@ -287,7 +289,8 @@ class WebhookRackCallTest < Minitest::Test
     Parse::Webhooks.allow_unauthenticated = true
     capture_io do
       _status, _headers, body = Parse::Webhooks.call(
-        build_env_with_content_type("application/json; charset=utf-8"))
+        build_env_with_content_type("application/json; charset=utf-8")
+      )
       payload = JSON.parse(body.join)
       # No route registered for "x"; success path returns {"success":true}.
       assert payload.key?("success")

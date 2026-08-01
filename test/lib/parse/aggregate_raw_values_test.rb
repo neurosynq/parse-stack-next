@@ -12,9 +12,9 @@ class TestAggregateRawValues < Minitest::Test
     attr_reader :last_class_name, :last_pipeline, :last_raw_values, :last_raw_field_names
 
     def aggregate_pipeline(class_name, pipeline, raw_values: false, raw_field_names: false, **opts)
-      @last_class_name   = class_name
-      @last_pipeline     = pipeline
-      @last_raw_values   = raw_values
+      @last_class_name = class_name
+      @last_pipeline = pipeline
+      @last_raw_values = raw_values
       @last_raw_field_names = raw_field_names
       stub_response
     end
@@ -32,7 +32,7 @@ class TestAggregateRawValues < Minitest::Test
 
   def setup
     @query = Parse::Query.new("Post")
-    @spy   = SpyClient.new
+    @spy = SpyClient.new
     @query.instance_variable_set(:@client, @spy)
   end
 

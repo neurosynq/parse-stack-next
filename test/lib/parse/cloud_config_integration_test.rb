@@ -765,7 +765,7 @@ class CloudConfigTest < Minitest::Test
         puts "\n=== Testing masterKeyOnly round-trip ==="
 
         guarded_key = "mko_guarded_#{Time.now.to_i}"
-        public_key  = "mko_public_#{Time.now.to_i}"
+        public_key = "mko_public_#{Time.now.to_i}"
 
         # Set both keys, mark only the guarded one as master-key-only.
         result = Parse.update_config(

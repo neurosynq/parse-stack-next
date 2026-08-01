@@ -25,6 +25,7 @@ class MCPServerPathRoutingTest < Minitest::Test
   # before short-circuiting on path.
   class FakeReq
     attr_reader :path, :request_method
+
     def initialize(path:, method: "POST", body: "{}", content_type: "application/json")
       @path = path
       @request_method = method
@@ -34,9 +35,11 @@ class MCPServerPathRoutingTest < Minitest::Test
         "Content-Length" => body.bytesize.to_s,
       }
     end
+
     def [](k); @headers[k]; end
     def body; @body; end
     def query_string; ""; end
+
     def each(&block)
       @headers.each_key(&block) if block
     end
@@ -44,10 +47,12 @@ class MCPServerPathRoutingTest < Minitest::Test
 
   class FakeRes
     attr_accessor :status, :body, :content_type
+
     def initialize
       @headers = {}
       @status = nil
     end
+
     def []=(k, v); @headers[k] = v; end
     def [](k); @headers[k]; end
   end

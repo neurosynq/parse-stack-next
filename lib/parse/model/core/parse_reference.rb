@@ -185,7 +185,7 @@ module Parse
         #   `after_create` callback that issues a follow-up `update!`.
         # @return [Symbol] the registered field name
         def parse_reference(field_name = :parse_reference, field: nil, precompute: false,
-                            index: true, unique_index: true)
+                                                           index: true, unique_index: true)
           field_name = field_name.to_sym
           unless field_name.to_s =~ /\A[a-z_][a-z0-9_]*\z/i
             raise ArgumentError,

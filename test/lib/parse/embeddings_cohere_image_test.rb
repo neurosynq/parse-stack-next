@@ -12,7 +12,7 @@ require "faraday"
 # Cohere v2's wire envelope differs from Voyage (`image_url: { url: }`
 # nested object vs Voyage's flat String) so the body assertions diverge.
 class EmbeddingsCohereImageTest < Minitest::Test
-  API_KEY  = "co-test-DO-NOT-LEAK"
+  API_KEY = "co-test-DO-NOT-LEAK"
   SENTINEL = "PROVIDER_EGRESS_VERIFIED"
 
   def setup
@@ -171,7 +171,7 @@ class EmbeddingsCohereImageTest < Minitest::Test
     stubs = Faraday::Adapter::Test::Stubs.new do |stub|
       stub.post("/v2/embed") { |_| [200, { "Content-Type" => "application/json" }, fake_response(1, 1536)] }
       stub.post("/v1/embed") { |_| flunk "embed_image must NOT post to /v1/embed" }
-      stub.post("embed")     { |_| flunk "embed_image must NOT post to relative embed (v1)" }
+      stub.post("embed") { |_| flunk "embed_image must NOT post to relative embed (v1)" }
     end
     provider = multimodal_provider(stubs)
     provider.embed_image(["https://1.1.1.1/x.jpg"])
@@ -249,7 +249,7 @@ class EmbeddingsCohereImageTest < Minitest::Test
     # Build a connection bound to a proxy-shaped base URL.
     conn = Faraday.new(url: "https://corp-proxy.example.test/cohere/v1",
                        headers: { "Authorization" => "Bearer #{API_KEY}",
-                                  "Content-Type"  => "application/json" }) do |f|
+                                  "Content-Type" => "application/json" }) do |f|
       f.adapter :test, stubs
     end
     provider = Parse::Embeddings::Cohere.new(
@@ -302,7 +302,7 @@ class EmbeddingsCohereImageTest < Minitest::Test
     # so Faraday should route to /v2/embed on the host.
     Faraday.new(url: "https://api.cohere.test/v1",
                 headers: { "Authorization" => "Bearer #{API_KEY}",
-                           "Content-Type"  => "application/json" }) do |f|
+                           "Content-Type" => "application/json" }) do |f|
       f.adapter :test, stubs
     end
   end

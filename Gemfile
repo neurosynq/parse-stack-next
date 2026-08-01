@@ -10,7 +10,7 @@ group :test, :development do
   gem "debug", ">= 1.0"
   gem "minitest"
   gem "minitest-mock"
-  gem 'minitest-reporters'
+  gem "minitest-reporters"
   gem "pry"
   # bundler-audit: scans Gemfile.lock against the ruby-advisory-db for known
   # CVEs. Used by the upstream-watch skill and dependency review.

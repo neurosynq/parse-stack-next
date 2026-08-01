@@ -74,7 +74,7 @@ class TestApiConfig < Minitest::Test
     assert_equal({ params: { "existing" => "new" } }, @last_request[:args][:body])
     refute @last_request[:args][:body].key?(:masterKeyOnly)
     assert_equal({ "existing" => true }, @master_key_only,
-      "masterKeyOnly cache should be untouched when caller did not pass it")
+                 "masterKeyOnly cache should be untouched when caller did not pass it")
   end
 
   def test_update_config_with_master_key_only_sends_and_merges

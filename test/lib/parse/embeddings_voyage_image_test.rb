@@ -11,7 +11,7 @@ require "faraday"
 # The image URL validator is enabled per-test via the sentinel +
 # allowed_image_hosts configuration.
 class EmbeddingsVoyageImageTest < Minitest::Test
-  API_KEY  = "pa-test-DO-NOT-LEAK"
+  API_KEY = "pa-test-DO-NOT-LEAK"
   SENTINEL = "PROVIDER_EGRESS_VERIFIED"
 
   def setup
@@ -247,7 +247,7 @@ class EmbeddingsVoyageImageTest < Minitest::Test
   def stubbed_conn(stubs)
     Faraday.new(url: "https://api.voyageai.test/v1",
                 headers: { "Authorization" => "Bearer #{API_KEY}",
-                           "Content-Type"  => "application/json" }) do |f|
+                           "Content-Type" => "application/json" }) do |f|
       f.adapter :test, stubs
     end
   end

@@ -83,7 +83,7 @@ class VerifyPasswordAPITest < Minitest::Test
   end
 
   def test_verify_password_returns_error_response_on_failure
-    err_body     = { "code" => 101, "error" => "Invalid username/password." }
+    err_body = { "code" => 101, "error" => "Invalid username/password." }
     @stub_response = Parse::Response.new(err_body)
     response = verify_password("alice", "wrong")
     assert response.error?
@@ -102,7 +102,7 @@ class VerifyPasswordUserTest < Minitest::Test
     user = Parse::User.new
     user.username = "alice"
 
-    ok_result   = { "objectId" => "abc123", "username" => "alice" }
+    ok_result = { "objectId" => "abc123", "username" => "alice" }
     ok_response = Parse::Response.new(ok_result)
 
     mock_client = Minitest::Mock.new
@@ -123,7 +123,7 @@ class VerifyPasswordUserTest < Minitest::Test
     user = Parse::User.new
     user.username = "alice"
 
-    err_body     = { "code" => 101, "error" => "Invalid username/password." }
+    err_body = { "code" => 101, "error" => "Invalid username/password." }
     err_response = Parse::Response.new(err_body)
     err_response.http_status = 404
 
@@ -143,7 +143,7 @@ class VerifyPasswordUserTest < Minitest::Test
     user = Parse::User.new
     user.username = "carol"
 
-    err_body     = { "code" => 101, "error" => "Invalid username/password." }
+    err_body = { "code" => 101, "error" => "Invalid username/password." }
     err_response = Parse::Response.new(err_body)
     err_response.http_status = 404
 
@@ -168,7 +168,7 @@ class VerifyPasswordUserTest < Minitest::Test
     user = Parse::User.new
     user.username = "bob"
 
-    err_body     = { "code" => 205, "error" => "User email is not verified." }
+    err_body = { "code" => 205, "error" => "User email is not verified." }
     err_response = Parse::Response.new(err_body)
     err_response.http_status = 400
 
@@ -188,7 +188,7 @@ class VerifyPasswordUserTest < Minitest::Test
     user = Parse::User.new
     user.username = "dana"
 
-    err_body     = { "code" => 205, "error" => "User email is not verified." }
+    err_body = { "code" => 205, "error" => "User email is not verified." }
     err_response = Parse::Response.new(err_body)
     err_response.http_status = 400
 

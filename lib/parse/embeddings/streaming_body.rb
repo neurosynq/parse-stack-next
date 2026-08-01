@@ -69,6 +69,7 @@ module Parse
           seg.is_a?(String) ? seg.bytesize : 4 * ((seg[:size] + 2) / 3)
         end
       end
+
       alias_method :length, :size
 
       # @param len [Integer, nil] bytes wanted; nil reads to the end
@@ -83,8 +84,7 @@ module Parse
           return len.nil? ? "" : nil
         end
 
-        chunk =
-          if len.nil?
+        chunk = if len.nil?
             b = @buffer
             @buffer = +""
             b
@@ -137,16 +137,16 @@ module Parse
           end
 
           @io ||= begin
-            f = ::File.open(seg[:path], "rb")
-            actual = f.size
-            if actual != seg[:size]
-              f.close
-              raise SizeMismatch,
-                    "Parse::Embeddings::StreamingBody: #{seg[:path]} is #{actual} bytes but " \
-                    "#{seg[:size]} was declared; the file changed underneath the request."
+              f = ::File.open(seg[:path], "rb")
+              actual = f.size
+              if actual != seg[:size]
+                f.close
+                raise SizeMismatch,
+                      "Parse::Embeddings::StreamingBody: #{seg[:path]} is #{actual} bytes but " \
+                      "#{seg[:size]} was declared; the file changed underneath the request."
+              end
+              f
             end
-            f
-          end
 
           data = @io.read(READ_CHUNK)
           if data.nil? || data.empty?

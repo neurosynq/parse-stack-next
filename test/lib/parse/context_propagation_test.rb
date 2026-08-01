@@ -52,7 +52,7 @@ class TestContextPropagation < Minitest::Test
   end
 
   def test_create_object_sets_cloud_context_header
-    ctx  = { "requestId" => "abc-123", "source" => "test" }
+    ctx = { "requestId" => "abc-123", "source" => "test" }
     fake = FakeObjectsClient.new
     fake.create_object("Post", { title: "Hello" }, context: ctx)
 
@@ -68,7 +68,7 @@ class TestContextPropagation < Minitest::Test
   end
 
   def test_update_object_sets_cloud_context_header
-    ctx  = { "userId" => "u1", "action" => "publish" }
+    ctx = { "userId" => "u1", "action" => "publish" }
     fake = FakeObjectsClient.new
     fake.update_object("Post", "abc123", { status: "published" }, context: ctx)
 
@@ -86,9 +86,9 @@ class TestContextPropagation < Minitest::Test
   # Verify that a caller-owned headers hash is NOT mutated in place — the
   # method must merge into a new hash, not modify the argument.
   def test_create_object_does_not_mutate_caller_headers
-    ctx          = { "source" => "test" }
-    caller_hdrs  = { "X-Custom" => "yes" }.freeze  # frozen guards mutation
-    fake         = FakeObjectsClient.new
+    ctx = { "source" => "test" }
+    caller_hdrs = { "X-Custom" => "yes" }.freeze  # frozen guards mutation
+    fake = FakeObjectsClient.new
 
     assert_silent { fake.create_object("Post", {}, headers: caller_hdrs, context: ctx) }
     refute caller_hdrs.key?(Parse::Protocol::CLOUD_CONTEXT)
@@ -110,7 +110,7 @@ class TestContextPropagation < Minitest::Test
   end
 
   def test_call_function_sets_cloud_context_header
-    ctx  = { "traceId" => "xyz-789" }
+    ctx = { "traceId" => "xyz-789" }
     fake = FakeCloudClient.new
     fake.call_function("myFunc", { arg: 1 }, context: ctx)
 
@@ -126,7 +126,7 @@ class TestContextPropagation < Minitest::Test
   end
 
   def test_call_function_with_session_sets_cloud_context_header
-    ctx  = { "locale" => "en-US" }
+    ctx = { "locale" => "en-US" }
     fake = FakeCloudClient.new
     fake.call_function_with_session("myFunc", { arg: 2 }, "sess-token-abc", context: ctx)
 
@@ -140,7 +140,7 @@ class TestContextPropagation < Minitest::Test
   def test_parse_call_function_with_context_threads_context_kwarg
     ctx = { "requestId" => "mod-test-01" }
 
-    mock_client   = Minitest::Mock.new
+    mock_client = Minitest::Mock.new
     mock_response = Minitest::Mock.new
     mock_response.expect :error?, false
     mock_response.expect :result, { "result" => "ok" }
@@ -164,7 +164,7 @@ class TestContextPropagation < Minitest::Test
     # When context: is absent the call to the client method must carry no
     # context: kwarg — this preserves exact compatibility with the existing
     # mock expectations in cloud_functions_module_test.rb.
-    mock_client   = Minitest::Mock.new
+    mock_client = Minitest::Mock.new
     mock_response = Minitest::Mock.new
     mock_response.expect :error?, false
     mock_response.expect :result, { "result" => "plain" }
@@ -190,9 +190,9 @@ class TestContextPropagation < Minitest::Test
     ctx = { "requestId" => "r-42", "locale" => "fr-FR" }
     payload = Parse::Webhooks::Payload.new(
       "triggerName" => "beforeSave",
-      "object"      => { "className" => "Post", "objectId" => "abc1" },
-      "master"      => true,
-      "context"     => ctx,
+      "object" => { "className" => "Post", "objectId" => "abc1" },
+      "master" => true,
+      "context" => ctx,
     )
 
     assert_equal ctx, payload.context
@@ -201,8 +201,8 @@ class TestContextPropagation < Minitest::Test
   def test_payload_context_is_nil_when_absent
     payload = Parse::Webhooks::Payload.new(
       "triggerName" => "afterSave",
-      "object"      => { "className" => "Post", "objectId" => "def2" },
-      "master"      => true,
+      "object" => { "className" => "Post", "objectId" => "def2" },
+      "master" => true,
     )
 
     assert_nil payload.context
@@ -214,8 +214,8 @@ class TestContextPropagation < Minitest::Test
     ctx = { "note" => "session notes are caller metadata, not credentials" }
     payload = Parse::Webhooks::Payload.new(
       "functionName" => "doWork",
-      "master"       => false,
-      "context"      => ctx,
+      "master" => false,
+      "context" => ctx,
     )
 
     assert_equal ctx, payload.context,
@@ -237,9 +237,9 @@ class TestContextPropagation < Minitest::Test
     ctx = { "source" => "ios", "version" => "2.1" }
     payload = Parse::Webhooks::Payload.new(
       "functionName" => "processPost",
-      "params"       => { "postId" => "xyz" },
-      "master"       => false,
-      "context"      => ctx,
+      "params" => { "postId" => "xyz" },
+      "master" => false,
+      "context" => ctx,
     )
 
     assert payload.function?

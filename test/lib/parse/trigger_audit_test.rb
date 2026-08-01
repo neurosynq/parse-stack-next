@@ -14,11 +14,12 @@ class TestTriggerAudit < Minitest::Test
   class AuditPostFixture < Parse::Object
     parse_class "AuditPostFixture"
     property :title, :string
-    before_save  :normalize
-    after_save   :reindex
+    before_save :normalize
+    after_save :reindex
     after_create :seed
     before_update :touch        # local-only (no server trigger can run it)
     after_validation :stamp     # local-only
+
     def normalize; end
     def reindex; end
     def seed; end
@@ -35,6 +36,7 @@ class TestTriggerAudit < Minitest::Test
     webhook :after_save do
       parse_object
     end
+
     def notify; end
   end
 
@@ -47,8 +49,10 @@ class TestTriggerAudit < Minitest::Test
   # A fake Parse::Client stand-in for the network path. `triggers.results`
   # returns the hashes the audit reads; `master_key` gates the guard.
   FakeResponse = Struct.new(:results)
+
   class FakeClient
     attr_reader :master_key
+
     def initialize(master_key:, triggers:)
       @master_key = master_key
       @triggers = triggers
@@ -73,7 +77,7 @@ class TestTriggerAudit < Minitest::Test
 
   def row(report_or_audit, name)
     classes = report_or_audit.is_a?(Parse::Webhooks::TriggerAudit) ?
-              report_or_audit.classes : nil
+      report_or_audit.classes : nil
     classes&.find { |c| c.parse_class == name }
   end
 
@@ -181,7 +185,7 @@ class TestTriggerAudit < Minitest::Test
     assert_includes kinds, :route_not_registered
     # And the callback is inert with :server missing.
     inert = row(audit, "AuditReportFixture").findings
-                                             .find { |f| f[:kind] == :callbacks_inert }
+      .find { |f| f[:kind] == :callbacks_inert }
     assert_equal [:server], inert[:missing]
   end
 
@@ -219,8 +223,10 @@ class TestTriggerAudit < Minitest::Test
 
   def test_gaps_fold_class_name_into_entries
     audit = networked_audit
-    gap = audit.gaps.find { |g| g[:parse_class] == "AuditPostFixture" &&
-                                g[:kind] == :callbacks_inert }
+    gap = audit.gaps.find { |g|
+      g[:parse_class] == "AuditPostFixture" &&
+      g[:kind] == :callbacks_inert
+    }
     refute_nil gap
     assert_equal "AuditPostFixture", gap[:parse_class]
   end

@@ -714,7 +714,7 @@ module Parse
     #   only WRITE_TOOLS leaves the raw tools off, so a deployment can
     #   permit "set_client_description" (an agent_method) while keeping
     #   "create_object" disabled.
-    WRITE_GATED_TOOLS  = %i[create_object update_object delete_object].freeze
+    WRITE_GATED_TOOLS = %i[create_object update_object delete_object].freeze
     SCHEMA_GATED_TOOLS = %i[create_class delete_class].freeze
 
     # Built-in tools that are safe to dispatch when the agent runs on a
@@ -1024,6 +1024,7 @@ module Parse
     def approval_gate
       @approval_gate ||= Parse::Agent::NullGate.new
     end
+
     attr_writer :approval_gate
 
     # @return [Boolean] true if the active cancellation token has been
@@ -1084,15 +1085,38 @@ module Parse
     #
     # @return [Hash]
     def acl_scope_kwargs
-      if @session_token && !@session_token.to_s.empty?
-        { session_token: @session_token }
-      elsif @acl_user_scope
-        { acl_user: @acl_user_scope }
-      elsif @acl_role_scope
-        { acl_role: @acl_role_scope }
-      else
-        { master: true }
-      end
+      scope = if @session_token && !@session_token.to_s.empty?
+          { session_token: @session_token }
+        elsif @acl_user_scope
+          { acl_user: @acl_user_scope }
+        elsif @acl_role_scope
+          { acl_role: @acl_role_scope }
+        else
+          { master: true }
+        end
+      scope
+    end
+
+    # {#acl_scope_kwargs} plus the agent's own client.
+    #
+    # Separate from {#acl_scope_kwargs} rather than folded into it, because
+    # that hash is public and documented for `agent_method` bodies to splat
+    # into calls of their own. Those calls can be anything, including REST
+    # paths and user-written helpers, and a stray `client:` would be an
+    # unknown-keyword error there. Only the direct paths that understand
+    # `client:` as an auth kwarg use this variant.
+    #
+    # It matters because an agent built on a secondary client would otherwise
+    # resolve its token, walk its role graph, and read its rows against the
+    # default application. Consumers are `Parse::MongoDB.aggregate`, the
+    # `Parse::Query` direct methods, and `Parse::AtlasSearch`'s own scope
+    # resolution, all of which consume `client:` before it reaches a driver.
+    #
+    # @return [Hash]
+    def direct_auth_kwargs
+      kwargs = acl_scope_kwargs
+      kwargs = kwargs.merge(client: @client) if @client
+      kwargs
     end
 
     # The agent's resolved identity claim set — the
@@ -1201,11 +1225,10 @@ module Parse
     def refresh_scope!
       return @acl_scope if @session_token
       return nil if @acl_user_scope.nil? && @acl_role_scope.nil?
-      resolved =
-        if @acl_user_scope
-          Parse::ACLScope.resolve_for_user(@acl_user_scope)
+      resolved = if @acl_user_scope
+          Parse::ACLScope.resolve_for_user(@acl_user_scope, client: @client)
         else
-          Parse::ACLScope.resolve_for_role(@acl_role_scope)
+          Parse::ACLScope.resolve_for_role(@acl_role_scope, client: @client)
         end
       @acl_scope = resolved&.freeze
       @auth_context = nil # invalidate memoized auth_context — user_id may have changed
@@ -1232,16 +1255,16 @@ module Parse
     # @return [self]
     def impersonate(user, mint: false, label: nil)
       token = resolve_impersonation_token!(user, mint: mint)
-      @session_token  = token
+      @session_token = token
       @acl_user_scope = nil
       @acl_role_scope = nil
       @impersonation_label = sanitize_impersonation_label(label) if label
       # Drop memoized scope/auth so the next call resolves under the new
       # token (session-token validity is checked per-call by Parse Server).
-      @acl_scope    = nil
+      @acl_scope = nil
       @auth_context = nil
       no_master_key = @client.respond_to?(:master_key) && @client.master_key.nil?
-      @client_mode  = no_master_key && !@session_token.to_s.empty?
+      @client_mode = no_master_key && !@session_token.to_s.empty?
       self
     end
 
@@ -1481,11 +1504,16 @@ module Parse
     #     end,
     #   )
     #
+    # Default for the `client:` keyword, distinguishing "not specified" from
+    # an explicit `client: :default`. A plain `:default` cannot do that job:
+    # it is also a legitimate value a caller may pass on purpose.
+    INHERIT_CLIENT = Object.new.freeze
+
     def initialize(permissions: :readonly, session_token: nil,
                    acl_user: nil, acl_role: nil,
                    impersonate_user: nil, impersonate_mint: false,
                    impersonation_label: nil,
-                   client: :default,
+                   client: INHERIT_CLIENT,
                    tenant_id: nil,
                    rate_limit: DEFAULT_RATE_LIMIT, rate_window: DEFAULT_RATE_WINDOW,
                    rate_limiter: nil,
@@ -1503,9 +1531,9 @@ module Parse
                    permission: nil,
                    impersonation_user: nil, impersonation_mint: nil,
                    impersonate_label: nil)
-      permissions          = permission unless permission.nil?
-      impersonate_user   ||= impersonation_user
-      impersonate_mint     = impersonation_mint unless impersonation_mint.nil?
+      permissions = permission unless permission.nil?
+      impersonate_user ||= impersonation_user
+      impersonate_mint = impersonation_mint unless impersonation_mint.nil?
       impersonation_label ||= impersonate_label
       # SECURITY: Mutually exclusive identity inputs. `acl_user:` and
       # `acl_role:` are unverified constructor assertions (the SDK does
@@ -1552,6 +1580,20 @@ module Parse
       end
 
       @permissions = permissions
+      # A sub-agent inherits its parent's client unless one was named
+      # explicitly. Falling back to the default meant a child of an agent
+      # bound to a secondary application silently resolved and read against
+      # the default one, and Parse::MongoDB's binding guard would see the
+      # default and wave it through.
+      #
+      # The check is on {INHERIT_CLIENT}, not on `:default`. Those are not
+      # the same thing: `Parse::Agent.new(parent: b_agent, client: :default)`
+      # is an explicit instruction to use the default client, and treating it
+      # as "unspecified" would silently substitute the parent's and ignore
+      # what the caller asked for.
+      if client.equal?(INHERIT_CLIENT)
+        client = (parent.client if parent.respond_to?(:client) && parent.client) || :default
+      end
       @client = client.is_a?(Parse::Client) ? client : Parse::Client.client(client)
       @operation_log = []
       @max_log_size = max_log_size
@@ -1586,8 +1628,8 @@ module Parse
           raise RecursionLimitExceeded.new(depth: parent.recursion_depth)
         end
         @recursion_depth = inherited_depth
-        @agent_depth     = parent.agent_depth + 1
-        rate_limiter   ||= parent.rate_limiter
+        @agent_depth = parent.agent_depth + 1
+        rate_limiter ||= parent.rate_limiter
         @parent_agent_id = parent.agent_id
         @inherited_correlation_id = parent.correlation_id
 
@@ -1611,10 +1653,12 @@ module Parse
         # produces a `:readonly` sub-agent — the safe default. To
         # maintain parity at the call site, pass `permissions:
         # parent.permissions`; the clamp check below validates that the
-        # resolved tier does not exceed the parent's. `client:` is also
-        # not inherited; its constructor default `:default` resolves to
-        # the same client the parent uses in standard single-app
-        # deployments.
+        # resolved tier does not exceed the parent's. `client:` IS
+        # inherited, unlike permissions: a sub-agent that quietly resolved
+        # and read against the default application while its parent was
+        # bound to another is a correctness bug, not a safe default, and
+        # there is no security argument for narrowing which application a
+        # child addresses.
         # Inherit auth scope from the parent only when the child supplied
         # NO identity at all. Three reasons:
         #
@@ -1674,7 +1718,7 @@ module Parse
         # tools emit progress over the same SSE stream the parent's
         # client is observing.
         @cancellation_token = parent.cancellation_token
-        @progress_callback  = parent.progress_callback
+        @progress_callback = parent.progress_callback
 
         # Clamp the sub-agent's permission tier at the parent's. The
         # default :readonly is always ≤ any parent tier, so this fires
@@ -1684,7 +1728,7 @@ module Parse
         # permissions: :admin)` and silently elevate above what the
         # parent's session was scoped to do.
         parent_tier = PERMISSION_HIERARCHY[parent.permissions] || 0
-        child_tier  = PERMISSION_HIERARCHY[permissions]        || 0
+        child_tier = PERMISSION_HIERARCHY[permissions] || 0
         if child_tier > parent_tier
           raise ArgumentError,
                 "sub-agent permissions: #{permissions.inspect} exceeds parent's " \
@@ -1695,7 +1739,7 @@ module Parse
         end
       else
         @recursion_depth = (recursion_depth || Parse::Agent.default_recursion_depth).to_i
-        @agent_depth     = 0
+        @agent_depth = 0
         @parent_agent_id = nil
         @inherited_correlation_id = nil
       end
@@ -1707,7 +1751,7 @@ module Parse
       # session-token path (client-mode detection, eager scope
       # resolution, request routing) unchanged. Fail-closed: raises when
       # the client has no master key or no session can be resolved.
-      @impersonation_label  = sanitize_impersonation_label(impersonation_label)
+      @impersonation_label = sanitize_impersonation_label(impersonation_label)
       @impersonated_user_id = nil
       if impersonate_user
         session_token = resolve_impersonation_token!(impersonate_user, mint: impersonate_mint)
@@ -1717,11 +1761,11 @@ module Parse
       # above resolves before the ivars are set. Without this ordering,
       # `@session_token = session_token` would assign the constructor's
       # nil default, and the inheritance would be a no-op.
-      @session_token   = session_token
-      @acl_user_scope  = acl_user
-      @acl_role_scope  = acl_role
-      @tenant_id       = tenant_id
-      @master_atlas    = master_atlas == true
+      @session_token = session_token
+      @acl_user_scope = acl_user
+      @acl_role_scope = acl_role
+      @tenant_id = tenant_id
+      @master_atlas = master_atlas == true
 
       # Client-mode detection. An agent runs in CLIENT MODE when its
       # underlying Parse::Client has no master_key AND it was constructed
@@ -1772,8 +1816,7 @@ module Parse
       # the safe path (omit kwarg) is trivially correct.
       if parent
         parent_allows = parent.respond_to?(:allow_mutations?) ? parent.allow_mutations? : true
-        resolved_allow_mutations =
-          if allow_mutations.nil?
+        resolved_allow_mutations = if allow_mutations.nil?
             parent_allows
           else
             allow_mutations == true
@@ -1787,8 +1830,7 @@ module Parse
         end
         @allow_mutations = resolved_allow_mutations
       else
-        @allow_mutations =
-          if allow_mutations.nil?
+        @allow_mutations = if allow_mutations.nil?
             !@client_mode
           else
             allow_mutations == true
@@ -1812,8 +1854,7 @@ module Parse
       # than at first tool call, and makes the subset check below
       # uniform across modes. Long-lived agents can re-resolve via
       # {#refresh_scope!}.
-      @acl_scope =
-        if @session_token
+      @acl_scope = if @session_token
           # Best-effort eager resolution. If Parse Server's /users/me is
           # unreachable at construction time (network blip, test env, MCP
           # bootstrap-before-server-ready), leave @acl_scope nil and let
@@ -1824,15 +1865,15 @@ module Parse
           # per-call validation will surface auth errors at the
           # actual usage site where the operator can act on them.
           begin
-            opts = { session_token: @session_token }
+            opts = { session_token: @session_token, client: @client }.compact
             Parse::ACLScope.resolve!(opts, method_name: :agent_init)
           rescue StandardError
             nil
           end
         elsif @acl_user_scope
-          Parse::ACLScope.resolve_for_user(@acl_user_scope)
+          Parse::ACLScope.resolve_for_user(@acl_user_scope, client: @client)
         elsif @acl_role_scope
-          Parse::ACLScope.resolve_for_role(@acl_role_scope)
+          Parse::ACLScope.resolve_for_role(@acl_role_scope, client: @client)
         else
           nil
         end
@@ -1948,10 +1989,10 @@ module Parse
       # Normalize the `tools:`, `methods:`, and `classes:` filters. Errors
       # raise ArgumentError (bad shape) or, when strict mode is on,
       # ArgumentError (unknown tool / class name).
-      @tool_filter_only,   @tool_filter_except   = normalize_tool_filter(tools)
+      @tool_filter_only, @tool_filter_except = normalize_tool_filter(tools)
       @method_filter_only, @method_filter_except = normalize_method_filter(methods)
-      @class_filter_only,  @class_filter_except  = normalize_class_filter(classes)
-      @filters                                   = normalize_query_filters(filters)
+      @class_filter_only, @class_filter_except = normalize_class_filter(classes)
+      @filters = normalize_query_filters(filters)
 
       # Sub-agent class-filter inheritance. Unlike `tools:` (which overrides
       # outright), `classes:` clamps to the parent's effective set so a
@@ -1960,7 +2001,7 @@ module Parse
       # parent's effective set raises at construction — empty-onlyset means
       # "address no classes," which is almost certainly a typo, not intent.
       if parent
-        parent_only   = parent.instance_variable_get(:@class_filter_only)
+        parent_only = parent.instance_variable_get(:@class_filter_only)
         parent_except = parent.instance_variable_get(:@class_filter_except)
         if parent_only && @class_filter_only
           intersection = Set.new(@class_filter_only) & parent_only
@@ -2107,9 +2148,9 @@ module Parse
     # @return [Array<Symbol>] list of allowed tool names
     def allowed_tools
       registered = Parse::Agent::Tools.registered_tools_for(@permissions)
-      permitted  = (tier_builtin_set + registered).uniq
+      permitted = (tier_builtin_set + registered).uniq
 
-      permitted = permitted & @tool_filter_only.to_a   if @tool_filter_only
+      permitted = permitted & @tool_filter_only.to_a if @tool_filter_only
       permitted = permitted - @tool_filter_except.to_a if @tool_filter_except
 
       if @client_mode
@@ -2160,7 +2201,7 @@ module Parse
       return false if @method_filter_only.nil? && @method_filter_except.nil?
 
       method_sym = method_name.to_sym
-      qualified  = "#{class_name}.#{method_name}"
+      qualified = "#{class_name}.#{method_name}"
 
       if @method_filter_only
         permitted = @method_filter_only.include?(method_sym) ||
@@ -2230,7 +2271,7 @@ module Parse
         # limit"). Borrow the configured limit/window when the injected
         # limiter exposes them; otherwise fall back to non-zero defaults.
         retry_after = (1.0 + rand * 4.0).round(2)
-        l = @rate_limiter.respond_to?(:limit)  ? @rate_limiter.limit  : RateLimiter::DEFAULT_LIMIT
+        l = @rate_limiter.respond_to?(:limit) ? @rate_limiter.limit : RateLimiter::DEFAULT_LIMIT
         w = @rate_limiter.respond_to?(:window) ? @rate_limiter.window : RateLimiter::DEFAULT_WINDOW
         raise RateLimitExceeded.new(retry_after: retry_after, limit: l, window: w)
       end
@@ -2325,10 +2366,10 @@ module Parse
          !(Parse::Agent.write_tools_enabled? && Parse::Agent.raw_crud_enabled? && @allow_mutations)
         missing = []
         missing << "PARSE_AGENT_ALLOW_WRITE_TOOLS=true" unless Parse::Agent.write_tools_enabled?
-        missing << "PARSE_AGENT_ALLOW_RAW_CRUD=true"    unless Parse::Agent.raw_crud_enabled?
+        missing << "PARSE_AGENT_ALLOW_RAW_CRUD=true" unless Parse::Agent.raw_crud_enabled?
         missing << "allow_mutations: true (per-agent kwarg)" unless @allow_mutations
         return error_response(
-                 "Raw CRUD tool '#{tool_name}' is disabled. Required: #{missing.join(' AND ')}. " \
+                 "Raw CRUD tool '#{tool_name}' is disabled. Required: #{missing.join(" AND ")}. " \
                  "Prefer declaring an agent_method on the target class for an intent-based " \
                  "write path that requires only PARSE_AGENT_ALLOW_WRITE_TOOLS.",
                  error_code: :access_denied,
@@ -2340,7 +2381,7 @@ module Parse
         missing << "PARSE_AGENT_ALLOW_SCHEMA_OPS=true" unless Parse::Agent.schema_ops_enabled?
         missing << "PARSE_AGENT_ALLOW_RAW_SCHEMA=true" unless Parse::Agent.raw_schema_enabled?
         return error_response(
-                 "Raw schema-mutating tool '#{tool_name}' is disabled. Required: #{missing.join(' AND ')}. " \
+                 "Raw schema-mutating tool '#{tool_name}' is disabled. Required: #{missing.join(" AND ")}. " \
                  "These tools mutate the entire Parse schema; consider whether an explicit operator " \
                  "process is a better fit than agent access.",
                  error_code: :access_denied,
@@ -2356,7 +2397,7 @@ module Parse
       unless approval_tiers.empty?
         eff_perm = effective_permission_for(tool_name, kwargs)
         if approval_tiers.include?(eff_perm)
-          preview  = build_approval_preview(tool_name, kwargs)
+          preview = build_approval_preview(tool_name, kwargs)
           decision = approval_gate.review(
             tool_name: tool_name,
             effective_permission: eff_perm,
@@ -2365,9 +2406,9 @@ module Parse
           )
           unless decision.approved?
             return error_response(
-              decision.reason || "Operation '#{tool_name}' requires approval and was not approved.",
-              error_code: :approval_denied,
-            )
+                     decision.reason || "Operation '#{tool_name}' requires approval and was not approved.",
+                     error_code: :approval_denied,
+                   )
           end
         end
       end
@@ -2388,9 +2429,9 @@ module Parse
         agent_id: agent_id,
         agent_depth: @agent_depth,
       }
-      payload[:correlation_id]   = @correlation_id if @correlation_id
-      payload[:parent_agent_id]  = @parent_agent_id if @parent_agent_id
-      payload[:impersonation_label]  = @impersonation_label  if @impersonation_label
+      payload[:correlation_id] = @correlation_id if @correlation_id
+      payload[:parent_agent_id] = @parent_agent_id if @parent_agent_id
+      payload[:impersonation_label] = @impersonation_label if @impersonation_label
       payload[:impersonated_user_id] = @impersonated_user_id if @impersonated_user_id
 
       # Audit surface — narrowing filters in effect for this call. SOC and
@@ -2400,12 +2441,12 @@ module Parse
       # the underlying frozen Sets) for stable JSON serialization. Omitted
       # entirely when no filter was declared so the payload stays minimal
       # for the common unscoped-agent case.
-      payload[:classes_only]    = @class_filter_only.to_a.sort   if @class_filter_only
-      payload[:classes_except]  = @class_filter_except.to_a.sort if @class_filter_except
-      payload[:tools_only]      = @tool_filter_only.to_a.sort    if @tool_filter_only
-      payload[:tools_except]    = @tool_filter_except.to_a.sort  if @tool_filter_except
-      payload[:methods_only]    = @method_filter_only.to_a.map(&:to_s).sort   if @method_filter_only
-      payload[:methods_except]  = @method_filter_except.to_a.map(&:to_s).sort if @method_filter_except
+      payload[:classes_only] = @class_filter_only.to_a.sort if @class_filter_only
+      payload[:classes_except] = @class_filter_except.to_a.sort if @class_filter_except
+      payload[:tools_only] = @tool_filter_only.to_a.sort if @tool_filter_only
+      payload[:tools_except] = @tool_filter_except.to_a.sort if @tool_filter_except
+      payload[:methods_only] = @method_filter_only.to_a.map(&:to_s).sort if @method_filter_only
+      payload[:methods_except] = @method_filter_except.to_a.map(&:to_s).sort if @method_filter_except
       # Per-agent per-class filters — emit class-name → field-name list,
       # NOT the constraint values. Filter values can contain user-identifying
       # data (`{ user_id: "abc123" }`, `{ org_id: tenant_uuid }`) that
@@ -2428,7 +2469,7 @@ module Parse
       # Checkpoint #2, which runs after the tool has executed, DOES
       # fire the notification with success: false, error_code: :cancelled.
       if cancelled?
-        payload[:success]    = false
+        payload[:success] = false
         payload[:error_code] = :cancelled
         return cancelled_response
       end
@@ -2476,7 +2517,7 @@ module Parse
           # of `agent.execute` and then crashes the dispatcher when it
           # inspects `result[:cancelled]`.
           if cancelled?
-            payload[:success]    = false
+            payload[:success] = false
             payload[:error_code] = :cancelled
             response = cancelled_response
             trigger_callbacks(:after_tool_call, tool_name, kwargs, response)
@@ -2506,9 +2547,9 @@ module Parse
                Parse::Agent::PromptInjectionDetected => e
           log_security_event(tool_name, kwargs, e)
           trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
-          payload[:success]     = false
+          payload[:success] = false
           payload[:error_class] = e.class.name
-          payload[:error_code]  = :security_blocked
+          payload[:error_code] = :security_blocked
           raise  # Re-raise security errors to caller
 
           # Method excluded by the agent instance's `methods:` filter.
@@ -2520,9 +2561,9 @@ module Parse
           # filter denial path.
         rescue Parse::Agent::MethodFiltered => e
           trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
-          payload[:success]     = false
+          payload[:success] = false
           payload[:error_class] = e.class.name
-          payload[:error_code]  = :tool_filtered
+          payload[:error_code] = :tool_filtered
           response = error_response(e.message, error_code: :tool_filtered)
 
           # Access-denied errors raised by Tools.assert_class_accessible! when
@@ -2532,9 +2573,9 @@ module Parse
           # internal state.
         rescue Parse::Agent::AccessDenied => e
           trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
-          payload[:success]     = false
+          payload[:success] = false
           payload[:error_class] = e.class.name
-          payload[:error_code]  = :access_denied
+          payload[:error_code] = :access_denied
           # Surface the AccessDenied subcode (`:hidden_class`,
           # `:class_filter`, `:field_denied`, `:storage_form_field_ref`)
           # in the audit payload so SOC tooling can distinguish operator
@@ -2550,58 +2591,58 @@ module Parse
           # branch on "tool doesn't exist here" vs a real failure.
         rescue Parse::Agent::NotImplemented => e
           trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
-          payload[:success]     = false
+          payload[:success] = false
           payload[:error_class] = e.class.name
-          payload[:error_code]  = :not_implemented
+          payload[:error_code] = :not_implemented
           response = error_response(e.message, error_code: :not_implemented)
 
           # Validation errors (e.g. from registered tool handlers or get_objects)
         rescue Parse::Agent::ValidationError => e
           trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
-          payload[:success]     = false
+          payload[:success] = false
           payload[:error_class] = e.class.name
-          payload[:error_code]  = :invalid_argument
+          payload[:error_code] = :invalid_argument
           response = error_response("Invalid arguments: #{e.message}", error_code: :invalid_argument)
 
           # Validation errors - return structured error response
         rescue ConstraintTranslator::InvalidOperatorError => e
           trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
-          payload[:success]     = false
+          payload[:success] = false
           payload[:error_class] = e.class.name
-          payload[:error_code]  = :invalid_query
+          payload[:error_code] = :invalid_query
           response = error_response(e.message, error_code: :invalid_query)
 
           # Timeout errors
         rescue ToolTimeoutError => e
           trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
-          payload[:success]     = false
+          payload[:success] = false
           payload[:error_class] = e.class.name
-          payload[:error_code]  = :timeout
+          payload[:error_code] = :timeout
           response = error_response(e.message, error_code: :timeout)
 
           # Rate limit errors (raised by the built-in limiter or by external
           # injected limiters that re-raise the same constant).
         rescue RateLimitExceeded => e
           trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
-          payload[:success]     = false
+          payload[:success] = false
           payload[:error_class] = e.class.name
-          payload[:error_code]  = :rate_limited
+          payload[:error_code] = :rate_limited
           response = error_response(e.message, error_code: :rate_limited, retry_after: e.retry_after)
 
           # Invalid arguments
         rescue ArgumentError => e
           trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
-          payload[:success]     = false
+          payload[:success] = false
           payload[:error_class] = e.class.name
-          payload[:error_code]  = :invalid_argument
+          payload[:error_code] = :invalid_argument
           response = error_response("Invalid arguments: #{e.message}", error_code: :invalid_argument)
 
           # Parse API errors
         rescue Parse::Error => e
           trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
-          payload[:success]     = false
+          payload[:success] = false
           payload[:error_class] = e.class.name
-          payload[:error_code]  = :parse_error
+          payload[:error_code] = :parse_error
           response = error_response("Parse error: #{e.message}", error_code: :parse_error)
 
           # Pointer-shape mismatch in `$in`/`$nin` array against a pointer
@@ -2615,9 +2656,9 @@ module Parse
           # to "internal error".
         rescue Parse::Query::PointerShapeError => e
           trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
-          payload[:success]     = false
+          payload[:success] = false
           payload[:error_class] = e.class.name
-          payload[:error_code]  = :pointer_shape_mismatch
+          payload[:error_code] = :pointer_shape_mismatch
           response = error_response(e.message, error_code: :pointer_shape_mismatch)
 
           # MongoDB-level query timeout (maxTimeMS exceeded, code 50).
@@ -2633,9 +2674,9 @@ module Parse
           # response is returned rather than the opaque internal_error path.
         rescue Parse::MongoDB::ExecutionTimeout => e
           trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
-          payload[:success]     = false
+          payload[:success] = false
           payload[:error_class] = e.class.name
-          payload[:error_code]  = :timeout
+          payload[:error_code] = :timeout
           response = error_response(
             "Query timed out at the database (max_time_ms=#{e.max_time_ms}ms). " \
             "Narrow the filter, add an index, or call explain_query to inspect the plan.",
@@ -2658,9 +2699,9 @@ module Parse
           warn "[Parse::Agent] Unexpected error in #{tool_name}: #{e.class} - #{e.message}"
           warn e.backtrace.first(5).join("\n") if e.backtrace
           trigger_callbacks(:on_error, e, { tool: tool_name, args: kwargs })
-          payload[:success]     = false
+          payload[:success] = false
           payload[:error_class] = e.class.name
-          payload[:error_code]  = :internal_error
+          payload[:error_code] = :internal_error
           response = error_response("#{tool_name} failed: internal error", error_code: :internal_error)
         ensure
           # Attribute embedding cost to this tool span and restore the
@@ -2668,7 +2709,7 @@ module Parse
           # when no embed happened, matching the minimal-payload discipline.
           embed_frame = Parse::Agent.embed_accumulator_end!(embed_frame_saved)
           if embed_frame && embed_frame[:calls] > 0
-            payload[:embed_calls]  = embed_frame[:calls]
+            payload[:embed_calls] = embed_frame[:calls]
             payload[:embed_tokens] = embed_frame[:tokens]
             cost = Parse::Agent.embed_cost_usd(embed_frame[:tokens])
             payload[:embed_cost_usd] = cost if cost
@@ -3212,7 +3253,7 @@ module Parse
 
       tools = expand_tool_profile(tools)
       only_list, except_list = extract_filter_lists(:tools, tools)
-      only_set   = only_list   && Set.new(Array(only_list).map(&:to_sym)).freeze
+      only_set = only_list && Set.new(Array(only_list).map(&:to_sym)).freeze
       except_set = except_list && Set.new(Array(except_list).map(&:to_sym)).freeze
 
       # "Known" tools include the global registry plus every tool in
@@ -3281,7 +3322,7 @@ module Parse
       return [nil, nil] if methods.nil?
 
       only_list, except_list = extract_filter_lists(:methods, methods)
-      only_set   = only_list   && Set.new(Array(only_list).map(&method(:normalize_method_filter_entry))).freeze
+      only_set = only_list && Set.new(Array(only_list).map(&method(:normalize_method_filter_entry))).freeze
       except_set = except_list && Set.new(Array(except_list).map(&method(:normalize_method_filter_entry))).freeze
       [only_set, except_set]
     end
@@ -3321,10 +3362,10 @@ module Parse
 
       only_list, except_list = extract_filter_lists(:classes, classes)
 
-      only_entries   = only_list   && resolve_class_filter_entries(only_list, validate: true)
+      only_entries = only_list && resolve_class_filter_entries(only_list, validate: true)
       except_entries = except_list && resolve_class_filter_entries(except_list, validate: false)
 
-      only_set   = only_entries   && Set.new(only_entries).freeze
+      only_set = only_entries && Set.new(only_entries).freeze
       except_set = except_entries && Set.new(except_entries).freeze
       [only_set, except_set]
     end
@@ -3590,9 +3631,9 @@ module Parse
                 "#{kwarg_name}: accepts only :only and :except keys " \
                 "(got unexpected #{bad_keys.inspect})"
         end
-        only   = value[:only]   || value["only"]
+        only = value[:only] || value["only"]
         except = value[:except] || value["except"]
-        unless only.nil?   || only.is_a?(Array)
+        unless only.nil? || only.is_a?(Array)
           raise ArgumentError, "#{kwarg_name}: :only must be an Array (got #{only.class})"
         end
         unless except.nil? || except.is_a?(Array)
@@ -3787,8 +3828,8 @@ module Parse
             identity: @acl_scope&.user_id }
         elsif @acl_user_scope
           { type: :acl_user, using_master_key: false,
-            identity: (@acl_scope&.user_id ||
-                       (@acl_user_scope.respond_to?(:id) ? @acl_user_scope.id : nil)) }
+           identity: (@acl_scope&.user_id ||
+                      (@acl_user_scope.respond_to?(:id) ? @acl_user_scope.id : nil)) }
         elsif @acl_role_scope
           role_name = case @acl_role_scope
             when Parse::Role then @acl_role_scope.name
@@ -3910,8 +3951,8 @@ module Parse
       # multi-client / multi-tenant setup those can point at different apps,
       # and the existing-session lookup must hit the same app we minted into.
       existing = Parse::Session.for_user(pointer)
-                              .where(:expires_at.gte => Time.now)
-                              .order(:updated_at.desc)
+        .where(:expires_at.gte => Time.now)
+        .order(:updated_at.desc)
       existing.client = @client
       existing = existing.first
       token = existing&.session_token
@@ -3949,8 +3990,8 @@ module Parse
       minted = resp.result["sessionToken"] || resp.result[:sessionToken]
       if minted.nil? || minted.to_s.empty?
         refreshed = Parse::Session.for_user(pointer)
-                                 .where(:expires_at.gte => Time.now)
-                                 .order(:updated_at.desc)
+          .where(:expires_at.gte => Time.now)
+          .order(:updated_at.desc)
         refreshed.client = @client
         refreshed = refreshed.first
         minted = refreshed&.session_token
@@ -4008,7 +4049,7 @@ module Parse
     # @return [Symbol] :readonly / :write / :admin (/ :unknown)
     def effective_permission_for(tool_name, kwargs)
       if tool_name.to_sym == :call_method
-        class_name  = kwargs[:class_name] || kwargs["class_name"]
+        class_name = kwargs[:class_name] || kwargs["class_name"]
         method_name = kwargs[:method_name] || kwargs["method_name"]
         if class_name && method_name
           klass = (Parse::Model.find_class(class_name.to_s) rescue nil)
@@ -4060,9 +4101,9 @@ module Parse
       append_log(entry)
 
       response = { success: false, error: message }
-      response[:error_code]  = error_code if error_code
+      response[:error_code] = error_code if error_code
       response[:retry_after] = retry_after if retry_after
-      response[:details]     = details if details.is_a?(Hash) && details.any?
+      response[:details] = details if details.is_a?(Hash) && details.any?
       response
     end
 
@@ -4074,10 +4115,10 @@ module Parse
       reason = @cancellation_token&.reason
       message = reason ? "Cancelled by client (#{reason})" : "Cancelled by client"
       {
-        success:    false,
-        error:      message,
+        success: false,
+        error: message,
         error_code: :cancelled,
-        cancelled:  true,
+        cancelled: true,
       }
     end
   end

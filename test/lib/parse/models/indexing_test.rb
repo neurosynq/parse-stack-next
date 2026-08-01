@@ -465,7 +465,7 @@ class RelationIndexDSLTest < Minitest::Test
     decls = RxRole.mongo_index_declarations
     assert_equal 2, decls.size, "bidirectional must register exactly two declarations"
     keys = decls.map { |d| d[:keys] }
-    assert_includes keys, { "owningId"  => 1 }
+    assert_includes keys, { "owningId" => 1 }
     assert_includes keys, { "relatedId" => 1 }
     decls.each do |d|
       assert_equal "_Join:users:_Role", d[:collection]
@@ -532,7 +532,7 @@ class RelationIndexDSLTest < Minitest::Test
     decls = RxDedupBidi.mongo_index_declarations
     assert_equal 3, decls.size, "bidirectional + dedup: must register three declarations"
     keys = decls.map { |d| d[:keys] }
-    assert_includes keys, { "owningId"  => 1 }
+    assert_includes keys, { "owningId" => 1 }
     assert_includes keys, { "relatedId" => 1 }
     assert_includes keys, { "owningId" => 1, "relatedId" => 1 }
     compound = decls.find { |d| d[:keys] == { "owningId" => 1, "relatedId" => 1 } }
@@ -646,9 +646,9 @@ class MongoDBWriterGatesTest < Minitest::Test
   def setup
     # Save state, reset between tests so we control the gate values.
     @saved_writer_enabled = Parse::MongoDB.instance_variable_get(:@writer_enabled)
-    @saved_writer_uri     = Parse::MongoDB.instance_variable_get(:@writer_uri)
-    @saved_mut            = Parse::MongoDB.index_mutations_enabled
-    @saved_env            = ENV[Parse::MongoDB::MUTATION_ENV_KEY]
+    @saved_writer_uri = Parse::MongoDB.instance_variable_get(:@writer_uri)
+    @saved_mut = Parse::MongoDB.index_mutations_enabled
+    @saved_env = ENV[Parse::MongoDB::MUTATION_ENV_KEY]
     Parse::MongoDB.instance_variable_set(:@writer_uri, nil)
     Parse::MongoDB.instance_variable_set(:@writer_enabled, false)
     Parse::MongoDB.index_mutations_enabled = false

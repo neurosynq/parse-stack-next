@@ -115,7 +115,7 @@ class LockRedisIntegrationTest < Minitest::Test
     # Slow-CI flake risk: zero.
     key = "race-key-#{SecureRandom.hex(4)}"
     acquired_signal = Queue.new
-    release_signal  = Queue.new
+    release_signal = Queue.new
     waiter_acquired_at = nil
     waiter_acquire_start = nil
 
@@ -155,7 +155,7 @@ class LockRedisIntegrationTest < Minitest::Test
   def test_wait_zero_against_held_real_redis_lock_raises_timeout
     key = "fast-fail-#{SecureRandom.hex(4)}"
     acquired_signal = Queue.new
-    release_signal  = Queue.new
+    release_signal = Queue.new
 
     holder = Thread.new do
       Parse::Lock.acquire(key, ttl: 5) do
@@ -184,8 +184,8 @@ class LockRedisIntegrationTest < Minitest::Test
     # sleep-based race conditions.
     key = "shared-name-#{SecureRandom.hex(4)}"
     a_acquired = Queue.new
-    a_release  = Queue.new
-    b_seen     = false
+    a_release = Queue.new
+    b_seen = false
 
     # 32-byte secrets — Parse::Lock now refuses explicit secrets
     # shorter than SECRET_MIN_BYTES (=16). Use real-length keys here.
@@ -222,7 +222,7 @@ class LockRedisIntegrationTest < Minitest::Test
   def test_secret_is_shared_with_create_lock_via_env_var
     # PARSE_STACK_LOCK_SECRET resolves the same value from
     # LockBackend regardless of which caller passes the source: tag.
-    s_lock        = Parse::LockBackend.lock_secret_for(store: @wrapper, source: "Parse::Lock")
+    s_lock = Parse::LockBackend.lock_secret_for(store: @wrapper, source: "Parse::Lock")
     s_create_lock = Parse::LockBackend.lock_secret_for(store: @wrapper, source: "Parse::CreateLock")
     assert_equal "integration-test-secret", s_lock
     assert_equal "integration-test-secret", s_create_lock

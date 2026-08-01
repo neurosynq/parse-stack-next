@@ -43,7 +43,7 @@ class MCPBiasDetectionTest < Minitest::Test
 
   class MCPBiasStudent < Parse::Object
     parse_class "MCPBiasStudent"
-    property :name,   :string
+    property :name, :string
     property :gender, :string   # "F" | "M"
   end
 
@@ -54,7 +54,7 @@ class MCPBiasDetectionTest < Minitest::Test
 
   class MCPBiasGrade < Parse::Object
     parse_class "MCPBiasGrade"
-    property :score,      :integer   # 0–100
+    property :score, :integer   # 0–100
     property :assignment, :string    # e.g. "Midterm"
     belongs_to :student, as: :pointer, class_name: "MCPBiasStudent"
     belongs_to :teacher, as: :pointer, class_name: "MCPBiasTeacher"
@@ -73,26 +73,26 @@ class MCPBiasDetectionTest < Minitest::Test
   BIASED_TEACHER = "Mr. Briggs"
 
   GRADES_BY_TEACHER = {
-    "Ms. Patel"  => {
-      "Ada"   => 84, "Bao"   => 80, "Cheng" => 82,
-      "Diego" => 83, "Eli"   => 80, "Felix" => 80,
+    "Ms. Patel" => {
+      "Ada" => 84, "Bao" => 80, "Cheng" => 82,
+      "Diego" => 83, "Eli" => 80, "Felix" => 80,
     },
     "Mr. Romero" => {
-      "Ada"   => 78, "Bao"   => 76, "Cheng" => 77,
-      "Diego" => 79, "Eli"   => 77, "Felix" => 78,
+      "Ada" => 78, "Bao" => 76, "Cheng" => 77,
+      "Diego" => 79, "Eli" => 77, "Felix" => 78,
     },
     "Mr. Briggs" => {
-      "Ada"   => 95, "Bao"   => 92, "Cheng" => 90,
-      "Diego" => 65, "Eli"   => 62, "Felix" => 60,
+      "Ada" => 95, "Bao" => 92, "Cheng" => 90,
+      "Diego" => 65, "Eli" => 62, "Felix" => 60,
     },
   }.freeze
 
   STUDENT_GENDERS = {
-    "Ada"   => "F",
-    "Bao"   => "F",
+    "Ada" => "F",
+    "Bao" => "F",
     "Cheng" => "F",
     "Diego" => "M",
-    "Eli"   => "M",
+    "Eli" => "M",
     "Felix" => "M",
   }.freeze
 
@@ -106,21 +106,21 @@ class MCPBiasDetectionTest < Minitest::Test
   def with_bias_fixtures
     students = nil
     teachers = nil
-    grades   = nil
+    grades = nil
     students = []
     teachers = []
-    grades   = []
+    grades = []
 
     STUDENT_GENDERS.each do |sname, gender|
       s = MCPBiasStudent.new(name: sname, gender: gender)
-      assert s.save, "MCPBiasStudent save failed for #{sname}: #{s.errors.full_messages.join(', ')}"
+      assert s.save, "MCPBiasStudent save failed for #{sname}: #{s.errors.full_messages.join(", ")}"
       students << s
     end
     students_by_name = students.each_with_object({}) { |s, h| h[s.name] = s }
 
     GRADES_BY_TEACHER.each_key do |tname|
       t = MCPBiasTeacher.new(name: tname)
-      assert t.save, "MCPBiasTeacher save failed for #{tname}: #{t.errors.full_messages.join(', ')}"
+      assert t.save, "MCPBiasTeacher save failed for #{tname}: #{t.errors.full_messages.join(", ")}"
       teachers << t
     end
     teachers_by_name = teachers.each_with_object({}) { |t, h| h[t.name] = t }
@@ -130,19 +130,19 @@ class MCPBiasDetectionTest < Minitest::Test
       scores.each do |sname, score|
         student = students_by_name.fetch(sname)
         g = MCPBiasGrade.new(
-          score:      score,
+          score: score,
           assignment: "Midterm",
-          student:    student,
-          teacher:    teacher
+          student: student,
+          teacher: teacher,
         )
-        assert g.save, "MCPBiasGrade save failed (#{tname}/#{sname}): #{g.errors.full_messages.join(', ')}"
+        assert g.save, "MCPBiasGrade save failed (#{tname}/#{sname}): #{g.errors.full_messages.join(", ")}"
         grades << g
       end
     end
 
     yield students, teachers, grades
   ensure
-    grades&.each   { |g| g.destroy rescue nil }
+    grades&.each { |g| g.destroy rescue nil }
     teachers&.each { |t| t.destroy rescue nil }
     students&.each { |s| s.destroy rescue nil }
   end
@@ -157,7 +157,7 @@ class MCPBiasDetectionTest < Minitest::Test
     configure_llm_provider!
 
     with_bias_fixtures do |students, teachers, grades|
-      agent        = Parse::Agent.new(permissions: :readonly)
+      agent = Parse::Agent.new(permissions: :readonly)
       openai_tools = fetch_openai_tools(agent)
 
       prompt = build_bias_prompt(
@@ -183,13 +183,13 @@ class MCPBiasDetectionTest < Minitest::Test
       )
 
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 8)
-      flat       = transcript_text(transcript)
+      flat = transcript_text(transcript)
       tool_calls = transcript_tool_names(transcript)
 
       assert_bias_analysis(
         transcript,
-        must_include:     ["Briggs"],
-        pattern:          /briggs/i
+        must_include: ["Briggs"],
+        pattern: /briggs/i,
       )
 
       # LLM must have actually fetched data (not hallucinated)
@@ -226,7 +226,7 @@ class MCPBiasDetectionTest < Minitest::Test
     configure_llm_provider!
 
     with_bias_fixtures do |students, teachers, grades|
-      agent        = Parse::Agent.new(permissions: :readonly)
+      agent = Parse::Agent.new(permissions: :readonly)
       openai_tools = fetch_openai_tools(agent)
 
       prompt = build_bias_prompt(
@@ -250,7 +250,7 @@ class MCPBiasDetectionTest < Minitest::Test
       )
 
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 8)
-      flat       = transcript_text(transcript)
+      flat = transcript_text(transcript)
       tool_calls = transcript_tool_names(transcript)
 
       # Must have fetched data
@@ -268,7 +268,7 @@ class MCPBiasDetectionTest < Minitest::Test
 
       # Must identify both genders explicitly
       assert_match(/female|women/i, flat, "answer must mention female group; got: #{flat[0, 800]}")
-      assert_match(/male|men/i,     flat, "answer must mention male group; got: #{flat[0, 800]}")
+      assert_match(/male|men/i, flat, "answer must mention male group; got: #{flat[0, 800]}")
     end
   end
 
@@ -282,7 +282,7 @@ class MCPBiasDetectionTest < Minitest::Test
     configure_llm_provider!
 
     with_bias_fixtures do |students, teachers, grades|
-      agent        = Parse::Agent.new(permissions: :readonly)
+      agent = Parse::Agent.new(permissions: :readonly)
       openai_tools = fetch_openai_tools(agent)
 
       prompt = build_bias_prompt(
@@ -304,7 +304,7 @@ class MCPBiasDetectionTest < Minitest::Test
       )
 
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 8)
-      flat       = transcript_text(transcript)
+      flat = transcript_text(transcript)
       tool_calls = transcript_tool_names(transcript)
 
       # Must have fetched data
@@ -313,7 +313,7 @@ class MCPBiasDetectionTest < Minitest::Test
              "model must call query_class or aggregate; got #{tool_calls.inspect}"
 
       # Fair teachers must appear in the answer
-      assert_match(/Patel/i,  flat, "answer must include Ms. Patel as fair; got: #{flat[0, 800]}")
+      assert_match(/Patel/i, flat, "answer must include Ms. Patel as fair; got: #{flat[0, 800]}")
       assert_match(/Romero/i, flat, "answer must include Mr. Romero as fair; got: #{flat[0, 800]}")
 
       # Briggs must NOT be labelled fair — tightened to verb-adjacency so a
@@ -369,7 +369,7 @@ class MCPBiasDetectionTest < Minitest::Test
   #   pattern          — optional Regexp that flat text must match
   def assert_bias_analysis(transcript, must_include: [], must_not_include: [], pattern: nil)
     tool_calls = transcript_tool_names(transcript)
-    flat       = transcript_text(transcript)
+    flat = transcript_text(transcript)
 
     refute_empty tool_calls, "model must invoke at least one MCP tool"
     assert (tool_calls & %w[query_class aggregate]).any?,
@@ -409,7 +409,7 @@ class MCPBiasDetectionTest < Minitest::Test
 
   def fetch_openai_tools(agent)
     envelope = mcp_call({ "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }, agent)
-    tools    = envelope.dig("result", "tools")
+    tools = envelope.dig("result", "tools")
     refute_nil tools, "tools/list returned no tools"
     mcp_tools_to_openai(tools)
   end
@@ -424,9 +424,9 @@ class MCPBiasDetectionTest < Minitest::Test
       {
         type: "function",
         function: {
-          name:        h["name"],
+          name: h["name"],
           description: h["description"].to_s[0, 1024],
-          parameters:  h["inputSchema"] || { "type" => "object", "properties" => {} },
+          parameters: h["inputSchema"] || { "type" => "object", "properties" => {} },
         },
       }
     end
@@ -441,16 +441,16 @@ class MCPBiasDetectionTest < Minitest::Test
     case @provider
     when "lmstudio"
       @base_url = ENV["LLM_BASE_URL"] || "http://localhost:1234/v1"
-      @model    = ENV["LLM_MODEL"]    || "qwen2.5-7b-instruct"
-      @api_key  = ENV["LLM_API_KEY"]  || "lm-studio"
+      @model = ENV["LLM_MODEL"] || "qwen2.5-7b-instruct"
+      @api_key = ENV["LLM_API_KEY"] || "lm-studio"
     when "openai"
       @base_url = ENV["LLM_BASE_URL"] || "https://api.openai.com/v1"
-      @model    = ENV["LLM_MODEL"]    || "gpt-4o-mini"
-      @api_key  = ENV["LLM_API_KEY"]
+      @model = ENV["LLM_MODEL"] || "gpt-4o-mini"
+      @api_key = ENV["LLM_API_KEY"]
     when "anthropic"
       @base_url = ENV["LLM_BASE_URL"] || "https://api.anthropic.com/v1"
-      @model    = ENV["LLM_MODEL"]    || "claude-haiku-4-5"
-      @api_key  = ENV["LLM_API_KEY"]
+      @model = ENV["LLM_MODEL"] || "claude-haiku-4-5"
+      @api_key = ENV["LLM_API_KEY"]
     else
       skip "Unknown LLM_PROVIDER=#{@provider.inspect}"
     end
@@ -461,7 +461,7 @@ class MCPBiasDetectionTest < Minitest::Test
   # --------------------------------------------------------------------------
 
   def llm_round_trip(prompt:, tools:, agent:, max_iterations: 8)
-    messages   = [{ role: "user", content: prompt }]
+    messages = [{ role: "user", content: prompt }]
     transcript = []
 
     max_iterations.times do
@@ -474,16 +474,16 @@ class MCPBiasDetectionTest < Minitest::Test
       reply[:tool_calls].each do |tc|
         body = {
           "jsonrpc" => "2.0",
-          "id"      => SecureRandom.hex(4),
-          "method"  => "tools/call",
-          "params"  => { "name" => tc[:name], "arguments" => tc[:arguments] },
+          "id" => SecureRandom.hex(4),
+          "method" => "tools/call",
+          "params" => { "name" => tc[:name], "arguments" => tc[:arguments] },
         }
-        result    = mcp_call(body, agent)
+        result = mcp_call(body, agent)
         tool_text = if result["result"]
-          result.dig("result", "content", 0, "text") || result["result"].to_json
-        else
-          result.dig("error", "message").to_s
-        end
+            result.dig("result", "content", 0, "text") || result["result"].to_json
+          else
+            result.dig("error", "message").to_s
+          end
         messages << { role: "tool", tool_call_id: tc[:id], content: tool_text }
       end
     end
@@ -494,7 +494,7 @@ class MCPBiasDetectionTest < Minitest::Test
   def call_llm(messages:, tools:)
     case @provider
     when "anthropic" then anthropic_chat(messages: messages, tools: tools)
-    else                  openai_chat(messages: messages, tools: tools)
+    else openai_chat(messages: messages, tools: tools)
     end
   end
 
@@ -517,11 +517,11 @@ class MCPBiasDetectionTest < Minitest::Test
       end
     end.compact
 
-    uri  = URI("#{@base_url}/chat/completions")
+    uri = URI("#{@base_url}/chat/completions")
     body = JSON.generate({ model: @model, messages: openai_messages, tools: tools, tool_choice: "auto" })
 
     req = Net::HTTP::Post.new(uri)
-    req["Content-Type"]  = "application/json"
+    req["Content-Type"] = "application/json"
     req["Authorization"] = "Bearer #{@api_key}"
     req.body = body
 
@@ -529,8 +529,8 @@ class MCPBiasDetectionTest < Minitest::Test
     skip "LLM call failed: HTTP #{res.code} #{res.body[0, 300]}" unless res.code.to_i.between?(200, 299)
 
     parsed = JSON.parse(res.body)
-    msg    = parsed.dig("choices", 0, "message") || {}
-    calls  = Array(msg["tool_calls"]).map do |tc|
+    msg = parsed.dig("choices", 0, "message") || {}
+    calls = Array(msg["tool_calls"]).map do |tc|
       args = tc.dig("function", "arguments")
       args = JSON.parse(args) if args.is_a?(String) && !args.empty?
       { id: tc["id"] || SecureRandom.hex(4), name: tc.dig("function", "name"), arguments: args || {} }
@@ -545,16 +545,16 @@ class MCPBiasDetectionTest < Minitest::Test
     anth_messages = messages.map do |m|
       case m[:role]
       when "user", "assistant" then { role: m[:role], content: m[:content].to_s }
-      when "tool"              then { role: "user", content: [{ type: "tool_result", tool_use_id: m[:tool_call_id], content: m[:content] }] }
+      when "tool" then { role: "user", content: [{ type: "tool_result", tool_use_id: m[:tool_call_id], content: m[:content] }] }
       end
     end.compact
 
-    uri  = URI("#{@base_url}/messages")
+    uri = URI("#{@base_url}/messages")
     body = JSON.generate({ model: @model, max_tokens: 1024, tools: anth_tools, messages: anth_messages })
 
     req = Net::HTTP::Post.new(uri)
-    req["Content-Type"]      = "application/json"
-    req["x-api-key"]         = @api_key
+    req["Content-Type"] = "application/json"
+    req["x-api-key"] = @api_key
     req["anthropic-version"] = "2023-06-01"
     req.body = body
 
@@ -563,8 +563,8 @@ class MCPBiasDetectionTest < Minitest::Test
 
     parsed = JSON.parse(res.body)
     blocks = Array(parsed["content"])
-    text   = blocks.select { |b| b["type"] == "text" }.map  { |b| b["text"] }.join("\n")
-    calls  = blocks.select { |b| b["type"] == "tool_use" }.map { |b| { id: b["id"], name: b["name"], arguments: b["input"] || {} } }
+    text = blocks.select { |b| b["type"] == "text" }.map { |b| b["text"] }.join("\n")
+    calls = blocks.select { |b| b["type"] == "tool_use" }.map { |b| { id: b["id"], name: b["name"], arguments: b["input"] || {} } }
     { role: "assistant", content: text, tool_calls: calls }
   end
 end

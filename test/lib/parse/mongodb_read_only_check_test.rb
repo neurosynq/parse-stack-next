@@ -10,13 +10,13 @@ require "parse/mongodb"
 class MongoDBReadOnlyCheckTest < Minitest::Test
   def setup
     @stash_analytics = ENV.delete("ANALYTICS_DATABASE_URI")
-    @stash_database  = ENV.delete("DATABASE_URI")
+    @stash_database = ENV.delete("DATABASE_URI")
     Parse::MongoDB.reset!
   end
 
   def teardown
     ENV["ANALYTICS_DATABASE_URI"] = @stash_analytics if @stash_analytics
-    ENV["DATABASE_URI"]           = @stash_database  if @stash_database
+    ENV["DATABASE_URI"] = @stash_database if @stash_database
     Parse::MongoDB.reset!
   end
 

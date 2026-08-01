@@ -160,8 +160,8 @@ module Parse
       # @param include [Array<String>, nil] pointer includes from the original call
       # @return [Hash] formatted results
       def format_query_results(class_name, results, limit:, skip:,
-                               where: nil, keys: nil, order: nil, include: nil,
-                               truncated_include_fields: nil)
+                                                    where: nil, keys: nil, order: nil, include: nil,
+                                                    truncated_include_fields: nil)
         total = results.size
         truncated = total > MAX_RESULTS_DISPLAY
         has_more = total >= limit
@@ -190,8 +190,7 @@ module Parse
         # dotted paths (`keys: ["user.iconImage"]`) if it needs fields
         # that were dropped. Suppress the key when nothing was auto-
         # projected — keeps the envelope minimal for the common case.
-        truncated_includes_payload =
-          if truncated_include_fields && !truncated_include_fields.empty?
+        truncated_includes_payload = if truncated_include_fields && !truncated_include_fields.empty?
             truncated_include_fields.transform_values { |meta| meta[:dropped] }.compact
           end
 
@@ -404,6 +403,7 @@ module Parse
           acc[key] = simplify_value(value)
         end
       end
+
       public :simplify_object
 
       # Simplify a single value

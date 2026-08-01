@@ -196,11 +196,11 @@ class AgentClientModeTest < Minitest::Test
 
   def test_custom_tool_refused_in_client_mode_without_client_safe_flag
     Parse::Agent::Tools.register(
-      name:        :my_unsafe_tool,
+      name: :my_unsafe_tool,
       description: "test tool",
-      parameters:  { type: "object", properties: {} },
-      permission:  :readonly,
-      handler:     ->(_agent, **_args) { { result: "ok" } },
+      parameters: { type: "object", properties: {} },
+      permission: :readonly,
+      handler: ->(_agent, **_args) { { result: "ok" } },
     )
     agent = Parse::Agent.new(session_token: FAKE_SESSION,
                              tools: { only: [:my_unsafe_tool] })
@@ -212,12 +212,12 @@ class AgentClientModeTest < Minitest::Test
 
   def test_custom_tool_allowed_in_client_mode_with_client_safe_flag
     Parse::Agent::Tools.register(
-      name:        :my_safe_tool,
+      name: :my_safe_tool,
       description: "test tool",
-      parameters:  { type: "object", properties: {} },
-      permission:  :readonly,
+      parameters: { type: "object", properties: {} },
+      permission: :readonly,
       client_safe: true,
-      handler:     ->(_agent, **_args) { { result: "ok" } },
+      handler: ->(_agent, **_args) { { result: "ok" } },
     )
     agent = Parse::Agent.new(session_token: FAKE_SESSION,
                              tools: { only: [:my_safe_tool] })
@@ -289,12 +289,12 @@ class AgentClientModeTest < Minitest::Test
 
   def test_allowed_tools_includes_client_safe_registered_tool
     Parse::Agent::Tools.register(
-      name:        :advertised_safe_tool,
+      name: :advertised_safe_tool,
       description: "test",
-      parameters:  { type: "object", properties: {} },
-      permission:  :readonly,
+      parameters: { type: "object", properties: {} },
+      permission: :readonly,
       client_safe: true,
-      handler:     ->(_a, **_k) { { result: "ok" } },
+      handler: ->(_a, **_k) { { result: "ok" } },
     )
     agent = Parse::Agent.new(session_token: FAKE_SESSION)
     assert_includes agent.allowed_tools, :advertised_safe_tool
@@ -302,11 +302,11 @@ class AgentClientModeTest < Minitest::Test
 
   def test_allowed_tools_excludes_non_client_safe_registered_tool
     Parse::Agent::Tools.register(
-      name:        :advertised_unsafe_tool,
+      name: :advertised_unsafe_tool,
       description: "test",
-      parameters:  { type: "object", properties: {} },
-      permission:  :readonly,
-      handler:     ->(_a, **_k) { { result: "ok" } },
+      parameters: { type: "object", properties: {} },
+      permission: :readonly,
+      handler: ->(_a, **_k) { { result: "ok" } },
     )
     agent = Parse::Agent.new(session_token: FAKE_SESSION)
     refute_includes agent.allowed_tools, :advertised_unsafe_tool
@@ -334,8 +334,8 @@ class AgentClientModeTest < Minitest::Test
     # at the mode ceiling.
     agent = Parse::Agent.new(
       session_token: FAKE_SESSION,
-      permissions:   :admin,
-      tools:         { only: [:aggregate] },
+      permissions: :admin,
+      tools: { only: [:aggregate] },
     )
     result = agent.execute(:aggregate, class_name: "Post", pipeline: [])
     refute result[:success]
@@ -362,7 +362,7 @@ class AgentClientModeTest < Minitest::Test
 
   def test_subagent_in_client_mode_refuses_same_tools_as_parent
     parent = Parse::Agent.new(session_token: FAKE_SESSION)
-    child  = Parse::Agent.new(parent: parent)
+    child = Parse::Agent.new(parent: parent)
     result = child.execute(:call_method, class_name: "Post", method_name: "x")
     refute result[:success]
     assert_equal :access_denied, result[:error_code]
@@ -422,8 +422,8 @@ class AgentClientModeTest < Minitest::Test
     # right knob first.
     agent = Parse::Agent.new(
       session_token: FAKE_SESSION,
-      permissions:   :write,
-      tools:         { except: [:create_object] },
+      permissions: :write,
+      tools: { except: [:create_object] },
     )
     result = agent.execute(:create_object, class_name: "Post", fields: { title: "x" })
     refute result[:success]
@@ -440,8 +440,8 @@ class AgentClientModeTest < Minitest::Test
     # the operator should see.
     agent = Parse::Agent.new(
       session_token: FAKE_SESSION,
-      permissions:   :admin,
-      tools:         { only: [:query_class] },
+      permissions: :admin,
+      tools: { only: [:query_class] },
     )
     result = agent.execute(:count_objects, class_name: "Post")
     refute result[:success]
@@ -470,11 +470,11 @@ class AgentClientModeTest < Minitest::Test
     # would produce: the agent rebuilds auth on every dispatch from its
     # own instance state.
     spoofed_args = {
-      class_name:     "Post",
-      session_token:  "r:malicious_token",
+      class_name: "Post",
+      session_token: "r:malicious_token",
       use_master_key: true,
-      master:         true,
-      acl_user:       "abc1234567",
+      master: true,
+      acl_user: "abc1234567",
     }
     # We don't have a live Parse Server in unit tests, so we can't assert
     # the actual outbound request — but we CAN assert request_opts is

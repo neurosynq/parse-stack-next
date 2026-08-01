@@ -769,9 +769,9 @@ module Parse
         end
         return unless emit
         warn "[Parse::Agent:SECURITY] class '#{name}' is agent-visible but declares no " \
-             "agent_tenant_scope while other classes do — queries against it are NOT " \
-             "tenant-scoped and may return cross-tenant rows. Add agent_tenant_scope to " \
-             "'#{name}', or confirm it is intentionally global."
+          "agent_tenant_scope while other classes do — queries against it are NOT " \
+          "tenant-scoped and may return cross-tenant rows. Add agent_tenant_scope to " \
+          "'#{name}', or confirm it is intentionally global."
       end
 
       # @!visibility private
@@ -820,10 +820,10 @@ module Parse
       # @return [Hash] enriched fields
       def enrich_fields(fields, klass)
         descriptions = klass.property_descriptions
-        enums        = klass.respond_to?(:property_enum_descriptions) ?
-                         klass.property_enum_descriptions : {}
+        enums = klass.respond_to?(:property_enum_descriptions) ?
+          klass.property_enum_descriptions : {}
         large_fields = klass.respond_to?(:agent_large_field_list) ? klass.agent_large_field_list : []
-        large_set    = large_fields.map(&:to_sym).to_set
+        large_set = large_fields.map(&:to_sym).to_set
 
         # Reverse field_map (wire symbol -> Ruby symbol) so descriptions
         # and enums declared on properties with an explicit `field:`
@@ -919,13 +919,13 @@ module Parse
           # environments where the LLM needs the full method contract.
           keys = Parse::Agent.agent_debug? ? info[:permitted_keys]&.map(&:to_s) : nil
           {
-            name:             name.to_s,
-            type:             info[:type]&.to_s || "unknown",
-            permission:       info[:permission]&.to_s || "readonly",
-            description:      info[:description],
+            name: name.to_s,
+            type: info[:type]&.to_s || "unknown",
+            permission: info[:permission]&.to_s || "readonly",
+            description: info[:description],
             supports_dry_run: info[:supports_dry_run] ? true : nil,
-            permitted_keys:   keys,
-            parameters:       info[:parameters],
+            permitted_keys: keys,
+            parameters: info[:parameters],
           }.compact
         end
       end

@@ -57,7 +57,7 @@ class PipelineForwardPassTest < Minitest::Test
   def test_group_then_sort_by_synthetic_count_passes
     aggregate([
       { "$group" => { "_id" => "$author", "count" => { "$sum" => 1 } } },
-      { "$sort"  => { "count" => -1 } },
+      { "$sort" => { "count" => -1 } },
       { "$limit" => 10 },
     ])
   end
@@ -92,14 +92,14 @@ class PipelineForwardPassTest < Minitest::Test
   def test_add_fields_introduces_new_field_addressable_downstream
     aggregate([
       { "$addFields" => { "computed" => { "$concat" => ["$status", "_x"] } } },
-      { "$match"     => { "computed" => "active_x" } },
+      { "$match" => { "computed" => "active_x" } },
     ])
   end
 
   def test_set_introduces_new_field_addressable_downstream
     aggregate([
-      { "$set"   => { "marker" => { "$literal" => 42 } } },
-      { "$sort"  => { "marker" => 1, "status" => -1 } },
+      { "$set" => { "marker" => { "$literal" => 42 } } },
+      { "$sort" => { "marker" => 1, "status" => -1 } },
     ])
   end
 
@@ -125,7 +125,7 @@ class PipelineForwardPassTest < Minitest::Test
     # $addFields is schema-EXTENDING, not replacing.
     aggregate([
       { "$addFields" => { "extra" => { "$literal" => "z" } } },
-      { "$match"     => { "status" => "x", "extra" => "z" } },
+      { "$match" => { "status" => "x", "extra" => "z" } },
     ])
   end
 
@@ -134,7 +134,7 @@ class PipelineForwardPassTest < Minitest::Test
   def test_project_then_match_on_projected_field_passes
     aggregate([
       { "$project" => { "status" => 1, "objectId" => 1 } },
-      { "$match"   => { "status" => "active" } },
+      { "$match" => { "status" => "active" } },
     ])
   end
 
@@ -144,7 +144,7 @@ class PipelineForwardPassTest < Minitest::Test
     err = assert_raises(Parse::Agent::AccessDenied) do
       aggregate([
         { "$project" => { "status" => 1 } },
-        { "$match"   => { "author" => "abc" } },
+        { "$match" => { "author" => "abc" } },
       ])
     end
     assert_match(/match field|author/, err.message)
@@ -155,10 +155,10 @@ class PipelineForwardPassTest < Minitest::Test
   def test_lookup_as_field_is_addressable_downstream
     aggregate([
       { "$lookup" => {
-        "from"         => "PFPProject",
-        "localField"   => "project",
+        "from" => "PFPProject",
+        "localField" => "project",
         "foreignField" => "objectId",
-        "as"           => "project_doc",
+        "as" => "project_doc",
       } },
       { "$match" => { "project_doc" => { "$ne" => [] } } },
     ])
@@ -169,10 +169,10 @@ class PipelineForwardPassTest < Minitest::Test
   def test_bucket_introduces_id_and_output_keys
     aggregate([
       { "$bucket" => {
-        "groupBy"     => "$status",
-        "boundaries"  => ["a", "m", "z"],
-        "default"     => "other",
-        "output"      => { "count" => { "$sum" => 1 } },
+        "groupBy" => "$status",
+        "boundaries" => ["a", "m", "z"],
+        "default" => "other",
+        "output" => { "count" => { "$sum" => 1 } },
       } },
       { "$match" => { "_id" => "other", "count" => { "$gte" => 1 } } },
     ])
@@ -181,14 +181,14 @@ class PipelineForwardPassTest < Minitest::Test
   def test_bucket_auto_default_output_is_count
     aggregate([
       { "$bucketAuto" => { "groupBy" => "$status", "buckets" => 3 } },
-      { "$sort"       => { "count" => -1 } },
+      { "$sort" => { "count" => -1 } },
     ])
   end
 
   def test_sort_by_count_introduces_id_and_count
     aggregate([
       { "$sortByCount" => "$status" },
-      { "$project"     => { "_id" => 1, "count" => 1 } },
+      { "$project" => { "_id" => 1, "count" => 1 } },
     ])
   end
 
@@ -225,7 +225,7 @@ class PipelineForwardPassTest < Minitest::Test
         ],
         "by_status" => [
           { "$group" => { "_id" => "$status", "total" => { "$sum" => 1 } } },
-          { "$sort"  => { "total" => -1 } },
+          { "$sort" => { "total" => -1 } },
         ],
       } },
     ])
@@ -304,7 +304,7 @@ class PipelineForwardPassTest < Minitest::Test
     # downstream $match on a source-allowlisted field must still pass.
     aggregate([
       { "$project" => { "_id" => 0 } },
-      { "$match"   => { "author" => "abc", "status" => "x" } },
+      { "$match" => { "author" => "abc", "status" => "x" } },
     ])
   end
 
@@ -315,7 +315,7 @@ class PipelineForwardPassTest < Minitest::Test
     err = assert_raises(Parse::Agent::AccessDenied) do
       aggregate([
         { "$project" => { "status" => 1, "_id" => 0 } },
-        { "$match"   => { "author" => "x" } },
+        { "$match" => { "author" => "x" } },
       ])
     end
     assert_match(/author/, err.message)
@@ -326,14 +326,14 @@ class PipelineForwardPassTest < Minitest::Test
     # matching $bucketAuto. Prior to the fix only $bucketAuto did this.
     aggregate([
       { "$bucket" => { "groupBy" => "$status", "boundaries" => ["a", "m"], "default" => "other" } },
-      { "$sort"   => { "count" => -1 } },
+      { "$sort" => { "count" => -1 } },
     ])
   end
 
   def test_unwind_with_include_array_index_registers_index_field
     aggregate([
       { "$unwind" => { "path" => "$status", "includeArrayIndex" => "idx" } },
-      { "$sort"   => { "idx" => 1 } },
+      { "$sort" => { "idx" => 1 } },
     ])
   end
 
@@ -341,8 +341,8 @@ class PipelineForwardPassTest < Minitest::Test
     aggregate([
       { "$setWindowFields" => {
         "partitionBy" => "$status",
-        "sortBy"      => { "createdAt" => 1 },
-        "output"      => { "rolling_total" => { "$sum" => 1 } },
+        "sortBy" => { "createdAt" => 1 },
+        "output" => { "rolling_total" => { "$sum" => 1 } },
       } },
       { "$match" => { "rolling_total" => { "$gte" => 1 } } },
     ])
@@ -355,7 +355,7 @@ class PipelineForwardPassTest < Minitest::Test
     # walker splits the match key on "." and looks up the root.
     aggregate([
       { "$project" => { "author.objectId" => 1, "status" => 1 } },
-      { "$match"   => { "author" => "abc" } },
+      { "$match" => { "author" => "abc" } },
     ])
   end
 
@@ -366,7 +366,7 @@ class PipelineForwardPassTest < Minitest::Test
     # the walker looks up the root segment.
     aggregate([
       { "$addFields" => { "user.derived" => { "$literal" => "z" } } },
-      { "$match"     => { "user" => "abc" } },
+      { "$match" => { "user" => "abc" } },
     ])
   end
 
@@ -374,8 +374,8 @@ class PipelineForwardPassTest < Minitest::Test
     aggregate([
       { "$setWindowFields" => {
         "partitionBy" => "$status",
-        "sortBy"      => { "createdAt" => 1 },
-        "output"      => { "audit.running_total" => { "$sum" => 1 } },
+        "sortBy" => { "createdAt" => 1 },
+        "output" => { "audit.running_total" => { "$sum" => 1 } },
       } },
       { "$match" => { "audit" => { "$exists" => true } } },
     ])

@@ -221,8 +221,7 @@ module Parse
         described = klass.property_descriptions.keys.map(&:to_sym).to_set
         declared_properties = klass.field_map.keys.map(&:to_sym)
 
-        candidates =
-          if klass.respond_to?(:agent_field_allowlist) && klass.agent_field_allowlist.any?
+        candidates = if klass.respond_to?(:agent_field_allowlist) && klass.agent_field_allowlist.any?
             klass.agent_field_allowlist.map(&:to_sym)
           else
             declared_properties

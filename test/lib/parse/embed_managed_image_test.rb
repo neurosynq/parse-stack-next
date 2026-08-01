@@ -309,7 +309,7 @@ class EmbedManagedImageTest < Minitest::Test
     parse_class "EmbedImageDocMixed"
     # Tiny 4-dim fixture for the text side.
     property :title, :string
-    property :body,  :string
+    property :body, :string
     property :title_embedding, :vector, dimensions: 4, provider: :fixture4
     embed :title, :body, into: :title_embedding
 
@@ -323,7 +323,7 @@ class EmbedManagedImageTest < Minitest::Test
     # Need the fixture4 provider too — register it alongside stub_image.
     Parse::Embeddings.register(:fixture4, Parse::Embeddings::Fixture.new(dimensions: 4))
 
-    text_dir  = MixedDoc.embed_directives[:title_embedding]
+    text_dir = MixedDoc.embed_directives[:title_embedding]
     image_dir = MixedDoc.embed_directives[:cover_embedding]
 
     refute_nil text_dir
@@ -342,7 +342,7 @@ class EmbedManagedImageTest < Minitest::Test
     doc = MixedDoc.new(title: "hello", body: "world")
     doc.cover_art = file_with_url("https://1.1.1.1/cover.jpg")
 
-    text_dir  = MixedDoc.embed_directives[:title_embedding]
+    text_dir = MixedDoc.embed_directives[:title_embedding]
     image_dir = MixedDoc.embed_directives[:cover_embedding]
     Parse::Core::EmbedManaged.recompute_embedding!(doc, text_dir)
     Parse::Core::EmbedManaged.recompute_embedding!(doc, image_dir)

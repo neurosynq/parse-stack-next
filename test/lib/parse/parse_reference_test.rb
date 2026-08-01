@@ -6,6 +6,7 @@ class PRDefault < Parse::Object
   parse_class "PRDefault"
   property :title, :string
   parse_reference
+
   def autofetch!(*); nil; end
 end
 
@@ -14,6 +15,7 @@ class PRCustomLocal < Parse::Object
   parse_class "PRCustomLocal"
   property :name, :string
   parse_reference :ref
+
   def autofetch!(*); nil; end
 end
 
@@ -22,6 +24,7 @@ class PRCustomBoth < Parse::Object
   parse_class "PRCustomBoth"
   property :label, :string
   parse_reference :ref, field: "refKey"
+
   def autofetch!(*); nil; end
 end
 
@@ -29,6 +32,7 @@ end
 class PRSystemUserSub < Parse::User
   parse_class "_User"
   parse_reference
+
   def autofetch!(*); nil; end
 end
 
@@ -36,6 +40,7 @@ class PRParentForSubclass < Parse::Object
   parse_class "PRParentForSubclass"
   property :title, :string
   parse_reference
+
   def autofetch!(*); nil; end
 end
 
@@ -51,6 +56,7 @@ class PRPrecomputed < Parse::Object
   parse_class "PRPrecomputed"
   property :title, :string
   parse_reference precompute: true
+
   def autofetch!(*); nil; end
 end
 
@@ -59,6 +65,7 @@ end
 class PRPrecomputedParent < Parse::Object
   parse_class "PRPrecomputedParent"
   parse_reference precompute: true
+
   def autofetch!(*); nil; end
 end
 
@@ -360,6 +367,7 @@ class ParseReferenceTest < Minitest::Test
   # test/lib/parse/models/user_save_signup_test.rb.
   class StubResponse
     attr_reader :result, :error
+
     def initialize(result: {}, error: nil); @result = result; @error = error; end
     def success?; @error.nil?; end
     def error?; !success?; end
@@ -367,6 +375,7 @@ class ParseReferenceTest < Minitest::Test
 
   class StubClient
     attr_reader :calls, :master_key
+
     def initialize(create_response: nil, update_response: nil, master_key: "test-master")
       @calls = []
       @create_response = create_response
@@ -380,9 +389,9 @@ class ParseReferenceTest < Minitest::Test
     def create_object(class_name, body, session_token: nil, **_opts)
       @calls << [:create_object, class_name, body, session_token]
       @create_response || StubResponse.new(result: {
-        "objectId" => body["objectId"] || "srv_generated",
-        "createdAt" => "2026-05-15T00:00:00Z",
-      })
+                                             "objectId" => body["objectId"] || "srv_generated",
+                                             "createdAt" => "2026-05-15T00:00:00Z",
+                                           })
     end
 
     def update_object(class_name, id, body, session_token: nil, **_opts)

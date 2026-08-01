@@ -110,7 +110,7 @@ module Parse
 
               batch_size = (ENV["BATCH_SIZE"] || "100").to_i
               batch_size = 100 if batch_size <= 0
-              dry_run    = ENV["DRY_RUN"].to_s.downcase == "true"
+              dry_run = ENV["DRY_RUN"].to_s.downcase == "true"
 
               if dry_run
                 puts "[parse:references:populate] DRY_RUN=true — no writes will be issued"
@@ -120,7 +120,7 @@ module Parse
                 fields = Array(klass._parse_reference_fields)
                 fields.each do |field_name|
                   populated_total = 0
-                  scanned_total   = 0
+                  scanned_total = 0
                   loops_without_progress = 0
                   loop do
                     # Query for records where the reference column is null/
@@ -207,7 +207,7 @@ module Parse
                   puts "    to_create:"
                   p[:to_create].each do |d|
                     flags = d[:options].dup
-                    name  = flags.delete(:name) || "(auto)"
+                    name = flags.delete(:name) || "(auto)"
                     puts "      + #{d[:keys].inspect}  name=#{name}  opts=#{flags.inspect}"
                   end
                 end
@@ -423,13 +423,13 @@ module Parse
                 end
 
                 update = ENV["UPDATE"].to_s.downcase == "true"
-                drop   = ENV["DROP"].to_s.downcase   == "true"
-                wait   = ENV["WAIT"].to_s.downcase   == "true"
+                drop = ENV["DROP"].to_s.downcase == "true"
+                wait = ENV["WAIT"].to_s.downcase == "true"
                 timeout = (ENV["WAIT_TIMEOUT"] || "600").to_i
                 modes = []
                 modes << "additive"
                 modes << "update-drifted" if update
-                modes << "drop-orphans"   if drop
+                modes << "drop-orphans" if drop
                 modes << "wait-for-ready (#{timeout}s)" if wait
                 puts "[parse:mongo:search_indexes:apply] mode: #{modes.join(" + ")}"
                 if drop

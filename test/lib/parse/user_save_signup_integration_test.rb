@@ -237,7 +237,7 @@ class UserSaveSignupIntegrationTest < Minitest::Test
         # which side survives — only that this DOES touch session state,
         # whereas the random-field test above does not.
         post_change_live = session_token_valid?(original_token)
-        new_token        = user.session_token
+        new_token = user.session_token
 
         # Either the original was invalidated, or the server rotated us
         # onto a new token. Both are evidence the server is auth-aware

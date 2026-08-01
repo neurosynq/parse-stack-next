@@ -409,6 +409,7 @@ class TestCloudFunctionsModule < Minitest::Test
   class FakeCloudClient
     include Parse::API::CloudFunctions
     attr_reader :captured
+
     def request(method, path, body: nil, headers: nil, opts: {})
       @captured = { method: method, path: path, body: body, headers: headers, opts: opts }
       :ok

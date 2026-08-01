@@ -34,16 +34,16 @@ class AgentFiltersTest < Minitest::Test
   def test_filters_kwarg_accepts_class_constant_string_and_default_symbol
     agent = silence_master_key do
       Parse::Agent.new(filters: {
-        FiltersTestAccount => { test_user: false },
-        "FiltersTestPost"  => { archived: false },
-        :default           => { tenant_active: true },
-      })
+                         FiltersTestAccount => { test_user: false },
+                         "FiltersTestPost" => { archived: false },
+                         :default => { tenant_active: true },
+                       })
     end
     # Class constants expand through hidden_name_variants_for; the canonical
     # parse_class name is what's stored. Strings pass through. :default stays a Symbol.
     assert agent.filters.key?("FiltersTestAccount"), "Class-constant key should normalize to parse_class String"
-    assert agent.filters.key?("FiltersTestPost"),    "String key should pass through"
-    assert agent.filters.key?(:default),             ":default symbol should be preserved"
+    assert agent.filters.key?("FiltersTestPost"), "String key should pass through"
+    assert agent.filters.key?(:default), ":default symbol should be preserved"
   end
 
   def test_filters_kwarg_rejects_non_hash_value
@@ -83,14 +83,14 @@ class AgentFiltersTest < Minitest::Test
   def test_filter_for_merges_per_class_and_default_with_class_winning
     agent = silence_master_key do
       Parse::Agent.new(filters: {
-        "Account" => { test_user: false, tenant_active: true },  # explicit field also in :default
-        :default  => { tenant_active: false },                    # different value for same field
-      })
+                         "Account" => { test_user: false, tenant_active: true },  # explicit field also in :default
+                         :default => { tenant_active: false },                    # different value for same field
+                       })
     end
     # Class entry's tenant_active wins over :default's tenant_active (more specific declaration).
     merged = agent.filter_for("Account")
     assert_equal false, merged[:test_user]
-    assert_equal true,  merged[:tenant_active], "per-class value must win over :default on key conflict"
+    assert_equal true, merged[:tenant_active], "per-class value must win over :default on key conflict"
   end
 
   def test_filter_for_returns_nil_when_no_filter_applies_and_no_default
@@ -105,8 +105,7 @@ class AgentFiltersTest < Minitest::Test
 
   def test_filter_for_canonicalizes_class_constant_and_parse_class_string_symmetrically
     agent = silence_master_key { Parse::Agent.new(filters: { Parse::User => { confirmed: true } }) }
-    assert_equal({ confirmed: true }, agent.filter_for("_User")
-    )
+    assert_equal({ confirmed: true }, agent.filter_for("_User"))
     assert_equal({ confirmed: true }, agent.filter_for("User"))
     assert_equal({ confirmed: true }, agent.filter_for(Parse::User))
   end
@@ -145,12 +144,12 @@ class AgentFiltersTest < Minitest::Test
     agent = silence_master_key { Parse::Agent.new(filters: { "Account" => { test_user: false } }) }
     pipeline = [
       { "$match" => { tenant: "acme" } },  # tenant-scope $match at index 0
-      { "$sort"  => { name: 1 } },
+      { "$sort" => { name: 1 } },
     ]
     out = Parse::Agent::Tools.apply_per_agent_filter_to_pipeline(pipeline, "Account", agent: agent)
     assert_equal({ "$match" => { tenant: "acme" } }, out[0], "tenant-scope match stays at index 0")
     assert_equal({ "$match" => { test_user: false } }, out[1], "per-agent filter goes at index 1")
-    assert_equal({ "$sort"  => { name: 1 } }, out[2])
+    assert_equal({ "$sort" => { name: 1 } }, out[2])
   end
 
   def test_pipeline_prepender_no_op_when_no_filter_applies
@@ -172,14 +171,14 @@ class AgentFiltersTest < Minitest::Test
     child = Parse::Agent.new(parent: parent, filters: { "Account" => { region: "us" } })
     merged = child.filter_for("Account")
     assert_equal false, merged[:test_user], "parent's other-field constraint must survive"
-    assert_equal "us",  merged[:region],    "child's region must override parent's on key conflict"
+    assert_equal "us", merged[:region], "child's region must override parent's on key conflict"
   end
 
   def test_sub_agent_adds_new_class_keys_without_disturbing_parent_keys
     parent = silence_master_key { Parse::Agent.new(filters: { "Account" => { test_user: false } }) }
     child = Parse::Agent.new(parent: parent, filters: { "Comment" => { spam: false } })
     assert_equal({ test_user: false }, child.filter_for("Account"))
-    assert_equal({ spam: false },      child.filter_for("Comment"))
+    assert_equal({ spam: false }, child.filter_for("Comment"))
   end
 
   # ---- Audit payload ------------------------------------------------------

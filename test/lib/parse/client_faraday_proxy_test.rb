@@ -22,9 +22,9 @@ class TestClientFaradayProxy < Minitest::Test
 
   def test_env_proxy_var_is_ignored_by_default
     original_https = ENV["HTTPS_PROXY"]
-    original_http  = ENV["HTTP_PROXY"]
+    original_http = ENV["HTTP_PROXY"]
     ENV["HTTPS_PROXY"] = "http://attacker.example:9999"
-    ENV["HTTP_PROXY"]  = "http://attacker.example:9999"
+    ENV["HTTP_PROXY"] = "http://attacker.example:9999"
     begin
       client = Parse::Client.new(server_url: "https://example.parse.local/parse",
                                  application_id: "app", master_key: "mk")

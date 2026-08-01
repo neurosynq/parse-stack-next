@@ -59,6 +59,7 @@ class TestPromptInjectionHardening < Minitest::Test
     Net::HTTP.stub(:start, ->(*_args, **_kwargs, &blk) {
       fake_http = Class.new do
         attr_accessor :captured_req
+
         def request(req)
           self.captured_req = req
           resp = Object.new

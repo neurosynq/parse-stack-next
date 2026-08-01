@@ -100,12 +100,15 @@ class MCPPreAuthTest < Minitest::Test
 
   class FakeLimiter
     attr_accessor :allow, :retry_after
+
     def initialize(allow: true, retry_after: 5)
       @allow = allow
       @retry_after = retry_after
       @calls = 0
     end
+
     attr_reader :calls
+
     def check!
       @calls += 1
       return true if @allow
@@ -115,6 +118,7 @@ class MCPPreAuthTest < Minitest::Test
 
   class FakeRateError < StandardError
     attr_reader :retry_after
+
     def initialize(retry_after:)
       @retry_after = retry_after
       super("limit")

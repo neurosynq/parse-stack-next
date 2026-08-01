@@ -34,8 +34,8 @@ class TestExcludeKeysMongoDirectRedact < Minitest::Test
     # included/nested object — the recursive-by-name contract.
     rows = [{
       "objectId" => "a1",
-      "name"     => "outer",
-      "author"   => { "objectId" => "u1", "name" => "inner", "email" => "x@y" },
+      "name" => "outer",
+      "author" => { "objectId" => "u1", "name" => "inner", "email" => "x@y" },
     }]
     redact("Post", [:name], rows)
     refute rows.first.key?("name")
@@ -85,10 +85,10 @@ class TestExcludeKeysMongoDirectRedact < Minitest::Test
 
   def test_reserved_timestamp_and_acl_fields_protected
     rows = [{
-      "objectId"  => "a1",
+      "objectId" => "a1",
       "createdAt" => "2026-01-01T00:00:00.000Z",
       "updatedAt" => "2026-01-02T00:00:00.000Z",
-      "ACL"       => { "*" => { "read" => true } },
+      "ACL" => { "*" => { "read" => true } },
     }]
     redact("Post", [:createdAt, :updatedAt, :ACL], rows)
     assert rows.first.key?("createdAt")
@@ -100,11 +100,11 @@ class TestExcludeKeysMongoDirectRedact < Minitest::Test
     # Defensive: even on a raw Mongo-form document, the storage-form reserved
     # keys survive so reconstruction can't be broken by excluding them.
     rows = [{
-      "_id"          => "a1",
-      "_created_at"  => "t1",
-      "_updated_at"  => "t2",
-      "_acl"         => { "*" => { "r" => true } },
-      "secretToken"  => "xyz",
+      "_id" => "a1",
+      "_created_at" => "t1",
+      "_updated_at" => "t2",
+      "_acl" => { "*" => { "r" => true } },
+      "secretToken" => "xyz",
     }]
     redact("Post", [:_id, :_created_at, :_updated_at, :_acl, :secret_token], rows)
     assert rows.first.key?("_id")

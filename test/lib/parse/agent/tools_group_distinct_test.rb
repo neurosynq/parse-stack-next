@@ -129,9 +129,9 @@ class ToolsGroupDistinctTest < Minitest::Test
     # assertions below still use "_id" because that's the wire-format
     # key inside the $group stage we send TO Parse Server.
     stub_aggregate([
-      { "objectId" => "rock",  "value" => 12 },
-      { "objectId" => "jazz",  "value" => 7  },
-      { "objectId" => "blues", "value" => 3  },
+      { "objectId" => "rock", "value" => 12 },
+      { "objectId" => "jazz", "value" => 7 },
+      { "objectId" => "blues", "value" => 3 },
     ])
 
     result = @agent.execute(:group_by, class_name: "GroupSong", field: "genre")
@@ -161,7 +161,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_group_by_sum_builds_sum_accumulator
     stub_aggregate([{ "objectId" => "rock", "value" => 5000 }])
     result = @agent.execute(:group_by, class_name: "GroupSong", field: "genre",
-                            operation: "sum", value_field: "plays")
+                                       operation: "sum", value_field: "plays")
     assert result[:success], result.inspect
     _class, pipeline = @agg_calls.first
     group_stage = find_stage(pipeline, "$group")["$group"]
@@ -174,7 +174,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_group_by_avg_alias_is_normalized
     stub_aggregate([{ "objectId" => "rock", "value" => 200.5 }])
     result = @agent.execute(:group_by, class_name: "GroupSong", field: "genre",
-                            operation: "average", value_field: "plays")
+                                       operation: "average", value_field: "plays")
     assert result[:success]
     assert_equal "avg", result[:data][:operation]
     group_stage = find_stage(@agg_calls.first[1], "$group")["$group"]
@@ -184,7 +184,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_group_by_flatten_arrays_inserts_unwind
     stub_aggregate([{ "objectId" => "guitar", "value" => 2 }])
     @agent.execute(:group_by, class_name: "GroupSong", field: "tags",
-                   flatten_arrays: true)
+                              flatten_arrays: true)
     _class, pipeline = @agg_calls.first
     assert_equal({ "$unwind" => "$tags" }, pipeline.first)
     assert_equal "$tags", find_stage(pipeline, "$group")["$group"]["_id"]
@@ -209,11 +209,11 @@ class ToolsGroupDistinctTest < Minitest::Test
     # the handler echoes the sort parameter on the response envelope.
     stub_aggregate([
       { "objectId" => "b", "value" => 10 },
-      { "objectId" => "c", "value" => 5  },
-      { "objectId" => "a", "value" => 2  },
+      { "objectId" => "c", "value" => 5 },
+      { "objectId" => "a", "value" => 2 },
     ])
     result = @agent.execute(:group_by, class_name: "GroupSong", field: "genre",
-                            sort: "value_desc", limit: 200)
+                                       sort: "value_desc", limit: 200)
     assert result[:success]
     assert_equal "value_desc", result[:data][:sort]
 
@@ -226,7 +226,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_group_by_invalid_operation_raises_validation
     stub_aggregate([])
     result = @agent.execute(:group_by, class_name: "GroupSong", field: "genre",
-                            operation: "bogus")
+                                       operation: "bogus")
     refute result[:success]
     assert_equal :invalid_argument, result[:error_code]
   end
@@ -250,7 +250,7 @@ class ToolsGroupDistinctTest < Minitest::Test
       { "objectId" => { "year" => 2024, "month" => 11, "day" => 25 }, "value" => 8 },
     ])
     result = @agent.execute(:group_by_date, class_name: "GroupSong",
-                            field: "createdAt", interval: "day")
+                                            field: "createdAt", interval: "day")
     assert result[:success], result.inspect
     body = result[:data]
     assert_equal "day", body[:interval]
@@ -259,15 +259,15 @@ class ToolsGroupDistinctTest < Minitest::Test
 
     _class, pipeline = @agg_calls.first
     group_id = find_stage(pipeline, "$group")["$group"]["_id"]
-    assert_equal({ "$year"        => "$createdAt" }, group_id["year"])
-    assert_equal({ "$month"       => "$createdAt" }, group_id["month"])
-    assert_equal({ "$dayOfMonth"  => "$createdAt" }, group_id["day"])
+    assert_equal({ "$year" => "$createdAt" }, group_id["year"])
+    assert_equal({ "$month" => "$createdAt" }, group_id["month"])
+    assert_equal({ "$dayOfMonth" => "$createdAt" }, group_id["day"])
   end
 
   def test_group_by_date_with_timezone
     stub_aggregate([{ "objectId" => { "year" => 2024, "month" => 11, "day" => 24 }, "value" => 1 }])
     result = @agent.execute(:group_by_date, class_name: "GroupSong",
-                            field: "createdAt", interval: "day", timezone: "America/New_York")
+                                            field: "createdAt", interval: "day", timezone: "America/New_York")
     assert result[:success]
     group_id = find_stage(@agg_calls.first[1], "$group")["$group"]["_id"]
     expected = { "date" => "$createdAt", "timezone" => "America/New_York" }
@@ -281,7 +281,7 @@ class ToolsGroupDistinctTest < Minitest::Test
       { "objectId" => { "year" => 2024, "month" => 12 }, "value" => 30 },
     ])
     result = @agent.execute(:group_by_date, class_name: "GroupSong",
-                            field: "createdAt", interval: "month")
+                                            field: "createdAt", interval: "month")
     assert result[:success]
     keys = result[:data][:groups].map { |g| g[:key] }
     assert_equal ["2024-12", "2025-01"], keys, "should default to chronological order"
@@ -290,7 +290,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_group_by_date_invalid_interval
     stub_aggregate([])
     result = @agent.execute(:group_by_date, class_name: "GroupSong",
-                            field: "createdAt", interval: "fortnight")
+                                            field: "createdAt", interval: "fortnight")
     refute result[:success]
     assert_equal :invalid_argument, result[:error_code]
   end
@@ -298,8 +298,8 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_group_by_date_invalid_timezone
     stub_aggregate([])
     result = @agent.execute(:group_by_date, class_name: "GroupSong",
-                            field: "createdAt", interval: "day",
-                            timezone: "evil; DROP TABLE")
+                                            field: "createdAt", interval: "day",
+                                            timezone: "evil; DROP TABLE")
     refute result[:success]
     assert_equal :invalid_argument, result[:error_code]
   end
@@ -312,7 +312,7 @@ class ToolsGroupDistinctTest < Minitest::Test
       { "objectId" => { "year" => 2024, "month" => 11, "day" => 26 }, "value" => 1 },
     ])
     result = @agent.execute(:group_by_date, class_name: "GroupSong",
-                            field: "createdAt", interval: "day", sort: "value_desc")
+                                            field: "createdAt", interval: "day", sort: "value_desc")
     keys = result[:data][:groups].map { |g| g[:key] }
     assert_equal ["2024-11-25", "2024-11-24", "2024-11-26"], keys
     pipeline = @agg_calls.first[1]
@@ -342,7 +342,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_distinct_pointer_field_strips_class_prefix
     stub_aggregate([
       { "objectId" => "GroupArtist$alice" },
-      { "objectId" => "GroupArtist$bob"   },
+      { "objectId" => "GroupArtist$bob" },
     ])
     result = @agent.execute(:distinct, class_name: "GroupSong", field: "artist")
     assert result[:success]
@@ -403,8 +403,8 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_group_by_dry_run_returns_pipeline_without_executing
     stub_aggregate([])  # would fail loudly if called
     result = @agent.execute(:group_by, class_name: "GroupSong", field: "genre",
-                            operation: "sum", value_field: "plays",
-                            sort: "value_desc", limit: 50, dry_run: true)
+                                       operation: "sum", value_field: "plays",
+                                       sort: "value_desc", limit: 50, dry_run: true)
     assert result[:success]
     body = result[:data]
     assert_equal true, body[:dry_run]
@@ -429,8 +429,8 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_group_by_date_dry_run_returns_pipeline
     stub_aggregate([])
     result = @agent.execute(:group_by_date, class_name: "GroupSong",
-                            field: "createdAt", interval: "month",
-                            timezone: "America/New_York", dry_run: true)
+                                            field: "createdAt", interval: "month",
+                                            timezone: "America/New_York", dry_run: true)
     assert result[:success]
     body = result[:data]
     assert body[:dry_run]
@@ -443,7 +443,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_distinct_dry_run_returns_pipeline
     stub_aggregate([])
     result = @agent.execute(:distinct, class_name: "GroupSong", field: "genre",
-                            sort: "asc", dry_run: true)
+                                       sort: "asc", dry_run: true)
     assert result[:success]
     body = result[:data]
     assert body[:dry_run]
@@ -457,7 +457,7 @@ class ToolsGroupDistinctTest < Minitest::Test
     # Invalid field shape must still be refused with dry_run set —
     # dry_run is not an authorization bypass.
     result = @agent.execute(:group_by, class_name: "GroupSong", field: "evil;drop",
-                            dry_run: true)
+                                       dry_run: true)
     refute result[:success]
     assert_equal :invalid_argument, result[:error_code]
   end
@@ -465,7 +465,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_dry_run_respects_agent_hidden_class
     stub_aggregate([])
     result = @agent.execute(:group_by, class_name: "GroupHiddenSong", field: "genre",
-                            dry_run: true)
+                                       dry_run: true)
     refute result[:success]
     assert_equal :access_denied, result[:error_code]
   end
@@ -487,7 +487,7 @@ class ToolsGroupDistinctTest < Minitest::Test
     fake.define_singleton_method(:find_objects) do |_class, _query, **_opts|
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:result)   {
+      r.define_singleton_method(:result) {
         { "queryPlanner" => { "winningPlan" => { "stage" => "COLLSCAN" } } }
       }
       r
@@ -499,7 +499,7 @@ class ToolsGroupDistinctTest < Minitest::Test
     @agent.define_singleton_method(:client) { fake }
 
     result = @agent.execute(:group_by, class_name: "GroupSong", field: "genre",
-                            where: { "title" => "Strict" })
+                                       where: { "title" => "Strict" })
     # Refusal envelope comes back as data (the handler returns it directly).
     assert result[:success], result.inspect
     assert result[:data][:refused]
@@ -537,7 +537,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_group_by_value_field_resolves_snake_case
     stub_aggregate([{ "objectId" => "GroupAuthor$alice", "value" => 100 }])
     result = @agent.execute(:group_by, class_name: "GroupTrack", field: "author_id",
-                            operation: "sum", value_field: "play_count")
+                                       operation: "sum", value_field: "play_count")
     assert result[:success], result.inspect
     group_stage = find_stage(@agg_calls.first[1], "$group")["$group"]
     assert_equal({ "$sum" => "$playCount" }, group_stage["value"],
@@ -549,7 +549,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_group_by_date_resolves_snake_case_date_via_field_map
     stub_aggregate([{ "objectId" => { "year" => 2024, "month" => 6, "day" => 1 }, "value" => 3 }])
     result = @agent.execute(:group_by_date, class_name: "GroupTrack",
-                            field: "released_at", interval: "day")
+                                            field: "released_at", interval: "day")
     assert result[:success], result.inspect
     group_id = find_stage(@agg_calls.first[1], "$group")["$group"]["_id"]
     # The date expression for "day" interval contains year/month/day sub-expressions.
@@ -563,7 +563,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_group_by_date_rejects_pointer_field
     stub_aggregate([])
     result = @agent.execute(:group_by_date, class_name: "GroupTrack",
-                            field: "author_id", interval: "day")
+                                            field: "author_id", interval: "day")
     refute result[:success], "pointer field must be rejected by group_by_date"
     assert_equal :invalid_argument, result[:error_code],
                  "expected invalid_argument error code for pointer field"
@@ -573,7 +573,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_group_by_date_rejects_array_field
     stub_aggregate([])
     result = @agent.execute(:group_by_date, class_name: "GroupTrack",
-                            field: "tags", interval: "day")
+                                            field: "tags", interval: "day")
     refute result[:success], "array field must be rejected by group_by_date"
     assert_equal :invalid_argument, result[:error_code],
                  "expected invalid_argument error code for array field"
@@ -584,7 +584,7 @@ class ToolsGroupDistinctTest < Minitest::Test
   def test_group_by_date_rejects_relation_field
     stub_aggregate([])
     result = @agent.execute(:group_by_date, class_name: "GroupRelationSong",
-                            field: "coauthors", interval: "day")
+                                            field: "coauthors", interval: "day")
     refute result[:success], "relation field must be rejected by group_by_date"
     assert_equal :invalid_argument, result[:error_code],
                  "expected invalid_argument error code for relation field"

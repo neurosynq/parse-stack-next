@@ -57,7 +57,7 @@ class IdempotentRetryIntegrationTest < Minitest::Test
   end
 
   def test_replayed_request_id_does_not_create_a_duplicate_row
-    id     = "_RB_#{SecureRandom.uuid}"
+    id = "_RB_#{SecureRandom.uuid}"
     marker = "probe-#{SecureRandom.hex(6)}"
 
     r1 = post_probe(id, marker)

@@ -36,15 +36,37 @@ module Parse
       end
 
       def [](key)
-        @pool.with { |store| store[key] }
+        load(key, {})
       end
 
-      def key?(key)
-        @pool.with { |store| store.key?(key) }
+      # Moneta's read primitive, carrying its options argument (`expires:` to
+      # refresh a TTL on read, for instance).
+      #
+      # Feature-detected rather than called blind. Every real Moneta store
+      # implements `load`, but a custom store that only implements `[]` would
+      # otherwise reach `Kernel#load`, which is private (so the failure is a
+      # confusing NoMethodError) and, were it public, would try to load a
+      # FILE named after the cache key. `respond_to?` answers false for the
+      # private Kernel method, so this check is exact.
+      def load(key, options = {})
+        @pool.with do |store|
+          next store.load(key, options || {}) if store.respond_to?(:load)
+          store[key]
+        end
       end
 
-      def delete(key)
-        @pool.with { |store| store.delete(key) }
+      def key?(key, options = {})
+        @pool.with do |store|
+          next store.key?(key, options || {}) if options_aware?(store, :key?)
+          store.key?(key)
+        end
+      end
+
+      def delete(key, options = {})
+        @pool.with do |store|
+          next store.delete(key, options || {}) if options_aware?(store, :delete)
+          store.delete(key)
+        end
       end
 
       def store(key, value, options = {})
@@ -78,6 +100,27 @@ module Parse
       # calls are no-ops. `ConnectionPool#shutdown` raises
       # `ConnectionPool::PoolShuttingDownError` on a second invocation,
       # so we gate it with a `@closed` flag.
+      # Whether `store` takes Moneta's options argument for `name`.
+      #
+      # Decided from arity and memoized per method, not by calling with
+      # options and rescuing ArgumentError. That retry had three problems: a
+      # store's own argument validation also raises ArgumentError, so a
+      # genuine rejection was retried instead of surfaced; for `delete` the
+      # retry meant the deletion could run TWICE; and because each attempt
+      # took its own checkout, the second ran against a DIFFERENT connection
+      # than the first. Every pooled store is built by the same block, so one
+      # probe answers for all of them.
+      def options_aware?(store, name)
+        @options_aware ||= {}
+        return @options_aware[name] if @options_aware.key?(name)
+        arity = begin
+            store.method(name).arity
+          rescue NameError
+            0
+          end
+        @options_aware[name] = arity.negative? || arity >= 2
+      end
+
       def close
         return if @closed
         @closed = true

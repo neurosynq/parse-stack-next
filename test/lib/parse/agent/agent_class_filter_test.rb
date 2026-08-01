@@ -78,7 +78,7 @@ class AgentClassFilterTest < Minitest::Test
   # ---- Class constants vs strings -----------------------------------------
 
   def test_string_and_constant_canonicalize_identically
-    by_const  = silence_master_key { Parse::Agent.new(classes: { only: [ClassFilterPost] }) }
+    by_const = silence_master_key { Parse::Agent.new(classes: { only: [ClassFilterPost] }) }
     by_string = silence_master_key { Parse::Agent.new(classes: { only: ["ClassFilterPost"] }) }
     assert_equal by_const.class_filter_only.include?("ClassFilterPost"),
                  by_string.class_filter_only.include?("ClassFilterPost")
@@ -174,7 +174,7 @@ class AgentClassFilterTest < Minitest::Test
     child = Parse::Agent.new(parent: parent, classes: { only: [ClassFilterTopic, ClassFilterComment] })
     # Intersection = ClassFilterTopic only.
     assert child.class_filter_permits?("ClassFilterTopic")
-    refute child.class_filter_permits?("ClassFilterPost"),    "child should not retain non-intersected parent class"
+    refute child.class_filter_permits?("ClassFilterPost"), "child should not retain non-intersected parent class"
     refute child.class_filter_permits?("ClassFilterComment"), "child should not see classes outside the intersection"
   end
 
@@ -268,7 +268,7 @@ class AgentClassFilterTest < Minitest::Test
     agent = silence_master_key { Parse::Agent.new }
     # No filter declared: classes_only / classes_except must not appear.
     agent.execute(:count_objects, class_name: "ClassFilterHidden")  # globally hidden, will deny
-    refute payload.key?(:classes_only),   "unscoped agent should not emit classes_only"
+    refute payload.key?(:classes_only), "unscoped agent should not emit classes_only"
     refute payload.key?(:classes_except), "unscoped agent should not emit classes_except"
     # AccessDenied from the global hidden gate still carries the :hidden_class kind.
     assert_equal :access_denied, payload[:error_code]

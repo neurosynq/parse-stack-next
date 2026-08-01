@@ -43,11 +43,11 @@ class ClientNoMasterKeySmokeTest < Minitest::Test
   end
 
   def setup
-    @prior_default      = Parse::Client.clients[:default]
-    @prior_client_mode  = Parse.client_mode
-    @prior_env_master   = ENV["PARSE_SERVER_MASTER_KEY"]
-    @prior_env_master2  = ENV["PARSE_MASTER_KEY"]
-    @prior_env_cmode    = ENV["PARSE_CLIENT_MODE"]
+    @prior_default = Parse::Client.clients[:default]
+    @prior_client_mode = Parse.client_mode
+    @prior_env_master = ENV["PARSE_SERVER_MASTER_KEY"]
+    @prior_env_master2 = ENV["PARSE_MASTER_KEY"]
+    @prior_env_cmode = ENV["PARSE_CLIENT_MODE"]
     # Force the ENV-fallthrough off so build_client(master_key: nil)
     # really does produce a key-less client.
     ENV.delete("PARSE_SERVER_MASTER_KEY")
@@ -59,8 +59,8 @@ class ClientNoMasterKeySmokeTest < Minitest::Test
     Parse::Client.clients[:default] = @prior_default
     Parse.client_mode = @prior_client_mode
     ENV["PARSE_SERVER_MASTER_KEY"] = @prior_env_master
-    ENV["PARSE_MASTER_KEY"]        = @prior_env_master2
-    ENV["PARSE_CLIENT_MODE"]       = @prior_env_cmode
+    ENV["PARSE_MASTER_KEY"] = @prior_env_master2
+    ENV["PARSE_CLIENT_MODE"] = @prior_env_cmode
     invalidate_model_client_cache!
   end
 
@@ -86,7 +86,7 @@ class ClientNoMasterKeySmokeTest < Minitest::Test
     refute captured.request_headers.key?(Parse::Protocol::MASTER_KEY),
            "master key header must NOT appear when no master key is configured " \
            "(headers seen: #{captured.request_headers.keys.inspect})"
-    assert_equal "test-app",  captured.request_headers[Parse::Protocol::APP_ID]
+    assert_equal "test-app", captured.request_headers[Parse::Protocol::APP_ID]
     assert_equal "test-rest", captured.request_headers[Parse::Protocol::API_KEY]
   end
 

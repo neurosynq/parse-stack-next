@@ -75,8 +75,8 @@ module Parse
         end
 
         to_create = []
-        in_sync   = []
-        drifted   = []
+        in_sync = []
+        drifted = []
 
         declared.each do |decl|
           target = existing_by_name[decl[:name]]
@@ -93,14 +93,14 @@ module Parse
         orphans = existing_by_name.keys.reject { |name| declared_names.include?(name) }
 
         {
-          collection:      coll,
-          declared:        declared,
-          existing:        existing,
+          collection: coll,
+          declared: declared,
+          existing: existing,
           atlas_available: available,
-          to_create:       to_create,
-          in_sync:         in_sync,
-          drifted:         drifted,
-          orphans:         orphans,
+          to_create: to_create,
+          in_sync: in_sync,
+          drifted: drifted,
+          orphans: orphans,
         }
       end
 
@@ -176,14 +176,14 @@ module Parse
         end
 
         {
-          created:         created,
-          skipped_exists:  skipped_exists,
-          in_sync:         p[:in_sync],
-          updated:         updated,
+          created: created,
+          skipped_exists: skipped_exists,
+          in_sync: p[:in_sync],
+          updated: updated,
           drifted_skipped: drifted_skipped,
-          dropped:         dropped,
+          dropped: dropped,
           orphans_skipped: orphans_skipped,
-          wait_results:    wait_results,
+          wait_results: wait_results,
         }
       end
 
@@ -321,10 +321,10 @@ module Parse
       # history, statusDetail) so operator-facing output stays readable.
       def serialize_existing(idx)
         {
-          name:               (idx["name"] || idx[:name]).to_s,
-          status:             (idx["status"] || idx[:status]).to_s,
-          queryable:          idx["queryable"] == true,
-          latest_definition:  idx["latestDefinition"] || idx[:latestDefinition],
+          name: (idx["name"] || idx[:name]).to_s,
+          status: (idx["status"] || idx[:status]).to_s,
+          queryable: idx["queryable"] == true,
+          latest_definition: idx["latestDefinition"] || idx[:latestDefinition],
         }
       end
 

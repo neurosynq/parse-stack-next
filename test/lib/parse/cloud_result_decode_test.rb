@@ -75,8 +75,8 @@ class TestCloudResultDecode < Minitest::Test
 
   def test_nested_object_inside_plain_hash_decodes
     payload = { "count" => 1,
-                "post" => { "__type" => "Object", "className" => "DecodePostCRD",
-                            "objectId" => "z", "title" => "Nested" } }
+               "post" => { "__type" => "Object", "className" => "DecodePostCRD",
+                           "objectId" => "z", "title" => "Nested" } }
     out = decode(payload)
     assert_equal 1, out["count"]
     assert_kind_of DecodePost, out["post"]

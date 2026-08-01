@@ -14,6 +14,7 @@ class WebhookChainModel < Parse::Object
   self.after_save_count = 0
 
   after_save :bump_after_save
+
   def bump_after_save
     self.class.after_save_count += 1
   end

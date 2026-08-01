@@ -73,8 +73,8 @@ class CorrelationIdTest < Minitest::Test
     fake_client.define_singleton_method(:find_objects) do |_c, _q, **_opts|
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:count)    { 7 }
-      r.define_singleton_method(:results)  { [] }
+      r.define_singleton_method(:count) { 7 }
+      r.define_singleton_method(:results) { [] }
       r
     end
     @agent.define_singleton_method(:client) { fake_client }
@@ -90,8 +90,8 @@ class CorrelationIdTest < Minitest::Test
     fake_client.define_singleton_method(:find_objects) do |_c, _q, **_opts|
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:count)    { 0 }
-      r.define_singleton_method(:results)  { [] }
+      r.define_singleton_method(:count) { 0 }
+      r.define_singleton_method(:results) { [] }
       r
     end
     @agent.define_singleton_method(:client) { fake_client }
@@ -121,13 +121,13 @@ class CorrelationIdTest < Minitest::Test
     app = Parse::Agent::MCPRackApp.new(agent_factory: factory)
 
     env = {
-      "REQUEST_METHOD"        => "POST",
-      "CONTENT_TYPE"          => "application/json",
-      "HTTP_MCP_SESSION_ID"   => "client-conv-7",
-      "rack.input"            => StringIO.new(JSON.generate(
-                                   jsonrpc: "2.0", id: 1,
-                                   method: "tools/list",
-                                 )),
+      "REQUEST_METHOD" => "POST",
+      "CONTENT_TYPE" => "application/json",
+      "HTTP_MCP_SESSION_ID" => "client-conv-7",
+      "rack.input" => StringIO.new(JSON.generate(
+        jsonrpc: "2.0", id: 1,
+        method: "tools/list",
+      )),
     }
     app.call(env)
 
@@ -147,10 +147,10 @@ class CorrelationIdTest < Minitest::Test
     app = Parse::Agent::MCPRackApp.new(agent_factory: factory)
 
     env = {
-      "REQUEST_METHOD"      => "POST",
-      "CONTENT_TYPE"        => "application/json",
+      "REQUEST_METHOD" => "POST",
+      "CONTENT_TYPE" => "application/json",
       "HTTP_MCP_SESSION_ID" => "client-tried-to-spoof",
-      "rack.input"          => StringIO.new(JSON.generate(jsonrpc: "2.0", id: 1, method: "tools/list")),
+      "rack.input" => StringIO.new(JSON.generate(jsonrpc: "2.0", id: 1, method: "tools/list")),
     }
     app.call(env)
 
@@ -172,10 +172,10 @@ class CorrelationIdTest < Minitest::Test
     app = Parse::Agent::MCPRackApp.new(agent_factory: factory)
 
     env = {
-      "REQUEST_METHOD"        => "POST",
-      "CONTENT_TYPE"          => "application/json",
+      "REQUEST_METHOD" => "POST",
+      "CONTENT_TYPE" => "application/json",
       "HTTP_X_MCP_SESSION_ID" => "legacy-header-ignored",
-      "rack.input"            => StringIO.new(JSON.generate(jsonrpc: "2.0", id: 1, method: "tools/list")),
+      "rack.input" => StringIO.new(JSON.generate(jsonrpc: "2.0", id: 1, method: "tools/list")),
     }
     app.call(env)
 
@@ -194,10 +194,10 @@ class CorrelationIdTest < Minitest::Test
     app = Parse::Agent::MCPRackApp.new(agent_factory: factory)
 
     env = {
-      "REQUEST_METHOD"      => "POST",
-      "CONTENT_TYPE"        => "application/json",
+      "REQUEST_METHOD" => "POST",
+      "CONTENT_TYPE" => "application/json",
       "HTTP_MCP_SESSION_ID" => "evil\nLOG-INJECTION",
-      "rack.input"          => StringIO.new(JSON.generate(jsonrpc: "2.0", id: 1, method: "tools/list")),
+      "rack.input" => StringIO.new(JSON.generate(jsonrpc: "2.0", id: 1, method: "tools/list")),
     }
     app.call(env)
 

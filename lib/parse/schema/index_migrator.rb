@@ -110,7 +110,7 @@ module Parse
         managed, ours = partition_parse_managed(existing)
         to_create, in_sync, conflicts = diff_declarations(declared, ours)
         declared_names = declared.map { |d| d[:options][:name] }.compact.to_set
-        declared_sigs  = declared.map { |d| key_sig(d[:keys]) }.to_set
+        declared_sigs = declared.map { |d| key_sig(d[:keys]) }.to_set
         orphans = ours.reject do |idx|
           declared_sigs.include?(key_sig(idx["key"] || idx[:key])) ||
             declared_names.include?(idx["name"] || idx[:name])
@@ -122,21 +122,21 @@ module Parse
         after_with_drop = after_no_drop - orphans.size
 
         {
-          collection:               collection,
-          declared:                 declared,
-          existing:                 existing,
-          parse_managed:            managed.map { |i| i["name"] || i[:name] },
-          to_create:                to_create,
-          in_sync:                  in_sync,
-          conflicts:                conflicts,
-          orphans:                  orphans.map { |i| i["name"] || i[:name] }.compact,
-          capacity_used:            used,
-          capacity_after:           after_no_drop,
-          capacity_remaining:       max - after_no_drop,
-          capacity_ok:              after_no_drop <= max,
+          collection: collection,
+          declared: declared,
+          existing: existing,
+          parse_managed: managed.map { |i| i["name"] || i[:name] },
+          to_create: to_create,
+          in_sync: in_sync,
+          conflicts: conflicts,
+          orphans: orphans.map { |i| i["name"] || i[:name] }.compact,
+          capacity_used: used,
+          capacity_after: after_no_drop,
+          capacity_remaining: max - after_no_drop,
+          capacity_ok: after_no_drop <= max,
           capacity_after_with_drop: after_with_drop,
           capacity_remaining_with_drop: max - after_with_drop,
-          capacity_ok_with_drop:    after_with_drop <= max,
+          capacity_ok_with_drop: after_with_drop <= max,
         }
       end
 
@@ -181,7 +181,7 @@ module Parse
           p[:orphans].each do |name|
             confirm = "drop:#{collection}:#{name}"
             res = Parse::MongoDB.drop_index(collection, name, confirm: confirm,
-                                            allow_system_classes: collection.start_with?("_Join:"))
+                                                              allow_system_classes: collection.start_with?("_Join:"))
             dropped << name if res == :dropped
           end
         end
@@ -190,21 +190,21 @@ module Parse
           result = Parse::MongoDB.create_index(
             collection,
             decl[:keys],
-            name:                decl[:options][:name],
-            unique:              decl[:options][:unique] == true,
-            sparse:              decl[:options][:sparse] == true,
-            partial_filter:      decl[:options][:partial_filter],
-            expire_after:        decl[:options][:expire_after],
+            name: decl[:options][:name],
+            unique: decl[:options][:unique] == true,
+            sparse: decl[:options][:sparse] == true,
+            partial_filter: decl[:options][:partial_filter],
+            expire_after: decl[:options][:expire_after],
             allow_system_classes: collection.start_with?("_Join:"),
           )
           (result == :exists ? skipped : created) << decl
         end
 
         {
-          created:        created,
+          created: created,
           skipped_exists: skipped,
-          dropped:        dropped,
-          conflicts:      p[:conflicts],
+          dropped: dropped,
+          conflicts: p[:conflicts],
           capacity_blocked: false,
         }
       end
@@ -235,12 +235,12 @@ module Parse
 
       def diff_declarations(declared, existing_ours)
         to_create = []
-        in_sync   = []
+        in_sync = []
         conflicts = []
 
         declared.each do |decl|
           decl_sig = key_sig(decl[:keys])
-          named    = decl[:options][:name]
+          named = decl[:options][:name]
 
           # Prefer a name match when the declaration named one — that's
           # the operator's authoritative target. Otherwise match by key
@@ -280,7 +280,7 @@ module Parse
       def serialize_existing(idx)
         {
           name: idx["name"] || idx[:name],
-          key:  idx["key"]  || idx[:key],
+          key: idx["key"] || idx[:key],
           unique: idx["unique"] == true,
           sparse: idx["sparse"] == true,
           partial_filter: idx["partialFilterExpression"],

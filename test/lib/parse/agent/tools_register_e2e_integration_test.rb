@@ -64,8 +64,7 @@ class ToolsRegisterE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_registered_tool_executes_real_parse_query
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     items = nil
     with_parse_server do
@@ -115,8 +114,7 @@ class ToolsRegisterE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_write_tool_filtered_out_of_readonly_tools_list
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       T.register(
@@ -137,8 +135,7 @@ class ToolsRegisterE2EIntegrationTest < Minitest::Test
   end
 
   def test_write_tool_visible_to_write_agent
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       T.register(
@@ -163,8 +160,7 @@ class ToolsRegisterE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_same_name_replacement_invokes_second_handler
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       T.register(
@@ -205,8 +201,7 @@ class ToolsRegisterE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_handler_error_surfaces_as_is_error_true
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       T.register(
@@ -238,8 +233,7 @@ class ToolsRegisterE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_registered_tool_fires_notifications_event
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     events = []
     mutex = Mutex.new
@@ -280,8 +274,7 @@ class ToolsRegisterE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_reset_registry_removes_all_custom_tools
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       T.register(
@@ -309,8 +302,7 @@ class ToolsRegisterE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_registered_tool_descriptor_appears_in_mcp_tools_list
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       T.register(
@@ -345,8 +337,7 @@ class ToolsRegisterE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_readonly_agent_permission_denied_for_write_tool_call
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       T.register(
@@ -371,8 +362,7 @@ class ToolsRegisterE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_multiple_custom_tools_coexist
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       5.times do |i|
@@ -399,8 +389,7 @@ class ToolsRegisterE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_registered_tool_timeout_override
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       T.register(

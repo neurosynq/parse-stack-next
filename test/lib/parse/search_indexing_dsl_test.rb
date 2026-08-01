@@ -29,8 +29,8 @@ class SearchIndexingDSLTest < Minitest::Test
 
   def test_mongo_search_index_supports_multiple_indexes_per_class
     m = fresh_model
-    m.mongo_search_index("text_search",         { mappings: { dynamic: true } })
-    m.mongo_search_index("autocomplete_index",  { mappings: { fields: { title: { type: "autocomplete" } } } })
+    m.mongo_search_index("text_search", { mappings: { dynamic: true } })
+    m.mongo_search_index("autocomplete_index", { mappings: { fields: { title: { type: "autocomplete" } } } })
     assert_equal 2, m.mongo_search_index_declarations.size
     assert_equal %w[text_search autocomplete_index],
                  m.mongo_search_index_declarations.map { |d| d[:name] }
@@ -71,7 +71,7 @@ class SearchIndexingDSLTest < Minitest::Test
 
   def test_mongo_search_index_idempotent_redeclaration_with_identical_content
     m = fresh_model
-    first  = m.mongo_search_index("ix", { mappings: { dynamic: true } })
+    first = m.mongo_search_index("ix", { mappings: { dynamic: true } })
     second = m.mongo_search_index("ix", { mappings: { dynamic: true } })
     assert_equal 1, m.mongo_search_index_declarations.size,
                  "identical redeclaration must not accumulate duplicates"
@@ -109,11 +109,11 @@ class SearchIndexingDSLTest < Minitest::Test
 
   def test_subclasses_have_separate_declaration_storage
     parent = fresh_model("SIxParent#{SecureRandom.hex(4)}")
-    child  = Class.new(parent)
+    child = Class.new(parent)
     child.define_singleton_method(:name) { "SIxChild#{SecureRandom.hex(4)}" }
     child.parse_class("SIxChild#{SecureRandom.hex(4)}")
     parent.mongo_search_index("p_ix", { mappings: { dynamic: true } })
-    child.mongo_search_index("c_ix",  { mappings: { dynamic: false, fields: { title: { type: "string" } } } })
+    child.mongo_search_index("c_ix", { mappings: { dynamic: false, fields: { title: { type: "string" } } } })
     assert_equal %w[p_ix], parent.mongo_search_index_declarations.map { |d| d[:name] }
     assert_equal %w[c_ix], child.mongo_search_index_declarations.map { |d| d[:name] }
   end

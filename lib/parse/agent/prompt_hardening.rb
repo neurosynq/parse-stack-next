@@ -27,7 +27,7 @@ module Parse
       # Max characters retained from any LLM-surfaced description.
       DESCRIPTION_CAP = 200
 
-      SCHEMA_DESC_OPEN  = "<schema_description>"
+      SCHEMA_DESC_OPEN = "<schema_description>"
       SCHEMA_DESC_CLOSE = "</schema_description>"
 
       # C0 (0x00-0x1F except \t\n) + DEL + C1 (0x7F-0x9F) + zero-width
@@ -73,7 +73,7 @@ module Parse
               allowed.each do |v|
                 next unless v.is_a?(Hash)
                 v["description"] = sanitize_description(v["description"]) if v["description"].is_a?(String)
-                v[:description]  = sanitize_description(v[:description])  if v[:description].is_a?(String)
+                v[:description] = sanitize_description(v[:description]) if v[:description].is_a?(String)
               end
             end
           end
@@ -89,7 +89,7 @@ module Parse
           methods.each do |m|
             next unless m.is_a?(Hash)
             m["description"] = sanitize_description(m["description"]) if m["description"].is_a?(String)
-            m[:description]  = sanitize_description(m[:description])  if m[:description].is_a?(String)
+            m[:description] = sanitize_description(m[:description]) if m[:description].is_a?(String)
             sanitize_nested_descriptions!(m["parameters"] || m[:parameters])
           end
         end
@@ -202,7 +202,7 @@ module Parse
 
       def deep_dup(obj)
         case obj
-        when Hash  then obj.each_with_object({}) { |(k, v), h| h[k] = deep_dup(v) }
+        when Hash then obj.each_with_object({}) { |(k, v), h| h[k] = deep_dup(v) }
         when Array then obj.map { |e| deep_dup(e) }
         when String then obj.dup
         else obj

@@ -51,14 +51,14 @@ module Parse
             class_name.to_s
           end
         {
-          class_name:              cn,
-          accessible:              describe_class_accessibility(cn),
-          agent_fields:            class_field_allowlist(cn),
-          agent_canonical_filter:  Parse::Agent::MetadataRegistry.canonical_filter(cn),
-          per_agent_filter:        respond_to?(:filter_for) ? filter_for(cn) : nil,
-          tenant_scope:            class_tenant_scope(cn),
-          large_fields:            class_large_fields(cn),
-          agent_methods:           class_agent_method_names(cn),
+          class_name: cn,
+          accessible: describe_class_accessibility(cn),
+          agent_fields: class_field_allowlist(cn),
+          agent_canonical_filter: Parse::Agent::MetadataRegistry.canonical_filter(cn),
+          per_agent_filter: respond_to?(:filter_for) ? filter_for(cn) : nil,
+          tenant_scope: class_tenant_scope(cn),
+          large_fields: class_large_fields(cn),
+          agent_methods: class_agent_method_names(cn),
         }
       end
 
@@ -136,7 +136,7 @@ module Parse
         # mirroring assert_class_accessible!'s signature.
         if class_name
           cn = class_name.is_a?(Class) && class_name.respond_to?(:parse_class) ?
-                 class_name.parse_class : class_name.to_s
+            class_name.parse_class : class_name.to_s
           begin
             Parse::Agent::Tools.assert_class_accessible!(cn, agent: self, op: op)
           rescue Parse::Agent::AccessDenied => e
@@ -152,7 +152,7 @@ module Parse
         # tool is call_method (the method-filter only narrows that tool).
         if tool_sym == :call_method && method_name && class_name
           cn = class_name.is_a?(Class) && class_name.respond_to?(:parse_class) ?
-                 class_name.parse_class : class_name.to_s
+            class_name.parse_class : class_name.to_s
           if respond_to?(:method_filtered?) &&
              method_filtered?(method_name.to_sym, class_name: cn)
             return { allowed: false, reason: :method_filtered,
@@ -169,23 +169,23 @@ module Parse
       # paths share the same data source.
       def describe_hash
         {
-          agent_id:       agent_id,
-          agent_depth:    agent_depth,
-          permissions:    @permissions,
-          auth:           auth_descriptor,
-          tenant_id:      tenant_id,
-          classes:        filter_descriptor(@class_filter_only, @class_filter_except),
-          tools:          tools_descriptor,
-          methods:        filter_descriptor(@method_filter_only, @method_filter_except, transform: ->(s) { s.to_s }),
-          filters:        per_agent_filters_summary,
+          agent_id: agent_id,
+          agent_depth: agent_depth,
+          permissions: @permissions,
+          auth: auth_descriptor,
+          tenant_id: tenant_id,
+          classes: filter_descriptor(@class_filter_only, @class_filter_except),
+          tools: tools_descriptor,
+          methods: filter_descriptor(@method_filter_only, @method_filter_except, transform: ->(s) { s.to_s }),
+          filters: per_agent_filters_summary,
           hidden_classes: Parse::Agent::MetadataRegistry.hidden_class_names,
-          per_class:      per_class_descriptor,
-          strict_modes:   {
-            tool_filter:  strict_tool_filter?,
+          per_class: per_class_descriptor,
+          strict_modes: {
+            tool_filter: strict_tool_filter?,
             class_filter: strict_class_filter?,
           },
           correlation_id: @correlation_id,
-          prompt:         { version: Parse::Agent::PROMPT_VERSION },
+          prompt: { version: Parse::Agent::PROMPT_VERSION },
         }
       end
 
@@ -230,8 +230,8 @@ module Parse
 
       def tools_descriptor
         {
-          only:      @tool_filter_only && @tool_filter_only.to_a.sort,
-          except:    @tool_filter_except && @tool_filter_except.to_a.sort,
+          only: @tool_filter_only && @tool_filter_only.to_a.sort,
+          except: @tool_filter_except && @tool_filter_except.to_a.sort,
           effective: allowed_tools.sort,
         }
       end
@@ -250,7 +250,7 @@ module Parse
       # class.
       def per_class_descriptor
         names = Set.new
-        names.merge(@class_filter_only.to_a)   if @class_filter_only
+        names.merge(@class_filter_only.to_a) if @class_filter_only
         names.merge(@class_filter_except.to_a) if @class_filter_except
         if @filters
           names.merge(@filters.keys.reject { |k| k == :default }.map(&:to_s))
@@ -280,7 +280,7 @@ module Parse
       def describe_class_accessibility(class_name)
         if Parse::Agent::MetadataRegistry.hidden?(class_name)
           except = Parse::Agent::MetadataRegistry.respond_to?(:hidden_exception_for) ?
-                     Parse::Agent::MetadataRegistry.hidden_exception_for(class_name) : nil
+            Parse::Agent::MetadataRegistry.hidden_exception_for(class_name) : nil
           if except == :master_key && auth_context[:using_master_key] == true
             # Hidden from session-bound / acl_user / acl_role agents but
             # reachable by this master-key agent.
@@ -308,7 +308,7 @@ module Parse
       def class_tenant_scope(class_name)
         return nil if tenant_id.nil?
         rule = Parse::Agent::MetadataRegistry.respond_to?(:tenant_scope_rule) ?
-                 Parse::Agent::MetadataRegistry.tenant_scope_rule(class_name) : nil
+          Parse::Agent::MetadataRegistry.tenant_scope_rule(class_name) : nil
         return nil unless rule
         { field: rule[:field], value: tenant_id }
       end
@@ -361,8 +361,8 @@ module Parse
         lines = []
         auth = data[:auth]
         auth_line = auth[:mode] == :session_token ?
-                      "#{auth[:mode]} (fingerprint=#{auth[:fingerprint]})" :
-                      auth[:mode].to_s
+          "#{auth[:mode]} (fingerprint=#{auth[:fingerprint]})" :
+          auth[:mode].to_s
         lines << "Parse::Agent #{data[:agent_id]} (depth=#{data[:agent_depth]}, correlation=#{data[:correlation_id] || "—"})"
         lines << "  auth:        #{auth_line}"
         lines << "  permissions: #{data[:permissions]}"
@@ -370,20 +370,20 @@ module Parse
 
         if data[:classes][:only] || data[:classes][:except]
           lines << "  classes:"
-          lines << "    only:    #{data[:classes][:only].inspect}"   if data[:classes][:only]
+          lines << "    only:    #{data[:classes][:only].inspect}" if data[:classes][:only]
           lines << "    except:  #{data[:classes][:except].inspect}" if data[:classes][:except]
         else
           lines << "  classes:     (no filter — every visible class reachable)"
         end
 
         lines << "  tools:"
-        lines << "    only:      #{data[:tools][:only].inspect}"      if data[:tools][:only]
-        lines << "    except:    #{data[:tools][:except].inspect}"    if data[:tools][:except]
+        lines << "    only:      #{data[:tools][:only].inspect}" if data[:tools][:only]
+        lines << "    except:    #{data[:tools][:except].inspect}" if data[:tools][:except]
         lines << "    effective: #{data[:tools][:effective].inspect}"
 
         if data[:methods][:only] || data[:methods][:except]
           lines << "  methods:"
-          lines << "    only:    #{data[:methods][:only].inspect}"   if data[:methods][:only]
+          lines << "    only:    #{data[:methods][:only].inspect}" if data[:methods][:only]
           lines << "    except:  #{data[:methods][:except].inspect}" if data[:methods][:except]
         end
 

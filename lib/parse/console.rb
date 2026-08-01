@@ -26,7 +26,7 @@ require "timeout"
 
 module Parse
   module Console
-    DEFAULT_WATCH_EVENTS  = [:create, :update, :delete, :enter, :leave].freeze
+    DEFAULT_WATCH_EVENTS = [:create, :update, :delete, :enter, :leave].freeze
     DEFAULT_WAIT_FOR_EVENTS = [:create, :enter].freeze
 
     module_function
@@ -120,9 +120,9 @@ module Parse
     # @return [Parse::Object] the matched row.
     # @raise [Timeout::Error] when `timeout:` elapses with no match.
     def wait_for(klass, where: {}, on: nil, timeout: nil, fields: nil,
-                 session_token: nil, &predicate)
+                        session_token: nil, &predicate)
       events = Array(on || DEFAULT_WAIT_FOR_EVENTS).map(&:to_sym)
-      queue  = Queue.new
+      queue = Queue.new
       sub = _open_subscription(klass, where: where, fields: fields, session_token: session_token)
 
       events.each do |ev|

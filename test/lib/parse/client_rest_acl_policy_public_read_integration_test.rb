@@ -47,7 +47,7 @@ class ClientRestAclPolicyPublicReadIntegrationTest < Minitest::Test
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
     super
     @alice, @alice_pw = seed_client_user("pr_alice")
-    @bob,   @bob_pw   = seed_client_user("pr_bob")
+    @bob, @bob_pw = seed_client_user("pr_bob")
   end
 
   # --------------------------------------------------------------------
@@ -67,7 +67,7 @@ class ClientRestAclPolicyPublicReadIntegrationTest < Minitest::Test
       perms = fresh.acl.permissions
       pub = perms["*"]
       refute_nil pub, ":public_read must stamp a public ACL entry"
-      assert pub.read,  ":public_read must grant public read"
+      assert pub.read, ":public_read must grant public read"
       refute pub.write, ":public_read must NOT grant public write"
       assert_equal 1, perms.size,
                    ":public_read must stamp exactly one ACL entry (the public one), got: #{perms.inspect}"
@@ -148,12 +148,12 @@ class ClientRestAclPolicyPublicReadIntegrationTest < Minitest::Test
       perms = fresh.acl.permissions
       pub = perms["*"]
       refute_nil pub, ":owner_but_public_read must stamp a public entry"
-      assert pub.read,  "public read must be granted"
+      assert pub.read, "public read must be granted"
       refute pub.write, "public write must NOT be granted"
 
       owner_entry = perms[@alice.id]
       refute_nil owner_entry, "owner ACL entry must be present (alice_id=#{@alice.id})"
-      assert owner_entry.read,  "owner must have read"
+      assert owner_entry.read, "owner must have read"
       assert owner_entry.write, "owner must have write"
     end
 
@@ -239,7 +239,7 @@ class ClientRestAclPolicyPublicReadIntegrationTest < Minitest::Test
       perms = fresh.acl.permissions
       pub = perms["*"]
       refute_nil pub, "fallback must still stamp the public entry"
-      assert pub.read,  "fallback must grant public read"
+      assert pub.read, "fallback must grant public read"
       refute pub.write, "fallback must NOT grant public write"
       assert_equal 1, perms.size,
                    "fallback shape must match :public_read exactly (single public entry), got: #{perms.inspect}"

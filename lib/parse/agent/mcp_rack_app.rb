@@ -137,9 +137,9 @@ module Parse
       # SSE response headers. X-Accel-Buffering disables Nginx proxy buffering.
       # Frozen template — call {#sse_headers} to obtain a per-response copy.
       SSE_HEADERS = {
-        "Content-Type"      => "text/event-stream",
-        "Cache-Control"     => "no-cache",
-        "Connection"        => "keep-alive",
+        "Content-Type" => "text/event-stream",
+        "Cache-Control" => "no-cache",
+        "Connection" => "keep-alive",
         "X-Accel-Buffering" => "no",
       }.freeze
 
@@ -356,28 +356,28 @@ module Parse
                   "notification stream; do not also pass streaming:/notifications: " \
                   "(resource_subscriptions: may still be combined to upgrade the bus to LiveQuery)"
           end
-          streaming     = true
+          streaming = true
           notifications = true
         end
         # Collapse the nil sentinel to the historical default for the
         # remainder of the constructor (and @streaming below).
-        streaming     = false if streaming.nil?
+        streaming = false if streaming.nil?
         notifications = false if notifications.nil?
 
-        @agent_factory              = agent_factory || block
-        @max_body_size              = max_body_size
-        @logger                     = logger
-        @streaming                  = streaming
-        @heartbeat_interval         = heartbeat_interval
+        @agent_factory = agent_factory || block
+        @max_body_size = max_body_size
+        @logger = logger
+        @streaming = streaming
+        @heartbeat_interval = heartbeat_interval
         # The dispatcher cap defaults to the finite DEFAULT_MAX_CONCURRENT_DISPATCHERS
         # (set in the signature). An explicit positive Integer overrides it; an
         # explicit nil knowingly opts into the unbounded surface; anything else
         # is a config error and raises.
         validate_max_concurrent_dispatchers!(max_concurrent_dispatchers)
         @max_concurrent_dispatchers = max_concurrent_dispatchers
-        @pre_auth_rate_limiter      = pre_auth_rate_limiter
-        @allowed_origins            = normalize_allowed_origins(allowed_origins)
-        @required_custom_header     = normalize_required_custom_header(require_custom_header)
+        @pre_auth_rate_limiter = pre_auth_rate_limiter
+        @allowed_origins = normalize_allowed_origins(allowed_origins)
+        @required_custom_header = normalize_required_custom_header(require_custom_header)
         # NEW-9: when no explicit allowed_origins / require_custom_header CSRF
         # gate is configured but the server was started on an unauthenticated
         # loopback bind, default to a loopback-only Origin policy. A browser
@@ -387,15 +387,15 @@ module Parse
         # SDK-to-SDK) send NO Origin and stay allowed, and a legitimate local
         # browser UI sends a loopback Origin and is allowed. Ignored when an
         # explicit allowlist is configured (operator owns the policy then).
-        @loopback_csrf_default      = loopback_csrf_default && @allowed_origins.nil?
-        @health_path                = health_path.is_a?(String) && !health_path.empty? ? health_path : nil
+        @loopback_csrf_default = loopback_csrf_default && @allowed_origins.nil?
+        @health_path = health_path.is_a?(String) && !health_path.empty? ? health_path : nil
         # Per-app registry of in-flight cancellable requests. Keyed by
         # [correlation_id, request_id]. A `notifications/cancelled` POST
         # whose `params.requestId` matches an entry trips the registered
         # CancellationToken. Scoped per-instance, not per-process: this
         # registry does not span multiple MCPRackApp mount points within
         # a process, nor multiple processes in a clustered deployment.
-        @cancellation_registry      = CancellationRegistry.new
+        @cancellation_registry = CancellationRegistry.new
 
         # Elicitation (human-in-the-loop approval) state, shared across
         # this app's requests and its GET listening streams. The
@@ -404,18 +404,18 @@ module Parse
         # holds server→client requests awaiting a reply. Both are cheap
         # and always present; they only do work when
         # Parse::Agent.require_approval_for opts a tier in.
-        @elicitation_capabilities   = Parse::Agent::ClientCapabilityRegistry.new
-        @pending_elicitations       = Parse::Agent::PendingElicitationRegistry.new
-        @approval_timeout           = approval_timeout
+        @elicitation_capabilities = Parse::Agent::ClientCapabilityRegistry.new
+        @pending_elicitations = Parse::Agent::PendingElicitationRegistry.new
+        @approval_timeout = approval_timeout
 
         # Binds each MCP session id to the principal that established it so a
         # listening stream can't be hijacked by another authenticated caller.
         # Same per-instance / single-process scope as @cancellation_registry.
-        @session_owners             = SessionOwnerRegistry.new
+        @session_owners = SessionOwnerRegistry.new
         if principal_resolver && !principal_resolver.respond_to?(:call)
           raise ArgumentError, "principal_resolver must respond to #call"
         end
-        @principal_resolver         = principal_resolver
+        @principal_resolver = principal_resolver
 
         # Listening-stream coordinator (the server→client broadcast bus
         # backing resource subscriptions, MCP elicitation, and
@@ -431,8 +431,7 @@ module Parse
         #     decoupling lever — a server can push arbitrary notifications
         #     without enabling LiveQuery resource subscriptions.
         # nil disables the GET listening stream entirely.
-        @subscription_manager =
-          if subscription_manager
+        @subscription_manager = if subscription_manager
             subscription_manager
           elsif resource_subscriptions
             Parse::Agent::MCPSubscriptions::Manager.new(logger: @logger)
@@ -922,12 +921,12 @@ module Parse
         return nil unless agent.respond_to?(:correlation_id)
         mgr = @subscription_manager
         Parse::Agent::MCPElicitationGate.new(
-          correlation_id:   agent.correlation_id,
-          pending:          @pending_elicitations,
-          publish:          ->(cid, req) { mgr ? !!mgr.publish(cid, req) : false },
+          correlation_id: agent.correlation_id,
+          pending: @pending_elicitations,
+          publish: ->(cid, req) { mgr ? !!mgr.publish(cid, req) : false },
           capability_check: ->(cid) { @elicitation_capabilities.get(cid) },
-          listener_check:   ->(cid) { mgr ? mgr.listener?(cid) : false },
-          timeout:          @approval_timeout,
+          listener_check: ->(cid) { mgr ? mgr.listener?(cid) : false },
+          timeout: @approval_timeout,
         )
       end
 
@@ -983,9 +982,9 @@ module Parse
         end
 
         progress_token = body.dig("params", "_meta", "progressToken") || SecureRandom.uuid
-        req_id         = body["id"]
-        interval       = @heartbeat_interval
-        logger         = @logger
+        req_id = body["id"]
+        interval = @heartbeat_interval
+        logger = @logger
 
         # Register a cancellation token in the per-app registry so a
         # subsequent notifications/cancelled with a matching
@@ -999,9 +998,9 @@ module Parse
         # (correlation_id, request_id) key cannot have its token evicted
         # when this request closes.
         cancellation_token = Parse::Agent::CancellationToken.new
-        correlation_id     = agent.respond_to?(:correlation_id) ? agent.correlation_id : nil
-        registry_entry_id  = @cancellation_registry.register(correlation_id, req_id, cancellation_token)
-        registry           = @cancellation_registry
+        correlation_id = agent.respond_to?(:correlation_id) ? agent.correlation_id : nil
+        registry_entry_id = @cancellation_registry.register(correlation_id, req_id, cancellation_token)
+        registry = @cancellation_registry
 
         # The block receives the SSEBody's progress_callback so tools can
         # emit `notifications/progress` events through it. The callback is
@@ -1013,13 +1012,13 @@ module Parse
           on_close: -> { registry.deregister(correlation_id, req_id, registry_entry_id) if registry_entry_id },
         ) do |progress_callback|
           Parse::Agent::MCPDispatcher.call(
-            body:                 body,
-            agent:                agent,
-            logger:               logger,
-            progress_callback:    progress_callback,
-            cancellation_token:   cancellation_token,
+            body: body,
+            agent: agent,
+            logger: logger,
+            progress_callback: progress_callback,
+            cancellation_token: cancellation_token,
             subscription_manager: @subscription_manager,
-            approval_gate:        build_approval_gate(agent),
+            approval_gate: build_approval_gate(agent),
           )
         end
 
@@ -1236,54 +1235,54 @@ module Parse
         def initialize(progress_token, req_id, interval, logger,
                        cancellation_token: nil, on_close: nil,
                        heartbeat_waiter: nil, &dispatcher_blk)
-          @progress_token         = progress_token
+          @progress_token = progress_token
           # Heartbeats use a dedicated server-generated progressToken so
           # the elapsed-seconds scale of heartbeats never appears on the
           # same MCP progressToken as work-unit values reported by tools.
           # The MCP spec requires `progress` to increase monotonically
           # per progressToken; mixing the two scales would violate it
           # at the boundary where a tool first reports.
-          @heartbeat_token        = "parse-stack:heartbeat:#{SecureRandom.uuid}"
-          @req_id                 = req_id
-          @interval               = interval
-          @logger                 = logger
-          @dispatcher_blk         = dispatcher_blk
-          @cancellation_token     = cancellation_token
-          @on_close               = on_close
-          @heartbeat_waiter       = heartbeat_waiter ||
-                                    Thread.current[:parse_mcp_sse_heartbeat_waiter] ||
-                                    ->(t, i) { t.join(i) }
-          @queue                  = Queue.new
-          @worker                 = nil
+          @heartbeat_token = "parse-stack:heartbeat:#{SecureRandom.uuid}"
+          @req_id = req_id
+          @interval = interval
+          @logger = logger
+          @dispatcher_blk = dispatcher_blk
+          @cancellation_token = cancellation_token
+          @on_close = on_close
+          @heartbeat_waiter = heartbeat_waiter ||
+                              Thread.current[:parse_mcp_sse_heartbeat_waiter] ||
+                              ->(t, i) { t.join(i) }
+          @queue = Queue.new
+          @worker = nil
           # The dispatcher thread spawned inside @worker. Published under
           # @close_mutex once started so {#close} can snapshot its liveness for
           # the abandonment signal. Never force-killed (see #close).
-          @dispatcher_thread      = nil
+          @dispatcher_thread = nil
           # Flipped to true by #each when the DONE sentinel is consumed.
           # #close uses this to decide whether to trip the cancellation
           # token (false = client disconnect) or skip the trip (true =
           # the request finished on its own). Reads and writes happen
           # under @close_mutex below.
-          @completed_normally     = false
+          @completed_normally = false
           # Volatile flag flipped by the progress_callback the first time a
           # tool reports. Heartbeats now use a separate progressToken so
           # the flag is no longer a spec-correctness gate, but we keep
           # it as a small bandwidth optimization — once a tool is
           # actively reporting, time-based heartbeats are noise.
           @tool_progress_reported = false
-          @progress_callback      = build_progress_callback
+          @progress_callback = build_progress_callback
           # Deregistration callbacks for the Tools/Prompts subscribe
           # bindings. Set when the worker starts (so a request that is
           # never driven via #each does not register a stale entry) and
           # cleared in #close.
-          @unsubscribe_tools      = nil
-          @unsubscribe_prompts    = nil
+          @unsubscribe_tools = nil
+          @unsubscribe_prompts = nil
           # Guards concurrent invocations of #close. Rack servers
           # sometimes call close from both the I/O fiber's ensure and a
           # separate disconnect-handler thread; without a mutex the
           # subscriber-deregister and on_close paths can run twice.
-          @close_mutex            = Mutex.new
-          @closed                 = false
+          @close_mutex = Mutex.new
+          @closed = false
         end
 
         # Rack body interface — called once by the Rack server.
@@ -1353,12 +1352,12 @@ module Parse
           # a disconnect-handler thread short-circuit after the first
           # caller wins the mutex.
           completed_normally = nil
-          dispatcher_alive   = false
+          dispatcher_alive = false
           @close_mutex.synchronize do
             return if @closed
             @closed = true
             completed_normally = @completed_normally
-            dispatcher_alive   = @dispatcher_thread&.alive? || false
+            dispatcher_alive = @dispatcher_thread&.alive? || false
           end
           unless completed_normally
             @cancellation_token&.cancel!(reason: :client_disconnect)
@@ -1380,7 +1379,7 @@ module Parse
               warn line
             end
           ensure
-            @unsubscribe_tools   = nil
+            @unsubscribe_tools = nil
             @unsubscribe_prompts = nil
           end
           if @on_close
@@ -1421,9 +1420,9 @@ module Parse
           return unless defined?(ActiveSupport::Notifications)
           ActiveSupport::Notifications.instrument(
             "parse.agent.mcp_dispatcher_abandoned",
-            reason:            :client_disconnect,
-            dispatcher_alive:  dispatcher_alive,
-            request_id:        @req_id,
+            reason: :client_disconnect,
+            dispatcher_alive: dispatcher_alive,
+            request_id: @req_id,
           )
         rescue StandardError => e
           line = "[Parse::Agent::MCPRackApp::SSEBody] abandonment-record error: #{e.class}: #{e.message}"
@@ -1446,7 +1445,7 @@ module Parse
           @worker = Thread.new do
             Thread.current[:parse_mcp_sse_worker] = true
             started_at = Time.now
-            result     = nil
+            result = nil
 
             begin
               # Run the dispatcher in the background. Meanwhile emit heartbeats
@@ -1565,10 +1564,10 @@ module Parse
         def build_progress_event(elapsed)
           data = JSON.generate({
             "jsonrpc" => "2.0",
-            "method"  => "notifications/progress",
-            "params"  => {
+            "method" => "notifications/progress",
+            "params" => {
               "progressToken" => @heartbeat_token,
-              "progress"      => elapsed,
+              "progress" => elapsed,
             },
           })
           "event: message\ndata: #{data}\n\n"
@@ -1585,7 +1584,7 @@ module Parse
         def build_list_changed_event(method)
           data = JSON.generate({
             "jsonrpc" => "2.0",
-            "method"  => method,
+            "method" => method,
           })
           "event: message\ndata: #{data}\n\n"
         end
@@ -1603,14 +1602,14 @@ module Parse
         def build_tool_progress_event(progress, total, message)
           params = {
             "progressToken" => @progress_token,
-            "progress"      => progress,
+            "progress" => progress,
           }
-          params["total"]   = total   unless total.nil?
+          params["total"] = total unless total.nil?
           params["message"] = message if message
           data = JSON.generate({
             "jsonrpc" => "2.0",
-            "method"  => "notifications/progress",
-            "params"  => params,
+            "method" => "notifications/progress",
+            "params" => params,
           })
           "event: message\ndata: #{data}\n\n"
         end
@@ -1661,8 +1660,8 @@ module Parse
         def build_error_envelope(error)
           {
             "jsonrpc" => "2.0",
-            "id"      => @req_id,
-            "error"   => { "code" => -32_603, "message" => "Internal error" },
+            "id" => @req_id,
+            "error" => { "code" => -32_603, "message" => "Internal error" },
           }
         end
       end
@@ -1701,15 +1700,15 @@ module Parse
         #   seconds; `<= 0` disables heartbeats.
         # @param logger [#warn, nil]
         def initialize(manager, session_id, heartbeat_interval, logger)
-          @manager            = manager
-          @session_id         = session_id
+          @manager = manager
+          @session_id = session_id
           @heartbeat_interval = heartbeat_interval
-          @logger             = logger
-          @queue              = Queue.new
-          @heartbeat          = nil
-          @closed             = false
-          @counted            = false
-          @close_mutex        = Mutex.new
+          @logger = logger
+          @queue = Queue.new
+          @heartbeat = nil
+          @closed = false
+          @counted = false
+          @close_mutex = Mutex.new
         end
 
         # Rack body interface — called once by the Rack server.
@@ -1763,7 +1762,7 @@ module Parse
 
         def start_heartbeat
           return unless @heartbeat_interval && @heartbeat_interval > 0
-          queue    = @queue
+          queue = @queue
           interval = @heartbeat_interval
           @heartbeat = Thread.new do
             loop do
@@ -1848,8 +1847,8 @@ module Parse
 
         def initialize(max_entries: DEFAULT_MAX_ENTRIES)
           @owners = {} # session_id => principal fingerprint (insertion-ordered for LRU)
-          @max    = max_entries
-          @mutex  = Mutex.new
+          @max = max_entries
+          @mutex = Mutex.new
         end
 
         # Authoritatively bind a session to a principal (initialize). A
@@ -1913,7 +1912,7 @@ module Parse
       class CancellationRegistry
         def initialize
           @entries = {}
-          @mutex   = Mutex.new
+          @mutex = Mutex.new
         end
 
         # Register a cancellation token for the given session and
@@ -2167,10 +2166,10 @@ module Parse
       # is refused, while a real local UI on http://localhost:<port> passes.
       def origin_is_loopback?(origin)
         host = begin
-          URI.parse(origin).host
-        rescue URI::InvalidURIError, StandardError
-          nil
-        end
+            URI.parse(origin).host
+          rescue URI::InvalidURIError, StandardError
+            nil
+          end
         return false if host.nil?
         host = host.downcase.delete_prefix("[").delete_suffix("]") # unwrap IPv6 brackets
         host == "localhost" || host == "127.0.0.1" || host == "::1"

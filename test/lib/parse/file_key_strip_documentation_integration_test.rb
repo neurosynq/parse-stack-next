@@ -48,7 +48,7 @@ class FileKeyStripDocumentationIntegrationTest < Minitest::Test
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
     super
     @canonical_name = "doc.pdf"
-    @canonical_key  = "tenants/#{SecureRandom.hex(4)}/#{SecureRandom.uuid}-#{@canonical_name}"
+    @canonical_key = "tenants/#{SecureRandom.hex(4)}/#{SecureRandom.uuid}-#{@canonical_name}"
     # Trusted-host stub URL — we are NOT testing the bucket upload
     # path here, only that Parse Server strips/normalizes the
     # embedded file pointer.

@@ -33,12 +33,12 @@ class IncludeProjectionIntegrationTest < Minitest::Test
       # Seed: one user with big string payloads + a Subscription pointing at them.
       big = "X" * 1500  # stand-in for an ~600-char S3 URL
       user = ProjUser.create!(
-        first_name:    "Ada",
-        last_name:     "Lovelace",
-        email:         "ada@example.test",
-        icon_image:    big,
-        source_image:  big,
-        category:  "vip",
+        first_name: "Ada",
+        last_name: "Lovelace",
+        email: "ada@example.test",
+        icon_image: big,
+        source_image: big,
+        category: "vip",
       )
       ProjMembership.create!(title: "Lead", active: true, user: user)
 
@@ -47,10 +47,10 @@ class IncludeProjectionIntegrationTest < Minitest::Test
       # (the same path the Agent tool uses) so we bypass Parse::Query's
       # .keys() which columnizes dotted paths and mangles them.
       raw_query = {
-        where:   { active: true }.to_json,
-        keys:    "title,active,user,user.firstName,user.email,user.category",
+        where: { active: true }.to_json,
+        keys: "title,active,user,user.firstName,user.email,user.category",
         include: "user",
-        limit:   1,
+        limit: 1,
       }
       raw_response = Parse::Client.client.find_objects("ProjMembership", raw_query)
       raw_user = raw_response.results.first["user"]
@@ -66,8 +66,8 @@ class IncludeProjectionIntegrationTest < Minitest::Test
       # Baseline (no projection) — confirms the user payload IS bloated
       # without the dotted-path projection.
       full_response = Parse::Client.client.find_objects("ProjMembership",
-        { where: { active: true }.to_json, include: "user", limit: 1 },
-        cache: false)
+                                                        { where: { active: true }.to_json, include: "user", limit: 1 },
+                                                        cache: false)
       full_user = full_response.results.first["user"]
       assert full_user.key?("iconImage"),
         "baseline: included user with no projection should carry iconImage. " \
@@ -80,13 +80,13 @@ class IncludeProjectionIntegrationTest < Minitest::Test
       result = Parse::Agent::Tools.query_class(
         agent,
         class_name: "ProjMembership",
-        where:      { active: true },
-        keys:       ["user", "title", "active", "createdAt"],
-        include:    ["user"],
-        limit:      10,
+        where: { active: true },
+        keys: ["user", "title", "active", "createdAt"],
+        include: ["user"],
+        limit: 10,
       )
       first_row = result[:results].first
-      user_obj  = first_row["user"]
+      user_obj = first_row["user"]
       assert_kind_of Hash, user_obj, "included user must be materialized"
       refute user_obj.key?("iconImage"),
         "agent_join_fields auto-projection must strip large fields from include; " \

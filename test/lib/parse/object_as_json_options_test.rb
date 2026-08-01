@@ -172,7 +172,7 @@ class ObjectAsJsonOptionsTest < Minitest::Test
       "objectId" => "abc123",
       "title" => "Test",
       "createdAt" => "2024-01-01T00:00:00.000Z",
-      "updatedAt" => "2024-01-01T00:00:00.000Z"
+      "updatedAt" => "2024-01-01T00:00:00.000Z",
     )
 
     result = song_with_id.as_json(only: [:title])
@@ -200,7 +200,7 @@ class ObjectAsJsonOptionsTest < Minitest::Test
       "title" => "Test",
       "artist" => "Artist",
       "createdAt" => "2024-01-01T00:00:00.000Z",
-      "updatedAt" => "2024-01-01T00:00:00.000Z"
+      "updatedAt" => "2024-01-01T00:00:00.000Z",
     )
 
     result = song_with_id.as_json(only: [:title], strict: true)

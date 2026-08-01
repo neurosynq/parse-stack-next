@@ -50,7 +50,7 @@ module ConcurrentRateLimiterDispatcherStub
   class << self
     def install!
       return if @installed
-      @original  = Parse::Agent::MCPDispatcher.method(:call)
+      @original = Parse::Agent::MCPDispatcher.method(:call)
       @installed = true
 
       Parse::Agent::MCPDispatcher.define_singleton_method(:call) do |body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil, subscription_manager: nil, **_extra|
@@ -61,8 +61,8 @@ module ConcurrentRateLimiterDispatcherStub
             status: 200,
             body: {
               "jsonrpc" => "2.0",
-              "id"      => body["id"],
-              "result"  => {
+              "id" => body["id"],
+              "result" => {
                 "content" => [{ "type" => "text", "text" => "{}" }],
                 "isError" => false,
               },
@@ -73,8 +73,8 @@ module ConcurrentRateLimiterDispatcherStub
             status: 200,
             body: {
               "jsonrpc" => "2.0",
-              "id"      => body["id"],
-              "result"  => {
+              "id" => body["id"],
+              "result" => {
                 "content" => [{ "type" => "text", "text" => result[:error].to_s }],
                 "isError" => true,
               },
@@ -89,7 +89,7 @@ module ConcurrentRateLimiterDispatcherStub
       orig = @original
       Parse::Agent::MCPDispatcher.define_singleton_method(:call, &orig)
       @installed = false
-      @original  = nil
+      @original = nil
     end
 
     def installed?
@@ -104,10 +104,10 @@ end
 # ---------------------------------------------------------------------------
 def build_stubbed_agent(rate_limiter: nil)
   agent = if rate_limiter
-    Parse::Agent.new(rate_limiter: rate_limiter)
-  else
-    Parse::Agent.new
-  end
+      Parse::Agent.new(rate_limiter: rate_limiter)
+    else
+      Parse::Agent.new
+    end
 
   # Override execute to call check! (rate limiter) then return stubbed data.
   # This mirrors the pattern in mcp_integration_test.rb#stubbed_agent.
@@ -122,7 +122,7 @@ def build_stubbed_agent(rate_limiter: nil)
       # the wrapping logic in Parse::Agent#execute (lib/parse/agent.rb).
       warn "[ConcurrentRateLimiterTest:stub] rate limiter failure: #{e.class}: #{e.message}"
       retry_after = (1.0 + rand * 4.0).round(2)
-      l = @rate_limiter.respond_to?(:limit)  ? @rate_limiter.limit  : Parse::Agent::RateLimiter::DEFAULT_LIMIT
+      l = @rate_limiter.respond_to?(:limit) ? @rate_limiter.limit : Parse::Agent::RateLimiter::DEFAULT_LIMIT
       w = @rate_limiter.respond_to?(:window) ? @rate_limiter.window : Parse::Agent::RateLimiter::DEFAULT_WINDOW
       exc = Parse::Agent::RateLimitExceeded.new(retry_after: retry_after, limit: l, window: w)
       return { success: false, error: exc.message, error_code: :rate_limited, retry_after: exc.retry_after }
@@ -138,13 +138,12 @@ end
 # The test class
 # ---------------------------------------------------------------------------
 class ConcurrentRateLimiterTest < Minitest::Test
-
   def setup
     unless Parse::Client.client?
       Parse.setup(
-        server_url:     "http://localhost:1337/parse",
+        server_url: "http://localhost:1337/parse",
         application_id: "test-app-id",
-        api_key:        "test-api-key",
+        api_key: "test-api-key",
       )
     end
     @prior_suppress_master_key_warning = Parse::Agent.suppress_master_key_warning
@@ -201,7 +200,7 @@ class ConcurrentRateLimiterTest < Minitest::Test
 
     assert limited.size >= 1, "Expected at least one rate-limited response"
     limited.each do |r|
-      assert r.key?(:retry_after),      "Rate-limited result must include :retry_after"
+      assert r.key?(:retry_after), "Rate-limited result must include :retry_after"
       assert r[:retry_after].to_f > 0, "retry_after must be positive, got #{r[:retry_after].inspect}"
     end
   end
@@ -248,7 +247,7 @@ class ConcurrentRateLimiterTest < Minitest::Test
   def test_no_thread_exceptions_under_concurrent_burst
     shared_limiter = Parse::Agent::RateLimiter.new(limit: 10, window: 60)
     exceptions = []
-    results    = Array.new(50, nil)
+    results = Array.new(50, nil)
 
     threads = 50.times.map do |i|
       Thread.new do
@@ -260,7 +259,7 @@ class ConcurrentRateLimiterTest < Minitest::Test
     threads.each { |t| t.join(5) }
 
     assert_empty exceptions, "No exceptions should be raised under concurrent load. " \
-                             "Got: #{exceptions.map { |e| "#{e.class}: #{e.message}" }.join(', ')}"
+                             "Got: #{exceptions.map { |e| "#{e.class}: #{e.message}" }.join(", ")}"
     assert results.all? { |r| r.is_a?(Hash) },
            "All results must be Hashes (no nils from crashed threads)"
   end
@@ -275,10 +274,10 @@ class ConcurrentRateLimiterTest < Minitest::Test
     broken_limiter.define_singleton_method(:check!) do
       raise RuntimeError, "Redis::CannotConnectError: connection refused"
     end
-    broken_limiter.define_singleton_method(:limit)  { 60 }
+    broken_limiter.define_singleton_method(:limit) { 60 }
     broken_limiter.define_singleton_method(:window) { 60 }
 
-    agent  = build_stubbed_agent(rate_limiter: broken_limiter)
+    agent = build_stubbed_agent(rate_limiter: broken_limiter)
     result = agent.execute(:ping)
 
     assert_equal false, result[:success],
@@ -301,10 +300,10 @@ class ConcurrentRateLimiterTest < Minitest::Test
   def test_broken_limiter_under_concurrent_load_no_exceptions
     broken_limiter = Object.new
     broken_limiter.define_singleton_method(:check!) { raise RuntimeError, "backend down" }
-    broken_limiter.define_singleton_method(:limit)  { 60 }
+    broken_limiter.define_singleton_method(:limit) { 60 }
     broken_limiter.define_singleton_method(:window) { 60 }
 
-    results    = Array.new(20, nil)
+    results = Array.new(20, nil)
     exceptions = []
 
     threads = 20.times.map do |i|
@@ -339,8 +338,8 @@ class ConcurrentRateLimiterTest < Minitest::Test
   def test_constructor_accepts_valid_external_limiter
     good_limiter = Object.new
     good_limiter.define_singleton_method(:check!) { true }
-    good_limiter.define_singleton_method(:limit)  { 100 }
-    good_limiter.define_singleton_method(:window) { 60  }
+    good_limiter.define_singleton_method(:limit) { 100 }
+    good_limiter.define_singleton_method(:window) { 60 }
 
     agent = nil
     assert_silent do
@@ -372,14 +371,14 @@ class ConcurrentRateLimiterTest < Minitest::Test
       Thread.new do
         body = JSON.generate({
           "jsonrpc" => "2.0",
-          "id"      => i,
-          "method"  => "tools/call",
-          "params"  => { "name" => "ping", "arguments" => {} },
+          "id" => i,
+          "method" => "tools/call",
+          "params" => { "name" => "ping", "arguments" => {} },
         })
         env = {
           "REQUEST_METHOD" => "POST",
-          "CONTENT_TYPE"   => "application/json",
-          "rack.input"     => StringIO.new(body),
+          "CONTENT_TYPE" => "application/json",
+          "rack.input" => StringIO.new(body),
         }
         _status, _headers, body_chunks = rack_app.call(env)
         results[i] = JSON.parse(body_chunks.join)
@@ -388,7 +387,7 @@ class ConcurrentRateLimiterTest < Minitest::Test
     threads.each { |t| t.join(5) }
 
     successes = results.count { |r| r && r.dig("result", "isError") == false }
-    failures  = results.count { |r| r && r.dig("result", "isError") == true }
+    failures = results.count { |r| r && r.dig("result", "isError") == true }
 
     assert_equal 5, successes,
                  "Expected exactly 5 successes through Rack with limit:5; got #{successes}"
@@ -402,11 +401,11 @@ class ConcurrentRateLimiterTest < Minitest::Test
 
   def test_in_process_limiter_thread_safety
     # Very high concurrency to stress the Mutex inside RateLimiter.
-    limit          = 100
-    thread_count   = 200
+    limit = 100
+    thread_count = 200
     shared_limiter = Parse::Agent::RateLimiter.new(limit: limit, window: 60)
-    results        = Array.new(thread_count, nil)
-    exceptions     = []
+    results = Array.new(thread_count, nil)
+    exceptions = []
 
     threads = thread_count.times.map do |i|
       Thread.new do
@@ -423,7 +422,7 @@ class ConcurrentRateLimiterTest < Minitest::Test
     end
     threads.each { |t| t.join(5) }
 
-    ok_count      = results.count(:ok)
+    ok_count = results.count(:ok)
     limited_count = results.count(:limited)
 
     assert_empty exceptions,

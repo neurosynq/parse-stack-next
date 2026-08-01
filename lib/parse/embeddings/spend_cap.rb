@@ -118,8 +118,7 @@ module Parse
             end
           end
           mutex.synchronize do
-            limits[key] =
-              if limit_tokens.nil?
+            limits[key] = if limit_tokens.nil?
                 nil
               else
                 cfg = { limit: Integer(limit_tokens), window: w }
@@ -357,7 +356,7 @@ module Parse
         # must not serialize every other tenant's charge).
         def emit_soft_cap_warning(payload)
           return unless defined?(ActiveSupport::Notifications)
-          ActiveSupport::Notifications.instrument(AS_NOTIFICATION_NAME, payload) {}
+          ActiveSupport::Notifications.instrument(AS_NOTIFICATION_NAME, payload) { }
         rescue StandardError
           # A raising subscriber must not turn a successful (admitted)
           # charge into a caller-visible failure.

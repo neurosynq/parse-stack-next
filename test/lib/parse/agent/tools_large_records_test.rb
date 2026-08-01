@@ -23,7 +23,7 @@ require_relative "../../../../lib/parse/agent/mcp_dispatcher"
 class ToolsLargeRecordsTest < Minitest::Test
   # 50 books × 100 KB full_text = ~5 MB raw, ~6 MB after JSON encoding —
   # comfortably over the 4 MiB dispatcher cap so the refusal path fires.
-  TOTAL    = 50
+  TOTAL = 50
   TEXT_LEN = 100_000  # bytes per book
 
   # Class with no field allowlist — caller-controlled projection only.
@@ -46,30 +46,30 @@ class ToolsLargeRecordsTest < Minitest::Test
     agent_fields :title, :year, :description
   end
 
-  NEEDLE_ID    = "needle_book"
+  NEEDLE_ID = "needle_book"
   NEEDLE_TITLE = "The Singularly Findable Volume"
 
   def self.rows
     @rows ||= begin
-      rng = Random.new(1701)
-      rows = Array.new(TOTAL) do |i|
-        {
-          "objectId"    => format("book_%03d", i),
-          "title"       => "Book #{i}",
-          "year"        => 1900 + rng.rand(125),
-          "description" => "Short description for book #{i}.",
-          "full_text"   => "x" * TEXT_LEN,
+        rng = Random.new(1701)
+        rows = Array.new(TOTAL) do |i|
+          {
+            "objectId" => format("book_%03d", i),
+            "title" => "Book #{i}",
+            "year" => 1900 + rng.rand(125),
+            "description" => "Short description for book #{i}.",
+            "full_text" => "x" * TEXT_LEN,
+          }
+        end
+        rows[17] = {
+          "objectId" => NEEDLE_ID,
+          "title" => NEEDLE_TITLE,
+          "year" => 2024,
+          "description" => "The one we want.",
+          "full_text" => "y" * TEXT_LEN,
         }
+        rows
       end
-      rows[17] = {
-        "objectId"    => NEEDLE_ID,
-        "title"       => NEEDLE_TITLE,
-        "year"        => 2024,
-        "description" => "The one we want.",
-        "full_text"   => "y" * TEXT_LEN,
-      }
-      rows
-    end
   end
 
   def setup
@@ -87,8 +87,8 @@ class ToolsLargeRecordsTest < Minitest::Test
       if query[:count].to_i == 1 && query[:limit].to_i == 0
         r = Object.new
         r.define_singleton_method(:success?) { true }
-        r.define_singleton_method(:count)    { filtered.size }
-        r.define_singleton_method(:results)  { [] }
+        r.define_singleton_method(:count) { filtered.size }
+        r.define_singleton_method(:results) { [] }
         next r
       end
 
@@ -96,8 +96,8 @@ class ToolsLargeRecordsTest < Minitest::Test
       page = ToolsLargeRecordsTest.project(page, query[:keys])
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { page }
-      r.define_singleton_method(:count)    { page.size }
+      r.define_singleton_method(:results) { page }
+      r.define_singleton_method(:count) { page.size }
       r
     end
 
@@ -108,14 +108,14 @@ class ToolsLargeRecordsTest < Minitest::Test
       r = Object.new
       if found
         projected = ToolsLargeRecordsTest.project([found], keys).first
-        r.define_singleton_method(:success?)         { true }
+        r.define_singleton_method(:success?) { true }
         r.define_singleton_method(:object_not_found?) { false }
-        r.define_singleton_method(:result)            { projected }
+        r.define_singleton_method(:result) { projected }
       else
-        r.define_singleton_method(:success?)         { false }
+        r.define_singleton_method(:success?) { false }
         r.define_singleton_method(:object_not_found?) { true }
-        r.define_singleton_method(:error)             { "Not found" }
-        r.define_singleton_method(:result)            { nil }
+        r.define_singleton_method(:error) { "Not found" }
+        r.define_singleton_method(:result) { nil }
       end
       r
     end
@@ -161,10 +161,10 @@ class ToolsLargeRecordsTest < Minitest::Test
     # instead of restarting the whole request.
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 1,
-      "method"  => "tools/call",
-      "params"  => {
-        "name"      => "query_class",
+      "id" => 1,
+      "method" => "tools/call",
+      "params" => {
+        "name" => "query_class",
         "arguments" => { "class_name" => "WideBook", "limit" => 50 },
       },
     }
@@ -173,7 +173,7 @@ class ToolsLargeRecordsTest < Minitest::Test
     assert_equal false, r["isError"], "query_class should recover with partial success"
 
     payload = JSON.parse(r["content"].first["text"])
-    trunc   = payload["_truncated"]
+    trunc = payload["_truncated"]
     assert trunc, "_truncated annotation must be present, got #{payload.keys.inspect}"
     assert_equal "response_exceeded_max_bytes", trunc["reason"]
     assert_includes trunc["dropped_fields"], "full_text"
@@ -197,25 +197,25 @@ class ToolsLargeRecordsTest < Minitest::Test
     cap = Parse::Agent::MCPDispatcher::MAX_TOOL_RESPONSE_BYTES
     huge_rows = [{
       "objectId" => "monster",
-      "blob_a"   => "x" * (cap + 100_000),
-      "blob_b"   => "y" * (cap + 100_000),
+      "blob_a" => "x" * (cap + 100_000),
+      "blob_b" => "y" * (cap + 100_000),
     }]
     fc = Object.new
     fc.define_singleton_method(:find_objects) do |_class, _q, **_opts|
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { huge_rows }
-      r.define_singleton_method(:count)    { huge_rows.size }
+      r.define_singleton_method(:results) { huge_rows }
+      r.define_singleton_method(:count) { huge_rows.size }
       r
     end
     fat_agent.define_singleton_method(:client) { fc }
 
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 10,
-      "method"  => "tools/call",
-      "params"  => {
-        "name"      => "query_class",
+      "id" => 10,
+      "method" => "tools/call",
+      "params" => {
+        "name" => "query_class",
         "arguments" => { "class_name" => "WideBook", "limit" => 1 },
       },
     }
@@ -234,14 +234,14 @@ class ToolsLargeRecordsTest < Minitest::Test
   def test_keys_projection_drops_response_below_cap
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 2,
-      "method"  => "tools/call",
-      "params"  => {
-        "name"      => "query_class",
+      "id" => 2,
+      "method" => "tools/call",
+      "params" => {
+        "name" => "query_class",
         "arguments" => {
           "class_name" => "WideBook",
-          "limit"     => 50,
-          "keys"      => ["title", "year", "description"],
+          "limit" => 50,
+          "keys" => ["title", "year", "description"],
         },
       },
     }
@@ -262,10 +262,10 @@ class ToolsLargeRecordsTest < Minitest::Test
   def test_single_record_fetch_under_cap
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 3,
-      "method"  => "tools/call",
-      "params"  => {
-        "name"      => "get_object",
+      "id" => 3,
+      "method" => "tools/call",
+      "params" => {
+        "name" => "get_object",
         "arguments" => { "class_name" => "WideBook", "object_id" => NEEDLE_ID },
       },
     }
@@ -288,14 +288,14 @@ class ToolsLargeRecordsTest < Minitest::Test
     # and stays under the cap even on a 50-row pull.
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 4,
-      "method"  => "tools/call",
-      "params"  => {
-        "name"      => "query_class",
+      "id" => 4,
+      "method" => "tools/call",
+      "params" => {
+        "name" => "query_class",
         "arguments" => {
           "class_name" => "GuardedBook",
-          "limit"     => 50,
-          "keys"      => ["title", "full_text"],
+          "limit" => 50,
+          "keys" => ["title", "full_text"],
         },
       },
     }
@@ -314,10 +314,10 @@ class ToolsLargeRecordsTest < Minitest::Test
     # cannot leak through the default path either.
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 5,
-      "method"  => "tools/call",
-      "params"  => { "name" => "query_class",
-                     "arguments" => { "class_name" => "GuardedBook", "limit" => 50 } },
+      "id" => 5,
+      "method" => "tools/call",
+      "params" => { "name" => "query_class",
+                    "arguments" => { "class_name" => "GuardedBook", "limit" => 50 } },
     }
     result = Parse::Agent::MCPDispatcher.call(body: body, agent: @agent)
     r = result[:body]["result"]
@@ -333,14 +333,14 @@ class ToolsLargeRecordsTest < Minitest::Test
     # the heavy column to find the row.
     body1 = {
       "jsonrpc" => "2.0",
-      "id"      => 6,
-      "method"  => "tools/call",
-      "params"  => {
-        "name"      => "query_class",
+      "id" => 6,
+      "method" => "tools/call",
+      "params" => {
+        "name" => "query_class",
         "arguments" => {
           "class_name" => "WideBook",
-          "where"     => { "title" => NEEDLE_TITLE },
-          "keys"      => ["title", "year", "description"],
+          "where" => { "title" => NEEDLE_TITLE },
+          "keys" => ["title", "year", "description"],
         },
       },
     }
@@ -354,10 +354,10 @@ class ToolsLargeRecordsTest < Minitest::Test
     # Step 2: fetch the full body for the one row we now care about.
     body2 = {
       "jsonrpc" => "2.0",
-      "id"      => 7,
-      "method"  => "tools/call",
-      "params"  => {
-        "name"      => "get_object",
+      "id" => 7,
+      "method" => "tools/call",
+      "params" => {
+        "name" => "get_object",
         "arguments" => { "class_name" => "WideBook", "object_id" => needle["objectId"] },
       },
     }
@@ -377,15 +377,15 @@ class ToolsLargeRecordsTest < Minitest::Test
     # than truncating mid-record.
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 8,
-      "method"  => "tools/call",
-      "params"  => {
-        "name"      => "export_data",
+      "id" => 8,
+      "method" => "tools/call",
+      "params" => {
+        "name" => "export_data",
         "arguments" => {
           "class_name" => "WideBook",
-          "limit"     => 50,
-          "columns"   => ["title", "year", "full_text"],
-          "format"    => "csv",
+          "limit" => 50,
+          "columns" => ["title", "year", "full_text"],
+          "format" => "csv",
         },
       },
     }
@@ -399,15 +399,15 @@ class ToolsLargeRecordsTest < Minitest::Test
   def test_export_metadata_only_fits_easily
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 9,
-      "method"  => "tools/call",
-      "params"  => {
-        "name"      => "export_data",
+      "id" => 9,
+      "method" => "tools/call",
+      "params" => {
+        "name" => "export_data",
         "arguments" => {
           "class_name" => "WideBook",
-          "limit"     => 50,
-          "columns"   => ["title", "year", "description"],
-          "format"    => "csv",
+          "limit" => 50,
+          "columns" => ["title", "year", "description"],
+          "format" => "csv",
         },
       },
     }

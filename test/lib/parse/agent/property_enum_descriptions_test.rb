@@ -13,15 +13,15 @@ class PropertyEnumDescriptionsTest < Minitest::Test
 
     property :grant, :string, _description: "Scope of the membership grant",
                               _enum: {
-                                team:         "Member of a team within the org",
-                                project:      "Member of a single project under a team",
+                                team: "Member of a team within the org",
+                                project: "Member of a single project under a team",
                                 organization: "Member of the org as a whole",
                               }
     property :account_level, :string, _enum: {
-      basic:         "Default tier",
-      paid:          "Active paid subscription",
-      complimentary: "Granted by support; non-billable",
-    }
+                                        basic: "Default tier",
+                                        paid: "Active paid subscription",
+                                        complimentary: "Granted by support; non-billable",
+                                      }
     property :active, :boolean
     property :title, :string
   end
@@ -62,8 +62,8 @@ class PropertyEnumDescriptionsTest < Minitest::Test
     enums = PEDMembership.property_enum_descriptions
     assert enums.key?(:grant), "grant should be stored under its property symbol"
     assert_equal({
-      "team"         => "Member of a team within the org",
-      "project"      => "Member of a single project under a team",
+      "team" => "Member of a team within the org",
+      "project" => "Member of a single project under a team",
       "organization" => "Member of the org as a whole",
     }, enums[:grant])
   end
@@ -129,7 +129,7 @@ class PropertyEnumDescriptionsTest < Minitest::Test
     # :external_status from "ExtStatus" and recover the description.
     server_schema = {
       "className" => "PEDAliased",
-      "fields"    => { "ExtStatus" => { "type" => "String" } },
+      "fields" => { "ExtStatus" => { "type" => "String" } },
     }
     result = Parse::Agent::MetadataRegistry.enriched_schema("PEDAliased", server_schema)
     assert_equal "Status from upstream system", result["fields"]["ExtStatus"]["description"]
@@ -138,7 +138,7 @@ class PropertyEnumDescriptionsTest < Minitest::Test
   def test_enrich_fields_resolves_allowed_values_under_field_alias
     server_schema = {
       "className" => "PEDAliased",
-      "fields"    => { "ExtStatus" => { "type" => "String" } },
+      "fields" => { "ExtStatus" => { "type" => "String" } },
     }
     result = Parse::Agent::MetadataRegistry.enriched_schema("PEDAliased", server_schema)
     values = result["fields"]["ExtStatus"]["allowed_values"]
@@ -154,11 +154,11 @@ class PropertyEnumDescriptionsTest < Minitest::Test
   def test_enrich_fields_emits_allowed_values_for_enum_property
     server_schema = {
       "className" => "PEDMembership",
-      "fields"    => {
-        "objectId"     => { "type" => "String" },
-        "grant"        => { "type" => "String" },
+      "fields" => {
+        "objectId" => { "type" => "String" },
+        "grant" => { "type" => "String" },
         "accountLevel" => { "type" => "String" },
-        "active"       => { "type" => "Boolean" },
+        "active" => { "type" => "Boolean" },
       },
     }
     result = Parse::Agent::MetadataRegistry.enriched_schema("PEDMembership", server_schema)
@@ -175,7 +175,7 @@ class PropertyEnumDescriptionsTest < Minitest::Test
     # The 3-key lookup in enrich_fields must reach the descriptions hash.
     server_schema = {
       "className" => "PEDMembership",
-      "fields"    => {
+      "fields" => {
         "accountLevel" => { "type" => "String" },
       },
     }
@@ -189,9 +189,9 @@ class PropertyEnumDescriptionsTest < Minitest::Test
   def test_enrich_fields_omits_allowed_values_when_no_enum_declared
     server_schema = {
       "className" => "PEDMembership",
-      "fields"    => {
+      "fields" => {
         "active" => { "type" => "Boolean" },
-        "title"  => { "type" => "String" },
+        "title" => { "type" => "String" },
       },
     }
     result = Parse::Agent::MetadataRegistry.enriched_schema("PEDMembership", server_schema)
@@ -206,13 +206,13 @@ class PropertyEnumDescriptionsTest < Minitest::Test
   def test_format_schema_surfaces_allowed_values_in_field_entry
     server_schema = {
       "className" => "PEDMembership",
-      "fields"    => {
-        "grant"        => { "type" => "String" },
+      "fields" => {
+        "grant" => { "type" => "String" },
         "accountLevel" => { "type" => "String" },
-        "active"       => { "type" => "Boolean" },
+        "active" => { "type" => "Boolean" },
       },
     }
-    enriched  = Parse::Agent::MetadataRegistry.enriched_schema("PEDMembership", server_schema)
+    enriched = Parse::Agent::MetadataRegistry.enriched_schema("PEDMembership", server_schema)
     formatted = Parse::Agent::ResultFormatter.format_schema(enriched)
     grant_field = formatted[:fields].find { |f| f[:name] == "grant" }
     assert grant_field[:allowed_values].is_a?(Array)

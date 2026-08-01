@@ -26,7 +26,7 @@ class TestMasterKeyBlock < Minitest::Test
                                                api_key: "api",
                                                master_key: master_key)
     mw.application_id = "app-id"
-    mw.master_key     = master_key
+    mw.master_key = master_key
     mw
   end
 

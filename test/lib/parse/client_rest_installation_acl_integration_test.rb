@@ -73,7 +73,7 @@ class ClientRestInstallationAclIntegrationTest < Minitest::Test
   # not leak to the wrong user".
   # --------------------------------------------------------------------
   def test_owner_scoped_installation_not_readable_by_other_user
-    owner,    owner_pwd    = seed_client_user("inst_owner")
+    owner, owner_pwd = seed_client_user("inst_owner")
     intruder, intruder_pwd = seed_client_user("inst_intruder")
 
     obj_id = nil

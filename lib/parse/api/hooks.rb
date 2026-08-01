@@ -44,7 +44,7 @@ module Parse
       def _verify_trigger(triggerName)
         camel = triggerName.to_s.camelize(:lower).to_sym
         if %i[beforeCreate afterCreate].include?(camel)
-          save     = camel == :beforeCreate ? "beforeSave" : "afterSave"
+          save = camel == :beforeCreate ? "beforeSave" : "afterSave"
           callback = camel == :beforeCreate ? "before_create" : "after_create"
           raise ArgumentError,
                 "Parse Server has no #{camel} webhook trigger. Register a " \

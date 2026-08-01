@@ -109,6 +109,100 @@ module Parse
         end
       end
 
+      # Capture the property values a transaction rollback must restore.
+      #
+      # Property values live in `@<field>` instance variables (see
+      # {Parse::Properties::ClassMethods#property}), so those are what gets
+      # snapshotted. {Parse::Object#attributes} is deliberately NOT captured:
+      # it returns a SCHEMA map (field name to type symbol), not values, so
+      # restoring it never rolled anything back.
+      #
+      # Restoring it was also actively harmful. `@attributes` is the ivar
+      # `ActiveModel::Dirty` keys its behavior on: `mutations_from_database`
+      # builds an `AttributeMutationTracker` over `@attributes` the moment
+      # that ivar is defined (and a `ForcedMutationTracker` otherwise), while
+      # `forget_attribute_assignments` calls `map(&:forgetting_assignment)`
+      # on it. Handing either one a schema Hash raised `NoMethodError` on a
+      # type symbol and on the `[key, value]` pair `Hash#map` yields. Both
+      # sites rescue and warn, so every rollback silently downgraded the
+      # object to broken change tracking instead of failing.
+      #
+      # @param obj [Parse::Object] the object being tracked.
+      # @return [Hash] field name to a snapshot of its value. Mutable values
+      #   are duplicated so in-place mutation between snapshot and rollback
+      #   cannot corrupt the saved copy.
+      def self.snapshot_property_values(obj)
+        fields = obj.class.respond_to?(:fields) ? obj.class.fields.keys : []
+        fields.each_with_object({}) do |key, snapshot|
+          ivar = :"@#{key}"
+          next unless obj.instance_variable_defined?(ivar)
+          snapshot[ivar] = dup_for_snapshot(obj.instance_variable_get(ivar))
+        end
+      end
+
+      # Copy a property value deeply enough that later in-place mutation of
+      # the live value cannot reach the snapshot.
+      #
+      # A plain `dup` is not sufficient for collection-backed properties:
+      # `:array` and association properties hold a {Parse::CollectionProxy},
+      # and duplicating the proxy still shares the underlying `@collection`
+      # array, so `widget.tags << "b"` would mutate the snapshot too. The
+      # proxy's inner array is duplicated as well.
+      #
+      # @param value [Object] the live property value.
+      # @return [Object] a copy safe to hold across the transaction.
+      def self.dup_for_snapshot(value)
+        copy = begin
+            value.dup
+          rescue TypeError
+            # Symbols, Integers, true/false/nil and other immediates are not
+            # duplicable on older rubies; they are also immutable, so sharing
+            # the reference is safe.
+            return value
+          end
+
+        if copy.instance_variable_defined?(:@collection)
+          inner = copy.instance_variable_get(:@collection)
+          copy.instance_variable_set(:@collection, inner.dup) if inner.is_a?(Array)
+        end
+        copy
+      end
+
+      # Restore the values captured by {snapshot_property_values}.
+      #
+      # Writes ivars directly rather than going through the property setters,
+      # since the setters mark the object dirty and the caller restores the
+      # dirty state itself immediately afterwards.
+      #
+      # @param obj [Parse::Object] the object being rolled back.
+      # @param snapshot [Hash] the return value of {snapshot_property_values}.
+      # @return [void]
+      def self.restore_property_values(obj, snapshot)
+        return unless snapshot.is_a?(Hash)
+        snapshot.each do |ivar, value|
+          obj.instance_variable_set(ivar, value)
+        end
+      end
+
+      # Roll a single tracked object back to the state captured when it was
+      # added to the transaction.
+      #
+      # @param state [Hash] one entry of the transaction's `original_states`.
+      # @return [void]
+      def self.rollback_object_state(state)
+        obj = state[:object]
+        return if obj.nil?
+        restore_property_values(obj, state[:property_values])
+        obj.instance_variable_set(:@changed_attributes, state[:changed_attributes])
+        obj.instance_variable_set(:@id, state[:id])
+        # Restore change tracking state. Leaving `@mutations_from_database`
+        # nil is fine: `ActiveModel::Dirty` lazily rebuilds it, and with
+        # `@attributes` no longer defined on the object it correctly rebuilds
+        # a `ForcedMutationTracker`.
+        obj.instance_variable_set(:@mutations_from_database, state[:mutations_from_database])
+        obj.instance_variable_set(:@mutations_before_last_save, state[:mutations_before_last_save])
+      end
+
       # Class methods applied to Parse::Object subclasses.
       module ClassMethods
 
@@ -169,7 +263,7 @@ module Parse
             if obj.respond_to?(:attributes) && obj.respond_to?(:id) && !original_states.key?(obj.object_id)
               original_states[obj.object_id] = {
                 object: obj,
-                attributes: obj.attributes.dup,
+                property_values: Parse::Core::Actions.snapshot_property_values(obj),
                 changed_attributes: obj.instance_variable_get(:@changed_attributes)&.dup || {},
                 id: obj.id,
                 mutations_from_database: obj.instance_variable_get(:@mutations_from_database),
@@ -243,13 +337,7 @@ module Parse
 
               # Rollback local object states
               original_states.each_value do |state|
-                obj = state[:object]
-                obj.instance_variable_set(:@attributes, state[:attributes])
-                obj.instance_variable_set(:@changed_attributes, state[:changed_attributes])
-                obj.instance_variable_set(:@id, state[:id])
-                # Restore change tracking state
-                obj.instance_variable_set(:@mutations_from_database, state[:mutations_from_database])
-                obj.instance_variable_set(:@mutations_before_last_save, state[:mutations_before_last_save])
+                Parse::Core::Actions.rollback_object_state(state)
               end
 
               raise Parse::Error, "Transaction failed: #{error_response.error}"
@@ -263,13 +351,7 @@ module Parse
 
             # Rollback local object states on final failure
             original_states.each_value do |state|
-              obj = state[:object]
-              obj.instance_variable_set(:@attributes, state[:attributes])
-              obj.instance_variable_set(:@changed_attributes, state[:changed_attributes])
-              obj.instance_variable_set(:@id, state[:id])
-              # Restore change tracking state
-              obj.instance_variable_set(:@mutations_from_database, state[:mutations_from_database])
-              obj.instance_variable_set(:@mutations_before_last_save, state[:mutations_before_last_save])
+              Parse::Core::Actions.rollback_object_state(state)
             end
 
             raise e

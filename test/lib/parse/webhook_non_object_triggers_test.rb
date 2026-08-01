@@ -34,13 +34,13 @@ class WebhookNonObjectTriggersTest < Minitest::Test
   # ==========================================================================
 
   TRIGGER_PREDICATES = {
-    "beforeLogin"                => :before_login?,
-    "afterLogin"                 => :after_login?,
-    "afterLogout"                => :after_logout?,
+    "beforeLogin" => :before_login?,
+    "afterLogin" => :after_login?,
+    "afterLogout" => :after_logout?,
     "beforePasswordResetRequest" => :before_password_reset_request?,
-    "beforeConnect"              => :before_connect?,
-    "beforeSubscribe"            => :before_subscribe?,
-    "afterEvent"                 => :after_event?,
+    "beforeConnect" => :before_connect?,
+    "beforeSubscribe" => :before_subscribe?,
+    "afterEvent" => :after_event?,
   }.freeze
 
   def test_each_trigger_predicate_is_exclusive
@@ -202,7 +202,7 @@ class WebhookNonObjectTriggersTest < Minitest::Test
     fired = []
     spy = Object.new
     spy.define_singleton_method(:is_a?) { |k| k == Parse::Object }
-    spy.define_singleton_method(:run_before_save_callbacks)  { fired << :before_save; true }
+    spy.define_singleton_method(:run_before_save_callbacks) { fired << :before_save; true }
     spy.define_singleton_method(:run_before_create_callbacks) { fired << :before_create; true }
     spy.define_singleton_method(:changes_payload) { { "x" => 1 } }
 
@@ -221,7 +221,7 @@ class WebhookNonObjectTriggersTest < Minitest::Test
     fired = []
     spy = Object.new
     spy.define_singleton_method(:is_a?) { |k| k == Parse::Object }
-    spy.define_singleton_method(:run_after_save_callbacks)   { fired << :after_save; true }
+    spy.define_singleton_method(:run_after_save_callbacks) { fired << :after_save; true }
     spy.define_singleton_method(:run_after_create_callbacks) { fired << :after_create; true }
 
     Parse::Webhooks.route(:after_login, "_User") { |_p| true }
@@ -403,5 +403,58 @@ class WebhookNonObjectTriggersTest < Minitest::Test
       assert_equal 200, status
       assert_equal "connection refused", JSON.parse(resp.join)["error"]
     end
+  end
+end
+
+# Handler composition for the non-object `after_*` triggers.
+#
+# The SDK registers its own `after_logout` handler for cache invalidation. If
+# registration replaced rather than composed, that would silently clobber an
+# application's handler, with the winner decided by file load order.
+class WebhookAfterTriggerCompositionTest < Minitest::Test
+  def setup
+    Parse::Webhooks.instance_variable_set(:@routes, nil)
+  end
+
+  def teardown
+    Parse::Webhooks.instance_variable_set(:@routes, nil)
+  end
+
+  def routes_for(type, class_name)
+    Parse::Webhooks.routes[type][class_name]
+  end
+
+  def test_after_logout_handlers_compose_instead_of_replacing
+    Parse::Webhooks.route(:after_logout, "_Session") { :app_handler }
+    Parse::Webhooks.route(:after_logout, "_Session") { :sdk_handler }
+
+    registry = routes_for(:after_logout, "_Session")
+    assert_kind_of Array, registry, "after_logout must accumulate handlers"
+    assert_equal 2, registry.size
+    assert_equal %i[app_handler sdk_handler], registry.map(&:call)
+  end
+
+  def test_after_login_handlers_compose
+    Parse::Webhooks.route(:after_login, "_User") { :one }
+    Parse::Webhooks.route(:after_login, "_User") { :two }
+    assert_equal 2, routes_for(:after_login, "_User").size
+  end
+
+  # A composite of a rejectable trigger would need to deny if ANY handler
+  # denies, which the `.last` fold cannot express, so these must keep
+  # single-slot semantics until that fold is written.
+  def test_rejectable_before_triggers_still_replace
+    Parse::Webhooks.route(:before_login, "_User") { :first }
+    Parse::Webhooks.route(:before_login, "_User") { :second }
+
+    registry = routes_for(:before_login, "_User")
+    refute_kind_of Array, registry
+    assert_equal :second, registry.call
+  end
+
+  def test_after_save_still_composes
+    Parse::Webhooks.route(:after_save, "Post") { :a }
+    Parse::Webhooks.route(:after_save, "Post") { :b }
+    assert_equal 2, routes_for(:after_save, "Post").size
   end
 end

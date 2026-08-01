@@ -68,9 +68,9 @@ module Parse
       # they still see the latest registry state on the next
       # `tools/list` / `prompts/list` poll.
       CAPABILITIES = {
-        "tools"     => { "listChanged" => true  },
-        "resources" => { "subscribe"   => false, "listChanged" => false },
-        "prompts"   => { "listChanged" => true  },
+        "tools" => { "listChanged" => true },
+        "resources" => { "subscribe" => false, "listChanged" => false },
+        "prompts" => { "listChanged" => true },
       }.freeze
 
       # Parse class-name identifier regex — used to validate resource URIs.
@@ -150,9 +150,9 @@ module Parse
         # dispatches on the same shared agent would race: the second
         # request's ensure would null the first request's still-needed
         # token.
-        prev_progress_callback   = agent.progress_callback   if agent.respond_to?(:progress_callback)
-        prev_cancellation_token  = agent.cancellation_token  if agent.respond_to?(:cancellation_token)
-        prev_approval_gate       = agent.approval_gate        if agent.respond_to?(:approval_gate)
+        prev_progress_callback = agent.progress_callback if agent.respond_to?(:progress_callback)
+        prev_cancellation_token = agent.cancellation_token if agent.respond_to?(:cancellation_token)
+        prev_approval_gate = agent.approval_gate if agent.respond_to?(:approval_gate)
 
         # Install the progress callback and cancellation token on the
         # agent for the duration of the dispatch. Cleared in the ensure
@@ -164,12 +164,12 @@ module Parse
         # two threads concurrently — the snapshot-restore pattern here
         # only handles sequential interleave. MCPRackApp's `agent_factory:`
         # is documented to return a fresh agent per request.
-        agent.progress_callback   = progress_callback   if progress_callback   && agent.respond_to?(:progress_callback=)
-        agent.cancellation_token  = cancellation_token  if cancellation_token  && agent.respond_to?(:cancellation_token=)
+        agent.progress_callback = progress_callback if progress_callback && agent.respond_to?(:progress_callback=)
+        agent.cancellation_token = cancellation_token if cancellation_token && agent.respond_to?(:cancellation_token=)
         # Install the per-session approval gate (MCP elicitation) so
         # agent.execute can request human approval for destructive tools.
         # Restored in the ensure block like the other per-request state.
-        agent.approval_gate       = approval_gate        if approval_gate       && agent.respond_to?(:approval_gate=)
+        agent.approval_gate = approval_gate if approval_gate && agent.respond_to?(:approval_gate=)
 
         # Guard: body must be a Hash with a "method" key.
         unless body.is_a?(Hash) && body.key?("method")
@@ -179,7 +179,7 @@ module Parse
 
         method = body["method"]
         params = body["params"] || {}
-        id     = body["id"]
+        id = body["id"]
 
         # JSON-RPC notifications MUST NOT carry an `id` field. Reject
         # `notifications/*` methods that include one — silently treating
@@ -191,7 +191,6 @@ module Parse
 
         result_hash = dispatch(method, params, agent, id, logger, subscription_manager)
         { status: result_hash[:status], body: result_hash[:body] }
-
       rescue Parse::Agent::Unauthorized => e
         { status: 401, body: jsonrpc_error(body.is_a?(Hash) ? body["id"] : nil, -32001, "Unauthorized") }
       rescue StandardError => e
@@ -206,7 +205,7 @@ module Parse
         # this request's token visible to a sibling dispatch on a
         # shared agent.
         if agent.respond_to?(:progress_callback=)
-          agent.progress_callback  = prev_progress_callback
+          agent.progress_callback = prev_progress_callback
         end
         if agent.respond_to?(:cancellation_token=)
           agent.cancellation_token = prev_cancellation_token
@@ -296,7 +295,6 @@ module Parse
         else
           { status: 200, body: jsonrpc_envelope(id, result: result) }
         end
-
       rescue Parse::Agent::Unauthorized => e
         { status: 401, body: jsonrpc_error(id, -32001, "Unauthorized") }
       rescue Parse::Agent::AccessDenied
@@ -340,17 +338,16 @@ module Parse
       # @return [Hash] protocol version, capabilities, and server info.
       def self.handle_initialize(params, subscription_manager = nil)
         requested = params.is_a?(Hash) ? params["protocolVersion"] : nil
-        negotiated =
-          if requested.is_a?(String) && SUPPORTED_PROTOCOL_VERSIONS.include?(requested)
+        negotiated = if requested.is_a?(String) && SUPPORTED_PROTOCOL_VERSIONS.include?(requested)
             requested
           else
             PROTOCOL_VERSION
           end
         {
           "protocolVersion" => negotiated,
-          "capabilities"    => capabilities_for(subscription_manager),
-          "serverInfo"      => {
-            "name"    => "parse-stack-mcp",
+          "capabilities" => capabilities_for(subscription_manager),
+          "serverInfo" => {
+            "name" => "parse-stack-mcp",
             "version" => Parse::Stack::VERSION,
           },
         }
@@ -415,7 +412,7 @@ module Parse
         end
 
         sym_args = arguments.transform_keys(&:to_sym)
-        result   = agent.execute(tool_name.to_sym, **sym_args)
+        result = agent.execute(tool_name.to_sym, **sym_args)
 
         # Cancellation short-circuit. Tools cooperate by returning a
         # `success: false, cancelled: true` envelope when `agent.cancelled?`
@@ -426,12 +423,12 @@ module Parse
         # still honor the client's intent by not surfacing the result).
         if result[:cancelled] || (agent.respond_to?(:cancelled?) && agent.cancelled?)
           return {
-            "content" => [
-              { "type" => "text", "text" => (result[:error] || "Cancelled by client").to_s },
-            ],
-            "isError"   => true,
-            "cancelled" => true,
-          }
+                   "content" => [
+                     { "type" => "text", "text" => (result[:error] || "Cancelled by client").to_s },
+                   ],
+                   "isError" => true,
+                   "cancelled" => true,
+                 }
         end
 
         if result[:success]
@@ -443,8 +440,7 @@ module Parse
             # with a _truncated block. Models handle partial success much
             # better than full refusal — they continue the task instead of
             # restarting. Other tools fall through to the structural refusal.
-            recovered_text =
-              if %w[query_class get_objects aggregate].include?(tool_name)
+            recovered_text = if %w[query_class get_objects aggregate].include?(tool_name)
                 attempt_truncate_response(result[:data], MAX_TOOL_RESPONSE_BYTES, tool_name)
               end
 
@@ -502,9 +498,9 @@ module Parse
             "isError" => true,
           }
           meta = {}
-          meta["parse.error_code"]  = result[:error_code].to_s if result[:error_code]
-          meta["parse.retry_after"] = result[:retry_after]     if result[:retry_after]
-          meta["parse.details"]     = result[:details]         if result[:details].is_a?(Hash) && result[:details].any?
+          meta["parse.error_code"] = result[:error_code].to_s if result[:error_code]
+          meta["parse.retry_after"] = result[:retry_after] if result[:retry_after]
+          meta["parse.details"] = result[:details] if result[:details].is_a?(Hash) && result[:details].any?
           envelope["_meta"] = meta unless meta.empty?
           envelope
         end
@@ -539,14 +535,7 @@ module Parse
         # narrowing guidance carry the message.
         return nil if data[:output].is_a?(String) && data[:headers].is_a?(Array)
 
-        rows =
-          if data[:results].is_a?(Array)         then data[:results]
-          elsif data["results"].is_a?(Array)     then data["results"]
-          elsif data[:objects].is_a?(Hash)       then data[:objects].values
-          elsif data["objects"].is_a?(Hash)      then data["objects"].values
-          elsif data[:object].is_a?(Hash)        then [data[:object]]
-          elsif data["object"].is_a?(Hash)       then [data["object"]]
-          end
+        rows = if data[:results].is_a?(Array) then data[:results] elsif data["results"].is_a?(Array) then data["results"] elsif data[:objects].is_a?(Hash) then data[:objects].values elsif data["objects"].is_a?(Hash) then data["objects"].values elsif data[:object].is_a?(Hash) then [data[:object]] elsif data["object"].is_a?(Hash) then [data["object"]] end
 
         return nil unless rows.is_a?(Array) && rows.any?
 
@@ -566,10 +555,10 @@ module Parse
 
         return nil if bytes_per_field.empty?
 
-        sorted    = bytes_per_field.sort_by { |_, b| -b }
-        top       = sorted.first(3)
-        n         = sample.size.to_f
-        largest   = sorted.first[0]
+        sorted = bytes_per_field.sort_by { |_, b| -b }
+        top = sorted.first(3)
+        n = sample.size.to_f
+        largest = sorted.first[0]
 
         # Produce a POSITIVE keys: list rather than asking the LLM to
         # subtract. `keys:` is inclusive — models that see "excluding 'X'"
@@ -581,7 +570,7 @@ module Parse
 
         formatted = top.map { |k, b| "#{k} (~#{humanize_bytes(b / n)}/record)" }.join(", ")
         "Largest fields by bytes: #{formatted}. " \
-          "Try keys: #{keep_fields.join(",").inspect} (drops the heaviest field)."
+        "Try keys: #{keep_fields.join(",").inspect} (drops the heaviest field)."
       end
       private_class_method :diagnose_oversize
 
@@ -661,7 +650,7 @@ module Parse
         rows = data[:results] || data["results"]
         return nil unless rows.is_a?(Array) && rows.any?
 
-        sample   = rows.first(5).select { |r| r.is_a?(Hash) }
+        sample = rows.first(5).select { |r| r.is_a?(Hash) }
         return nil if sample.empty?
 
         heaviest = find_heaviest_field(sample)
@@ -676,7 +665,7 @@ module Parse
         # Read the caller's effective skip so next_skip can resume rather
         # than reset pagination. Only relevant for query_class; aggregate
         # pipelines are deterministic and not paginatable.
-        pagination    = data[:pagination] || data["pagination"] || {}
+        pagination = data[:pagination] || data["pagination"] || {}
         original_skip = (pagination[:skip] || pagination["skip"] || 0).to_i
 
         # The recovered envelope must strip stale cardinality keys so the
@@ -708,8 +697,7 @@ module Parse
         candidate.delete(:next_call)
         candidate.delete("next_call")
 
-        initial_hint =
-          if tool_name == "aggregate"
+        initial_hint = if tool_name == "aggregate"
             "Field '#{heaviest}' was dropped from all rows to fit the #{max_bytes}-byte response cap. " \
             "Narrow the pipeline with a $match or $project stage to reduce result size, " \
             "or call get_object(class_name: <class>, object_id: <id>) for the dropped field."
@@ -719,15 +707,15 @@ module Parse
           end
 
         annotation = {
-          reason:         "response_exceeded_max_bytes",
+          reason: "response_exceeded_max_bytes",
           dropped_fields: [heaviest],
-          kept_count:     trimmed_rows.size,
+          kept_count: trimmed_rows.size,
           original_count: rows.size,
-          hint:           initial_hint,
+          hint: initial_hint,
         }
 
         # First try: heaviest field dropped, all rows kept.
-        candidate[:results]    = trimmed_rows
+        candidate[:results] = trimmed_rows
         candidate[:_truncated] = annotation
         text = JSON.pretty_generate(candidate)
         return text if text.bytesize <= max_bytes
@@ -736,10 +724,10 @@ module Parse
         # from the trimmed sample, then verify and back off by one if the
         # estimator overshoots (JSON overhead).
         sample_after = trimmed_rows.first([5, trimmed_rows.size].min)
-        sample_text  = JSON.pretty_generate(sample_after)
-        per_row      = sample_text.bytesize / sample_after.size.to_f
+        sample_text = JSON.pretty_generate(sample_after)
+        per_row = sample_text.bytesize / sample_after.size.to_f
 
-        envelope_data  = candidate.merge(results: [])
+        envelope_data = candidate.merge(results: [])
         envelope_bytes = JSON.pretty_generate(envelope_data).bytesize
         budget = max_bytes - envelope_bytes - 256  # safety margin
         return nil if budget <= 0 || per_row <= 0
@@ -749,7 +737,7 @@ module Parse
         return nil if fit_count < 1
 
         loop do
-          candidate[:results]                 = trimmed_rows.first(fit_count)
+          candidate[:results] = trimmed_rows.first(fit_count)
           candidate[:_truncated][:kept_count] = fit_count
 
           if tool_name == "query_class"
@@ -793,7 +781,7 @@ module Parse
         objects = data[:objects] || data["objects"]
         return nil unless objects.is_a?(Hash) && objects.any?
 
-        sample   = objects.values.first(5).select { |r| r.is_a?(Hash) }
+        sample = objects.values.first(5).select { |r| r.is_a?(Hash) }
         return nil if sample.empty?
 
         heaviest = find_heaviest_field(sample)
@@ -810,27 +798,27 @@ module Parse
         candidate = data.dup
 
         annotation = {
-          reason:          "response_exceeded_max_bytes",
-          dropped_fields:  [heaviest],
-          kept_count:      trimmed_objects.size,
-          original_count:  objects.size,
+          reason: "response_exceeded_max_bytes",
+          dropped_fields: [heaviest],
+          kept_count: trimmed_objects.size,
+          original_count: objects.size,
           dropped_for_size: [],
-          hint:            "Field '#{heaviest}' was dropped from all records to fit the #{max_bytes}-byte response cap. " \
-                           "To retrieve it for a specific record, call get_object(class_name: <class>, object_id: <id>).",
+          hint: "Field '#{heaviest}' was dropped from all records to fit the #{max_bytes}-byte response cap. " \
+                "To retrieve it for a specific record, call get_object(class_name: <class>, object_id: <id>).",
         }
 
         # First try: heaviest field dropped, all records kept.
-        candidate[:objects]    = trimmed_objects
+        candidate[:objects] = trimmed_objects
         candidate[:_truncated] = annotation
         text = JSON.pretty_generate(candidate)
         return text if text.bytesize <= max_bytes
 
         # Still over budget — drop trailing records by insertion order.
         sample_after = trimmed_objects.values.first([5, trimmed_objects.size].min)
-        sample_text  = JSON.pretty_generate(sample_after)
-        per_rec      = sample_text.bytesize / sample_after.size.to_f
+        sample_text = JSON.pretty_generate(sample_after)
+        per_rec = sample_text.bytesize / sample_after.size.to_f
 
-        envelope_data  = candidate.merge(objects: {})
+        envelope_data = candidate.merge(objects: {})
         envelope_bytes = JSON.pretty_generate(envelope_data).bytesize
         budget = max_bytes - envelope_bytes - 256  # safety margin
         return nil if budget <= 0 || per_rec <= 0
@@ -840,11 +828,11 @@ module Parse
         return nil if fit_count < 1
 
         loop do
-          kept_keys    = trimmed_objects.keys.first(fit_count)
+          kept_keys = trimmed_objects.keys.first(fit_count)
           dropped_keys = trimmed_objects.keys - kept_keys
 
-          candidate[:objects]                      = trimmed_objects.slice(*kept_keys)
-          candidate[:_truncated][:kept_count]      = fit_count
+          candidate[:objects] = trimmed_objects.slice(*kept_keys)
+          candidate[:_truncated][:kept_count] = fit_count
           candidate[:_truncated][:dropped_for_size] = dropped_keys
           candidate[:_truncated][:hint] =
             "Field '#{heaviest}' was dropped and only #{fit_count} of #{objects.size} records fit " \
@@ -863,8 +851,8 @@ module Parse
       # @api private
       def self.humanize_bytes(n)
         n = n.to_f
-        return "#{n.round} B"                              if n < 1024
-        return "#{(n / 1024.0).round(1)} KB"               if n < 1_048_576
+        return "#{n.round} B" if n < 1024
+        return "#{(n / 1024.0).round(1)} KB" if n < 1_048_576
         "#{(n / 1_048_576.0).round(1)} MB"
       end
       private_class_method :humanize_bytes
@@ -887,30 +875,30 @@ module Parse
         # every MCP client. We now concatenate `custom` and `built_in` and
         # fall back to the legacy `classes` key in case a custom agent
         # subclass returns the older shape.
-        data      = result[:data] || {}
-        classes   = (data[:custom] || []) + (data[:built_in] || [])
-        classes   = data[:classes] || [] if classes.empty? && data[:classes]
+        data = result[:data] || {}
+        classes = (data[:custom] || []) + (data[:built_in] || [])
+        classes = data[:classes] || [] if classes.empty? && data[:classes]
         resources = classes.flat_map do |cls|
-          name       = cls[:name]
+          name = cls[:name]
           klass_desc = cls[:description] || "Parse class (#{cls[:type] || "Custom"})"
           [
             {
-              "uri"         => "parse://#{name}/schema",
-              "name"        => "#{name} schema",
+              "uri" => "parse://#{name}/schema",
+              "name" => "#{name} schema",
               "description" => "Field definitions and types for #{name}. #{klass_desc}",
-              "mimeType"    => "application/json",
+              "mimeType" => "application/json",
             },
             {
-              "uri"         => "parse://#{name}/count",
-              "name"        => "#{name} count",
+              "uri" => "parse://#{name}/count",
+              "name" => "#{name} count",
               "description" => "Total number of #{name} objects",
-              "mimeType"    => "application/json",
+              "mimeType" => "application/json",
             },
             {
-              "uri"         => "parse://#{name}/samples",
-              "name"        => "#{name} samples",
+              "uri" => "parse://#{name}/samples",
+              "name" => "#{name} samples",
               "description" => "Five most recent #{name} objects",
-              "mimeType"    => "application/json",
+              "mimeType" => "application/json",
             },
           ]
         end
@@ -939,21 +927,21 @@ module Parse
           "resourceTemplates" => [
             {
               "uriTemplate" => "parse://{className}/schema",
-              "name"        => "Parse class schema",
+              "name" => "Parse class schema",
               "description" => "Field definitions and types for a Parse class. Expand {className} with any class your agent can list via tools/list or resources/list.",
-              "mimeType"    => "application/json",
+              "mimeType" => "application/json",
             },
             {
               "uriTemplate" => "parse://{className}/count",
-              "name"        => "Parse class object count",
+              "name" => "Parse class object count",
               "description" => "Total number of objects in a Parse class.",
-              "mimeType"    => "application/json",
+              "mimeType" => "application/json",
             },
             {
               "uriTemplate" => "parse://{className}/samples",
-              "name"        => "Parse class sample objects",
+              "name" => "Parse class sample objects",
               "description" => "Five most recent objects from a Parse class.",
-              "mimeType"    => "application/json",
+              "mimeType" => "application/json",
             },
           ],
         }
@@ -969,12 +957,12 @@ module Parse
       # @param agent [Parse::Agent]
       # @return [Hash] MCP contents envelope or an error hash.
       def self.handle_resources_read(params, agent)
-        uri   = params["uri"].to_s
+        uri = params["uri"].to_s
         match = uri.match(%r{\Aparse://([A-Za-z_][A-Za-z0-9_]*)(?:/(schema|count|samples))?\z})
         return { error: { "code" => -32602, "message" => "Invalid resource URI: #{uri}" } } unless match
 
         class_name = match[1]
-        kind       = match[2] || "schema"
+        kind = match[2] || "schema"
 
         result = case kind
           when "schema"
@@ -989,9 +977,9 @@ module Parse
           {
             "contents" => [
               {
-                "uri"      => uri,
+                "uri" => uri,
                 "mimeType" => "application/json",
-                "text"     => JSON.pretty_generate(result[:data]),
+                "text" => JSON.pretty_generate(result[:data]),
               },
             ],
           }
@@ -1021,8 +1009,8 @@ module Parse
         return subscriptions_unsupported_error unless manager.respond_to?(:supported?) && manager.supported?
         ok = manager.subscribe(
           session_id: agent_session_id(agent),
-          uri:        params["uri"].to_s,
-          agent:      agent,
+          uri: params["uri"].to_s,
+          agent: agent,
         )
         return {} if ok
         # subscribe returned false: the session's listening stream was torn down
@@ -1032,8 +1020,8 @@ module Parse
         # contract an empty result == subscribed) so the client reopens its GET
         # stream and retries instead of waiting forever for updates.
         { error: { "code" => -32602,
-                   "message" => "resources/subscribe: the session no longer has an open " \
-                                "listening stream; reopen the GET stream and retry" } }
+                 "message" => "resources/subscribe: the session no longer has an open " \
+                              "listening stream; reopen the GET stream and retry" } }
       end
       private_class_method :handle_resources_subscribe
 
@@ -1047,7 +1035,7 @@ module Parse
         return subscriptions_unsupported_error unless manager.respond_to?(:supported?) && manager.supported?
         manager.unsubscribe(
           session_id: agent_session_id(agent),
-          uri:        params["uri"].to_s,
+          uri: params["uri"].to_s,
         )
         {}
       end
@@ -1100,8 +1088,8 @@ module Parse
       #
       # @return [Hash] MCP messages envelope or an error hash with :error key.
       def self.handle_prompts_get(params)
-        name   = params["name"].to_s
-        args   = params["arguments"] || {}
+        name = params["name"].to_s
+        args = params["arguments"] || {}
         result = Parse::Agent::Prompts.render(name, args)
 
         # Guard against oversized prompt renderers. The renderer is untrusted

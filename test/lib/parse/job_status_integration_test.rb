@@ -74,9 +74,9 @@ class JobStatusIntegrationTest < Minitest::Test
     skip "Integration tests require PARSE_TEST_USE_DOCKER=true" if setup_skipped?
 
     tag = "scope_#{SecureRandom.hex(3)}"
-    make_job_status(job_name: tag, status: "running",  finished_at: nil)
+    make_job_status(job_name: tag, status: "running", finished_at: nil)
     make_job_status(job_name: tag, status: "succeeded")
-    make_job_status(job_name: tag, status: "failed",   message: "boom")
+    make_job_status(job_name: tag, status: "failed", message: "boom")
 
     running_ids = Parse::JobStatus.running.where(job_name: tag).all.map(&:id)
     succeeded_ids = Parse::JobStatus.succeeded.where(job_name: tag).all.map(&:id)

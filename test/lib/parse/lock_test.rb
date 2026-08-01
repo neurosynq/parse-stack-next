@@ -47,7 +47,7 @@ class ParseLockTest < Minitest::Test
 
   def setup
     @prior_store = Parse.instance_variable_get(:@synchronize_create_store)
-    @lock_store  = ParseLockTestStore.new
+    @lock_store = ParseLockTestStore.new
     Parse.singleton_class.attr_accessor :synchronize_create_store unless Parse.respond_to?(:synchronize_create_store=)
     Parse.synchronize_create_store = @lock_store
     Parse::CreateLock.reset!
@@ -65,19 +65,19 @@ class ParseLockTest < Minitest::Test
   end
 
   def test_acquire_refuses_non_string_key
-    assert_raises(ArgumentError) { Parse::Lock.acquire(nil, ttl: 1) {} }
-    assert_raises(ArgumentError) { Parse::Lock.acquire(:symbol, ttl: 1) {} }
-    assert_raises(ArgumentError) { Parse::Lock.acquire(42, ttl: 1) {} }
+    assert_raises(ArgumentError) { Parse::Lock.acquire(nil, ttl: 1) { } }
+    assert_raises(ArgumentError) { Parse::Lock.acquire(:symbol, ttl: 1) { } }
+    assert_raises(ArgumentError) { Parse::Lock.acquire(42, ttl: 1) { } }
   end
 
   def test_acquire_refuses_empty_key
-    err = assert_raises(ArgumentError) { Parse::Lock.acquire("", ttl: 1) {} }
+    err = assert_raises(ArgumentError) { Parse::Lock.acquire("", ttl: 1) { } }
     assert_match(/non-empty String/, err.message)
   end
 
   def test_acquire_refuses_oversized_key
     huge = "x" * 2048
-    err = assert_raises(ArgumentError) { Parse::Lock.acquire(huge, ttl: 1) {} }
+    err = assert_raises(ArgumentError) { Parse::Lock.acquire(huge, ttl: 1) { } }
     assert_match(/exceeds 1024 bytes/, err.message)
   end
 
@@ -138,7 +138,7 @@ class ParseLockTest < Minitest::Test
     # thread tries), synchronize on explicit signals: the holder reports
     # once it actually holds the lock, and is told when to release.
     acquired = Thread::Queue.new
-    release  = Thread::Queue.new
+    release = Thread::Queue.new
     holder = Thread.new do
       Parse::Lock.acquire("contended", ttl: 5) do
         acquired << true
@@ -159,7 +159,7 @@ class ParseLockTest < Minitest::Test
     Parse::Lock.acquire("contended", ttl: 5, wait: 5.0) do
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start
       assert elapsed >= 0.05, "main thread should have waited for the holder to release"
-      assert elapsed < 2.0,   "main thread should have acquired well under the wait budget"
+      assert elapsed < 2.0, "main thread should have acquired well under the wait budget"
     end
     releaser.join
     holder.join
@@ -306,7 +306,7 @@ class ParseLockTest < Minitest::Test
         Parse::Lock.acquire("k", ttl: 1, secret: bad) { flunk "must not run" }
       end
       assert_match(/at least #{Parse::Lock::SECRET_MIN_BYTES} bytes/, err.message,
-        "value=#{bad.inspect} should be rejected")
+                   "value=#{bad.inspect} should be rejected")
     end
   end
 
@@ -362,7 +362,7 @@ class ParseLockTest < Minitest::Test
   end
 
   def test_acquire_auto_secret_picks_up_env_var
-    prior_env  = ENV["PARSE_STACK_LOCK_SECRET"]
+    prior_env = ENV["PARSE_STACK_LOCK_SECRET"]
     prior_attr = Parse.respond_to?(:synchronize_create_secret) ? Parse.synchronize_create_secret : nil
     ENV["PARSE_STACK_LOCK_SECRET"] = "env-test-secret"
     # Force a refresh so any cached state is cleared.

@@ -67,7 +67,7 @@ module Parse
         #   3. A session-token-authenticated request (the existing check
         #      below; session token wins over master key).
         header_disable = env[:request_headers][DISABLE_MASTER_KEY].present?
-        fiber_disable  = Parse.master_key_disabled?
+        fiber_disable = Parse.master_key_disabled?
         unless @master_key.blank? || header_disable || fiber_disable
           headers[MASTER_KEY] = @master_key
         end

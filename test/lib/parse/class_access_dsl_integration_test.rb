@@ -18,9 +18,9 @@ class ClassAccessInstallationStyle < Parse::Object
   # Update/delete are master-only so even a malicious client with the id
   # can't tamper.
   set_class_access(
-    find:   :master,
-    count:  :master,
-    get:    :public,
+    find: :master,
+    count: :master,
+    get: :public,
     create: :public,
     update: :master,
     delete: :master,
@@ -77,7 +77,7 @@ class ClassAccessDslEndToEndIntegrationTest < Minitest::Test
   def test_installation_style_class_allows_non_master_create_and_get
     # Non-master creates a record
     create_response = non_master_post("classes/ClassAccessInstallationStyle",
-                                       { "token" => "client-installed" })
+                                      { "token" => "client-installed" })
     refute create_response.error?,
            "create should succeed for set_class_access(create: :public). " \
            "Got: status=#{create_response.code.inspect} result=#{create_response.result.inspect}"
@@ -95,7 +95,7 @@ class ClassAccessDslEndToEndIntegrationTest < Minitest::Test
   def test_installation_style_class_blocks_non_master_update
     # Master creates a record
     create_response = master_post("classes/ClassAccessInstallationStyle",
-                                   { "token" => "original" })
+                                  { "token" => "original" })
     object_id = create_response.result["objectId"]
 
     # Non-master tries to update -- should be blocked by update: :master

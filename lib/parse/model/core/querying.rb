@@ -613,7 +613,7 @@ module Parse
         # Forward session-token / use_master_key when supplied so client-mode
         # callers can scope a `.find` to a logged-in user without dropping
         # down to the raw `client.fetch_object` form.
-        client_opts[:session_token]  = session_token  unless session_token.nil?
+        client_opts[:session_token] = session_token unless session_token.nil?
         client_opts[:use_master_key] = use_master_key unless use_master_key.nil?
         # The parallel path spawns worker threads via `Parallel.map`. Worker
         # threads don't inherit fiber-local storage from the calling thread,

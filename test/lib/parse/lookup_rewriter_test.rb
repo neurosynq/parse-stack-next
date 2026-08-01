@@ -7,12 +7,14 @@ class LRForeignWithRef < Parse::Object
   parse_class "LRForeignWithRef"
   property :title, :string
   parse_reference
+
   def autofetch!(*); nil; end
 end
 
 class LRForeignNoRef < Parse::Object
   parse_class "LRForeignNoRef"
   property :title, :string
+
   def autofetch!(*); nil; end
 end
 
@@ -24,6 +26,7 @@ class LRLocal < Parse::Object
   belongs_to :project, class_name: "LRForeignWithRef"
   belongs_to :legacy, class_name: "LRForeignNoRef"
   parse_reference
+
   def autofetch!(*); nil; end
 end
 
@@ -34,6 +37,7 @@ class LRChildOfLocal < Parse::Object
   property :title, :string
   belongs_to :owner, class_name: "LRLocal"
   parse_reference
+
   def autofetch!(*); nil; end
 end
 
@@ -42,12 +46,14 @@ end
 class LRLocalNoRef < Parse::Object
   parse_class "LRLocalNoRef"
   property :name, :string
+
   def autofetch!(*); nil; end
 end
 
 class LRChildOfLocalNoRef < Parse::Object
   parse_class "LRChildOfLocalNoRef"
   belongs_to :owner, class_name: "LRLocalNoRef"
+
   def autofetch!(*); nil; end
 end
 
@@ -451,8 +457,8 @@ class LookupRewriterTest < Minitest::Test
 
   def test_graph_lookup_refuses_internal_collection
     pipeline = [{ "$graphLookup" => { "from" => "_Hooks", "as" => "x",
-                                       "startWith" => "$x", "connectFromField" => "a",
-                                       "connectToField" => "b" } }]
+                                     "startWith" => "$x", "connectFromField" => "a",
+                                     "connectToField" => "b" } }]
     err = assert_raises(Parse::PipelineSecurity::Error) do
       Parse::LookupRewriter.rewrite(pipeline, local_class: LRLocal)
     end

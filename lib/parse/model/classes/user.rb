@@ -450,7 +450,7 @@ module Parse
 
       # @!visibility private
       def _rebuild_user_protected_fields!
-        @master_only_fields  ||= []
+        @master_only_fields ||= []
         @self_visible_fields ||= []
         pointer = @self_pointer_field || :self
         all_hidden = (@master_only_fields + @self_visible_fields).uniq
@@ -1435,6 +1435,65 @@ module Parse
               "verify_password failed: " \
               "#{response.error || "HTTP #{response.http_status}"} (code=#{response.code.inspect})"
       end
+    end
+
+    # Inspect one effective object permission for this user. The richer
+    # decision distinguishes a definite denial from missing local evidence.
+    # This is a policy preflight; Parse Server remains authoritative.
+    #
+    # @param object [Parse::Object] the Parse object to check.
+    # @param operation [Symbol] `:read`, `:write`, or `:delete`.
+    # @param client [Parse::Client, nil] application whose CLP/roles to inspect.
+    # @param authenticated [Boolean, nil] explicit authentication assertion.
+    #   When omitted, an attached session token is required for user/role-
+    #   specific grants; public grants can still be answered without one.
+    # @param max_role_depth [Integer] inherited-role traversal limit.
+    # @return [Parse::Access::Decision]
+    def access_decision(object, operation, client: nil, authenticated: nil,
+                                           max_role_depth: 10)
+      require_relative "../../access" unless defined?(Parse::Access)
+      Parse::Access.check(
+        principal: self,
+        object: object,
+        operation: operation,
+        client: client,
+        authenticated: authenticated,
+        max_role_depth: max_role_depth,
+      )
+    end
+
+    # Inspect read, write, and delete while sharing one role-graph lookup.
+    # @return [Hash<Symbol, Parse::Access::Decision>]
+    def access_decisions(object, client: nil, authenticated: nil, max_role_depth: 10)
+      require_relative "../../access" unless defined?(Parse::Access)
+      Parse::Access.check_all(
+        principal: self,
+        object: object,
+        client: client,
+        authenticated: authenticated,
+        max_role_depth: max_role_depth,
+      )
+    end
+
+    # Return whether local evidence definitively grants read access. Unknown
+    # states (partial objects, unresolved CLP/roles, or an id-only user) fail
+    # closed.
+    # @return [Boolean]
+    def can_read?(object, **options)
+      access_decision(object, :read, **options).allowed?
+    end
+
+    # Return whether local evidence definitively grants update access.
+    # @return [Boolean]
+    def can_write?(object, **options)
+      access_decision(object, :write, **options).allowed?
+    end
+
+    # Return whether local evidence definitively grants delete access. Delete
+    # uses the ACL write grant plus the class's delete CLP.
+    # @return [Boolean]
+    def can_delete?(object, **options)
+      access_decision(object, :delete, **options).allowed?
     end
 
     # Return the transitive upward closure of role names this user

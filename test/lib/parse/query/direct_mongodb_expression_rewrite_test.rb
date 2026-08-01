@@ -95,7 +95,7 @@ class DirectMongoDBExpressionRewriteTest < Minitest::Test
           "$switch" => {
             "branches" => [
               { "case" => { "$eq" => ["$author", "$approver"] }, "then" => "self_approved" },
-              { "case" => { "$eq" => ["$requestedBy", nil] },    "then" => "system" },
+              { "case" => { "$eq" => ["$requestedBy", nil] }, "then" => "system" },
             ],
             "default" => "other",
           },
@@ -106,12 +106,12 @@ class DirectMongoDBExpressionRewriteTest < Minitest::Test
     rewritten = @query.send(:convert_stage_for_direct_mongodb, stage)
     branches = rewritten["$group"]["_id"]["$switch"]["branches"]
 
-    assert_equal "$_p_author",      branches[0]["case"]["$eq"][0]
-    assert_equal "$_p_approver",    branches[0]["case"]["$eq"][1]
-    assert_equal "self_approved",   branches[0]["then"]
+    assert_equal "$_p_author", branches[0]["case"]["$eq"][0]
+    assert_equal "$_p_approver", branches[0]["case"]["$eq"][1]
+    assert_equal "self_approved", branches[0]["then"]
     assert_equal "$_p_requestedBy", branches[1]["case"]["$eq"][0]
-    assert_nil                      branches[1]["case"]["$eq"][1]
-    assert_equal "other",           rewritten["$group"]["_id"]["$switch"]["default"]
+    assert_nil branches[1]["case"]["$eq"][1]
+    assert_equal "other", rewritten["$group"]["_id"]["$switch"]["default"]
   end
 
   # Case 4: $addFields with $not on a bare pointer reference. The
@@ -145,7 +145,7 @@ class DirectMongoDBExpressionRewriteTest < Minitest::Test
     rewritten = @query.send(:convert_stage_for_direct_mongodb, stage)
     eq_args = rewritten["$match"]["$expr"]["$eq"]
 
-    assert_equal "$_p_author",   eq_args[0]
+    assert_equal "$_p_author", eq_args[0]
     assert_equal "$_p_approver", eq_args[1]
   end
 
@@ -259,13 +259,13 @@ class DirectMongoDBExpressionRewriteTest < Minitest::Test
   # them. `$objectId` reaches `$_id`, `$createdAt` reaches
   # `$_created_at`, `$updatedAt` reaches `$_updated_at`.
   def test_builtin_field_refs_always_remap
-    assert_equal "$_id",          @query.send(:rewrite_expression_for_direct_mongodb, "$objectId")
-    assert_equal "$_created_at",  @query.send(:rewrite_expression_for_direct_mongodb, "$createdAt")
-    assert_equal "$_updated_at",  @query.send(:rewrite_expression_for_direct_mongodb, "$updatedAt")
+    assert_equal "$_id", @query.send(:rewrite_expression_for_direct_mongodb, "$objectId")
+    assert_equal "$_created_at", @query.send(:rewrite_expression_for_direct_mongodb, "$createdAt")
+    assert_equal "$_updated_at", @query.send(:rewrite_expression_for_direct_mongodb, "$updatedAt")
     # The snake_case forms also remap — format_field normalizes first.
-    assert_equal "$_id",          @query.send(:rewrite_expression_for_direct_mongodb, "$object_id")
-    assert_equal "$_created_at",  @query.send(:rewrite_expression_for_direct_mongodb, "$created_at")
-    assert_equal "$_updated_at",  @query.send(:rewrite_expression_for_direct_mongodb, "$updated_at")
+    assert_equal "$_id", @query.send(:rewrite_expression_for_direct_mongodb, "$object_id")
+    assert_equal "$_created_at", @query.send(:rewrite_expression_for_direct_mongodb, "$created_at")
+    assert_equal "$_updated_at", @query.send(:rewrite_expression_for_direct_mongodb, "$updated_at")
   end
 
   # Output-key aliases on every projection-shape stage pass through
@@ -281,9 +281,9 @@ class DirectMongoDBExpressionRewriteTest < Minitest::Test
     translated = @query.send(:translate_pipeline_for_direct_mongodb, pipeline)
 
     assert_equal "contributing_user_count", translated[0]["$project"].keys.first
-    assert_equal "is_system",               translated[1]["$addFields"].keys.first
-    assert_equal "total_count",             translated[2]["$set"].keys.first
-    assert_equal "subtotal_amount",         translated[3]["$group"].keys.last
+    assert_equal "is_system", translated[1]["$addFields"].keys.first
+    assert_equal "total_count", translated[2]["$set"].keys.first
+    assert_equal "subtotal_amount", translated[3]["$group"].keys.last
   end
 
   # Aliases whose names happen to coincide with pointer-property names
@@ -294,7 +294,7 @@ class DirectMongoDBExpressionRewriteTest < Minitest::Test
   # alias. Avoid alias names that shadow declared Parse properties.
   def test_alias_shadowing_property_name_is_rewritten_per_documented_limitation
     pipeline = [
-      { "$group"   => { "_id" => nil, "author" => { "$first" => "$_p_author" } } },
+      { "$group" => { "_id" => nil, "author" => { "$first" => "$_p_author" } } },
       { "$project" => { "first_author" => "$author" } },
     ]
 

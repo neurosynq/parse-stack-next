@@ -198,10 +198,10 @@ module Parse
         },
 
         "find_relationship" => ->(args) {
-          pc  = Validators.validate_identifier!(args["parent_class"],  "parent_class")
-          pid = Validators.validate_object_id!(args["parent_id"],      "parent_id")
-          cc  = Validators.validate_identifier!(args["child_class"],   "child_class")
-          pf  = Validators.validate_identifier!(args["pointer_field"], "pointer_field")
+          pc = Validators.validate_identifier!(args["parent_class"], "parent_class")
+          pid = Validators.validate_object_id!(args["parent_id"], "parent_id")
+          cc = Validators.validate_identifier!(args["child_class"], "child_class")
+          pf = Validators.validate_identifier!(args["pointer_field"], "pointer_field")
           where = { pf => { "__type" => "Pointer", "className" => pc, "objectId" => pid } }
           "Find #{cc} objects whose #{pf} field points to #{pc} #{pid}. " \
           "First call count_objects with class_name=\"#{cc}\" and where=#{where.to_json}. " \
@@ -210,7 +210,7 @@ module Parse
         },
 
         "created_in_range" => ->(args) {
-          cn    = Validators.validate_identifier!(args["class_name"], "class_name")
+          cn = Validators.validate_identifier!(args["class_name"], "class_name")
           since = Validators.validate_iso8601!(args["since"], "since")
           upper = Validators.validate_iso8601!(args["until"], "until", required: false)
           date_constraint = { "$gte" => { "__type" => "Date", "iso" => since } }
@@ -268,17 +268,17 @@ module Parse
 
           if result.is_a?(Hash)
             description = (result[:description] || result["description"]).to_s
-            text        = (result[:text] || result["text"]).to_s
+            text = (result[:text] || result["text"]).to_s
           else
             description = "Parse analytics prompt: #{name}"
-            text        = result.to_s
+            text = result.to_s
           end
 
           {
             "description" => description,
             "messages" => [
               {
-                "role"    => "user",
+                "role" => "user",
                 "content" => { "type" => "text", "text" => text },
               },
             ],
@@ -294,9 +294,9 @@ module Parse
         #   Hash with :description and :text keys
         def register(name:, description:, arguments: [], renderer:)
           prompt = {
-            "name"        => name.to_s,
+            "name" => name.to_s,
             "description" => description.to_s,
-            "arguments"   => arguments,
+            "arguments" => arguments,
           }
           REGISTRY_MUTEX.synchronize do
             @registry[name.to_s] = { prompt: prompt, renderer: renderer }

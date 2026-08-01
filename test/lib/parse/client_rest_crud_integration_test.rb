@@ -42,7 +42,7 @@ class ClientRestCrudIntegrationTest < Minitest::Test
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
     super
     @alice, @alice_password = seed_client_user("alice")
-    @bob,   @bob_password   = seed_client_user("bob")
+    @bob, @bob_password = seed_client_user("bob")
   end
 
   # --------------------------------------------------------------------

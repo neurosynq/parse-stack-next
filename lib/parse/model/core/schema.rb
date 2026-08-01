@@ -72,7 +72,7 @@ module Parse
       # These are managed automatically by Parse Server.
       SCHEMA_READONLY_CLASSES = [
         Parse::Model::CLASS_PUSH_STATUS,
-        Parse::Model::CLASS_SCHEMA
+        Parse::Model::CLASS_SCHEMA,
       ].freeze
 
       # Default CLP that grants public access to all operations.
@@ -84,7 +84,7 @@ module Parse
         "create" => { "*" => true },
         "update" => { "*" => true },
         "delete" => { "*" => true },
-        "addField" => { "*" => true }
+        "addField" => { "*" => true },
       }.freeze
 
       # Reset the CLP on the server to public defaults.

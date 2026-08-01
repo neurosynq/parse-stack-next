@@ -296,12 +296,12 @@ class TestMigration < Minitest::Test
 
   def test_build_schema_uses_opt_in_default_class_level_permissions
     locked = {
-      "find"     => { "requiresAuthentication" => true },
-      "get"      => { "requiresAuthentication" => true },
-      "count"    => { "requiresAuthentication" => true },
-      "create"   => {},
-      "update"   => {},
-      "delete"   => {},
+      "find" => { "requiresAuthentication" => true },
+      "get" => { "requiresAuthentication" => true },
+      "count" => { "requiresAuthentication" => true },
+      "create" => {},
+      "update" => {},
+      "delete" => {},
       "addField" => {},
     }
     original = Parse::Schema.default_class_level_permissions

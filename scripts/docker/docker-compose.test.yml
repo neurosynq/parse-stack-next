@@ -67,6 +67,11 @@ services:
     depends_on:
       mongo:
         condition: service_started
+      # Parse Server's cache adapter connects to Redis during startup and the
+      # boot fails if that connect rejects, so wait for Redis to answer PING
+      # rather than merely to have been created.
+      redis:
+        condition: service_healthy
     volumes:
       - ../../test/cloud:/parse-server/cloud
       - ../../config:/parse-server/config
@@ -100,6 +105,26 @@ services:
       # test/lib/parse/track_event_wire_shape_test.rb. See
       # test/cloud/analytics-adapter.js for the in-process recorder.
       PARSE_SERVER_ANALYTICS_ADAPTER: "/parse-server/cloud/analytics-adapter.js"
+      # Back Parse Server's own session / user / role caches with Redis so the
+      # `<appId>:role:<userId>` entries it writes are observable from outside
+      # the container. Without this it uses the in-process InMemoryCacheAdapter
+      # and Parse::Cache::UpstreamRoles has nothing to read.
+      #
+      # MUST be a different Redis DATABASE from the one the SDK caches into
+      # (PARSE_TEST_REDIS_URL, db 0). Parse Server FLUSHDBs its cache database
+      # on every _Role write, which on a shared database would delete the SDK's
+      # cached responses and its parse-stack:foc:v1:* create-locks and thereby
+      # break first_or_create! mutual exclusion. See
+      # https://github.com/parse-community/parse-server/issues/10617
+      #
+      # This URL is resolved INSIDE the container, so it uses the compose
+      # service name and the container port, not the 29xxx host port. The
+      # adapter module (test/cloud/redis-cache-adapter.js) refuses db 0.
+      PARSE_CACHE_REDIS_URL: ${PARSE_CACHE_REDIS_URL:-redis://redis:6379/1}
+      # Entry TTL in milliseconds. Kept at parse-server's own default because
+      # Parse::Cache::UpstreamRoles derives an entry's write time from the
+      # remaining TTL and rejects anything longer than 60000ms.
+      PARSE_CACHE_REDIS_TTL_MS: ${PARSE_CACHE_REDIS_TTL_MS:-30000}
     # Remove health check for now since it's causing startup delays
     # healthcheck:
     #   test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:1337/parse/health"]
@@ -114,13 +139,27 @@ services:
     depends_on:
       preflight:
         condition: service_completed_successfully
-    # Loopback-only by default. Used by the cache integration test
-    # (cache_redis_integration_test.rb) and the synchronize-create lock
-    # tests. Override with `REDIS_BIND=0.0.0.0` if you need to point a
-    # remote client at it during debugging.
+    # Loopback-only by default. Override with `REDIS_BIND=0.0.0.0` if you
+    # need to point a remote client at it during debugging.
+    #
+    # Two logical caches share this server, separated by database index:
+    #   db 0  the Ruby SDK's own cache and its create-locks
+    #         (cache_redis_integration_test.rb, the synchronize-create
+    #         lock tests, PARSE_TEST_REDIS_URL)
+    #   db 1  Parse Server's cache adapter (PARSE_CACHE_REDIS_URL)
+    #
+    # They MUST stay on separate databases: Parse Server clears its cache
+    # with a raw FLUSHDB on every _Role write, and FLUSHDB only affects the
+    # selected database. Sharing one would wipe the SDK's create-locks.
     ports:
       - "${REDIS_BIND:-127.0.0.1}:${REDIS_HOST_PORT:-29379}:6379"
     command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 2s
 
   parse-dashboard:
     image: parseplatform/parse-dashboard:9

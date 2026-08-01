@@ -21,7 +21,7 @@ class EmbedManagedTest < Minitest::Test
   class EmbedDoc < Parse::Object
     parse_class "EmbedDocA"
     property :title, :string
-    property :body,  :string
+    property :body, :string
     property :body_embedding, :vector, dimensions: 4, provider: :fixture4
     embed :title, :body, into: :body_embedding
   end
@@ -228,6 +228,7 @@ class EmbedManagedTest < Minitest::Test
   class LyingWidthProvider < Parse::Embeddings::Provider
     def dimensions = 4
     def model_name = "liar-4"
+
     def embed_text(strings, input_type: :search_document)
       strings.map { Array.new(8, 0.5) }
     end

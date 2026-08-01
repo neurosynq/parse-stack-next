@@ -48,7 +48,7 @@ class FindSimilarTest < Minitest::Test
       captured_args[:collection] = coll
       captured_args.merge!(kwargs)
       [
-        { "_id" => "abc", "title" => "first",  "_vscore" => 0.91 },
+        { "_id" => "abc", "title" => "first", "_vscore" => 0.91 },
         { "_id" => "xyz", "title" => "second", "_vscore" => 0.42 },
       ]
     end
@@ -414,6 +414,7 @@ class FindSimilarTest < Minitest::Test
   class LyingWidthProvider < Parse::Embeddings::Provider
     def dimensions = 4
     def model_name = "fix-4"
+
     def embed_text(strings, input_type: :search_document)
       strings.map { Array.new(8, 0.25) }
     end

@@ -93,10 +93,10 @@ module Parse
   module Lock
     KEY_PREFIX = "parse-stack:lock:v1:"
 
-    DEFAULT_TTL  = 3
+    DEFAULT_TTL = 3
     DEFAULT_WAIT = 2.0
-    MAX_TTL      = 30
-    MAX_WAIT     = 30
+    MAX_TTL = 30
+    MAX_WAIT = 30
 
     # Minimum byte-length for an explicit `secret:` kwarg. 16 bytes
     # ≈ 128 bits of separation between tenants — short enough not to
@@ -196,13 +196,13 @@ module Parse
       # @raise [Parse::Lock::UnavailableError] when `on_degraded: :raise`
       #   and the store is process-local.
       def acquire(key, ttl: DEFAULT_TTL, wait: DEFAULT_WAIT,
-                  on_degraded: :warn, secret: :auto, &block)
+                       on_degraded: :warn, secret: :auto, &block)
         raise ArgumentError, "block required" unless block_given?
         validated_key = validate_key!(key)
         validate_on_degraded!(on_degraded)
         validate_secret!(secret)
-        normalized_ttl  = clamp(Integer(ttl),  1,   MAX_TTL)
-        normalized_wait = clamp(Float(wait),   0.0, MAX_WAIT)
+        normalized_ttl = clamp(Integer(ttl), 1, MAX_TTL)
+        normalized_wait = clamp(Float(wait), 0.0, MAX_WAIT)
 
         # Route through Parse::LockBackend — the shared module that
         # also serves Parse::CreateLock. The KEY_PREFIX
@@ -216,15 +216,12 @@ module Parse
         # up the operator-configured secret if one exists; the
         # explicit-String branch overrides it; the explicit-nil
         # branch opts out without a warn.
-        resolved_secret =
-          case secret
-          when :auto   then Parse::LockBackend.lock_secret_for(store: store, source: "Parse::Lock")
-          when String  then secret
-          when nil     then nil
+        resolved_secret = case secret
+          when :auto then Parse::LockBackend.lock_secret_for(store: store, source: "Parse::Lock")
+          when String then secret
+          when nil then nil
           end
-        digest = resolved_secret \
-          ? OpenSSL::HMAC.hexdigest("SHA256", resolved_secret, validated_key) \
-          : Digest::SHA256.hexdigest(validated_key)
+        digest = resolved_secret ? OpenSSL::HMAC.hexdigest("SHA256", resolved_secret, validated_key) : Digest::SHA256.hexdigest(validated_key)
         store_key = "#{KEY_PREFIX}#{digest}"
 
         if Parse::LockBackend.degraded_store?(store)
@@ -238,13 +235,13 @@ module Parse
           # cross-process owner here — the Mutex IS the exclusion — so a
           # fresh UUID is purely for signature parity / local fencing.
           return Parse::LockBackend.synchronize_process_mutex(store_key) do
-            yield SecureRandom.uuid
-          end
+                   yield SecureRandom.uuid
+                 end
         end
 
-        owner       = SecureRandom.uuid
+        owner = SecureRandom.uuid
         acquired_at = nil
-        start       = Parse::LockBackend.monotonic_now
+        start = Parse::LockBackend.monotonic_now
 
         loop do
           if Parse::LockBackend.try_acquire(store, store_key, owner, normalized_ttl)

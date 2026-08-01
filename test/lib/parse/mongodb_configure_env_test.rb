@@ -11,13 +11,13 @@ require "parse/mongodb"
 class MongoDBConfigureEnvTest < Minitest::Test
   def setup
     @stash_analytics = ENV.delete("ANALYTICS_DATABASE_URI")
-    @stash_database  = ENV.delete("DATABASE_URI")
+    @stash_database = ENV.delete("DATABASE_URI")
     Parse::MongoDB.reset!
   end
 
   def teardown
     ENV["ANALYTICS_DATABASE_URI"] = @stash_analytics if @stash_analytics
-    ENV["DATABASE_URI"]           = @stash_database  if @stash_database
+    ENV["DATABASE_URI"] = @stash_database if @stash_database
     Parse::MongoDB.reset!
   end
 
@@ -29,7 +29,7 @@ class MongoDBConfigureEnvTest < Minitest::Test
 
   def test_analytics_uri_takes_priority_over_database_uri
     ENV["ANALYTICS_DATABASE_URI"] = "mongodb://analytics:27017/db"
-    ENV["DATABASE_URI"]           = "mongodb://primary:27017/db"
+    ENV["DATABASE_URI"] = "mongodb://primary:27017/db"
     Parse::MongoDB.configure(enabled: true, verify_role: false)
     assert_equal "mongodb://analytics:27017/db", Parse::MongoDB.uri
   end
@@ -54,7 +54,7 @@ class MongoDBConfigureEnvTest < Minitest::Test
 
   def test_empty_string_env_var_is_treated_as_unset
     ENV["ANALYTICS_DATABASE_URI"] = ""
-    ENV["DATABASE_URI"]           = "mongodb://primary:27017/db"
+    ENV["DATABASE_URI"] = "mongodb://primary:27017/db"
     Parse::MongoDB.configure(enabled: true, verify_role: false)
     assert_equal "mongodb://primary:27017/db", Parse::MongoDB.uri
   end

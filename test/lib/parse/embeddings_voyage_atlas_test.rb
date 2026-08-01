@@ -14,8 +14,8 @@ require "base64"
 # Faraday::Adapter::Test connection.
 class EmbeddingsVoyageAtlasTest < Minitest::Test
   VOYAGE_KEY = "pa-test-DO-NOT-LEAK"
-  ATLAS_KEY  = "al-test-DO-NOT-LEAK"
-  SENTINEL   = "PROVIDER_EGRESS_VERIFIED"
+  ATLAS_KEY = "al-test-DO-NOT-LEAK"
+  SENTINEL = "PROVIDER_EGRESS_VERIFIED"
 
   def setup
     Parse::Embeddings.reset!
@@ -226,7 +226,7 @@ class EmbeddingsVoyageAtlasTest < Minitest::Test
     Parse::Embeddings.max_media_bytes = 64 * 1024 * 1024
     oversized = Parse::Embeddings::ImageFetch::FetchedImage.new(
       bytes: "\x00" * (Parse::Embeddings::Voyage::MAX_MEDIA_BYTES + 1),
-      mime_type: "image/png", url: nil
+      mime_type: "image/png", url: nil,
     )
     provider = multimodal(flunking_stubs_conn)
     err = assert_raises(Parse::Embeddings::Voyage::BadRequestError) do
@@ -352,7 +352,7 @@ class EmbeddingsVoyageAtlasTest < Minitest::Test
     enable_urls(["1.1.1.1"])
     bodies = []
     provider = multimodal(counting_stubs { |b| bodies << b })
-    hostile = 'https://1.1.1.1/a.jpg?q=%22%7D%5D%2C%22model%22%3A%22evil'
+    hostile = "https://1.1.1.1/a.jpg?q=%22%7D%5D%2C%22model%22%3A%22evil"
     provider.embed_image([hostile])
 
     body = JSON.parse(bodies.first)

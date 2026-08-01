@@ -19,9 +19,9 @@ class ToolsQueryClassFormatTest < Minitest::Test
       rows = @rows
       response = Object.new
       response.define_singleton_method(:success?) { true }
-      response.define_singleton_method(:results)  { rows }
-      response.define_singleton_method(:count)    { rows.size }
-      response.define_singleton_method(:error)    { nil }
+      response.define_singleton_method(:results) { rows }
+      response.define_singleton_method(:count) { rows.size }
+      response.define_singleton_method(:error) { nil }
       response
     end
   end
@@ -41,7 +41,7 @@ class ToolsQueryClassFormatTest < Minitest::Test
 
   ROWS = [
     { "objectId" => "abc", "name" => "Alice", "score" => 10 },
-    { "objectId" => "def", "name" => "Bob",   "score" => 20 },
+    { "objectId" => "def", "name" => "Bob", "score" => 20 },
   ].freeze
 
   # ---- format: nil (default) -- existing structured envelope ------------
@@ -73,7 +73,7 @@ class ToolsQueryClassFormatTest < Minitest::Test
     assert_equal 2, result[:row_count]
     assert result[:output].lines.size >= 3, "csv output should have header + 2 data rows"
     assert_match(/Alice/, result[:output])
-    assert_match(/Bob/,   result[:output])
+    assert_match(/Bob/, result[:output])
   end
 
   # ---- format: markdown -------------------------------------------------
@@ -94,7 +94,7 @@ class ToolsQueryClassFormatTest < Minitest::Test
     result = T.query_class(agent, class_name: "Test", format: "table")
     assert_equal "table", result[:format]
     assert_match(/\+\-+/, result[:output])
-    assert_match(/Alice/,  result[:output])
+    assert_match(/Alice/, result[:output])
   end
 
   # ---- format: <invalid> -----------------------------------------------

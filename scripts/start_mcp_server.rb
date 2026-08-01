@@ -40,10 +40,10 @@ def require_env!(name)
   value
 end
 
-server_url     = require_env!("PARSE_SERVER_URL")
+server_url = require_env!("PARSE_SERVER_URL")
 application_id = require_env!("PARSE_APP_ID")
-master_key     = require_env!("PARSE_MASTER_KEY")
-api_key        = ENV["PARSE_API_KEY"]  # optional
+master_key = require_env!("PARSE_MASTER_KEY")
+api_key = ENV["PARSE_API_KEY"]  # optional
 
 # Configure Parse client
 Parse.setup(

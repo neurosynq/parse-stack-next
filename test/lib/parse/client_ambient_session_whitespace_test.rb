@@ -25,13 +25,15 @@ require "parse/client/authentication"
 class ClientAmbientSessionWhitespaceTest < Minitest::Test
   include Parse::Protocol
   MASTER = "configured-master-key"
-  BOUND  = "r:bound-user-token"
+  BOUND = "r:bound-user-token"
 
   # Captures the headers +Parse::Client#request+ hands to its connection,
   # short-circuiting the response so nothing leaves the process.
   class FakeConn
     attr_reader :calls
+
     def initialize; @calls = []; end
+
     def send(method, uri, params, headers)
       @calls << { headers: headers.dup }
       body = Parse::Response.new({})

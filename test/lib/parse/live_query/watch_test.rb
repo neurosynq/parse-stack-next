@@ -80,16 +80,16 @@ class TestLiveQueryWatch < Minitest::Test
     )
     msg = sub.to_subscribe_message
     assert_equal ["title", "author"], msg[:query][:keys]
-    assert_equal ["status"],           msg[:query][:watch]
+    assert_equal ["status"], msg[:query][:watch]
   end
 
   def test_subscribe_message_base_structure_intact_with_watch
     sub = subscription_with(watch: ["title"])
     msg = sub.to_subscribe_message
-    assert_equal "subscribe",  msg[:op]
-    assert_equal "Post",       msg[:query][:className]
-    assert_equal({},           msg[:query][:where])
-    assert_equal ["title"],    msg[:query][:watch]
+    assert_equal "subscribe", msg[:op]
+    assert_equal "Post", msg[:query][:className]
+    assert_equal({}, msg[:query][:where])
+    assert_equal ["title"], msg[:query][:watch]
   end
 
   # --- Client#subscribe forwarding ---------------------------------------

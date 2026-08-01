@@ -87,7 +87,7 @@ class AgentHiddenSecurityPatchTest < Minitest::Test
       captured = query
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { [] }
+      r.define_singleton_method(:results) { [] }
       r
     end
     @agent.define_singleton_method(:client) { fake_client }
@@ -98,9 +98,9 @@ class AgentHiddenSecurityPatchTest < Minitest::Test
                    limit: 1)
 
     keys = captured[:keys].split(",")
-    refute_includes keys, "ssn",          "ssn must be stripped despite caller's keys: override"
+    refute_includes keys, "ssn", "ssn must be stripped despite caller's keys: override"
     refute_includes keys, "parent_email", "parent_email must be stripped"
-    assert_includes keys, "name",         "permitted fields survive the intersection"
+    assert_includes keys, "name", "permitted fields survive the intersection"
     assert_includes keys, "subject"
   end
 
@@ -113,7 +113,7 @@ class AgentHiddenSecurityPatchTest < Minitest::Test
       captured = query
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { [] }
+      r.define_singleton_method(:results) { [] }
       r
     end
     @agent.define_singleton_method(:client) { fake_client }
@@ -130,7 +130,7 @@ class AgentHiddenSecurityPatchTest < Minitest::Test
   def test_aggregate_lookup_from_hidden_class_is_denied
     pipeline = [
       { "$lookup" => { "from" => "PatchHiddenIDs", "localField" => "objectId",
-                       "foreignField" => "objectId", "as" => "leak" } },
+                      "foreignField" => "objectId", "as" => "leak" } },
     ]
     result = @agent.execute(:aggregate, class_name: "PatchVisibleStudent", pipeline: pipeline)
     refute result[:success]
@@ -149,7 +149,7 @@ class AgentHiddenSecurityPatchTest < Minitest::Test
       { "$facet" => {
         "branch" => [
           { "$lookup" => { "from" => "PatchHiddenIDs", "as" => "x",
-                           "localField" => "objectId", "foreignField" => "objectId" } },
+                          "localField" => "objectId", "foreignField" => "objectId" } },
         ],
       } },
     ]
@@ -179,7 +179,7 @@ class AgentHiddenSecurityPatchTest < Minitest::Test
     fake_client.define_singleton_method(:aggregate_pipeline) do |_class_name, _pipeline, **_opts|
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { [] }
+      r.define_singleton_method(:results) { [] }
       r
     end
     @agent.define_singleton_method(:client) { fake_client }
@@ -244,7 +244,7 @@ class AgentHiddenSecurityPatchTest < Minitest::Test
     # let this lookup through, fetching the hidden class's rows server-side.
     pipeline = [
       { "$lookup" => { "from" => "PatchHiddenAliased", "localField" => "objectId",
-                       "foreignField" => "objectId", "as" => "leak" } },
+                      "foreignField" => "objectId", "as" => "leak" } },
     ]
     result = @agent.execute(:aggregate, class_name: "PatchVisibleStudent", pipeline: pipeline)
     refute result[:success]
@@ -264,12 +264,12 @@ class AgentHiddenSecurityPatchTest < Minitest::Test
     payload = [
       {
         "objectId" => "abc1",
-        "label"    => "ok",
+        "label" => "ok",
         "secret_record" => {
-          "__type"    => "Object",
+          "__type" => "Object",
           "className" => "PatchHiddenIDs",
-          "ssn"       => "123-45-6789",
-          "address"   => "11 Maple St",
+          "ssn" => "123-45-6789",
+          "address" => "11 Maple St",
         },
       },
     ]
@@ -291,7 +291,7 @@ class AgentHiddenSecurityPatchTest < Minitest::Test
       } },
     ]
     redacted = Parse::Agent::Tools.redact_hidden_classes!(payload)
-    assert_equal "Ada",  redacted.first["name"]
+    assert_equal "Ada", redacted.first["name"]
     assert_equal "Math", redacted.first["subject"]["name"]
   end
 

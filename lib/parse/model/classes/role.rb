@@ -62,6 +62,47 @@ module Parse
     # @return [RelationCollectionProxy<User>] a Parse relation of users belonging to this role.
     has_many :users, through: :relation
 
+    # Names of Mongo driver errors that mean "the server is momentarily
+    # unreachable", for which falling back to the Parse Server walk is right.
+    #
+    # Names rather than classes, resolved on first use rather than at load
+    # time, because the driver is required lazily (`Parse::MongoDB.require_gem!`)
+    # and `Mongo::Error` does not exist when this file loads.
+    #
+    # The previous check tested `Mongo::Error::ConnectionFailure`, which does
+    # NOT exist in the locked 2.25.0 driver, so `defined?` was always false and
+    # the fallback never fired on a real error. The tests manufactured the
+    # constant themselves, which is how a guard can be green and dead at the
+    # same time. Real availability errors propagated instead of degrading.
+    #
+    # `ConnectionFailure` is kept for older drivers that do define it.
+    # Deliberately narrow otherwise: `ExecutionTimeout`, `DeniedOperator`, and
+    # `CLPScope::Denied` are attack signals or policy denials and must keep
+    # propagating rather than silently downgrading to the slow path.
+    MONGO_AVAILABILITY_ERROR_NAMES = %w[
+      ConnectionFailure
+      ConnectionUnavailable
+      ConnectionPerished
+      ConnectionCheckOutTimeout
+      SocketError
+      SocketTimeoutError
+      NoServerAvailable
+    ].freeze
+
+    # @return [Array<Class>] the subset of {MONGO_AVAILABILITY_ERROR_NAMES}
+    #   this driver actually defines.
+    def self.mongo_availability_errors
+      return [] unless defined?(::Mongo::Error)
+      @mongo_availability_errors ||= MONGO_AVAILABILITY_ERROR_NAMES.filter_map do |name|
+        ::Mongo::Error.const_get(name) if ::Mongo::Error.const_defined?(name)
+      end.freeze
+    end
+
+    # @return [Boolean] whether `error` means the server was unreachable.
+    def self.mongo_availability_error?(error)
+      mongo_availability_errors.any? { |klass| error.is_a?(klass) }
+    end
+
     # Parse Server requires every _Role row to ship with an ACL (the
     # requirement is hard-coded in SchemaController.requiredColumns and
     # cannot be disabled by config). We default to master-only (ACL = {})
@@ -150,6 +191,9 @@ module Parse
       #   scope (subject to `_Role` CLP). The scope is forwarded
       #   verbatim to {Parse::MongoDB.role_names_for_user}; CLP denial
       #   raises {Parse::CLPScope::Denied}.
+      # @param strict [Boolean] re-raise REST role-query failures instead of
+      #   returning the closure resolved before the failure. Access inspection
+      #   uses this to distinguish no membership from unavailable evidence.
       # @return [Set<String>] role names (no `role:` prefix) the user
       #   transitively inherits permissions from, including direct
       #   memberships. Empty set for anonymous or no-membership users.
@@ -166,7 +210,8 @@ module Parse
       # @example
       #   names = Parse::Role.all_for_user(user, master: true)  # admin/analytics
       #   names = Parse::Role.all_for_user(user, as: current_user)  # scope-checked
-      def all_for_user(user, max_depth: 10, master: false, as: nil)
+      def all_for_user(user, max_depth: 10, master: false, as: nil, client: nil,
+                             strict: false)
         names = Set.new
         return names if user.nil? || max_depth <= 0
 
@@ -182,7 +227,7 @@ module Parse
         # have no scope to forward.
         if master == true || !as.nil?
           fast_path_result = all_for_user_mongo_fast_path(
-            user_pointer.id, max_depth, master: master, as: as,
+            user_pointer.id, max_depth, master: master, as: as, client: client,
           )
           if fast_path_result.is_a?(Set)
             ActiveSupport::Notifications.instrument(
@@ -195,13 +240,34 @@ module Parse
           end
         end
 
+        if as
+          # FAIL CLOSED. The slow path below reads `_Role` through the REST
+          # client, which in a master-keyed process answers with every role
+          # regardless of what `as:` may see. Silently falling back would turn
+          # a scoped traversal into a master-keyed one and hand the caller a
+          # closure they were never entitled to. A caller who wants the master
+          # answer has to ask for it.
+          raise Parse::MongoDB::NotEnabled,
+                "Parse::Role.all_for_user: `as:` requires the mongo-direct role graph, " \
+                "which is unavailable. Refusing to fall back to the Parse Server walk, " \
+                "which would run under the client's own credentials rather than the " \
+                "requested scope. Configure Parse::MongoDB, or pass `master: true` to " \
+                "take the unscoped answer deliberately."
+        end
+
         begin
-          direct_roles = Parse::Role.all(users: user_pointer)
-        rescue
+          direct_roles = role_query_all({ users: user_pointer }, client: client)
+        rescue StandardError
+          raise if strict
           return names
         end
 
-        result = expand_inheritance_upward(direct_roles, max_depth: max_depth)
+        result = expand_inheritance_upward(
+          direct_roles,
+          max_depth: max_depth,
+          client: client,
+          strict: strict,
+        )
         ActiveSupport::Notifications.instrument(
           "parse.role.expand",
           direction: :forward, target_id: user_pointer.id,
@@ -217,11 +283,11 @@ module Parse
       # is unavailable (mongo not configured, or a benign availability
       # error). Attack-signal errors (timeouts, denied operators,
       # CLP::Denied, ArgumentError on missing auth) are propagated.
-      def all_for_user_mongo_fast_path(user_id, max_depth, master: false, as: nil)
+      def all_for_user_mongo_fast_path(user_id, max_depth, master: false, as: nil, client: nil)
         return nil unless defined?(Parse::MongoDB)
         return nil unless Parse::MongoDB.respond_to?(:role_names_for_user)
         Parse::MongoDB.role_names_for_user(
-          user_id, max_depth: max_depth, master: master, as: as,
+          user_id, max_depth: max_depth, master: master, as: as, client: client,
         )
       rescue StandardError => e
         # Fall back to Parse-Server path on benign availability errors
@@ -229,8 +295,7 @@ module Parse
         # ExecutionTimeout, DeniedOperator, CLPScope::Denied,
         # ArgumentError, and any unrecognized Mongo::Error subclass —
         # so attack signals aren't masked by a silent slow-path retry.
-        if defined?(::Mongo::Error::ConnectionFailure) &&
-           e.is_a?(::Mongo::Error::ConnectionFailure)
+        if Parse::Role.mongo_availability_error?(e)
           # Emit a structured event so operators can observe the
           # fast-path-unavailable rate (e.g. analytics-replica
           # connection flapping). The fallback to the Parse-Server
@@ -262,7 +327,46 @@ module Parse
       # @param max_depth [Integer] maximum BFS depth.
       # @return [Set<String>] role names (no `role:` prefix) including
       #   the starting frontier and every transitive parent.
-      def expand_inheritance_upward(starting_roles, max_depth: 10)
+      # @!visibility private
+      # Run a `_Role` query against a SPECIFIC client.
+      #
+      # `Parse::Role.all(...)` resolves its client through the class, which is
+      # the default client. That was fine while identity resolution was also
+      # global, and became a split brain once it was not: a session token
+      # could be resolved against client B while the role closure for the
+      # resulting user was walked against the default application, mixing one
+      # application's identity with another's role graph.
+      #
+      # A nil client keeps the historical behavior.
+      # @!visibility private
+      # Run a `_User` query against a SPECIFIC client. Same rationale as
+      # {.role_query_all}: `Parse::User.all` resolves through the class, which
+      # is the default client, so the reverse role traversal would hydrate one
+      # application's users while the subtree came from another's database.
+      def user_query_all(constraints, client: nil)
+        return Parse::User.all(**constraints) if client.nil?
+        query = Parse::User.query(constraints)
+        query.client = client
+        query.results
+      end
+
+      def role_query_all(constraints, client: nil)
+        # No explicit client means the historical path, unchanged. This is not
+        # only for compatibility: `Parse::Role.all` is what callers and tests
+        # observe and stub, and routing around it when nothing asked us to
+        # would change behavior for every existing caller to fix a problem
+        # none of them have.
+        # Double-splat, not a positional Hash: `Parse::Role.all` takes
+        # keywords, and Ruby 3 does not convert one to the other.
+        return Parse::Role.all(**constraints) if client.nil?
+
+        query = Parse::Role.query(constraints)
+        query.client = client
+        query.results
+      end
+
+      def expand_inheritance_upward(starting_roles, max_depth: 10, client: nil,
+                                                    strict: false)
         names = Set.new
         visited_ids = Set.new
         frontier = []
@@ -281,8 +385,9 @@ module Parse
           frontier.each do |role|
             next if role.nil? || role.id.nil?
             begin
-              parents = Parse::Role.all(roles: role)
-            rescue
+              parents = role_query_all({ roles: role }, client: client)
+            rescue StandardError
+              raise if strict
               next
             end
             parents.each do |parent|
@@ -554,13 +659,13 @@ module Parse
     # @example
     #   all_users = admin_role.all_users(master: true)
     #   visible = admin_role.all_users(as: current_user)
-    def all_users(max_depth: 10, visited: Set.new, master: false, as: nil)
+    def all_users(max_depth: 10, visited: Set.new, master: false, as: nil, client: nil)
       return [] if max_depth <= 0
       return [] if id.nil? || visited.include?(id)
 
       # The fast path is opt-in (same rationale as {.all_for_user}).
       if master == true || !as.nil?
-        fast_path = all_users_mongo_fast_path(max_depth, master: master, as: as)
+        fast_path = all_users_mongo_fast_path(max_depth, master: master, as: as, client: client)
         if fast_path.is_a?(Array)
           ActiveSupport::Notifications.instrument(
             "parse.role.expand",
@@ -571,13 +676,32 @@ module Parse
         end
       end
 
+      if as
+        # Same fail-closed rule as {.all_for_user}: the relation reads below
+        # run under the client's own credentials, so a master-keyed process
+        # would answer a scoped request with every user in the subtree.
+        raise Parse::MongoDB::NotEnabled,
+              "Parse::Role#all_users: `as:` requires the mongo-direct role graph, " \
+              "which is unavailable. Refusing to fall back to the Parse Server walk, " \
+              "which would run under the client's own credentials rather than the " \
+              "requested scope. Configure Parse::MongoDB, or pass `master: true` to " \
+              "take the unscoped answer deliberately."
+      end
+
       visited << id
 
-      direct_users = users.all
-
-      child_roles = roles.all
+      # The posture travels with the recursion. Dropping `client:` here meant
+      # a traversal that started on client B finished on the default, and
+      # dropping `master:` meant an explicit master call could silently
+      # downgrade under client mode or an ambient session token partway down
+      # the tree.
+      direct_users = relation_all(users, client: client)
+      child_roles = relation_all(roles, client: client)
       child_users = child_roles.flat_map do |child_role|
-        child_role.all_users(max_depth: max_depth - 1, visited: visited)
+        child_role.all_users(
+          max_depth: max_depth - 1, visited: visited,
+          master: master, as: as, client: client,
+        )
       end
 
       result = (direct_users + child_users).uniq { |u| u.id }
@@ -601,28 +725,27 @@ module Parse
     # (sub-pipeline `_rperm` match in the role-subtree join, see
     # MONGO-4) AND on the hydration query (full _User row-level ACL
     # filtering before the rows hit the wire).
-    def all_users_mongo_fast_path(max_depth, master: false, as: nil)
+    def all_users_mongo_fast_path(max_depth, master: false, as: nil, client: nil)
       return nil unless defined?(Parse::MongoDB)
       return nil unless Parse::MongoDB.respond_to?(:users_in_role_subtree)
       ids = Parse::MongoDB.users_in_role_subtree(
-        id, max_depth: max_depth, master: master, as: as,
+        id, max_depth: max_depth, master: master, as: as, client: client,
       )
       return nil if ids.nil?
       return [] if ids.empty?
 
       if master == true
         # Master path: master-keyed default client returns every row.
-        Parse::User.all(:objectId.in => ids.to_a)
+        Parse::Role.send(:user_query_all, { :objectId.in => ids.to_a }, client: client)
       else
         # Scoped path: route through Parse::MongoDB.aggregate so _User
         # ACL is enforced by the SDK on the hydration query. The
         # aggregate already strips protectedFields and filters by
         # _rperm/CLP under the resolved scope.
-        hydrate_users_under_scope(ids.to_a, as)
+        hydrate_users_under_scope(ids.to_a, as, client: client)
       end
     rescue StandardError => e
-      if defined?(::Mongo::Error::ConnectionFailure) &&
-         e.is_a?(::Mongo::Error::ConnectionFailure)
+      if Parse::Role.mongo_availability_error?(e)
         # Emit a structured event so operators can monitor fast-path
         # availability separate from the role-graph notification.
         ActiveSupport::Notifications.instrument(
@@ -637,6 +760,19 @@ module Parse
     end
 
     # @!visibility private
+    # Read a relation against a SPECIFIC client. `relation.all` resolves
+    # through the class, which is the default client, so a traversal that
+    # started on a secondary client would finish on the default one.
+    def relation_all(relation, client: nil)
+      return relation.all if client.nil?
+      query = relation.query
+      query.client = client
+      query.results
+    rescue StandardError
+      relation.all
+    end
+
+    # @!visibility private
     # Hydrate a list of `_User.objectId`s into {Parse::User} instances
     # via `Parse::MongoDB.aggregate` under the supplied scope. This is
     # the scoped-path hydration that goes through the SDK's ACL
@@ -644,14 +780,14 @@ module Parse
     # instead of the master-keyed `Parse::User.all`.
     #
     # Returns an Array of {Parse::User} instances (possibly empty).
-    def hydrate_users_under_scope(ids, as_scope)
+    def hydrate_users_under_scope(ids, as_scope, client: nil)
       return [] if ids.nil? || ids.empty?
       pipeline = [
         { "$match" => { "_id" => { "$in" => ids.map(&:to_s) } } },
       ]
       raw = Parse::MongoDB.aggregate(
         Parse::Model::CLASS_USER, pipeline,
-        allow_internal_fields: true, acl_user: as_scope,
+        allow_internal_fields: true, acl_user: as_scope, client: client,
       )
       raw.map do |doc|
         parse_doc = Parse::MongoDB.convert_document_to_parse(
@@ -660,7 +796,60 @@ module Parse
         Parse::User.new(parse_doc) if parse_doc
       end.compact
     end
+
     private :hydrate_users_under_scope
+
+    # Inspect one effective object permission for a hypothetical authenticated
+    # member of this role. User-specific, pointer-specific, and `_User` self
+    # rules remain unknown because a role does not identify a concrete member.
+    #
+    # @param object [Parse::Object] the Parse object to check.
+    # @param operation [Symbol] `:read`, `:write`, or `:delete`.
+    # @return [Parse::Access::Decision]
+    def access_decision(object, operation, client: nil, authenticated: nil,
+                                           max_role_depth: 10)
+      require_relative "../../access" unless defined?(Parse::Access)
+      Parse::Access.check(
+        principal: self,
+        object: object,
+        operation: operation,
+        client: client,
+        authenticated: authenticated,
+        max_role_depth: max_role_depth,
+      )
+    end
+
+    # Inspect read, write, and delete while sharing one parent-role lookup.
+    # @return [Hash<Symbol, Parse::Access::Decision>]
+    def access_decisions(object, client: nil, authenticated: nil, max_role_depth: 10)
+      require_relative "../../access" unless defined?(Parse::Access)
+      Parse::Access.check_all(
+        principal: self,
+        object: object,
+        client: client,
+        authenticated: authenticated,
+        max_role_depth: max_role_depth,
+      )
+    end
+
+    # Return whether the role-derived policy definitively grants read access.
+    # Unknown states fail closed.
+    # @return [Boolean]
+    def can_read?(object, **options)
+      access_decision(object, :read, **options).allowed?
+    end
+
+    # Return whether the role-derived policy definitively grants update access.
+    # @return [Boolean]
+    def can_write?(object, **options)
+      access_decision(object, :write, **options).allowed?
+    end
+
+    # Return whether the role-derived policy definitively grants delete access.
+    # @return [Boolean]
+    def can_delete?(object, **options)
+      access_decision(object, :delete, **options).allowed?
+    end
 
     # Get the set of role names whose presence in a `_rperm` array
     # grants access to this role's members. That's the role itself
@@ -688,8 +877,18 @@ module Parse
     #   `self.name` and every transitive parent.
     # @example
     #   permission_strings = admin.all_parent_role_names.map { |n| "role:#{n}" }
-    def all_parent_role_names(max_depth: 10)
-      Parse::Role.expand_inheritance_upward([self], max_depth: max_depth)
+    # @param client [Parse::Client, nil] resolve the `_Role` traversal
+    #   against this client. Nil uses the default, which is the historical
+    #   behavior. Supplying it matters wherever the caller's identity was
+    #   resolved against a specific client: walking the role graph on the
+    #   default application would then mix one application's identity with
+    #   another's role names.
+    # @param strict [Boolean] re-raise role-query failures rather than returning
+    #   a partial parent closure.
+    def all_parent_role_names(max_depth: 10, client: nil, strict: false)
+      Parse::Role.expand_inheritance_upward(
+        [self], max_depth: max_depth, client: client, strict: strict,
+      )
     end
 
     # Get all child roles recursively. Cycle-safe; see {#all_users}.

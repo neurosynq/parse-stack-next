@@ -96,7 +96,7 @@ class VectorVisibilityTest < Minitest::Test
   #
   # Parse Server's afterFind payload carries NO className anywhere — the matched
   # objects omit it and there is no top-level className (verified against Parse
-  # Server 9.9.0). The class is known only from the webhook URL path, threaded
+  # Server 9.10.0). The class is known only from the webhook URL path, threaded
   # in as `webhook_class:`. These fixtures therefore use objects WITHOUT
   # className and supply the class via webhook_class (the real shape), NOT via
   # per-element className.
@@ -104,10 +104,10 @@ class VectorVisibilityTest < Minitest::Test
   def test_webhook_strips_vectors_from_afterfind_objects_via_route_class
     payload = P.new(
       { trigger_name: "afterFind",
-        objects: [
-          { "title" => "a", "embedding" => [1.0, 2.0, 3.0] },
-          { "title" => "b", "embedding" => [4.0, 5.0, 6.0] },
-        ] },
+       objects: [
+        { "title" => "a", "embedding" => [1.0, 2.0, 3.0] },
+        { "title" => "b", "embedding" => [4.0, 5.0, 6.0] },
+      ] },
       "VisDefault",
     )
     payload.objects.each do |o|

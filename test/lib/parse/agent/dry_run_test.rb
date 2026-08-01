@@ -67,6 +67,7 @@ class AgentDryRunTest < Minitest::Test
         { archived: true }
       end
     end
+
     agent_method :archive, "Archive this record", permission: :admin, supports_dry_run: true
   end
 
@@ -76,6 +77,7 @@ class AgentDryRunTest < Minitest::Test
     property :name, :string
 
     agent_method :deactivate, "Deactivate this widget", permission: :write
+
     def deactivate
       self.name = "deactivated"
       { done: true }
@@ -101,7 +103,7 @@ class AgentDryRunTest < Minitest::Test
     end
     @saved_env = ALL_ENV_VARS.each_with_object({}) { |k, h| h[k] = ENV.delete(k) }
     ENV["PARSE_AGENT_ALLOW_WRITE_TOOLS"] = "true"
-    ENV["PARSE_AGENT_ALLOW_SCHEMA_OPS"]  = "true"
+    ENV["PARSE_AGENT_ALLOW_SCHEMA_OPS"] = "true"
     DryRecord.clear_stub
   end
 
@@ -240,8 +242,8 @@ class AgentDryRunTest < Minitest::Test
     assert_equal true, data[:dry_run]
     assert_equal false, data[:supports_real_dry_run]
     assert_equal "DryRunWidget", data[:would_call][:class]
-    assert_equal "deactivate",  data[:would_call][:method]
-    assert_equal "w_001",       data[:would_call][:object_id]
+    assert_equal "deactivate", data[:would_call][:method]
+    assert_equal "w_001", data[:would_call][:object_id]
   end
 
   def test_universal_preview_strips_dry_run_from_would_call_args

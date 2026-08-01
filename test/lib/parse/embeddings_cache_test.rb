@@ -14,12 +14,15 @@ class EmbeddingsCacheTest < Minitest::Test
   # Counts embed_text invocations.
   class CountingProvider < Parse::Embeddings::Provider
     attr_reader :count
+
     def initialize(model: "counting-1")
       @model = model
       @count = 0
     end
+
     def dimensions; 3; end
     def model_name; @model; end
+
     def embed_text(strings, input_type: :search_document)
       @count += 1
       strings.map { |s| [s.length.to_f, input_type == :search_query ? 1.0 : 0.0, 9.9] }
@@ -128,6 +131,7 @@ class EmbeddingsCacheTest < Minitest::Test
   def test_custom_store
     store = Class.new do
       attr_reader :h
+
       def initialize = @h = {}
       def get(k) = @h[k]
       def set(k, v) = @h[k] = v
@@ -166,6 +170,7 @@ class EmbeddingsCacheTest < Minitest::Test
 
   class FakeMoneta
     attr_reader :h, :expires_seen
+
     def initialize
       @h = {}
       @expires_seen = []
@@ -280,6 +285,7 @@ class EmbeddingsCacheTest < Minitest::Test
     bad = Class.new(Parse::Embeddings::Provider) do
       def dimensions; 3; end
       def model_name; "bad"; end
+
       def embed_text(strings, input_type: :search_document)
         [[1.0], [2.0]] # two vectors for one input
       end

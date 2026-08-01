@@ -58,7 +58,7 @@ class VerifyPasswordRateLimitTest < Minitest::Test
     limiter = make_limiter
     limiter.send(:login_rate_limits)["alice"] = {
       failures: 5,
-      locked_until: Time.now + 300
+      locked_until: Time.now + 300,
     }
 
     assert_raises(Parse::Error::AccountLockoutError) do

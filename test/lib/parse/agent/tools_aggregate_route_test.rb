@@ -30,7 +30,6 @@ end
 #      shared helper the agent tool calls before handing the pipeline to
 #      Parse::MongoDB.aggregate.
 class ToolsAggregateRouteTest < Minitest::Test
-
   class FakeRouteClient
     attr_reader :received_pipeline, :aggregate_call_count
 
@@ -43,8 +42,8 @@ class ToolsAggregateRouteTest < Minitest::Test
       @received_pipeline = pipeline
       response = Object.new
       response.define_singleton_method(:success?) { true }
-      response.define_singleton_method(:results)  { [] }
-      response.define_singleton_method(:error)    { nil }
+      response.define_singleton_method(:results) { [] }
+      response.define_singleton_method(:error) { nil }
       response
     end
   end
@@ -71,7 +70,7 @@ class ToolsAggregateRouteTest < Minitest::Test
     result = Parse::Agent::Tools.aggregate(
       @agent,
       class_name: "RouteCapture",
-      pipeline:   [{ "$group" => { "_id" => "$status" } }],
+      pipeline: [{ "$group" => { "_id" => "$status" } }],
       apply_canonical_filter: false,
     )
 
@@ -86,7 +85,7 @@ class ToolsAggregateRouteTest < Minitest::Test
     result = Parse::Agent::Tools.aggregate(
       @agent,
       class_name: "RouteCapture",
-      pipeline:   [{ "$group" => { "_id" => "$status" } }],
+      pipeline: [{ "$group" => { "_id" => "$status" } }],
       apply_canonical_filter: false,
       mongo_direct: false,
     )
@@ -103,7 +102,7 @@ class ToolsAggregateRouteTest < Minitest::Test
     Parse::Agent::Tools.aggregate(
       @agent,
       class_name: "RouteCapture",
-      pipeline:   [{ "$group" => { "_id" => "$author", "n" => { "$sum" => 1 } } }],
+      pipeline: [{ "$group" => { "_id" => "$author", "n" => { "$sum" => 1 } } }],
       apply_canonical_filter: false,
       mongo_direct: false,
     )
@@ -123,18 +122,18 @@ class ToolsAggregateRouteTest < Minitest::Test
   def test_pipeline_translator_walks_every_stage
     query = Parse::Query.new("RouteCapture")
     pipeline = [
-      { "$match"  => { "$expr" => { "$eq" => ["$author", "$requestedBy"] } } },
-      { "$group"  => { "_id" => { "$cond" => [{ "$eq" => ["$requestedBy", nil] }, "system", "human"] },
-                       "n"   => { "$sum" => 1 } } },
-      { "$sort"   => { "n" => -1 } },
-      { "$limit"  => 100 },
+      { "$match" => { "$expr" => { "$eq" => ["$author", "$requestedBy"] } } },
+      { "$group" => { "_id" => { "$cond" => [{ "$eq" => ["$requestedBy", nil] }, "system", "human"] },
+                     "n" => { "$sum" => 1 } } },
+      { "$sort" => { "n" => -1 } },
+      { "$limit" => 100 },
     ]
 
     translated = query.send(:translate_pipeline_for_direct_mongodb, pipeline)
 
     # Stage 1: $match with $expr rewrites both sides of $eq.
     eq_args = translated[0]["$match"]["$expr"]["$eq"]
-    assert_equal "$_p_author",      eq_args[0]
+    assert_equal "$_p_author", eq_args[0]
     assert_equal "$_p_requestedBy", eq_args[1]
 
     # Stage 2: $group._id ($cond inside $eq with null) and accumulator
@@ -144,7 +143,7 @@ class ToolsAggregateRouteTest < Minitest::Test
     assert_nil cond_args[0]["$eq"][1]
 
     # Untouched stages (no field references) pass through structurally.
-    assert_equal({ "n" => -1 },  translated[2]["$sort"])
+    assert_equal({ "n" => -1 }, translated[2]["$sort"])
     assert_equal({ "$limit" => 100 }, translated[3])
   end
 
@@ -158,7 +157,7 @@ class ToolsAggregateRouteTest < Minitest::Test
       { "$group" => { "_id" => "$_p_requestedBy" } },
     ]
 
-    once  = query.send(:translate_pipeline_for_direct_mongodb, pipeline)
+    once = query.send(:translate_pipeline_for_direct_mongodb, pipeline)
     twice = query.send(:translate_pipeline_for_direct_mongodb, once)
 
     assert_equal once, twice
@@ -169,7 +168,7 @@ class ToolsAggregateRouteTest < Minitest::Test
   # malformed inputs.
   def test_translator_passes_non_array_through
     query = Parse::Query.new("RouteCapture")
-    assert_nil  query.send(:translate_pipeline_for_direct_mongodb, nil)
+    assert_nil query.send(:translate_pipeline_for_direct_mongodb, nil)
     assert_equal "not a pipeline", query.send(:translate_pipeline_for_direct_mongodb, "not a pipeline")
   end
 
@@ -179,7 +178,25 @@ class ToolsAggregateRouteTest < Minitest::Test
   # mask rows the agent is authorized to see. Pre-4.4.0 parity.
   def test_mongo_direct_auth_kwargs_defaults_to_master
     kwargs = Parse::Agent::Tools.send(:mongo_direct_auth_kwargs, @agent)
-    assert_equal({ master: true }, kwargs)
+    assert_equal true, kwargs[:master]
+    assert_equal %i[master client].sort, kwargs.keys.sort
+  end
+
+  # The agent's own client rides along on the DIRECT path only. An agent
+  # built on a secondary client would otherwise resolve its token, walk its
+  # role graph, and read its rows against the default application, and
+  # Parse::MongoDB's binding guard would have nothing to check.
+  def test_mongo_direct_auth_kwargs_carries_the_agents_client
+    kwargs = Parse::Agent::Tools.send(:mongo_direct_auth_kwargs, @agent)
+    assert_same @agent.client, kwargs[:client]
+  end
+
+  # But NOT on the public hash. `acl_scope_kwargs` is documented for
+  # `agent_method` bodies to splat into calls of their own, which can be REST
+  # paths or user-written helpers where a stray `client:` is an
+  # unknown-keyword error. The two must stay separate.
+  def test_public_acl_scope_kwargs_does_not_carry_the_client
+    refute_includes @agent.acl_scope_kwargs.keys, :client
   end
 
   # Session-tokened agents thread the token through to ACLScope so
@@ -188,7 +205,8 @@ class ToolsAggregateRouteTest < Minitest::Test
   def test_mongo_direct_auth_kwargs_uses_session_token_when_present
     agent = Parse::Agent.new(session_token: "r:tok_abc123")
     kwargs = Parse::Agent::Tools.send(:mongo_direct_auth_kwargs, agent)
-    assert_equal({ session_token: "r:tok_abc123" }, kwargs)
+    assert_equal "r:tok_abc123", kwargs[:session_token]
+    assert_equal %i[session_token client].sort, kwargs.keys.sort
   end
 
   # Defense: an LLM that puts master: true in a tool call's JSON args
@@ -203,7 +221,7 @@ class ToolsAggregateRouteTest < Minitest::Test
     result = Parse::Agent::Tools.aggregate(
       @agent,
       class_name: "RouteCapture",
-      pipeline:   [{ "$group" => { "_id" => "$status" } }],
+      pipeline: [{ "$group" => { "_id" => "$status" } }],
       apply_canonical_filter: false,
       # Hostile LLM-supplied kwargs:
       master: true,

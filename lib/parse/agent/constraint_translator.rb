@@ -171,10 +171,10 @@ module Parse
           # count deltas even when operators are otherwise clean.
           assert_where_key_permitted!(key)
           result[columnize(key)] = if key == "$relatedTo"
-                                     translate_related_to_value(value, depth: 0, agent: agent)
-                                   else
-                                     translate_value(value, depth: 0, agent: agent)
-                                   end
+              translate_related_to_value(value, depth: 0, agent: agent)
+            else
+              translate_value(value, depth: 0, agent: agent)
+            end
         end
       end
 

@@ -132,8 +132,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_health_returns_ok_unauthenticated
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -151,8 +150,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_get_to_mcp_returns_405
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -166,8 +164,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   end
 
   def test_wrong_content_type_returns_415
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -188,8 +185,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   end
 
   def test_oversize_body_returns_413
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -210,8 +206,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   end
 
   def test_malformed_json_returns_400
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -233,8 +228,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   end
 
   def test_chunked_transfer_encoding_returns_411
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -259,8 +253,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_mcp_wrong_api_key_returns_401
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -274,8 +267,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   end
 
   def test_mcp_no_api_key_returns_401
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -296,8 +288,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   end
 
   def test_mcp_correct_api_key_returns_200
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -313,8 +304,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_tools_endpoint_correct_key_returns_tool_list
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -328,8 +318,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   end
 
   def test_tools_endpoint_wrong_key_returns_401
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -346,8 +335,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_initialize_returns_protocol_version
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -361,8 +349,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   end
 
   def test_initialize_returns_capabilities
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -378,8 +365,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   end
 
   def test_initialize_returns_server_info
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -398,8 +384,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_tools_list_returns_array_of_tool_descriptors
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -420,8 +405,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   end
 
   def test_tools_list_contains_known_builtin_tools
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -440,8 +424,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_tools_call_get_all_schemas_returns_real_data
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -466,8 +449,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   end
 
   def test_tools_call_get_all_schemas_includes_fixture_class
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     items = nil
     with_parse_server do
@@ -495,8 +477,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_tools_call_query_class_returns_fixture_records
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     items = nil
     with_parse_server do
@@ -528,8 +509,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   end
 
   def test_tools_call_query_class_with_where_constraint
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     items = nil
     with_parse_server do
@@ -564,8 +544,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_prompts_list_returns_builtin_prompts
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -582,8 +561,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   end
 
   def test_prompts_get_parse_conventions
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -609,8 +587,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_resources_list_includes_fixture_class_resources
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     items = nil
     with_parse_server do
@@ -636,8 +613,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   end
 
   def test_resources_list_resource_shape
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|
@@ -657,8 +633,7 @@ class MCPServerE2EIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_unknown_method_returns_method_not_found
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_mcp_server do |port|

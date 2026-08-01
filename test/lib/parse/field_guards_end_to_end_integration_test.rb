@@ -47,6 +47,7 @@ class GuardedAfterSaveCounter < Parse::Object
   self.send_email_count = 0
 
   after_save :record_after_save
+
   def record_after_save
     self.class.send_email_count += 1
   end
@@ -294,22 +295,26 @@ class FieldGuardsEndToEndIntegrationTest < Minitest::Test
 
     # Register Ruby-side callbacks dynamically -- we don't want them on the
     # class permanently because they'd affect other tests.
-    rb_before = -> { GuardedE2EThing.instance_variable_set(:@ruby_before_save_count,
-                                                            GuardedE2EThing.instance_variable_get(:@ruby_before_save_count) + 1); true }
-    rb_after  = -> { GuardedE2EThing.instance_variable_set(:@ruby_after_save_count,
-                                                            GuardedE2EThing.instance_variable_get(:@ruby_after_save_count) + 1); true }
+    rb_before = -> {
+      GuardedE2EThing.instance_variable_set(:@ruby_before_save_count,
+                                            GuardedE2EThing.instance_variable_get(:@ruby_before_save_count) + 1); true
+    }
+    rb_after = -> {
+      GuardedE2EThing.instance_variable_set(:@ruby_after_save_count,
+                                            GuardedE2EThing.instance_variable_get(:@ruby_after_save_count) + 1); true
+    }
     GuardedE2EThing.set_callback(:save, :before, rb_before)
     GuardedE2EThing.set_callback(:save, :after, rb_after)
 
     # Register the webhook blocks (these replace the auto-stub from `guard`).
     Parse::Webhooks.route(:before_save, "GuardedE2EThing") do
       GuardedE2EThing.instance_variable_set(:@webhook_before_save_count,
-                                             GuardedE2EThing.instance_variable_get(:@webhook_before_save_count) + 1)
+                                            GuardedE2EThing.instance_variable_get(:@webhook_before_save_count) + 1)
       parse_object
     end
     Parse::Webhooks.route(:after_save, "GuardedE2EThing") do
       GuardedE2EThing.instance_variable_set(:@webhook_after_save_count,
-                                             GuardedE2EThing.instance_variable_get(:@webhook_after_save_count) + 1)
+                                            GuardedE2EThing.instance_variable_get(:@webhook_after_save_count) + 1)
       true
     end
 

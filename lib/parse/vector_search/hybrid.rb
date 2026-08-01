@@ -136,11 +136,11 @@ module Parse
           acc.values
              .sort_by { |e| [-e[:score], row_id(e[:doc]).to_s, e[:seq]] }
              .map do |e|
-               row = e[:doc].dup
-               row["_hybrid_score"] = e[:score]
-               row["_hybrid_ranks"] = e[:ranks]
-               row
-             end
+            row = e[:doc].dup
+            row["_hybrid_score"] = e[:score]
+            row["_hybrid_ranks"] = e[:ranks]
+            row
+          end
         end
 
         # Detect whether the cluster backing `collection` supports the
@@ -156,14 +156,21 @@ module Parse
         # cached per collection for {PROBE_CACHE_TTL}.
         #
         # @param collection [String] Parse class / Mongo collection name.
+        # @param authorizing_client [Parse::Client, nil] client whose
+        #   application binding must be checked before probing.
         # @return [Boolean]
-        def rank_fusion_supported?(collection)
+        def rank_fusion_supported?(collection, authorizing_client: nil)
+          # Check on every call, including cache hits. Otherwise a verdict
+          # cached by application A could bypass the unidentified/mismatched
+          # caller guard when application B asks about the same collection.
+          Parse::MongoDB.verify_client!(authorizing_client)
+
           key = collection.to_s
           now = monotonic
           cached = probe_cache_get(key, now)
           return cached unless cached.nil?
 
-          supported = run_probe(key)
+          supported = run_probe(key, authorizing_client: authorizing_client)
           probe_cache_put(key, supported, now)
           supported
         end
@@ -235,7 +242,7 @@ module Parse
                   "hybrid search: fusion[:method] must be :rrf, :rrf_client, or :rrf_native (got #{method.inspect})."
           end
           k_constant = fusion[:k_constant] || DEFAULT_K_CONSTANT
-          weights    = fusion[:weights]
+          weights = fusion[:weights]
           # Two distinct numbers, deliberately not one. `fusion_depth` is
           # how many rows each branch RETAINS for RRF (bounded by
           # VectorSearch::MAX_K, since it becomes a branch `k`);
@@ -256,30 +263,39 @@ module Parse
           # two-aggregate client path unless a caller explicitly opts into
           # native AND the cluster supports it. Native still falls back to
           # the client path on any execution error.
-          if method == :rrf_native && rank_fusion_supported?(collection_name)
-            # The native pipeline enforces ACL AFTER fusion, so its
-            # per-branch limit is the pre-ACL depth: the candidate
-            # window, not the fusion depth.
-            fused = run_native(collection_name, lex, vec, candidate_window,
-                               k_constant: k_constant, weights: weights, scope_opts: scope_opts)
-            if fused
-              trimmed = fused.first(k_int)
-              # Native retains the full candidate window per branch,
-              # NOT the client path's fusion depth: its ACL `$match`
-              # runs after `$rankFusion`, so the branch limit and the
-              # pre-ACL window are necessarily the same number. Report
-              # what actually executed rather than the client figure.
-              emit_hybrid_stats(collection_name: collection_name, k: k_int,
-                                method: :rrf_native, branch_depth: candidate_window,
-                                candidate_window: candidate_window,
-                                post_filter_count: fused.length,
-                                returned_count: trimmed.length)
-              return trimmed
+          if method == :rrf_native
+            native_resolution = Parse::ACLScope.resolve!(
+              scope_opts.dup, method_name: :"VectorSearch::Hybrid.search",
+            )
+            if rank_fusion_supported?(
+              collection_name,
+              authorizing_client: Parse::ACLScope.client_of(native_resolution),
+            )
+              # The native pipeline enforces ACL AFTER fusion, so its
+              # per-branch limit is the pre-ACL depth: the candidate
+              # window, not the fusion depth.
+              fused = run_native(collection_name, lex, vec, candidate_window,
+                                 k_constant: k_constant, weights: weights, scope_opts: scope_opts,
+                                 resolution: native_resolution)
+              if fused
+                trimmed = fused.first(k_int)
+                # Native retains the full candidate window per branch,
+                # NOT the client path's fusion depth: its ACL `$match`
+                # runs after `$rankFusion`, so the branch limit and the
+                # pre-ACL window are necessarily the same number. Report
+                # what actually executed rather than the client figure.
+                emit_hybrid_stats(collection_name: collection_name, k: k_int,
+                                  method: :rrf_native, branch_depth: candidate_window,
+                                  candidate_window: candidate_window,
+                                  post_filter_count: fused.length,
+                                  returned_count: trimmed.length)
+                return trimmed
+              end
             end
           end
 
           lexical_rows = run_lexical(collection_name, lex, fusion_depth, scope_opts)
-          vector_rows  = run_vector(collection_name, vec, fusion_depth, candidate_window, scope_opts)
+          vector_rows = run_vector(collection_name, vec, fusion_depth, candidate_window, scope_opts)
           fused = rrf({ lexical: lexical_rows, vector: vector_rows },
                       k_constant: k_constant, weights: weights)
           trimmed = fused.first(k_int)
@@ -310,8 +326,7 @@ module Parse
         #
         # @return [Array(Integer, Integer)] `[fusion_depth, candidate_window]`
         def resolve_windows(k_int, candidate_limit)
-          window =
-            if candidate_limit
+          window = if candidate_limit
               limit = Integer(candidate_limit)
               if limit < k_int
                 raise ArgumentError,
@@ -441,8 +456,8 @@ module Parse
           pipeline
         end
 
-        def run_native(collection_name, lex, vec, oversample, k_constant:, weights:, scope_opts:)
-          resolution = Parse::ACLScope.resolve!(scope_opts.dup, method_name: :"VectorSearch::Hybrid.search")
+        def run_native(collection_name, lex, vec, oversample, k_constant:, weights:, scope_opts:, resolution: nil)
+          resolution ||= Parse::ACLScope.resolve!(scope_opts.dup, method_name: :"VectorSearch::Hybrid.search")
           assert_clp_find!(collection_name, resolution)
           pointer_fields = resolve_pointer_fields!(collection_name, resolution)
           protected_fields = Parse::CLPScope.protected_fields_for(
@@ -455,7 +470,8 @@ module Parse
 
           pipeline = native_pipeline_for(lex, vec, oversample, resolution,
                                          k_constant: k_constant, weights: weights, limit: oversample)
-          rows = run_pipeline!(collection_name, pipeline)
+          rows = run_pipeline!(collection_name, pipeline,
+                               authorizing_client: Parse::ACLScope.client_of(resolution))
 
           unless resolution.master?
             # Defense-in-depth top-level row gate. The in-pipeline ACL
@@ -515,11 +531,11 @@ module Parse
           num_candidates = (vec[:num_candidates] || oversample * Parse::VectorSearch::DEFAULT_NUM_CANDIDATES_MULTIPLIER).to_i
           num_candidates = [[num_candidates, oversample].max, 10_000].min
           stage = {
-            "index"         => vec[:index].to_s,
-            "path"          => vec[:field].to_s,
-            "queryVector"   => vec[:query_vector],
+            "index" => vec[:index].to_s,
+            "path" => vec[:field].to_s,
+            "queryVector" => vec[:query_vector],
             "numCandidates" => num_candidates,
-            "limit"         => oversample,
+            "limit" => oversample,
           }
           stage["filter"] = vec[:vector_filter] if vec[:vector_filter] && !vec[:vector_filter].empty?
           inner = [{ "$vectorSearch" => stage }]
@@ -543,10 +559,18 @@ module Parse
 
         # -- the $rankFusion support probe -------------------------------
 
-        def run_probe(collection_name)
-          coll = Parse::MongoDB.collection(collection_name)
+        # Capability probe only: runs `$rankFusion` with an empty input and a
+        # `$limit 0`, so it reads no rows. It still carries the authorizing
+        # client because the process-global MongoDB connection must enforce
+        # its application binding even for a zero-row probe.
+        def run_probe(collection_name, authorizing_client: nil)
+          coll = Parse::MongoDB.collection(collection_name, authorizing_client: authorizing_client)
           coll.aggregate([{ "$rankFusion" => { "input" => {} } }, { "$limit" => 0 }]).to_a
           true
+        rescue Parse::MongoDB::ClientMismatch
+          # A binding violation is not evidence that the stage exists. It is a
+          # security boundary and must reach the caller without being cached.
+          raise
         rescue StandardError => e
           # "Unknown aggregation stage $rankFusion" (or an unrecognized-
           # operator variant) means the cluster predates native support.
@@ -642,8 +666,9 @@ module Parse
           end
         end
 
-        def run_pipeline!(collection_name, pipeline)
-          Parse::MongoDB.collection(collection_name).aggregate(pipeline).to_a
+        def run_pipeline!(collection_name, pipeline, authorizing_client: nil)
+          Parse::MongoDB.collection(collection_name, authorizing_client: authorizing_client)
+                        .aggregate(pipeline).to_a
         end
 
         def assert_clp_find!(collection_name, resolution)

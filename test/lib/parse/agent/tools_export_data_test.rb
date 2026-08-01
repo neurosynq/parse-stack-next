@@ -36,9 +36,9 @@ class ToolsExportDataTest < Minitest::Test
   end
 
   ROWS = [
-    { "objectId" => "a1", "name" => "Ada",   "grade" => 11,
+    { "objectId" => "a1", "name" => "Ada", "grade" => 11,
       "subject" => { "__type" => "Object", "className" => "ExportTestSubject", "name" => "Algebra II" } },
-    { "objectId" => "a2", "name" => "Bao",   "grade" => 10,
+    { "objectId" => "a2", "name" => "Bao", "grade" => 10,
       "subject" => { "__type" => "Object", "className" => "ExportTestSubject", "name" => "Biology" } },
     { "objectId" => "a3", "name" => "Cheng", "grade" => 12,
       "subject" => { "__type" => "Object", "className" => "ExportTestSubject", "name" => "Algebra II" } },
@@ -51,11 +51,11 @@ class ToolsExportDataTest < Minitest::Test
     end
     @agent = Parse::Agent.new(permissions: :readonly)
     rows = ROWS
-    @find_calls   = []
-    @agg_calls    = []
-    fake_client   = Object.new
-    find_calls    = @find_calls
-    agg_calls     = @agg_calls
+    @find_calls = []
+    @agg_calls = []
+    fake_client = Object.new
+    find_calls = @find_calls
+    agg_calls = @agg_calls
     fake_client.define_singleton_method(:find_objects) do |class_name, query, **_opts|
       find_calls << [class_name, query]
       r = Object.new
@@ -88,7 +88,7 @@ class ToolsExportDataTest < Minitest::Test
 
   def test_markdown_format
     result = @agent.execute(:export_data, class_name: "ExportTestStudent",
-                            limit: 10, format: "markdown")
+                                          limit: 10, format: "markdown")
     assert result[:success]
     out = result[:data][:output]
     assert_match(/\A\| .+\|\n\| --- \|/, out, "must start with header row + separator")
@@ -98,7 +98,7 @@ class ToolsExportDataTest < Minitest::Test
 
   def test_text_table_format
     result = @agent.execute(:export_data, class_name: "ExportTestStudent",
-                            limit: 10, format: "table")
+                                          limit: 10, format: "table")
     assert result[:success]
     out = result[:data][:output]
     assert_match(/\A\+-/, out, "must start with corner +")
@@ -118,15 +118,15 @@ class ToolsExportDataTest < Minitest::Test
 
   def test_columns_with_string_specs
     result = @agent.execute(:export_data, class_name: "ExportTestStudent",
-                            columns: ["name", "grade"], format: "csv")
+                                          columns: ["name", "grade"], format: "csv")
     parsed = CSV.parse(result[:data][:output], headers: true)
     assert_equal %w[name grade], parsed.headers
   end
 
   def test_columns_with_hash_aliases
     result = @agent.execute(:export_data, class_name: "ExportTestStudent",
-                            columns: ["name", { "grade" => "Year" }],
-                            format: "csv")
+                                          columns: ["name", { "grade" => "Year" }],
+                                          format: "csv")
     parsed = CSV.parse(result[:data][:output], headers: true)
     assert_equal %w[name Year], parsed.headers
     # Value is mapped from `grade`, displayed under the `Year` header
@@ -135,23 +135,23 @@ class ToolsExportDataTest < Minitest::Test
 
   def test_columns_dotted_path_extraction
     result = @agent.execute(:export_data, class_name: "ExportTestStudent",
-                            columns: ["name", { "subject.name" => "Subject" }],
-                            include: ["subject"], format: "csv")
+                                          columns: ["name", { "subject.name" => "Subject" }],
+                                          include: ["subject"], format: "csv")
     parsed = CSV.parse(result[:data][:output], headers: true)
     assert_equal "Algebra II", parsed[0]["Subject"]
-    assert_equal "Biology",    parsed[1]["Subject"]
+    assert_equal "Biology", parsed[1]["Subject"]
   end
 
   def test_columns_invalid_hash_rejected
     result = @agent.execute(:export_data, class_name: "ExportTestStudent",
-                            columns: [{ "a" => "A", "b" => "B" }])
+                                          columns: [{ "a" => "A", "b" => "B" }])
     refute result[:success]
     assert_equal :invalid_argument, result[:error_code]
   end
 
   def test_columns_invalid_type_rejected
     result = @agent.execute(:export_data, class_name: "ExportTestStudent",
-                            columns: [123])
+                                          columns: [123])
     refute result[:success]
     assert_equal :invalid_argument, result[:error_code]
   end
@@ -166,7 +166,7 @@ class ToolsExportDataTest < Minitest::Test
 
   def test_aggregate_mode_calls_aggregate_pipeline
     @agent.execute(:export_data, class_name: "ExportTestStudent",
-                   pipeline: [{ "$match" => { "name" => "Ada" } }])
+                                 pipeline: [{ "$match" => { "name" => "Ada" } }])
     assert_equal 1, @agg_calls.size
     assert_empty @find_calls
   end
@@ -181,16 +181,16 @@ class ToolsExportDataTest < Minitest::Test
 
   def test_export_aggregate_lookup_into_hidden_is_denied
     result = @agent.execute(:export_data, class_name: "ExportTestStudent",
-                            pipeline: [{ "$lookup" => { "from" => "ExportHidden",
-                                                        "as" => "x", "localField" => "_id",
-                                                        "foreignField" => "_id" } }])
+                                          pipeline: [{ "$lookup" => { "from" => "ExportHidden",
+                                                                     "as" => "x", "localField" => "_id",
+                                                                     "foreignField" => "_id" } }])
     refute result[:success]
     assert_equal :access_denied, result[:error_code]
   end
 
   def test_export_intersects_keys_with_agent_fields_allowlist
     @agent.execute(:export_data, class_name: "ExportRestrictedStudent",
-                   keys: ["ssn", "name"])
+                                 keys: ["ssn", "name"])
     # The keys param should be filtered to drop ssn since it's not in allowlist
     query = @find_calls.last.last
     keys = query[:keys].split(",")
@@ -222,7 +222,7 @@ class ToolsExportDataTest < Minitest::Test
       r
     end
     result = @agent.execute(:export_data, class_name: "ExportTestStudent",
-                            columns: ["name"], format: "csv")
+                                          columns: ["name"], format: "csv")
     assert result[:success]
     assert_equal 0, result[:data][:row_count]
     # CSV.generate with just the header row produces "name\n"

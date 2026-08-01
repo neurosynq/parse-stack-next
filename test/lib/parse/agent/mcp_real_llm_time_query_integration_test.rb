@@ -71,11 +71,11 @@ class MCPTimeQueryTest < Minitest::Test
   #
   # EVENTS_OLDER_THAN_14: events with N in {16,18,20,22,25,28,30} — 7 events.
 
-  EVENTS_TOTAL         = 20
-  EVENTS_LAST_7_DAYS   = 8
-  EVENTS_LAST_14_DAYS  = 13   # 8 + 5
+  EVENTS_TOTAL = 20
+  EVENTS_LAST_7_DAYS = 8
+  EVENTS_LAST_14_DAYS = 13   # 8 + 5
   EVENTS_OLDER_THAN_14 = 7
-  LOGIN_EVENTS_LAST_7  = 3    # login events in the last-7-days bucket only
+  LOGIN_EVENTS_LAST_7 = 3    # login events in the last-7-days bucket only
 
   # Fixture table: [days_ago, category, title]
   # Using UTC seconds so event_at timestamps are unambiguously in the correct
@@ -83,28 +83,28 @@ class MCPTimeQueryTest < Minitest::Test
   #
   # Last-7-days bucket (N in 0..6) — 8 events, 3 login:
   EVENT_FIXTURES = [
-    [0,  "login",    "User login attempt"],
-    [1,  "checkout", "Checkout completed"],
-    [2,  "login",    "User login attempt"],
-    [3,  "signup",   "Signup confirmation"],
-    [4,  "login",    "User login attempt"],
-    [5,  "checkout", "Checkout completed"],
-    [5,  "signup",   "Signup confirmation"],
-    [6,  "error",    "Error in payment flow"],
+    [0, "login", "User login attempt"],
+    [1, "checkout", "Checkout completed"],
+    [2, "login", "User login attempt"],
+    [3, "signup", "Signup confirmation"],
+    [4, "login", "User login attempt"],
+    [5, "checkout", "Checkout completed"],
+    [5, "signup", "Signup confirmation"],
+    [6, "error", "Error in payment flow"],
     # 8-14 days bucket (N in 8..12) — 5 events:
-    [8,  "checkout", "Checkout completed"],
-    [9,  "signup",   "Signup confirmation"],
-    [10, "error",    "Error in payment flow"],
-    [11, "login",    "User login attempt"],
+    [8, "checkout", "Checkout completed"],
+    [9, "signup", "Signup confirmation"],
+    [10, "error", "Error in payment flow"],
+    [11, "login", "User login attempt"],
     [12, "checkout", "Checkout completed"],
     # Older than 14 days bucket (N in 16..30) — 7 events:
-    [16, "signup",   "Signup confirmation"],
-    [18, "login",    "User login attempt"],
-    [20, "error",    "Error in payment flow"],
+    [16, "signup", "Signup confirmation"],
+    [18, "login", "User login attempt"],
+    [20, "error", "Error in payment flow"],
     [22, "checkout", "Checkout completed"],
-    [25, "login",    "User login attempt"],
-    [28, "signup",   "Signup confirmation"],
-    [30, "error",    "Error in payment flow"],
+    [25, "login", "User login attempt"],
+    [28, "signup", "Signup confirmation"],
+    [30, "error", "Error in payment flow"],
   ].freeze
 
   # NOTE: do NOT override `def setup` / `def teardown` here.
@@ -128,9 +128,9 @@ class MCPTimeQueryTest < Minitest::Test
     events = EVENT_FIXTURES.map do |days_ago, category, title|
       ts = Time.now.utc - (days_ago * 86400)
       e = MCPTimeQueryEvent.new(
-        title:    title,
+        title: title,
         category: category,
-        event_at: ts
+        event_at: ts,
       )
       assert e.save, "event save failed (#{days_ago}d ago, #{category}): #{e.errors.full_messages.join(", ")}"
       e
@@ -155,7 +155,7 @@ class MCPTimeQueryTest < Minitest::Test
     configure_llm_provider!
 
     with_time_query_fixtures do |events|
-      agent        = Parse::Agent.new(permissions: :readonly)
+      agent = Parse::Agent.new(permissions: :readonly)
       openai_tools = fetch_openai_tools(agent)
 
       # Pre-compute the cutoff so the LLM does not need to do date math.
@@ -166,17 +166,17 @@ class MCPTimeQueryTest < Minitest::Test
       cutoff_7_ago = (Time.now.utc - 7 * 86400).iso8601
 
       prompt = time_query_prompt(
-        question:            "How many events occurred since #{cutoff_7_ago}? " \
-                             "Use count_objects with event_at >= the provided cutoff timestamp. " \
-                             "Answer with just the count.",
+        question: "How many events occurred since #{cutoff_7_ago}? " \
+                  "Use count_objects with event_at >= the provided cutoff timestamp. " \
+                  "Answer with just the count.",
         include_format_hint: true,
-        cutoffs:             { "seven_days_ago (use as $gte value)" => cutoff_7_ago }
+        cutoffs: { "seven_days_ago (use as $gte value)" => cutoff_7_ago },
       )
 
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 6)
-      flat       = transcript_text(transcript)
+      flat = transcript_text(transcript)
       tool_calls = transcript_tool_names(transcript)
-      tool_args  = transcript_tool_args(transcript)
+      tool_args = transcript_tool_args(transcript)
 
       # Always print tool args — this is the empirical record of whether the
       # LLM constructed { "__type": "Date", "iso": "..." } or some other form.
@@ -205,28 +205,28 @@ class MCPTimeQueryTest < Minitest::Test
     configure_llm_provider!
 
     with_time_query_fixtures do |events|
-      agent        = Parse::Agent.new(permissions: :readonly)
+      agent = Parse::Agent.new(permissions: :readonly)
       openai_tools = fetch_openai_tools(agent)
 
-      cutoff_7_ago  = (Time.now.utc - 7  * 86400).iso8601
+      cutoff_7_ago = (Time.now.utc - 7 * 86400).iso8601
       cutoff_14_ago = (Time.now.utc - 14 * 86400).iso8601
 
       prompt = time_query_prompt(
-        question:            "How many events occurred between the two provided cutoff timestamps " \
-                             "(from fourteen_days_ago up to seven_days_ago, inclusive)? " \
-                             "Use $gte for the start cutoff and $lte for the end cutoff on event_at. " \
-                             "Answer with just the count.",
+        question: "How many events occurred between the two provided cutoff timestamps " \
+                  "(from fourteen_days_ago up to seven_days_ago, inclusive)? " \
+                  "Use $gte for the start cutoff and $lte for the end cutoff on event_at. " \
+                  "Answer with just the count.",
         include_format_hint: true,
-        cutoffs:             {
+        cutoffs: {
           "fourteen_days_ago (use as $gte value)" => cutoff_14_ago,
           "seven_days_ago    (use as $lte value)" => cutoff_7_ago,
-        }
+        },
       )
 
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 6)
-      flat       = transcript_text(transcript)
+      flat = transcript_text(transcript)
       tool_calls = transcript_tool_names(transcript)
-      tool_args  = transcript_tool_args(transcript)
+      tool_args = transcript_tool_args(transcript)
 
       refute_empty tool_calls, "model must invoke at least one MCP tool; got none"
       assert (tool_calls & %w[count_objects query_class]).any?,
@@ -250,23 +250,23 @@ class MCPTimeQueryTest < Minitest::Test
     configure_llm_provider!
 
     with_time_query_fixtures do |events|
-      agent        = Parse::Agent.new(permissions: :readonly)
+      agent = Parse::Agent.new(permissions: :readonly)
       openai_tools = fetch_openai_tools(agent)
 
       cutoff_14_ago = (Time.now.utc - 14 * 86400).iso8601
 
       prompt = time_query_prompt(
-        question:            "How many events occurred MORE than 14 days ago? " \
-                             "Use $lt on event_at with the provided fourteen_days_ago cutoff. " \
-                             "Answer with just the count.",
+        question: "How many events occurred MORE than 14 days ago? " \
+                  "Use $lt on event_at with the provided fourteen_days_ago cutoff. " \
+                  "Answer with just the count.",
         include_format_hint: true,
-        cutoffs:             { "fourteen_days_ago (use as $lt value)" => cutoff_14_ago }
+        cutoffs: { "fourteen_days_ago (use as $lt value)" => cutoff_14_ago },
       )
 
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 6)
-      flat       = transcript_text(transcript)
+      flat = transcript_text(transcript)
       tool_calls = transcript_tool_names(transcript)
-      tool_args  = transcript_tool_args(transcript)
+      tool_args = transcript_tool_args(transcript)
 
       refute_empty tool_calls, "model must invoke at least one MCP tool; got none"
       assert (tool_calls & %w[count_objects query_class]).any?,
@@ -291,23 +291,23 @@ class MCPTimeQueryTest < Minitest::Test
     configure_llm_provider!
 
     with_time_query_fixtures do |events|
-      agent        = Parse::Agent.new(permissions: :readonly)
+      agent = Parse::Agent.new(permissions: :readonly)
       openai_tools = fetch_openai_tools(agent)
 
       cutoff_7_ago = (Time.now.utc - 7 * 86400).iso8601
 
       prompt = time_query_prompt(
-        question:            "How many login events occurred since the provided seven_days_ago cutoff? " \
-                             "Filter by BOTH event_at >= seven_days_ago AND category equal to 'login'. " \
-                             "Answer with just the count.",
+        question: "How many login events occurred since the provided seven_days_ago cutoff? " \
+                  "Filter by BOTH event_at >= seven_days_ago AND category equal to 'login'. " \
+                  "Answer with just the count.",
         include_format_hint: true,
-        cutoffs:             { "seven_days_ago (use as $gte value for event_at)" => cutoff_7_ago }
+        cutoffs: { "seven_days_ago (use as $gte value for event_at)" => cutoff_7_ago },
       )
 
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 6)
-      flat       = transcript_text(transcript)
+      flat = transcript_text(transcript)
       tool_calls = transcript_tool_names(transcript)
-      tool_args  = transcript_tool_args(transcript)
+      tool_args = transcript_tool_args(transcript)
 
       refute_empty tool_calls, "model must invoke at least one MCP tool; got none"
       assert (tool_calls & %w[count_objects query_class]).any?,
@@ -354,29 +354,29 @@ class MCPTimeQueryTest < Minitest::Test
     configure_llm_provider!
 
     with_time_query_fixtures do |events|
-      agent        = Parse::Agent.new(permissions: :readonly)
+      agent = Parse::Agent.new(permissions: :readonly)
       openai_tools = fetch_openai_tools(agent)
 
       # Deliberately no wire-format hint. The LLM may construct a raw ISO
       # string, may omit the filter, or may loop without converging.
       # We observe all three possible behaviors without enforcing a count.
       prompt = time_query_prompt(
-        question:            "How many events happened today? " \
-                             "Use count_objects with a where filter on event_at. Answer with just the count.",
-        include_format_hint: false
+        question: "How many events happened today? " \
+                  "Use count_objects with a where filter on event_at. Answer with just the count.",
+        include_format_hint: false,
       )
 
       # This must not raise — the tool result (whatever it is) should be
       # returned without an exception, even if the LLM loops.
       transcript = begin
-        llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 6)
-      rescue => e
-        flunk "llm_round_trip raised unexpectedly: #{e.class}: #{e.message}"
-      end
+          llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 6)
+        rescue => e
+          flunk "llm_round_trip raised unexpectedly: #{e.class}: #{e.message}"
+        end
 
-      flat       = transcript_text(transcript)
+      flat = transcript_text(transcript)
       tool_calls = transcript_tool_names(transcript)
-      tool_args  = transcript_tool_args(transcript)
+      tool_args = transcript_tool_args(transcript)
 
       # Always print tool args — this is the empirical record of what format
       # the LLM used (or did not use) and what Parse Server returned.
@@ -432,23 +432,23 @@ class MCPTimeQueryTest < Minitest::Test
     cutoff_section = cutoffs.empty? ? "" : "Pre-computed cutoff timestamps (use these EXACTLY as the iso value):\n#{cutoff_block}\n"
 
     format_hint = if include_format_hint
-      <<~HINT
+        <<~HINT
 
-        IMPORTANT: Parse Server expects date values in this wire format:
-          { "__type": "Date", "iso": "<ISO 8601 string in UTC>" }
-        NOT as raw strings. A where clause filtering by date looks like:
-          where: { "event_at": { "$gte": { "__type": "Date", "iso": "2026-05-10T00:00:00Z" } } }
-        For a range, combine $gte and $lte (or $lt) in the same field object:
-          where: { "event_at": { "$gte": { "__type": "Date", "iso": "<start>" },
-                                 "$lte": { "__type": "Date", "iso": "<end>" } } }
+          IMPORTANT: Parse Server expects date values in this wire format:
+            { "__type": "Date", "iso": "<ISO 8601 string in UTC>" }
+          NOT as raw strings. A where clause filtering by date looks like:
+            where: { "event_at": { "$gte": { "__type": "Date", "iso": "2026-05-10T00:00:00Z" } } }
+          For a range, combine $gte and $lte (or $lt) in the same field object:
+            where: { "event_at": { "$gte": { "__type": "Date", "iso": "<start>" },
+                                   "$lte": { "__type": "Date", "iso": "<end>" } } }
 
-        Use count_objects with a where argument for counting with filters. Example call:
-          count_objects(class_name: "MCPTimeQueryEvent", where: { "event_at": { "$gte": { "__type": "Date", "iso": "..." } } })
-        Do NOT use query_class for counting — it returns records, not a count.
-      HINT
-    else
-      ""
-    end
+          Use count_objects with a where argument for counting with filters. Example call:
+            count_objects(class_name: "MCPTimeQueryEvent", where: { "event_at": { "$gte": { "__type": "Date", "iso": "..." } } })
+          Do NOT use query_class for counting — it returns records, not a count.
+        HINT
+      else
+        ""
+      end
 
     <<~PROMPT
       You have access to MCP tools. The class MCPTimeQueryEvent has:
@@ -487,7 +487,7 @@ class MCPTimeQueryTest < Minitest::Test
 
   def fetch_openai_tools(agent)
     envelope = mcp_call({ "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }, agent)
-    tools    = envelope.dig("result", "tools")
+    tools = envelope.dig("result", "tools")
     refute_nil tools, "tools/list returned no tools"
     mcp_tools_to_openai(tools)
   end
@@ -504,9 +504,9 @@ class MCPTimeQueryTest < Minitest::Test
       {
         type: "function",
         function: {
-          name:        h["name"],
+          name: h["name"],
           description: h["description"].to_s[0, 1024],
-          parameters:  h["inputSchema"] || { "type" => "object", "properties" => {} },
+          parameters: h["inputSchema"] || { "type" => "object", "properties" => {} },
         },
       }
     end
@@ -521,16 +521,16 @@ class MCPTimeQueryTest < Minitest::Test
     case @provider
     when "lmstudio"
       @base_url = ENV["LLM_BASE_URL"] || "http://localhost:1234/v1"
-      @model    = ENV["LLM_MODEL"]    || "qwen2.5-7b-instruct"
-      @api_key  = ENV["LLM_API_KEY"]  || "lm-studio"
+      @model = ENV["LLM_MODEL"] || "qwen2.5-7b-instruct"
+      @api_key = ENV["LLM_API_KEY"] || "lm-studio"
     when "openai"
       @base_url = ENV["LLM_BASE_URL"] || "https://api.openai.com/v1"
-      @model    = ENV["LLM_MODEL"]    || "gpt-4o-mini"
-      @api_key  = ENV["LLM_API_KEY"]
+      @model = ENV["LLM_MODEL"] || "gpt-4o-mini"
+      @api_key = ENV["LLM_API_KEY"]
     when "anthropic"
       @base_url = ENV["LLM_BASE_URL"] || "https://api.anthropic.com/v1"
-      @model    = ENV["LLM_MODEL"]    || "claude-haiku-4-5"
-      @api_key  = ENV["LLM_API_KEY"]
+      @model = ENV["LLM_MODEL"] || "claude-haiku-4-5"
+      @api_key = ENV["LLM_API_KEY"]
     else
       skip "Unknown LLM_PROVIDER=#{@provider.inspect}"
     end
@@ -542,7 +542,7 @@ class MCPTimeQueryTest < Minitest::Test
   # --------------------------------------------------------------------------
 
   def llm_round_trip(prompt:, tools:, agent:, max_iterations: 6)
-    messages   = [{ role: "user", content: prompt }]
+    messages = [{ role: "user", content: prompt }]
     transcript = []
 
     max_iterations.times do
@@ -555,16 +555,16 @@ class MCPTimeQueryTest < Minitest::Test
       reply[:tool_calls].each do |tc|
         body = {
           "jsonrpc" => "2.0",
-          "id"      => SecureRandom.hex(4),
-          "method"  => "tools/call",
-          "params"  => { "name" => tc[:name], "arguments" => tc[:arguments] },
+          "id" => SecureRandom.hex(4),
+          "method" => "tools/call",
+          "params" => { "name" => tc[:name], "arguments" => tc[:arguments] },
         }
-        result    = mcp_call(body, agent)
+        result = mcp_call(body, agent)
         tool_text = if result["result"]
-          result.dig("result", "content", 0, "text") || result["result"].to_json
-        else
-          result.dig("error", "message").to_s
-        end
+            result.dig("result", "content", 0, "text") || result["result"].to_json
+          else
+            result.dig("error", "message").to_s
+          end
         messages << { role: "tool", tool_call_id: tc[:id], content: tool_text }
       end
     end
@@ -575,7 +575,7 @@ class MCPTimeQueryTest < Minitest::Test
   def call_llm(messages:, tools:)
     case @provider
     when "anthropic" then anthropic_chat(messages: messages, tools: tools)
-    else                  openai_chat(messages: messages, tools: tools)
+    else openai_chat(messages: messages, tools: tools)
     end
   end
 
@@ -602,11 +602,11 @@ class MCPTimeQueryTest < Minitest::Test
       end
     end.compact
 
-    uri  = URI("#{@base_url}/chat/completions")
+    uri = URI("#{@base_url}/chat/completions")
     body = JSON.generate({ model: @model, messages: openai_messages, tools: tools, tool_choice: "auto", temperature: 0 })
 
     req = Net::HTTP::Post.new(uri)
-    req["Content-Type"]  = "application/json"
+    req["Content-Type"] = "application/json"
     req["Authorization"] = "Bearer #{@api_key}"
     req.body = body
 
@@ -614,8 +614,8 @@ class MCPTimeQueryTest < Minitest::Test
     skip "LLM call failed: HTTP #{res.code} #{res.body[0, 300]}" unless res.code.to_i.between?(200, 299)
 
     parsed = JSON.parse(res.body)
-    msg    = parsed.dig("choices", 0, "message") || {}
-    calls  = Array(msg["tool_calls"]).map do |tc|
+    msg = parsed.dig("choices", 0, "message") || {}
+    calls = Array(msg["tool_calls"]).map do |tc|
       args = tc.dig("function", "arguments")
       args = JSON.parse(args) if args.is_a?(String) && !args.empty?
       { id: tc["id"] || SecureRandom.hex(4), name: tc.dig("function", "name"), arguments: args || {} }
@@ -628,20 +628,20 @@ class MCPTimeQueryTest < Minitest::Test
   # --------------------------------------------------------------------------
 
   def anthropic_chat(messages:, tools:)
-    anth_tools    = tools.map { |t| { name: t[:function][:name], description: t[:function][:description], input_schema: t[:function][:parameters] } }
+    anth_tools = tools.map { |t| { name: t[:function][:name], description: t[:function][:description], input_schema: t[:function][:parameters] } }
     anth_messages = messages.map do |m|
       case m[:role]
       when "user", "assistant" then { role: m[:role], content: m[:content].to_s }
-      when "tool"              then { role: "user", content: [{ type: "tool_result", tool_use_id: m[:tool_call_id], content: m[:content] }] }
+      when "tool" then { role: "user", content: [{ type: "tool_result", tool_use_id: m[:tool_call_id], content: m[:content] }] }
       end
     end.compact
 
-    uri  = URI("#{@base_url}/messages")
+    uri = URI("#{@base_url}/messages")
     body = JSON.generate({ model: @model, max_tokens: 1024, tools: anth_tools, messages: anth_messages })
 
     req = Net::HTTP::Post.new(uri)
-    req["Content-Type"]      = "application/json"
-    req["x-api-key"]         = @api_key
+    req["Content-Type"] = "application/json"
+    req["x-api-key"] = @api_key
     req["anthropic-version"] = "2023-06-01"
     req.body = body
 
@@ -650,8 +650,8 @@ class MCPTimeQueryTest < Minitest::Test
 
     parsed = JSON.parse(res.body)
     blocks = Array(parsed["content"])
-    text   = blocks.select { |b| b["type"] == "text" }.map { |b| b["text"] }.join("\n")
-    calls  = blocks.select { |b| b["type"] == "tool_use" }.map { |b| { id: b["id"], name: b["name"], arguments: b["input"] || {} } }
+    text = blocks.select { |b| b["type"] == "text" }.map { |b| b["text"] }.join("\n")
+    calls = blocks.select { |b| b["type"] == "tool_use" }.map { |b| { id: b["id"], name: b["name"], arguments: b["input"] || {} } }
     { role: "assistant", content: text, tool_calls: calls }
   end
 end

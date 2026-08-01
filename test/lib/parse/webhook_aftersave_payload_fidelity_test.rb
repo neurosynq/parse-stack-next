@@ -77,10 +77,10 @@ class LifecyclePost < Parse::Object
   end
   self.seen = []
 
-  before_save   { LifecyclePost.snapshot(self, :before_save) }
+  before_save { LifecyclePost.snapshot(self, :before_save) }
   before_create { LifecyclePost.snapshot(self, :before_create) }
-  after_create  { LifecyclePost.snapshot(self, :after_create) }
-  after_save    { LifecyclePost.snapshot(self, :after_save) }
+  after_create { LifecyclePost.snapshot(self, :after_create) }
+  after_save { LifecyclePost.snapshot(self, :after_save) }
 
   def self.snapshot(obj, hook)
     seen << {
@@ -115,14 +115,15 @@ class CondCbPost < Parse::Object
   property :title, :string
   class << self; attr_accessor :ran; end
   self.ran = []
-  before_save   :always_bs
-  before_save   :skip_bs,  if: -> { false }
+  before_save :always_bs
+  before_save :skip_bs, if: -> { false }
   before_create :always_bc
-  before_create :skip_bc,  if: -> { false }
+  before_create :skip_bc, if: -> { false }
+
   def always_bs; CondCbPost.ran << :always_bs; end
-  def skip_bs;   CondCbPost.ran << :skip_bs; end
+  def skip_bs; CondCbPost.ran << :skip_bs; end
   def always_bc; CondCbPost.ran << :always_bc; end
-  def skip_bc;   CondCbPost.ran << :skip_bc; end
+  def skip_bc; CondCbPost.ran << :skip_bc; end
 end
 
 class WebhookAfterSavePayloadFidelityTest < Minitest::Test
@@ -147,13 +148,13 @@ class WebhookAfterSavePayloadFidelityTest < Minitest::Test
     {
       "triggerName" => "afterSave",
       "object" => {
-        "className"  => "FidelityPost",
-        "objectId"   => "NEWobj0001",
-        "title"      => "hello world",
-        "status"     => "draft",
-        "createdAt"  => CREATED_AT,
-        "updatedAt"  => CREATED_AT, # equal => freshly created
-        "ACL"        => { "u_owner" => { "read" => true, "write" => true } },
+        "className" => "FidelityPost",
+        "objectId" => "NEWobj0001",
+        "title" => "hello world",
+        "status" => "draft",
+        "createdAt" => CREATED_AT,
+        "updatedAt" => CREATED_AT, # equal => freshly created
+        "ACL" => { "u_owner" => { "read" => true, "write" => true } },
       },
       "headers" => { "x-parse-request-id" => "client_create_01" },
     }
@@ -166,24 +167,24 @@ class WebhookAfterSavePayloadFidelityTest < Minitest::Test
     {
       "triggerName" => "afterSave",
       "object" => {
-        "className"  => "FidelityPost",
-        "objectId"   => "UPDobj0001",
-        "title"      => "goodbye world",
-        "status"     => "draft",
-        "body"       => "v2",
-        "createdAt"  => CREATED_AT,
-        "updatedAt"  => UPDATED_AT, # differs => this is an update
-        "ACL"        => { "u_owner" => { "read" => true, "write" => true } },
+        "className" => "FidelityPost",
+        "objectId" => "UPDobj0001",
+        "title" => "goodbye world",
+        "status" => "draft",
+        "body" => "v2",
+        "createdAt" => CREATED_AT,
+        "updatedAt" => UPDATED_AT, # differs => this is an update
+        "ACL" => { "u_owner" => { "read" => true, "write" => true } },
       },
       "original" => {
-        "className"  => "FidelityPost",
-        "objectId"   => "UPDobj0001",
-        "title"      => "hello world",
-        "status"     => "draft",
-        "body"       => "v1",
-        "createdAt"  => CREATED_AT,
-        "updatedAt"  => CREATED_AT,
-        "ACL"        => { "u_owner" => { "read" => true, "write" => true } },
+        "className" => "FidelityPost",
+        "objectId" => "UPDobj0001",
+        "title" => "hello world",
+        "status" => "draft",
+        "body" => "v1",
+        "createdAt" => CREATED_AT,
+        "updatedAt" => CREATED_AT,
+        "ACL" => { "u_owner" => { "read" => true, "write" => true } },
       },
       "headers" => { "x-parse-request-id" => "client_update_01" },
     }
@@ -244,16 +245,16 @@ class WebhookAfterSavePayloadFidelityTest < Minitest::Test
   # system fields (createdAt / updatedAt / ACL) stay clean and still readable.
   def test_new_payload_dirty_tracking
     obj = Parse::Webhooks::Payload.new(new_aftersave_payload).parse_object
-    assert obj.title_changed?,  "title must be reported changed on an afterSave create"
+    assert obj.title_changed?, "title must be reported changed on an afterSave create"
     assert obj.status_changed?, "status must be reported changed on an afterSave create"
     assert_includes obj.changed, "title"
     assert_includes obj.changed, "status"
     # System fields are present (readable) but NOT reported as data changes.
     refute obj.created_at_changed?, "createdAt must stay clean on a create"
     refute obj.updated_at_changed?, "updatedAt must stay clean on a create"
-    refute obj.acl_changed?,        "ACL must stay clean on a create"
+    refute obj.acl_changed?, "ACL must stay clean on a create"
     refute_nil obj.created_at, "createdAt is still readable"
-    refute_nil obj.acl,        "ACL is still readable"
+    refute_nil obj.acl, "ACL is still readable"
   end
 
   # Regression guard for the default-value bug: a property whose create value
@@ -266,20 +267,20 @@ class WebhookAfterSavePayloadFidelityTest < Minitest::Test
       "triggerName" => "afterSave",
       "object" => {
         "className" => "DefaultPost",
-        "objectId"  => "DEFobj0001",
-        "title"     => "hello",
-        "status"    => "draft", # == default
-        "count"     => 0,       # == default
-        "archived"  => false,   # == default
+        "objectId" => "DEFobj0001",
+        "title" => "hello",
+        "status" => "draft", # == default
+        "count" => 0,       # == default
+        "archived" => false,   # == default
         "createdAt" => CREATED_AT,
         "updatedAt" => CREATED_AT,
       },
     }
     obj = Parse::Webhooks::Payload.new(payload).parse_object
-    assert obj.status_changed?,   "status == default must still mark changed on a create"
-    assert obj.count_changed?,    "count == default must still mark changed on a create"
+    assert obj.status_changed?, "status == default must still mark changed on a create"
+    assert obj.count_changed?, "count == default must still mark changed on a create"
     assert obj.archived_changed?, "archived == default must still mark changed on a create"
-    assert obj.title_changed?,    "a non-default field marks changed too"
+    assert obj.title_changed?, "a non-default field marks changed too"
     %w[status count archived title].each do |f|
       assert_includes obj.changed, f, "#{f} must be in changed"
     end
@@ -293,8 +294,8 @@ class WebhookAfterSavePayloadFidelityTest < Minitest::Test
       "triggerName" => "afterSave",
       "object" => {
         "className" => "DefaultPost",
-        "objectId"  => "DEFobj0002",
-        "title"     => "hello",
+        "objectId" => "DEFobj0002",
+        "title" => "hello",
         "createdAt" => CREATED_AT,
         "updatedAt" => CREATED_AT,
       },
@@ -303,7 +304,7 @@ class WebhookAfterSavePayloadFidelityTest < Minitest::Test
     assert_equal "draft", obj.status, "a defaulted field absent from the payload keeps its default"
     assert_equal 0, obj.count, "absent defaulted field keeps its default value"
     refute obj.status_changed?, "a field absent from the payload is not a change"
-    assert obj.title_changed?,  "the present field is reported changed"
+    assert obj.title_changed?, "the present field is reported changed"
   end
 
   # ========================================================================
@@ -341,12 +342,12 @@ class WebhookAfterSavePayloadFidelityTest < Minitest::Test
   # specific field across the prior and final state.
   def test_changed_payload_diff_via_original_vs_object
     payload = Parse::Webhooks::Payload.new(changed_aftersave_payload)
-    obj  = payload.parse_object
+    obj = payload.parse_object
     orig = payload.original_parse_object
 
     refute_nil orig, "original_parse_object must build from the original hash"
-    assert_equal "hello world",   orig.title, "original retains previous value"
-    assert_equal "goodbye world", obj.title,  "object holds new value"
+    assert_equal "hello world", orig.title, "original retains previous value"
+    assert_equal "goodbye world", obj.title, "object holds new value"
     refute_equal orig.title, obj.title, "a field-level change is detectable by comparison"
     assert_equal orig.status, obj.status, "unchanged field is equal across original/object"
   end
@@ -383,10 +384,10 @@ class WebhookAfterSavePayloadFidelityTest < Minitest::Test
 
   # Remote (wire) key -> local accessor used to read it back off the object.
   REMOTE_TO_LOCAL = {
-    "objectId"  => :id,
+    "objectId" => :id,
     "createdAt" => :created_at,
     "updatedAt" => :updated_at,
-    "ACL"       => :acl,
+    "ACL" => :acl,
   }.freeze
 
   # Wire keys that are routing metadata, not data fields, and are not expected
@@ -435,7 +436,7 @@ class WebhookAfterSavePayloadFidelityTest < Minitest::Test
     p["object"] = p["object"].merge("sessionToken" => "r:should-be-scrubbed")
     payload = Parse::Webhooks::Payload.new(p)
 
-    raw_keys      = payload.raw[:object].keys.sort
+    raw_keys = payload.raw[:object].keys.sort
     scrubbed_keys = payload.object.keys.sort
 
     assert_includes raw_keys, "createdAt",
@@ -508,10 +509,10 @@ class WebhookAfterSavePayloadFidelityTest < Minitest::Test
       "triggerName" => "beforeSave",
       "object" => {
         "className" => "LifecyclePost",
-        "objectId"  => "BScreate01",
-        "title"     => "new title",
-        "status"    => "draft",
-        "ACL"       => { "u_owner" => { "read" => true, "write" => true } },
+        "objectId" => "BScreate01",
+        "title" => "new title",
+        "status" => "draft",
+        "ACL" => { "u_owner" => { "read" => true, "write" => true } },
       },
       "headers" => { "x-parse-request-id" => "client_bs_create" },
     }

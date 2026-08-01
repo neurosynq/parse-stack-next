@@ -30,17 +30,17 @@ class ToolCategoriesTest < Minitest::Test
   # ---- Built-in categorization -------------------------------------------
 
   EXPECTED_BUILTIN_CATEGORIES = {
-    get_all_schemas:    "schema",
-    get_schema:         "schema",
-    query_class:        "query",
-    count_objects:      "query",
-    get_object:         "query",
-    get_objects:        "query",
+    get_all_schemas: "schema",
+    get_schema: "schema",
+    query_class: "query",
+    count_objects: "query",
+    get_object: "query",
+    get_objects: "query",
     get_sample_objects: "query",
-    explain_query:      "query",
-    aggregate:          "aggregate",
-    call_method:        "mutation",
-    export_data:        "export",
+    explain_query: "query",
+    aggregate: "aggregate",
+    call_method: "mutation",
+    export_data: "export",
   }.freeze
 
   def test_every_builtin_carries_expected_category

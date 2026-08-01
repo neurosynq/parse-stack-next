@@ -78,7 +78,7 @@ class MCPTieredComplexityTest < Minitest::Test
 
   TIER_TEACHERS = [
     { name: "Ms. Vasquez", rating: 4.9 },
-    { name: "Mr. Okafor",  rating: 4.2 },
+    { name: "Mr. Okafor", rating: 4.2 },
     { name: "Mrs. Davies", rating: 4.6 },
   ].freeze
 
@@ -87,13 +87,13 @@ class MCPTieredComplexityTest < Minitest::Test
   TIER_STUDENT_DISTRIBUTION = {
     "Ms. Vasquez" => %w[Ada Bao Cheng Diego],
     "Mrs. Davies" => %w[Esi Fatima Goro],
-    "Mr. Okafor"  => %w[Hana],
+    "Mr. Okafor" => %w[Hana],
   }.freeze
 
   TIER_SUBJECTS = [
-    { name: "Algebra II",      department: "Mathematics" },
-    { name: "World Literature", department: "English"    },
-    { name: "Biology",          department: "Sciences"   },
+    { name: "Algebra II", department: "Mathematics" },
+    { name: "World Literature", department: "English" },
+    { name: "Biology", department: "Sciences" },
   ].freeze
 
   # Tier 4: every student takes exactly 2 exams (Algebra II + Biology).
@@ -101,18 +101,18 @@ class MCPTieredComplexityTest < Minitest::Test
   # All other students score ≤ 170 combined so the winner is unambiguous.
   # Layout: { student_name => [algebra_score, biology_score] }
   TIER4_EXAM_SCORES = {
-    "Ada"    => [80, 85],  # 165
-    "Bao"    => [95, 92],  # 187  ← top scorer
-    "Cheng"  => [70, 75],  # 145
-    "Diego"  => [82, 88],  # 170
-    "Esi"    => [65, 72],  # 137
+    "Ada" => [80, 85],  # 165
+    "Bao" => [95, 92],  # 187  ← top scorer
+    "Cheng" => [70, 75],  # 145
+    "Diego" => [82, 88],  # 170
+    "Esi" => [65, 72],  # 137
     "Fatima" => [78, 80],  # 158
-    "Goro"   => [60, 68],  # 128
-    "Hana"   => [55, 65],  # 120
+    "Goro" => [60, 68],  # 128
+    "Hana" => [55, 65],  # 120
   }.freeze
 
   TIER4_TOP_STUDENT = "Bao"
-  TIER4_TOP_SCORE   = 187  # 95 + 92
+  TIER4_TOP_SCORE = 187  # 95 + 92
 
   # Tier 5: Cheng has 3 "absent" records; every other student has at most 1.
   # Cheng's exam sum (145) is also below the median — the underperforming story holds.
@@ -189,9 +189,9 @@ class MCPTieredComplexityTest < Minitest::Test
 
     yield teachers, students, subjects
   ensure
-    (subjects  || []).each { |s| s.destroy rescue nil }
-    (students  || []).each { |s| s.destroy rescue nil }
-    (teachers  || []).each { |t| t.destroy rescue nil }
+    (subjects || []).each { |s| s.destroy rescue nil }
+    (students || []).each { |s| s.destroy rescue nil }
+    (teachers || []).each { |t| t.destroy rescue nil }
   end
 
   # Tier 4: Tier 3 + deterministic exam records (2 per student).
@@ -220,14 +220,14 @@ class MCPTieredComplexityTest < Minitest::Test
       sub
     end
     # Exam subjects: Algebra II (index 0), Biology (index 2).
-    algebra  = subjects[0]
-    biology  = subjects[2]
+    algebra = subjects[0]
+    biology = subjects[2]
 
     exams = TIER4_EXAM_SCORES.flat_map do |student_name, scores|
       student = students_by_name.fetch(student_name)
       [
-        MCPTierExam.new(title: "#{student_name} Algebra II Exam",  score: scores[0], student: student, subject: algebra),
-        MCPTierExam.new(title: "#{student_name} Biology Exam",      score: scores[1], student: student, subject: biology),
+        MCPTierExam.new(title: "#{student_name} Algebra II Exam", score: scores[0], student: student, subject: algebra),
+        MCPTierExam.new(title: "#{student_name} Biology Exam", score: scores[1], student: student, subject: biology),
       ].map do |e|
         assert e.save, "exam save failed for #{e.title}: #{e.errors.full_messages.join(", ")}"
         e
@@ -236,7 +236,7 @@ class MCPTieredComplexityTest < Minitest::Test
 
     yield teachers, students, subjects, exams
   ensure
-    (exams    || []).each { |e| e.destroy rescue nil }
+    (exams || []).each { |e| e.destroy rescue nil }
     (subjects || []).each { |s| s.destroy rescue nil }
     (students || []).each { |s| s.destroy rescue nil }
     (teachers || []).each { |t| t.destroy rescue nil }
@@ -273,8 +273,8 @@ class MCPTieredComplexityTest < Minitest::Test
     exams = TIER4_EXAM_SCORES.flat_map do |student_name, scores|
       student = students_by_name.fetch(student_name)
       [
-        MCPTierExam.new(title: "#{student_name} Algebra II Exam",  score: scores[0], student: student, subject: algebra),
-        MCPTierExam.new(title: "#{student_name} Biology Exam",      score: scores[1], student: student, subject: biology),
+        MCPTierExam.new(title: "#{student_name} Algebra II Exam", score: scores[0], student: student, subject: algebra),
+        MCPTierExam.new(title: "#{student_name} Biology Exam", score: scores[1], student: student, subject: biology),
       ].map do |e|
         assert e.save, "exam save failed for #{e.title}: #{e.errors.full_messages.join(", ")}"
         e
@@ -291,9 +291,9 @@ class MCPTieredComplexityTest < Minitest::Test
       end
       statuses.each_with_index.map do |status, i|
         rec = MCPTierAttendance.new(
-          status:          status,
+          status: status,
           attendance_date: base_date - (5 - i),
-          student:         student
+          student: student,
         )
         assert rec.save, "attendance save failed for #{student.name} day #{i + 1}: #{rec.errors.full_messages.join(", ")}"
         rec
@@ -303,10 +303,10 @@ class MCPTieredComplexityTest < Minitest::Test
     yield teachers, students, subjects, exams, attendance
   ensure
     (attendance || []).each { |r| r.destroy rescue nil }
-    (exams      || []).each { |e| e.destroy rescue nil }
-    (subjects   || []).each { |s| s.destroy rescue nil }
-    (students   || []).each { |s| s.destroy rescue nil }
-    (teachers   || []).each { |t| t.destroy rescue nil }
+    (exams || []).each { |e| e.destroy rescue nil }
+    (subjects || []).each { |s| s.destroy rescue nil }
+    (students || []).each { |s| s.destroy rescue nil }
+    (teachers || []).each { |t| t.destroy rescue nil }
   end
 
   # --------------------------------------------------------------------------
@@ -322,8 +322,8 @@ class MCPTieredComplexityTest < Minitest::Test
     configure_llm_provider!
 
     with_tier1_fixtures do |teachers|
-      agent        = Parse::Agent.new(permissions: :readonly)
-      tools_env    = mcp_call({ "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }, agent)
+      agent = Parse::Agent.new(permissions: :readonly)
+      tools_env = mcp_call({ "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }, agent)
       openai_tools = mcp_tools_to_openai(tools_env.dig("result", "tools"))
 
       prompt = <<~PROMPT
@@ -339,8 +339,8 @@ class MCPTieredComplexityTest < Minitest::Test
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 8)
       assert_llm_answer(
         transcript,
-        expected_patterns:   [/\b3\b|three/i],
-        expected_tool_calls: %w[count_objects]
+        expected_patterns: [/\b3\b|three/i],
+        expected_tool_calls: %w[count_objects],
       )
     end
   end
@@ -359,8 +359,8 @@ class MCPTieredComplexityTest < Minitest::Test
     configure_llm_provider!
 
     with_tier2_fixtures do |teachers, students|
-      agent        = Parse::Agent.new(permissions: :readonly)
-      tools_env    = mcp_call({ "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }, agent)
+      agent = Parse::Agent.new(permissions: :readonly)
+      tools_env = mcp_call({ "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }, agent)
       openai_tools = mcp_tools_to_openai(tools_env.dig("result", "tools"))
 
       prompt = <<~PROMPT
@@ -384,8 +384,8 @@ class MCPTieredComplexityTest < Minitest::Test
         # Use negative lookbehind/lookahead so "4" inside "4.2", "4.6", "4.9"
         # (teacher ratings in results) does not trigger a false pass. Only a
         # standalone "4" — the student count — satisfies this pattern.
-        expected_patterns:   [/four|(?<![\d.])4(?![\d.])/i],
-        expected_tool_calls: %w[query_class count_objects]
+        expected_patterns: [/four|(?<![\d.])4(?![\d.])/i],
+        expected_tool_calls: %w[query_class count_objects],
       )
     end
   end
@@ -404,8 +404,8 @@ class MCPTieredComplexityTest < Minitest::Test
     configure_llm_provider!
 
     with_tier3_fixtures do |teachers, students, subjects|
-      agent        = Parse::Agent.new(permissions: :readonly)
-      tools_env    = mcp_call({ "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }, agent)
+      agent = Parse::Agent.new(permissions: :readonly)
+      tools_env = mcp_call({ "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }, agent)
       openai_tools = mcp_tools_to_openai(tools_env.dig("result", "tools"))
 
       prompt = <<~PROMPT
@@ -424,8 +424,8 @@ class MCPTieredComplexityTest < Minitest::Test
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 8)
       assert_llm_answer(
         transcript,
-        expected_patterns:   [/Vasquez/i, /4\.9/],
-        expected_tool_calls: %w[query_class]
+        expected_patterns: [/Vasquez/i, /4\.9/],
+        expected_tool_calls: %w[query_class],
       )
     end
   end
@@ -444,8 +444,8 @@ class MCPTieredComplexityTest < Minitest::Test
     configure_llm_provider!
 
     with_tier4_fixtures do |teachers, students, subjects, exams|
-      agent        = Parse::Agent.new(permissions: :readonly)
-      tools_env    = mcp_call({ "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }, agent)
+      agent = Parse::Agent.new(permissions: :readonly)
+      tools_env = mcp_call({ "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }, agent)
       openai_tools = mcp_tools_to_openai(tools_env.dig("result", "tools"))
 
       prompt = <<~PROMPT
@@ -479,8 +479,8 @@ class MCPTieredComplexityTest < Minitest::Test
         # from the data. The sum (187) is documented in TIER4_TOP_SCORE but
         # asserting it here would produce flaky failures due to LLM arithmetic
         # errors that are not regressions in the gem's tool surface.
-        expected_patterns:   [/#{TIER4_TOP_STUDENT}/i],
-        expected_tool_calls: %w[query_class]
+        expected_patterns: [/#{TIER4_TOP_STUDENT}/i],
+        expected_tool_calls: %w[query_class],
       )
     end
   end
@@ -504,8 +504,8 @@ class MCPTieredComplexityTest < Minitest::Test
     configure_llm_provider!
 
     with_tier5_fixtures do |teachers, students, subjects, exams, attendance|
-      agent        = Parse::Agent.new(permissions: :readonly)
-      tools_env    = mcp_call({ "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }, agent)
+      agent = Parse::Agent.new(permissions: :readonly)
+      tools_env = mcp_call({ "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }, agent)
       openai_tools = mcp_tools_to_openai(tools_env.dig("result", "tools"))
 
       prompt = <<~PROMPT
@@ -534,8 +534,8 @@ class MCPTieredComplexityTest < Minitest::Test
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 10)
       assert_llm_answer(
         transcript,
-        expected_patterns:   [/#{TIER5_OUTLIER}/i],
-        expected_tool_calls: %w[query_class count_objects]
+        expected_patterns: [/#{TIER5_OUTLIER}/i],
+        expected_tool_calls: %w[query_class count_objects],
       )
     end
   end
@@ -555,7 +555,7 @@ class MCPTieredComplexityTest < Minitest::Test
   # --------------------------------------------------------------------------
   def assert_llm_answer(transcript, expected_patterns:, expected_tool_calls:)
     # Include both assistant content and tool result payloads in the scan.
-    flat       = transcript.map { |m| m[:content].to_s }.compact.join(" ")
+    flat = transcript.map { |m| m[:content].to_s }.compact.join(" ")
     tool_calls = transcript.flat_map { |m| Array(m[:tool_calls]).map { |tc| tc[:name] } }
 
     refute_empty tool_calls,
@@ -581,16 +581,16 @@ class MCPTieredComplexityTest < Minitest::Test
     case @provider
     when "lmstudio"
       @base_url = ENV["LLM_BASE_URL"] || "http://localhost:1234/v1"
-      @model    = ENV["LLM_MODEL"]    || "qwen2.5-7b-instruct"
-      @api_key  = ENV["LLM_API_KEY"]  || "lm-studio"
+      @model = ENV["LLM_MODEL"] || "qwen2.5-7b-instruct"
+      @api_key = ENV["LLM_API_KEY"] || "lm-studio"
     when "openai"
       @base_url = ENV["LLM_BASE_URL"] || "https://api.openai.com/v1"
-      @model    = ENV["LLM_MODEL"]    || "gpt-4o-mini"
-      @api_key  = ENV["LLM_API_KEY"]
+      @model = ENV["LLM_MODEL"] || "gpt-4o-mini"
+      @api_key = ENV["LLM_API_KEY"]
     when "anthropic"
       @base_url = ENV["LLM_BASE_URL"] || "https://api.anthropic.com/v1"
-      @model    = ENV["LLM_MODEL"]    || "claude-haiku-4-5"
-      @api_key  = ENV["LLM_API_KEY"]
+      @model = ENV["LLM_MODEL"] || "claude-haiku-4-5"
+      @api_key = ENV["LLM_API_KEY"]
     else
       skip "Unknown LLM_PROVIDER=#{@provider.inspect}"
     end
@@ -612,9 +612,9 @@ class MCPTieredComplexityTest < Minitest::Test
       {
         type: "function",
         function: {
-          name:        h["name"],
+          name: h["name"],
           description: h["description"].to_s[0, 1024],
-          parameters:  h["inputSchema"] || { "type" => "object", "properties" => {} },
+          parameters: h["inputSchema"] || { "type" => "object", "properties" => {} },
         },
       }
     end
@@ -625,7 +625,7 @@ class MCPTieredComplexityTest < Minitest::Test
   # --------------------------------------------------------------------------
 
   def llm_round_trip(prompt:, tools:, agent:, max_iterations: 6)
-    messages   = [{ role: "user", content: prompt }]
+    messages = [{ role: "user", content: prompt }]
     transcript = []
 
     max_iterations.times do
@@ -638,21 +638,21 @@ class MCPTieredComplexityTest < Minitest::Test
       reply[:tool_calls].each do |tc|
         body = {
           "jsonrpc" => "2.0",
-          "id"      => SecureRandom.hex(4),
-          "method"  => "tools/call",
-          "params"  => { "name" => tc[:name], "arguments" => tc[:arguments] },
+          "id" => SecureRandom.hex(4),
+          "method" => "tools/call",
+          "params" => { "name" => tc[:name], "arguments" => tc[:arguments] },
         }
-        result    = mcp_call(body, agent)
+        result = mcp_call(body, agent)
         tool_text = if result["result"]
-          (result.dig("result", "content", 0, "text") || result["result"].to_json)
-        else
-          result.dig("error", "message").to_s
-        end
+            (result.dig("result", "content", 0, "text") || result["result"].to_json)
+          else
+            result.dig("error", "message").to_s
+          end
         # Record tool results in the transcript so assert_llm_answer can scan
         # them. This matters when gpt-4o-mini omits a prose final turn but the
         # correct answer is present in the tool return payload.
         transcript << { role: "tool", content: tool_text }
-        messages   << { role: "tool", tool_call_id: tc[:id], content: tool_text }
+        messages << { role: "tool", tool_call_id: tc[:id], content: tool_text }
       end
     end
 
@@ -662,7 +662,7 @@ class MCPTieredComplexityTest < Minitest::Test
   def call_llm(messages:, tools:)
     case @provider
     when "anthropic" then anthropic_chat(messages: messages, tools: tools)
-    else                  openai_chat(messages: messages, tools: tools)
+    else openai_chat(messages: messages, tools: tools)
     end
   end
 
@@ -683,7 +683,7 @@ class MCPTieredComplexityTest < Minitest::Test
         out = { role: "assistant", content: m[:content] }
         if m[:tool_calls] && !m[:tool_calls].empty?
           out[:tool_calls] = m[:tool_calls].map do |tc|
-            args     = tc[:arguments]
+            args = tc[:arguments]
             args_str = args.is_a?(String) ? args : JSON.generate(args || {})
             { id: tc[:id], type: "function", function: { name: tc[:name], arguments: args_str } }
           end
@@ -694,18 +694,18 @@ class MCPTieredComplexityTest < Minitest::Test
       end
     end.compact
 
-    uri  = URI("#{@base_url}/chat/completions")
+    uri = URI("#{@base_url}/chat/completions")
     body = JSON.generate({
-      model:       @model,
-      messages:    openai_messages,
-      tools:       tools.empty? ? nil : tools,
+      model: @model,
+      messages: openai_messages,
+      tools: tools.empty? ? nil : tools,
       tool_choice: tools.empty? ? nil : "auto",
     }.compact)
 
-    req                  = Net::HTTP::Post.new(uri)
-    req["Content-Type"]  = "application/json"
+    req = Net::HTTP::Post.new(uri)
+    req["Content-Type"] = "application/json"
     req["Authorization"] = "Bearer #{@api_key}"
-    req.body             = body
+    req.body = body
 
     res = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https", read_timeout: 90) do |h|
       h.request(req)
@@ -713,8 +713,8 @@ class MCPTieredComplexityTest < Minitest::Test
     skip "LLM call failed: HTTP #{res.code} #{res.body[0, 400]}" unless res.code.to_i.between?(200, 299)
 
     parsed = JSON.parse(res.body)
-    msg    = parsed.dig("choices", 0, "message") || {}
-    calls  = Array(msg["tool_calls"]).map do |tc|
+    msg = parsed.dig("choices", 0, "message") || {}
+    calls = Array(msg["tool_calls"]).map do |tc|
       args = tc.dig("function", "arguments")
       args = JSON.parse(args) if args.is_a?(String) && !args.empty?
       { id: tc["id"] || SecureRandom.hex(4), name: tc.dig("function", "name"), arguments: args || {} }
@@ -729,8 +729,8 @@ class MCPTieredComplexityTest < Minitest::Test
   def anthropic_chat(messages:, tools:)
     anth_tools = tools.map do |t|
       {
-        name:         t[:function][:name],
-        description:  t[:function][:description],
+        name: t[:function][:name],
+        description: t[:function][:description],
         input_schema: t[:function][:parameters],
       }
     end
@@ -744,19 +744,19 @@ class MCPTieredComplexityTest < Minitest::Test
       end
     end.compact
 
-    uri  = URI("#{@base_url}/messages")
+    uri = URI("#{@base_url}/messages")
     body = JSON.generate({
-      model:      @model,
+      model: @model,
       max_tokens: 1024,
-      tools:      anth_tools.empty? ? nil : anth_tools,
-      messages:   anth_messages,
+      tools: anth_tools.empty? ? nil : anth_tools,
+      messages: anth_messages,
     }.compact)
 
-    req                      = Net::HTTP::Post.new(uri)
-    req["Content-Type"]      = "application/json"
-    req["x-api-key"]         = @api_key
+    req = Net::HTTP::Post.new(uri)
+    req["Content-Type"] = "application/json"
+    req["x-api-key"] = @api_key
     req["anthropic-version"] = "2023-06-01"
-    req.body                 = body
+    req.body = body
 
     res = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https", read_timeout: 90) do |h|
       h.request(req)
@@ -765,8 +765,8 @@ class MCPTieredComplexityTest < Minitest::Test
 
     parsed = JSON.parse(res.body)
     blocks = Array(parsed["content"])
-    text   = blocks.select { |b| b["type"] == "text" }.map { |b| b["text"] }.join("\n")
-    calls  = blocks.select { |b| b["type"] == "tool_use" }.map do |b|
+    text = blocks.select { |b| b["type"] == "text" }.map { |b| b["text"] }.join("\n")
+    calls = blocks.select { |b| b["type"] == "tool_use" }.map do |b|
       { id: b["id"], name: b["name"], arguments: b["input"] || {} }
     end
     { role: "assistant", content: text, tool_calls: calls }

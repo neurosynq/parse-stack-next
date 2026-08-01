@@ -40,8 +40,8 @@ class TestMCPOriginAllowlist < Minitest::Test
   def rack_env(origin: nil, headers: {})
     env = {
       "REQUEST_METHOD" => "POST",
-      "CONTENT_TYPE"   => "application/json",
-      "rack.input"     => StringIO.new('{"jsonrpc":"2.0","id":1,"method":"ping"}'),
+      "CONTENT_TYPE" => "application/json",
+      "rack.input" => StringIO.new('{"jsonrpc":"2.0","id":1,"method":"ping"}'),
     }
     env["HTTP_ORIGIN"] = origin if origin
     headers.each { |k, v| env["HTTP_#{k.upcase.tr("-", "_")}"] = v }

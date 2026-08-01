@@ -99,8 +99,7 @@ module Parse
       end
       outer = rings.first
       pairs = outer.map do |(lng, lat)|
-        raise ArgumentError, "[Parse::Polygon] GeoJSON ring entries must be [lng, lat] numeric pairs." \
-          unless lng.is_a?(Numeric) && lat.is_a?(Numeric)
+        raise ArgumentError, "[Parse::Polygon] GeoJSON ring entries must be [lng, lat] numeric pairs." unless lng.is_a?(Numeric) && lat.is_a?(Numeric)
         [lat.to_f, lng.to_f]
       end
       new(pairs)
@@ -120,8 +119,7 @@ module Parse
     # - a Hash with a `coordinates` key (the Parse REST wire shape)
     # - another {Parse::Polygon}
     def coordinates=(value)
-      coords =
-        case value
+      coords = case value
         when Parse::Polygon
           # Duplicate so external mutation of the source doesn't leak in.
           value.coordinates.map { |pair| pair.dup }
@@ -270,8 +268,7 @@ module Parse
     # @param point [Parse::GeoPoint, Array<Numeric>] the point to test.
     # @return [Boolean]
     def contains_point?(point)
-      lat, lng =
-        case point
+      lat, lng = case point
         when Parse::GeoPoint then [point.latitude, point.longitude]
         when Array then [point[0].to_f, point[1].to_f]
         else

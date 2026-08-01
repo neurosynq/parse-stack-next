@@ -32,17 +32,17 @@ require "parse/live_query"
 # ---------------------------------------------------------------------------
 Parse.setup(
   server_url: ENV.fetch("PARSE_SERVER_URL", "http://localhost:1337/parse"),
-  app_id:     ENV.fetch("PARSE_APP_ID"),
-  api_key:    ENV.fetch("PARSE_REST_KEY"),
+  app_id: ENV.fetch("PARSE_APP_ID"),
+  api_key: ENV.fetch("PARSE_REST_KEY"),
   master_key: nil,            # a plain client — the session token does the scoping
-  logging:    false,
+  logging: false,
 )
 
 Parse.live_query_enabled = true
 Parse::LiveQuery.configure do |config|
-  config.url            = ENV.fetch("PARSE_LIVE_QUERY_URL", "ws://localhost:1337/parse")
+  config.url = ENV.fetch("PARSE_LIVE_QUERY_URL", "ws://localhost:1337/parse")
   config.application_id = ENV.fetch("PARSE_APP_ID")
-  config.client_key     = ENV.fetch("PARSE_REST_KEY")
+  config.client_key = ENV.fetch("PARSE_REST_KEY")
 end
 
 class Post < Parse::Object
@@ -73,13 +73,13 @@ subscription = Post.subscribe(
   session_token: user.session_token,
 )
 
-subscription.on(:subscribe)   { puts "[#{stamp}] subscribed — waiting for events…" }
-subscription.on(:create)      { |post|        puts "[#{stamp}] CREATE  #{post.id}  #{post.title.inspect}" }
-subscription.on(:update)      { |post, _orig| puts "[#{stamp}] UPDATE  #{post.id}  #{post.title.inspect}" }
-subscription.on(:delete)      { |post|        puts "[#{stamp}] DELETE  #{post.id}" }
-subscription.on(:enter)       { |post, _orig| puts "[#{stamp}] ENTER   #{post.id}  (now matches query)" }
-subscription.on(:leave)       { |post, _orig| puts "[#{stamp}] LEAVE   #{post.id}  (no longer matches)" }
-subscription.on(:error)       { |err|         warn "[#{stamp}] ERROR   #{err}" }
+subscription.on(:subscribe) { puts "[#{stamp}] subscribed — waiting for events…" }
+subscription.on(:create) { |post| puts "[#{stamp}] CREATE  #{post.id}  #{post.title.inspect}" }
+subscription.on(:update) { |post, _orig| puts "[#{stamp}] UPDATE  #{post.id}  #{post.title.inspect}" }
+subscription.on(:delete) { |post| puts "[#{stamp}] DELETE  #{post.id}" }
+subscription.on(:enter) { |post, _orig| puts "[#{stamp}] ENTER   #{post.id}  (now matches query)" }
+subscription.on(:leave) { |post, _orig| puts "[#{stamp}] LEAVE   #{post.id}  (no longer matches)" }
+subscription.on(:error) { |err| warn "[#{stamp}] ERROR   #{err}" }
 
 # ---------------------------------------------------------------------------
 # 4. Block and print until Ctrl-C

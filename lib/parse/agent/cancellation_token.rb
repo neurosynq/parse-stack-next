@@ -44,14 +44,14 @@ module Parse
 
       def initialize
         @cancelled = false
-        @reason    = nil
+        @reason = nil
         # Mutex protects the read-modify-write in {#cancel!} so a
         # concurrent cancel from notifications/cancelled and client
         # disconnect cannot lose a reason or partially update state.
         # The hot poll path (#cancelled?) reads the boolean ivar
         # directly — atomic on MRI and on each major Ruby
         # implementation we ship against.
-        @mutex     = Mutex.new
+        @mutex = Mutex.new
       end
 
       # @return [Boolean] true once {#cancel!} has been called at least once.
@@ -71,7 +71,7 @@ module Parse
         @mutex.synchronize do
           return false if @cancelled
           @cancelled = true
-          @reason    = reason
+          @reason = reason
           true
         end
       end

@@ -51,19 +51,19 @@ class TrackAgentFixC2Test < Minitest::Test
       @received_query = query
       response = Object.new
       response.define_singleton_method(:success?) { true }
-      response.define_singleton_method(:count)    { 0 }
-      response.define_singleton_method(:results)  { [] }
-      response.define_singleton_method(:error)    { nil }
+      response.define_singleton_method(:count) { 0 }
+      response.define_singleton_method(:results) { [] }
+      response.define_singleton_method(:error) { nil }
       response
     end
 
     def aggregate_pipeline(class_name, pipeline, **_opts)
-      @received_class    = class_name
+      @received_class = class_name
       @received_pipeline = pipeline
       response = Object.new
       response.define_singleton_method(:success?) { true }
-      response.define_singleton_method(:results)  { [] }
-      response.define_singleton_method(:error)    { nil }
+      response.define_singleton_method(:results) { [] }
+      response.define_singleton_method(:error) { nil }
       response
     end
 
@@ -89,15 +89,15 @@ class TrackAgentFixC2Test < Minitest::Test
 
   class FilterClassOrder < Parse::Object
     parse_class "FilterClassOrder"
-    property :title,    :string
+    property :title, :string
     property :archived, :boolean
-    property :status,   :string
+    property :status, :string
     agent_canonical_filter "archived" => { "$ne" => true }
   end
 
   class FilterClassPayment < Parse::Object
     parse_class "FilterClassPayment"
-    property :amount,   :integer
+    property :amount, :integer
     property :test_user, :boolean
     # No canonical filter — exercises the "per-agent only" path
   end
@@ -131,11 +131,11 @@ class TrackAgentFixC2Test < Minitest::Test
       "permitted_ptr" => {
         "$inQuery" => {
           "className" => "FilterClassPayment",
-          "where"     => {
+          "where" => {
             "deeper_ptr" => {
               "$inQuery" => {
                 "className" => HiddenInQueryClass.parse_class,
-                "where"     => {},
+                "where" => {},
               },
             },
           },
@@ -166,10 +166,10 @@ class TrackAgentFixC2Test < Minitest::Test
     # The LLM-controlled kwarg can disable the per-class canonical filter,
     # but the operator's per-agent filter MUST stay applied — that's the
     # operator's narrowing boundary.
-    agent  = Parse::Agent.new(filters: { FilterClassPayment => { test_user: false } })
+    agent = Parse::Agent.new(filters: { FilterClassPayment => { test_user: false } })
     client = stub_agent_client(agent)
     T.count_objects(agent, class_name: "FilterClassPayment",
-                    apply_canonical_filter: false)
+                           apply_canonical_filter: false)
     refute_nil client.received_query
     # `where:` was injected — the per-agent filter MUST appear even though
     # apply_canonical_filter: false dropped the canonical-filter declaration.
@@ -183,20 +183,20 @@ class TrackAgentFixC2Test < Minitest::Test
     # Class declares an agent_canonical_filter; agent declares a per-class
     # filter. apply_canonical_filter: false should drop the FORMER and
     # keep the LATTER (the test_user constraint must survive).
-    agent  = Parse::Agent.new(filters: { FilterClassOrder => { test_user: false } })
+    agent = Parse::Agent.new(filters: { FilterClassOrder => { test_user: false } })
     client = stub_agent_client(agent)
     T.count_objects(agent, class_name: "FilterClassOrder",
-                    apply_canonical_filter: false)
+                           apply_canonical_filter: false)
     parsed = JSON.parse(client.received_query[:where])
     # Per-agent filter is preserved; canonical (archived: { $ne: true }) is dropped.
     assert_equal({ "testUser" => false }, parsed)
   end
 
   def test_agent7_apply_canonical_filter_true_keeps_both_layers
-    agent  = Parse::Agent.new(filters: { FilterClassOrder => { test_user: false } })
+    agent = Parse::Agent.new(filters: { FilterClassOrder => { test_user: false } })
     client = stub_agent_client(agent)
     T.count_objects(agent, class_name: "FilterClassOrder",
-                    apply_canonical_filter: true)
+                           apply_canonical_filter: true)
     parsed = JSON.parse(client.received_query[:where])
     # Both layers compose via $and.
     assert parsed.key?("$and"), "expected $and composition of per-agent + canonical, got #{parsed.inspect}"
@@ -210,10 +210,10 @@ class TrackAgentFixC2Test < Minitest::Test
   # =============================================================
 
   def test_agent1_get_objects_applies_per_agent_filter_unconditional
-    agent  = Parse::Agent.new(filters: { FilterClassPayment => { test_user: false } })
+    agent = Parse::Agent.new(filters: { FilterClassPayment => { test_user: false } })
     client = stub_agent_client(agent)
     T.get_objects(agent, class_name: "FilterClassPayment", ids: %w[abc1234567],
-                  apply_canonical_filter: false)
+                         apply_canonical_filter: false)
     refute_nil client.received_query
     parsed = JSON.parse(client.received_query[:where])
     # Per-agent filter MUST appear alongside the $in even with canonical-off.
@@ -225,7 +225,7 @@ class TrackAgentFixC2Test < Minitest::Test
   end
 
   def test_agent1_get_objects_applies_canonical_filter_by_default
-    agent  = Parse::Agent.new
+    agent = Parse::Agent.new
     client = stub_agent_client(agent)
     T.get_objects(agent, class_name: "FilterClassOrder", ids: %w[abc1234567])
     parsed = JSON.parse(client.received_query[:where])
@@ -236,10 +236,10 @@ class TrackAgentFixC2Test < Minitest::Test
   end
 
   def test_agent1_get_objects_canonical_opt_out_drops_only_canonical
-    agent  = Parse::Agent.new
+    agent = Parse::Agent.new
     client = stub_agent_client(agent)
     T.get_objects(agent, class_name: "FilterClassOrder", ids: %w[abc1234567],
-                  apply_canonical_filter: false)
+                         apply_canonical_filter: false)
     parsed = JSON.parse(client.received_query[:where])
     # With canonical off and no per-agent filter, the where is just the $in.
     assert_equal({ "objectId" => { "$in" => ["abc1234567"] } }, parsed)
@@ -250,7 +250,7 @@ class TrackAgentFixC2Test < Minitest::Test
   # =============================================================
 
   def test_agent6_get_object_applies_canonical_filter_by_default
-    agent  = Parse::Agent.new
+    agent = Parse::Agent.new
     client = stub_agent_client(agent)
     # The FakeClient returns one row from find_objects so get_object
     # treats it as a hit and the call completes.
@@ -259,8 +259,8 @@ class TrackAgentFixC2Test < Minitest::Test
       @received_query = query
       response = Object.new
       response.define_singleton_method(:success?) { true }
-      response.define_singleton_method(:results)  { [{ "objectId" => "abc1234567", "title" => "x" }] }
-      response.define_singleton_method(:error)    { nil }
+      response.define_singleton_method(:results) { [{ "objectId" => "abc1234567", "title" => "x" }] }
+      response.define_singleton_method(:error) { nil }
       response
     end
 
@@ -278,11 +278,11 @@ class TrackAgentFixC2Test < Minitest::Test
   def test_agent6_get_object_canonical_opt_out_uses_direct_fetch_path
     # With canonical off and no per-agent filter, get_object should NOT
     # rewrite to find_objects — it falls through to the cheap fetch_object.
-    agent  = Parse::Agent.new
+    agent = Parse::Agent.new
     client = stub_agent_client(agent)
 
     fetch_called = false
-    find_called  = false
+    find_called = false
     client.define_singleton_method(:fetch_object) do |class_name, object_id, **_opts|
       fetch_called = true
       response = Object.new
@@ -298,10 +298,10 @@ class TrackAgentFixC2Test < Minitest::Test
     end
 
     T.get_object(agent, class_name: "FilterClassOrder", object_id: "abc1234567",
-                 apply_canonical_filter: false)
+                        apply_canonical_filter: false)
 
     assert fetch_called, "fetch_object should have been called when no filter applies"
-    refute find_called,  "find_objects should NOT be called when no filter applies"
+    refute find_called, "find_objects should NOT be called when no filter applies"
   end
 
   # =============================================================
@@ -314,22 +314,22 @@ class TrackAgentFixC2Test < Minitest::Test
     # group_distinct test file already.
     agent = Parse::Agent.new
     out = T.group_by(agent, class_name: "FilterClassOrder", field: "status",
-                     operation: "count", dry_run: true, apply_canonical_filter: false)
+                            operation: "count", dry_run: true, apply_canonical_filter: false)
     assert out.is_a?(Hash)
   end
 
   def test_agent6_distinct_accepts_apply_canonical_filter_kwarg
     agent = Parse::Agent.new
     out = T.distinct(agent, class_name: "FilterClassOrder", field: "status",
-                     dry_run: true, apply_canonical_filter: false)
+                            dry_run: true, apply_canonical_filter: false)
     assert out.is_a?(Hash)
   end
 
   def test_agent6_group_by_date_accepts_apply_canonical_filter_kwarg
     agent = Parse::Agent.new
     out = T.group_by_date(agent, class_name: "FilterClassOrder",
-                          field: "createdAt", interval: "day",
-                          dry_run: true, apply_canonical_filter: false)
+                                 field: "createdAt", interval: "day",
+                                 dry_run: true, apply_canonical_filter: false)
     assert out.is_a?(Hash)
   end
 
@@ -340,14 +340,14 @@ class TrackAgentFixC2Test < Minitest::Test
   def test_agent6_compose_atlas_filter_returns_nil_when_no_filters
     agent = Parse::Agent.new
     out = T.compose_atlas_filter(nil, "ATAtlasClass", agent: agent,
-                                 apply_canonical_filter: false)
+                                                      apply_canonical_filter: false)
     assert_nil out
   end
 
   def test_agent6_compose_atlas_filter_returns_canonical_when_no_others
     agent = Parse::Agent.new
     out = T.compose_atlas_filter(nil, "ATAtlasClass", agent: agent,
-                                 apply_canonical_filter: true)
+                                                      apply_canonical_filter: true)
     assert_equal({ "archived" => { "$ne" => true } }, out)
   end
 
@@ -355,7 +355,7 @@ class TrackAgentFixC2Test < Minitest::Test
     # Even with apply_canonical_filter: false the per-agent filter survives.
     agent = Parse::Agent.new(filters: { ATAtlasClass => { archived: true } })
     out = T.compose_atlas_filter(nil, "ATAtlasClass", agent: agent,
-                                 apply_canonical_filter: false)
+                                                      apply_canonical_filter: false)
     assert_equal({ archived: true }, out)
   end
 
@@ -363,7 +363,7 @@ class TrackAgentFixC2Test < Minitest::Test
     agent = Parse::Agent.new(filters: { ATAtlasClass => { user_id: "u1" } })
     caller_filter = { "score" => { "$gte" => 5 } }
     out = T.compose_atlas_filter(caller_filter, "ATAtlasClass", agent: agent,
-                                 apply_canonical_filter: true)
+                                                                apply_canonical_filter: true)
     assert out.key?("$and")
     parts = out["$and"]
     assert_includes parts, { user_id: "u1" }
@@ -382,7 +382,7 @@ class TrackAgentFixC2Test < Minitest::Test
     )
     err = assert_raises(Parse::Agent::AccessDenied) do
       T.atlas_faceted_search(agent, class_name: "FilterClassPayment",
-                              facets: { "x" => { type: :string, path: :amount } })
+                                    facets: { "x" => { type: :string, path: :amount } })
     end
     assert_equal :atlas_facet_filter_unsafe, err.kind
   end
@@ -391,7 +391,7 @@ class TrackAgentFixC2Test < Minitest::Test
     agent = Parse::Agent.new(master_atlas: true)
     err = assert_raises(Parse::Agent::AccessDenied) do
       T.atlas_faceted_search(agent, class_name: "ATAtlasClass",
-                              facets: { "x" => { type: :string, path: :title } })
+                                    facets: { "x" => { type: :string, path: :title } })
     end
     assert_equal :atlas_facet_filter_unsafe, err.kind
   end
@@ -416,7 +416,7 @@ class TrackAgentFixC2Test < Minitest::Test
     # as proxy for master-key. An acl_user agent also has empty session_token
     # but is NOT master-key; it must NOT see the master-key-except class as
     # accessible.
-    user  = Parse::User.new(objectId: "u_describe_acl_user")
+    user = Parse::User.new(objectId: "u_describe_acl_user")
     agent = silence_master_key { Parse::Agent.new(acl_user: user) }
     accessibility = agent.describe_for(HiddenExceptMaster.parse_class)[:accessible]
     assert_equal :hidden, accessibility,
@@ -431,9 +431,9 @@ class TrackAgentFixC2Test < Minitest::Test
   end
 
   def test_agent8_auth_descriptor_reports_acl_user_not_master_key
-    user  = Parse::User.new(objectId: "u_describe_acl_user")
+    user = Parse::User.new(objectId: "u_describe_acl_user")
     agent = silence_master_key { Parse::Agent.new(acl_user: user) }
-    desc  = agent.describe[:auth]
+    desc = agent.describe[:auth]
     assert_equal :acl_user, desc[:mode]
     refute_equal :master_key, desc[:mode]
   end
@@ -442,7 +442,7 @@ class TrackAgentFixC2Test < Minitest::Test
     role = Parse::Role.new(name: "Auditor")
     role.id = "r_auditor_test"
     agent = silence_master_key { Parse::Agent.new(acl_role: role) }
-    desc  = agent.describe[:auth]
+    desc = agent.describe[:auth]
     assert_equal :acl_role, desc[:mode]
     assert_equal "Auditor", desc[:identity]
   end
@@ -452,7 +452,7 @@ class TrackAgentFixC2Test < Minitest::Test
     # so a CLP-restricted op on an otherwise-permitted class returns
     # refusal. Use query_class (a readonly tool) with op: :create so the
     # tier/env-gate checks pass and we isolate the CLP-op gate.
-    user  = Parse::User.new(objectId: "u_clp_test")
+    user = Parse::User.new(objectId: "u_clp_test")
     agent = silence_master_key { Parse::Agent.new(acl_user: user) }
 
     # Stub the CLP gate so :create is refused unless role:Admin is in
@@ -463,7 +463,7 @@ class TrackAgentFixC2Test < Minitest::Test
       perms && perms.include?("role:Admin")
     }) do
       result = agent.would_permit?(:query_class, class_name: "CLPCreateAdminOnly",
-                                    op: :create)
+                                                 op: :create)
       refute result[:allowed], "op: :create should be refused without role:Admin (got #{result.inspect})"
       assert_equal :clp_denied, result[:reason]
     end
@@ -476,7 +476,7 @@ class TrackAgentFixC2Test < Minitest::Test
     result = agent.would_permit?(:atlas_faceted_search, class_name: "ATAtlasClass")
     refute result[:allowed]
     assert_equal :master_atlas_required, result[:reason]
-    assert_equal :master_atlas_gate,     result[:denied_at]
+    assert_equal :master_atlas_gate, result[:denied_at]
   end
 
   def test_agent8_would_permit_master_atlas_permitted_when_set
@@ -504,12 +504,12 @@ class TrackAgentFixC2Test < Minitest::Test
     result = agent.would_permit?(:create_object, class_name: "CLPCreateAdminOnly")
     refute result[:allowed]
     assert_equal :write_env_gate_disabled, result[:reason]
-    assert_equal :write_env_gate,           result[:denied_at]
+    assert_equal :write_env_gate, result[:denied_at]
   end
 
   def test_agent8_would_permit_write_env_gate_passes_when_both_envs_set
     ENV["PARSE_AGENT_ALLOW_WRITE_TOOLS"] = "true"
-    ENV["PARSE_AGENT_ALLOW_RAW_CRUD"]    = "true"
+    ENV["PARSE_AGENT_ALLOW_RAW_CRUD"] = "true"
     begin
       agent = silence_master_key { Parse::Agent.new(permissions: :write) }
       result = agent.would_permit?(:create_object, class_name: "FilterClassPayment")
@@ -522,10 +522,11 @@ class TrackAgentFixC2Test < Minitest::Test
 
   class MethodFilterTarget < Parse::Object
     parse_class "MethodFilterTarget"
-    agent_method :archive,    permission: :readonly
+    agent_method :archive, permission: :readonly
     agent_method :reactivate, permission: :readonly
-    def archive    ; :archived ; end
-    def reactivate ; :reactivated ; end
+
+    def archive; :archived; end
+    def reactivate; :reactivated; end
   end
 
   def test_agent8_would_permit_method_filtered_for_call_method
@@ -534,7 +535,7 @@ class TrackAgentFixC2Test < Minitest::Test
       Parse::Agent.new(methods: { except: [:archive] })
     }
     result = agent.would_permit?(:call_method, class_name: "MethodFilterTarget",
-                                  method_name: :archive)
+                                               method_name: :archive)
     refute result[:allowed]
     assert_equal :method_filtered, result[:reason]
   end
@@ -544,7 +545,7 @@ class TrackAgentFixC2Test < Minitest::Test
       Parse::Agent.new(methods: { except: [:archive] })
     }
     result = agent.would_permit?(:call_method, class_name: "MethodFilterTarget",
-                                  method_name: :reactivate)
+                                               method_name: :reactivate)
     assert result[:allowed]
   end
 
@@ -554,20 +555,20 @@ class TrackAgentFixC2Test < Minitest::Test
 
   def test_agent5_subagent_inherits_master_atlas_when_nil
     parent = silence_master_key { Parse::Agent.new(master_atlas: true) }
-    child  = Parse::Agent.new(parent: parent)
+    child = Parse::Agent.new(parent: parent)
     assert child.master_atlas?, "sub-agent with no master_atlas: kwarg should inherit parent's true"
   end
 
   def test_agent5_subagent_explicit_false_drops_master_atlas_below_parent
     parent = silence_master_key { Parse::Agent.new(master_atlas: true) }
-    child  = Parse::Agent.new(parent: parent, master_atlas: false)
+    child = Parse::Agent.new(parent: parent, master_atlas: false)
     refute child.master_atlas?,
            "sub-agent passing master_atlas: false should DROP authority below parent (TRACK-AGENT-5)"
   end
 
   def test_agent5_subagent_explicit_true_keeps_master_atlas
     parent = silence_master_key { Parse::Agent.new(master_atlas: true) }
-    child  = Parse::Agent.new(parent: parent, master_atlas: true)
+    child = Parse::Agent.new(parent: parent, master_atlas: true)
     assert child.master_atlas?
   end
 

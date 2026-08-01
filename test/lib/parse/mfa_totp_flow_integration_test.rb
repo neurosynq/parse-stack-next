@@ -116,8 +116,7 @@ class MfaTotpFlowIntegrationTest < Minitest::Test
 
     as_client do
       %w[000000 123456].each do |bad|
-        result =
-          begin
+        result = begin
             Parse::User.login_with_mfa(user.username, password, bad)
           rescue Parse::Error
             nil

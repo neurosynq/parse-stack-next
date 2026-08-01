@@ -1871,7 +1871,7 @@ class MongoDBDirectIntegrationTest < Minitest::Test
         data = [
           { title: "GB1", artist: "GroupBy Artist", genre: "Rock", plays: 10 },
           { title: "GB2", artist: "GroupBy Artist", genre: "Rock", plays: 30 },
-          { title: "GB3", artist: "GroupBy Artist", genre: "Pop",  plays: 20 },
+          { title: "GB3", artist: "GroupBy Artist", genre: "Pop", plays: 20 },
         ]
         data.each { |s| assert MongoDirectSong.new(s).save }
         sleep 0.5
@@ -1893,7 +1893,7 @@ class MongoDBDirectIntegrationTest < Minitest::Test
         end
 
         rock = direct_results.find { |r| r["_id"] == "Rock" }
-        pop  = direct_results.find { |r| r["_id"] == "Pop" }
+        pop = direct_results.find { |r| r["_id"] == "Pop" }
         assert_equal 2, rock["count"], "Rock count must survive the conversion"
         assert_equal 40, rock["total"], "Rock total must survive the conversion"
         assert_equal 1, pop["count"]
@@ -2851,9 +2851,9 @@ class MongoDBDirectIntegrationTest < Minitest::Test
         results = Parse::MongoDB.aggregate("MongoDirectAclNote", [], acl_user: alice_ptr)
         contents = results.map { |r| r["content"] }
 
-        assert_includes contents, "public",     "alice should see public rows"
+        assert_includes contents, "public", "alice should see public rows"
         assert_includes contents, "alice-only", "alice should see her own rows"
-        refute_includes contents, "bob-only",   "alice should NOT see bob's rows"
+        refute_includes contents, "bob-only", "alice should NOT see bob's rows"
 
         [public_note, alice_note, bob_note].each(&:destroy)
         alice.destroy
@@ -2890,10 +2890,10 @@ class MongoDBDirectIntegrationTest < Minitest::Test
         results = Parse::MongoDB.aggregate("MongoDirectAclNote", [], acl_role: "scope:admin")
         contents = results.map { |r| r["content"] }
 
-        assert_includes contents, "public",         "admin scope should see public rows"
-        assert_includes contents, "admin-only",     "admin scope should see admin-only rows"
-        assert_includes contents, "user-readable",  "admin should inherit scope:user permissions"
-        refute_includes contents, "unrelated",      "admin should NOT see scope:editor rows"
+        assert_includes contents, "public", "admin scope should see public rows"
+        assert_includes contents, "admin-only", "admin scope should see admin-only rows"
+        assert_includes contents, "user-readable", "admin should inherit scope:user permissions"
+        refute_includes contents, "unrelated", "admin should NOT see scope:editor rows"
 
         [public_note, user_note, admin_note, unrelated_note].each(&:destroy)
         admin_role.destroy
@@ -2945,10 +2945,10 @@ class MongoDBDirectIntegrationTest < Minitest::Test
         # name `ownerId` on the Mongo side.
         pipeline = [
           { "$lookup" => {
-              "from" => "MongoDirectAclOwner",
-              "localField" => "ownerId",
-              "foreignField" => "_id",
-              "as" => "owner_obj",
+            "from" => "MongoDirectAclOwner",
+            "localField" => "ownerId",
+            "foreignField" => "_id",
+            "as" => "owner_obj",
           } },
         ]
         results = Parse::MongoDB.aggregate("MongoDirectAclNote", pipeline,
@@ -2996,9 +2996,9 @@ class MongoDBDirectIntegrationTest < Minitest::Test
         pipeline = [
           { "$match" => { "content" => "with-array" } },
           { "$lookup" => {
-              "from" => "MongoDirectAclOwner",
-              "pipeline" => [],          # no filter — pull all rows into the array
-              "as" => "owner_obj",
+            "from" => "MongoDirectAclOwner",
+            "pipeline" => [],          # no filter — pull all rows into the array
+            "as" => "owner_obj",
           } },
         ]
         results = Parse::MongoDB.aggregate("MongoDirectAclNote", pipeline,
@@ -3044,9 +3044,9 @@ class MongoDBDirectIntegrationTest < Minitest::Test
         client[:MongoDirectAclNote].update_one(
           { "_id" => note.id },
           { "$set" => { "embedded_list" => [
-              { "_rperm" => ["*"],            "label" => "public" },
-              { "_rperm" => ["someone_else"], "label" => "denied" },
-              { "_rperm" => ["alice_id"],     "label" => "alice-only" },
+            { "_rperm" => ["*"], "label" => "public" },
+            { "_rperm" => ["someone_else"], "label" => "denied" },
+            { "_rperm" => ["alice_id"], "label" => "alice-only" },
           ] } },
         )
         sleep 0.2

@@ -78,11 +78,11 @@ module Parse
       class RateLimitError < Error; end
       class TransientError < Error; end
 
-      DEFAULT_TIMEOUT      = 30
+      DEFAULT_TIMEOUT = 30
       DEFAULT_OPEN_TIMEOUT = 5
-      DEFAULT_MAX_RETRIES  = 3
-      DEFAULT_BATCH_SIZE   = 32
-      MAX_RESPONSE_BYTES   = 16 * 1024 * 1024
+      DEFAULT_MAX_RETRIES = 3
+      DEFAULT_BATCH_SIZE = 32
+      MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
       # @param base_url [String] required. Must be http(s):// with a host.
       # @param model [String] required. Identifier the local server expects
@@ -353,7 +353,7 @@ module Parse
       end
 
       def backoff_seconds(attempt)
-        [0.5 * (2**(attempt - 1)), 30.0].min
+        [0.5 * (2 ** (attempt - 1)), 30.0].min
       end
 
       def retry_after_seconds(response)
@@ -414,8 +414,7 @@ module Parse
         # Empty-resolution under allow_private_endpoint is treated as
         # private for the http:// scheme gate below, since the operator
         # has already asserted local-class trust.
-        is_private =
-          if resolved.empty?
+        is_private = if resolved.empty?
             allow_private_endpoint
           else
             resolved.any? { |ip| Parse::File::BLOCKED_CIDRS.any? { |cidr| cidr.include?(ip) } }

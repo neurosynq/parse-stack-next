@@ -93,39 +93,85 @@ module Parse
       #   @return [Boolean]
       attr_accessor :require_session_token
 
-      # @!attribute [rw] session_cache_ttl
-      #   TTL (seconds) for {Session}'s session-token → user-id cache.
-      #   Default: 3600 (1 hour). Longer values reduce `/users/me`
-      #   round-trips but extend the window during which a revoked
-      #   session can still authenticate Atlas Search calls; apps
-      #   with sub-TTL revocation requirements should call
-      #   {Session.invalidate} from their logout path.
-      #   @return [Integer]
-      attr_accessor :session_cache_ttl
+      # --- authorization state: delegated, no longer stored here ----------
+      #
+      # These five used to be module-level ivars on Atlas Search, which made
+      # Atlas Search the owner of identity and role resolution for the whole
+      # SDK: `Parse::ACLScope` reached through this namespace, and
+      # `Parse::MongoDB.aggregate` reaches through `Parse::ACLScope`, so a
+      # plain mongo-direct query with no `$search` in it depended on them.
+      # They now read and write the DEFAULT client's
+      # {Parse::Authorization::Context}. See {Parse::Authorization}.
+      #
+      # Being module-level, they can only ever address `Parse.client`. Code
+      # running against a secondary application must use
+      # `other_client.authorization` directly, which is the whole reason the
+      # state moved onto the client.
+      #
+      # Slated for removal in 6.0.
 
-      # @!attribute [rw] role_cache_ttl
-      #   TTL (seconds) for {Session}'s user-id → role-name cache.
-      #   Default: 30. Short on purpose: stale role data yields
-      #   incorrect ACL decisions, so the cache is sized to amortize
-      #   within a single request/turn but expire well inside the
-      #   response time the operator notices a role grant or revoke.
-      #   @return [Integer]
-      attr_accessor :role_cache_ttl
+      # @deprecated Use `client.authorization.identity_cache_ttl`.
+      #   Renamed because it never stored sessions: it stores one user id per
+      #   token, and the old name led readers to reason about `_Session`
+      #   semantics that were never involved.
+      def session_cache_ttl = authorization&.identity_cache_ttl || Parse::Authorization::Context::DEFAULT_IDENTITY_TTL
 
-      # @!attribute [rw] session_cache
-      #   Pluggable cache for {Session}'s session-token lookups.
-      #   Replace with a Redis/Memcached adapter for cross-process
-      #   sharing; the object must respond to `get(key)`,
-      #   `set(key, value, ttl:)`, and `invalidate(key)`. Defaults
-      #   to a process-local {Session::MemoryCache}.
-      #   @return [#get, #set, #invalidate]
-      attr_accessor :session_cache
+      def session_cache_ttl=(value)
+        authorization&.identity_cache_ttl = value
+      end
 
-      # @!attribute [rw] role_cache
-      #   Pluggable cache for {Session}'s role-name lookups. See
-      #   {.session_cache} for the interface contract.
-      #   @return [#get, #set, #invalidate]
-      attr_accessor :role_cache
+      # @deprecated Use `client.authorization.role_cache_ttl`.
+      def role_cache_ttl = authorization&.role_cache_ttl || Parse::Authorization::Context::DEFAULT_ROLE_TTL
+
+      def role_cache_ttl=(value)
+        authorization&.role_cache_ttl = value
+      end
+
+      # @deprecated Use `client.authorization.identity_cache`.
+      def session_cache = authorization&.identity_cache
+
+      def session_cache=(value)
+        authorization&.identity_cache = value
+      end
+
+      # @deprecated Use `client.authorization.role_cache`.
+      def role_cache = authorization&.role_cache
+
+      def role_cache=(value)
+        authorization&.role_cache = value
+      end
+
+      # @deprecated Use `client.authorization.upstream_role_reader`.
+      def upstream_role_reader = authorization&.upstream_role_reader
+
+      def upstream_role_reader=(value)
+        authorization&.upstream_role_reader = value
+      end
+
+      # @deprecated Use `client.authorization.compare_upstream_roles`.
+      def compare_upstream_roles = authorization&.compare_upstream_roles || false
+
+      def compare_upstream_roles=(value)
+        authorization&.compare_upstream_roles = value
+      end
+
+      # The default client's authorization context, or `nil` when no client
+      # has been configured yet.
+      #
+      # Nil-tolerant on purpose. These delegators exist only for backward
+      # compatibility, and the module-level API they replace worked in a
+      # process that had never called `Parse.setup` (it kept its own
+      # process-local caches). Raising `ConnectionError` from what used to be
+      # a plain attribute reader would break configuration code that touches
+      # these before setting up a client, and `reset!` is a test helper that
+      # must not require a live client to run.
+      #
+      # @return [Parse::Authorization::Context, nil]
+      def authorization
+        Parse.client&.authorization
+      rescue Parse::Error::ConnectionError
+        nil
+      end
 
       # Configure Atlas Search (uses Parse::MongoDB connection)
       # @param enabled [Boolean] whether to enable Atlas Search (default: true)
@@ -142,6 +188,12 @@ module Parse
       #   (seconds). Default: 3600.
       # @param role_cache_ttl [Integer] role-name cache TTL (seconds).
       #   Default: 30.
+      # @param upstream_role_reader [#roles_for, nil] see
+      #   {#upstream_role_reader}. Default: unchanged (`nil` unless set
+      #   separately).
+      # @param compare_upstream_roles [Boolean] see
+      #   {#compare_upstream_roles}. Default: unchanged (`false` unless
+      #   set separately).
       # @example
       #   Parse::AtlasSearch.configure(enabled: true, default_index: "default")
       def configure(enabled: true,
@@ -149,14 +201,22 @@ module Parse
                     allow_raw: nil,
                     require_session_token: nil,
                     session_cache_ttl: nil,
-                    role_cache_ttl: nil)
+                    role_cache_ttl: nil,
+                    upstream_role_reader: nil,
+                    compare_upstream_roles: nil)
         Parse::MongoDB.require_gem!
         @enabled = enabled
         @default_index = default_index
         @allow_raw = allow_raw.nil? ? default_allow_raw : allow_raw
         @require_session_token = require_session_token unless require_session_token.nil?
-        @session_cache_ttl = session_cache_ttl unless session_cache_ttl.nil?
-        @role_cache_ttl = role_cache_ttl unless role_cache_ttl.nil?
+        # Authorization settings belong to the client, not to this module.
+        # Forwarded rather than stored so there is exactly one copy.
+        authorization&.configure(
+          identity_cache_ttl: session_cache_ttl,
+          role_cache_ttl: role_cache_ttl,
+          upstream_role_reader: upstream_role_reader,
+          compare_upstream_roles: compare_upstream_roles,
+        )
         IndexManager.clear_cache
       end
 
@@ -194,10 +254,15 @@ module Parse
         @default_index = "default"
         @allow_raw = default_allow_raw
         @require_session_token = false
-        @session_cache_ttl = 3600
-        @role_cache_ttl = 30
-        @session_cache = Session::MemoryCache.new
-        @role_cache = Session::MemoryCache.new
+        authorization&.configure(
+          identity_cache_ttl: Parse::Authorization::Context::DEFAULT_IDENTITY_TTL,
+          role_cache_ttl: Parse::Authorization::Context::DEFAULT_ROLE_TTL,
+          identity_cache: Parse::Authorization::MemoryCache.new,
+          role_cache: Parse::Authorization::MemoryCache.new,
+          upstream_role_reader: false,
+          compare_upstream_roles: false,
+        )
+        authorization&.upstream_role_reader = nil
         @master_warned = false
         IndexManager.clear_cache
       end
@@ -497,6 +562,7 @@ module Parse
         raw_results = run_atlas_pipeline!(
           collection_name, pipeline, options[:max_time_ms],
           read_preference: read_preference,
+          authorizing_client: Parse::ACLScope.client_of(resolution),
         )
 
         unless resolution.master?
@@ -635,6 +701,7 @@ module Parse
         facet_results_raw = run_atlas_pipeline!(
           collection_name, facet_pipeline, options[:max_time_ms],
           read_preference: read_preference,
+          authorizing_client: Parse::ACLScope.client_of(resolution),
         )
 
         # Extract facet results
@@ -668,6 +735,11 @@ module Parse
             search_opts = options.merge(limit: limit, skip: skip_val)
             search_opts[:master] = true if acl[:master]
             search_opts[:read_preference] = read_preference if read_preference
+            # Re-thread the client for the same reason as the auth kwargs
+            # above: the outer faceted_search popped it in resolve_scope!, so
+            # this inner search would otherwise resolve and read as the
+            # default application.
+            search_opts[:client] = Parse::ACLScope.client_of(resolution) if Parse::ACLScope.client_of(resolution)
             search(collection_name, query, **search_opts).results
           else
             []
@@ -686,10 +758,10 @@ module Parse
       # `find` / pointerFields / protectedFields / highlight-field
       # checks.
       def search_pipeline!(collection_name, search_stage, resolution:,
-                           protected_fields:, pointer_fields:,
-                           highlight_field: nil, filter: nil, sort: nil,
-                           skip: 0, limit: 100, max_time_ms: nil,
-                           read_preference: nil, class_name: nil, raw: false)
+                                                          protected_fields:, pointer_fields:,
+                                                          highlight_field: nil, filter: nil, sort: nil,
+                                                          skip: 0, limit: 100, max_time_ms: nil,
+                                                          read_preference: nil, class_name: nil, raw: false)
         # Backstop the stage-safety check at the shared execution chokepoint
         # so ANY path that runs a $search stage (not just search_with_stage)
         # rejects a non-$search stage / returnStoredSource. The .search and
@@ -735,6 +807,7 @@ module Parse
         # enforcement chain inline below.
         raw_results = run_atlas_pipeline!(
           collection_name, pipeline, max_time_ms, read_preference: read_preference,
+                                                  authorizing_client: Parse::ACLScope.client_of(resolution),
         )
 
         # Post-fetch enforcement: walk the result rows the same way
@@ -797,6 +870,10 @@ module Parse
         master = options.delete(:master)
         acl_user = options.delete(:acl_user)
         acl_role = options.delete(:acl_role)
+        # Consumed like the other auth kwargs so it never reaches the driver,
+        # and so `agent.acl_scope_kwargs` can carry the agent's own client
+        # into a `$search` the same way it carries the identity.
+        scope_client = options.delete(:client)
 
         # 4-way mutex. Mirrors Parse::ACLScope.resolve!'s
         # `provided.length > 1` check so an `acl_user:` + `acl_role:`
@@ -814,28 +891,57 @@ module Parse
                 "session_token:, master: true, acl_user:, or acl_role:. Pick one."
         end
 
+        # Resolve against the caller's own client when one was supplied.
+        # Atlas Search used to go only through the `Session` shim, which can
+        # address nothing but `Parse.client`, so a `$search` issued by a
+        # secondary client resolved its token against the wrong application.
+        #
+        # With no explicit client the RESOLUTION still goes through
+        # `Session.resolve` against the default, preserving the historical
+        # path, but the Resolution records the default client rather than
+        # nil.
+        #
+        # Recording nil was wrong. This is a public entry point, and the rule
+        # is that a public entry point resolves omission to the default once
+        # while internal sinks treat nil as unidentified. Leaving it nil here
+        # pushed an omission all the way down, so after a second application
+        # had been observed every ordinary default-client `$search` was
+        # rejected as unidentified.
+        auth_client = scope_client || default_authorizing_client
+
         if session_token
-          resolved = Session.resolve(session_token)
+          # Branch on the EXPLICIT client, not the resolved one. With none
+          # supplied this must stay on `Session.resolve` (the historical
+          # default-client path) while still recording the default on the
+          # Resolution below. Branching on `auth_client` routed the ordinary
+          # case through a different resolver.
+          resolved = if scope_client
+              scope_client.authorization.resolve(session_token)
+            else
+              Session.resolve(session_token)
+            end
           return Parse::ACLScope::Resolution.new(
-            mode: :session,
-            permission_strings: resolved.permission_strings,
-            user_id: resolved.user_id,
-            session: resolved,
-          )
+                   mode: :session,
+                   permission_strings: resolved.permission_strings,
+                   user_id: resolved.user_id,
+                   session: resolved,
+                   client: auth_client,
+                 )
         end
 
         if acl_user
-          return Parse::ACLScope.resolve_for_user(acl_user)
+          return Parse::ACLScope.resolve_for_user(acl_user, client: auth_client)
         end
 
         if acl_role
-          return Parse::ACLScope.resolve_for_role(acl_role)
+          return Parse::ACLScope.resolve_for_role(acl_role, client: auth_client)
         end
 
         if master == true
           return Parse::ACLScope::Resolution.new(
-            mode: :master, permission_strings: nil, user_id: nil, session: nil,
-          )
+                   mode: :master, permission_strings: nil, user_id: nil, session: nil,
+                   client: auth_client,
+                 )
         end
 
         if @require_session_token == true
@@ -854,7 +960,18 @@ module Parse
           permission_strings: anonymous.permission_strings,
           user_id: nil,
           session: anonymous,
+          client: auth_client,
         )
+      end
+
+      # @!visibility private
+      # The default Parse client, or nil when none is configured. Never
+      # raises and never constructs one: `Parse.client` does both.
+      def default_authorizing_client
+        return nil unless Parse::Client.client?
+        Parse.client
+      rescue StandardError
+        nil
       end
 
       # CLP `find` boundary check. Master-mode skips; for every other
@@ -940,10 +1057,13 @@ module Parse
       # helper {Parse::MongoDB.aggregate} uses so the kwarg semantics
       # are identical on both paths (invalid values warn and route to
       # primary; nil = no override).
-      def run_atlas_pipeline!(collection_name, pipeline, max_time_ms = nil, read_preference: nil)
+      def run_atlas_pipeline!(collection_name, pipeline, max_time_ms = nil, read_preference: nil,
+                                                                            authorizing_client: nil)
         agg_opts = {}
         agg_opts[:max_time_ms] = max_time_ms if max_time_ms
-        coll = Parse::MongoDB.collection(collection_name)
+        # Atlas Search does not go through Parse::MongoDB.aggregate, so this
+        # is the only place its reads meet the binding guard.
+        coll = Parse::MongoDB.collection(collection_name, authorizing_client: authorizing_client)
         if (mode = Parse::MongoDB.send(:normalize_read_preference, read_preference))
           coll = coll.with(read: { mode: mode })
         end
@@ -1147,10 +1267,11 @@ module Parse
     @default_index = "default"
     @allow_raw = nil
     @require_session_token = false
-    @session_cache_ttl = 3600
-    @role_cache_ttl = 30
-    @session_cache = Session::MemoryCache.new
-    @role_cache = Session::MemoryCache.new
+    # No authorization ivars here anymore. The identity and role caches, their
+    # TTLs, and the upstream reader live on each client's
+    # Parse::Authorization::Context and are initialized there, so this module
+    # cannot hold a second, divergent copy. Initializing them at load time
+    # would also require a configured client before one exists.
     @master_warned = false
   end
 end

@@ -42,7 +42,7 @@ class ClientRestAclIntegrationTest < Minitest::Test
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
     super
     @alice, @alice_pw = seed_client_user("acl_alice")
-    @bob,   @bob_pw   = seed_client_user("acl_bob")
+    @bob, @bob_pw = seed_client_user("acl_bob")
   end
 
   # --------------------------------------------------------------------
@@ -159,7 +159,7 @@ class ClientRestAclIntegrationTest < Minitest::Test
   def test_user_can_modify_self_but_not_other
     as_client do
       alice = Parse::User.login(@alice.username, @alice_pw)
-      bob   = Parse::User.login(@bob.username, @bob_pw)
+      bob = Parse::User.login(@bob.username, @bob_pw)
 
       # Self-update succeeds.
       self_update = Parse.client.update_object(
@@ -210,7 +210,7 @@ class ClientRestAclIntegrationTest < Minitest::Test
         perms = fresh.acl.permissions
         owner_entry = perms[alice.id]
         refute_nil owner_entry, "owner ACL entry must be present"
-        assert owner_entry.read,  "owner ACL must grant read"
+        assert owner_entry.read, "owner ACL must grant read"
         assert owner_entry.write, "owner ACL must grant write"
 
         # `*` may be either absent or present-with-nil — both serialize to

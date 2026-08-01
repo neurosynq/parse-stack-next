@@ -92,12 +92,12 @@ module Parse
         def agent_hidden(except: nil)
           @agent_hidden = true
           @agent_hidden_except = case except
-                                 when nil    then nil
-                                 when :master_key, "master_key" then :master_key
-                                 else
-                                   raise ArgumentError,
-                                         "agent_hidden(except:) accepts only :master_key (got #{except.inspect})"
-                                 end
+            when nil then nil
+            when :master_key, "master_key" then :master_key
+            else
+              raise ArgumentError,
+                    "agent_hidden(except:) accepts only :master_key (got #{except.inspect})"
+            end
           Parse::Agent::MetadataRegistry.register_hidden_class(self, except: @agent_hidden_except)
           true
         end
@@ -462,7 +462,7 @@ module Parse
         #   stricter MCP clients can validate before dispatch.
         # @return [Hash] the method metadata
         def agent_method(method_name, description = nil, permission: :readonly,
-                         supports_dry_run: false, permitted_keys: nil, parameters: nil)
+                                                         supports_dry_run: false, permitted_keys: nil, parameters: nil)
           method_sym = method_name.to_sym
 
           unless AGENT_METHOD_PERMISSIONS.include?(permission)
