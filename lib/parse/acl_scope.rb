@@ -4,6 +4,7 @@
 require "set"
 require_relative "model/acl"
 require_relative "clp_scope"
+require_relative "authorization"
 
 module Parse
   # Shared identity-resolution helper for query paths that simulate
@@ -22,11 +23,13 @@ module Parse
   # userObjectId, "role:Admin", ...]`), so callers can prepend a
   # `$match` stage built via {Parse::ACL.read_predicate}.
   #
-  # Atlas Search uses the same pattern through
-  # `Parse::AtlasSearch::Session`; this module reuses that resolver
-  # (token → user_id → role expansion + caching) and adds a
-  # path-agnostic kwarg-popping front door so every mongo-direct entry
-  # point can speak the same auth vocabulary.
+  # Identity and role resolution live in {Parse::Authorization}, which
+  # owns the token → user_id → role-expansion pipeline and its caches.
+  # This module adds a path-agnostic kwarg-popping front door on top, so
+  # every mongo-direct entry point speaks the same auth vocabulary.
+  # Atlas Search is a peer consumer of the same resolver, not its home:
+  # `Parse::Query#results_direct` runs no `$search` at all and must not
+  # depend on the Atlas Search namespace to decide who the caller is.
   module ACLScope
     # Raised when a query path is configured to require an explicit
     # session-token or master mode and the caller supplied neither.
@@ -50,7 +53,7 @@ module Parse
     #   @return [String, nil] the resolved user_id, or `nil` for
     #     `:master` and `:public`.
     # @!attribute session
-    #   @return [Parse::AtlasSearch::Session::Resolved, nil] the
+    #   @return [Parse::Authorization::Resolved, nil] the
     #     underlying resolved-session struct (carries role-name set),
     #     `nil` for `:master`.
     # @!attribute strict_role
@@ -64,7 +67,14 @@ module Parse
     #     `strict_role: true`, rows with NO `_rperm` field still pass
     #     (Parse-Server treats absent `_rperm` as public-default); the
     #     knob only suppresses the `"*"` subscription in the `$in` set.
-    Resolution = Struct.new(:mode, :permission_strings, :user_id, :session, :strict_role, keyword_init: true) do
+    # @!attribute client
+    #   @return [Parse::Client, nil] the client whose authorization context
+    #     produced this resolution. Carried so a caller about to run the
+    #     query against a process-global resource can check that the two
+    #     agree; see {Parse::MongoDB.verify_client!}. Per-client
+    #     authorization plus a process-global MongoDB connection is safe only
+    #     when they belong to the same application.
+    Resolution = Struct.new(:mode, :permission_strings, :user_id, :session, :strict_role, :client, keyword_init: true) do
       def master?; mode == :master; end
       def session?; mode == :session; end
       def public?; mode == :public; end
@@ -124,7 +134,7 @@ module Parse
           # Parse::Query#scope_to_user. Mirrors the session-token path
           # but skips the /users/me round-trip; role expansion still
           # runs via Parse::Role.all_for_user.
-          return resolve_for_user(acl_user)
+          return resolve_for_user(acl_user, client: authorization_client(options))
         end
 
         if acl_role
@@ -137,22 +147,25 @@ module Parse
           # identity. Parent-role inheritance applies (passing
           # "scope:admin" includes any role "scope:admin" inherits
           # from).
-          return resolve_for_role(acl_role, strict_role: strict_role)
+          return resolve_for_role(acl_role, strict_role: strict_role,
+                                  client: authorization_client(options))
         end
 
         if session_token
-          require_atlas_session!
-          resolved = Parse::AtlasSearch::Session.resolve(session_token)
+          context = authorization_for(options)
+          resolved = context.resolve(session_token)
           return Resolution.new(
             mode: :session,
             permission_strings: resolved.permission_strings,
             user_id: resolved.user_id,
             session: resolved,
+            client: context.client,
           )
         end
 
         if master == true
-          return Resolution.new(mode: :master, permission_strings: nil, user_id: nil, session: nil)
+          return Resolution.new(mode: :master, permission_strings: nil, user_id: nil, session: nil,
+                                client: authorization_client(options))
         end
 
         if @require_session_token == true
@@ -165,13 +178,13 @@ module Parse
         end
 
         warn_no_acl_context_once!(method_name)
-        require_atlas_session!
-        anonymous = Parse::AtlasSearch::Session::Resolved.new(nil, Set.new)
+        anonymous = Parse::Authorization::Resolved.new(nil, Set.new)
         Resolution.new(
           mode: :public,
           permission_strings: anonymous.permission_strings,
           user_id: nil,
           session: anonymous,
+          client: authorization_client(options),
         )
       end
 
@@ -565,7 +578,7 @@ module Parse
       # through a session token.
       # @param user [Parse::User, Parse::Pointer]
       # @return [Resolution]
-      def resolve_for_user(user)
+      def resolve_for_user(user, client: nil)
         # SECURITY: className must be `_User` (or the legacy `User`
         # alias). Without this check, any duck-typed object exposing
         # `#id` — including a `Parse::Pointer` to a foreign class
@@ -608,12 +621,12 @@ module Parse
         role_names.each { |name| perms << "role:#{name}" if name && !name.empty? }
         perms.uniq!
 
-        require_atlas_session!
         Resolution.new(
           mode: :session,
           permission_strings: perms,
           user_id: user.id,
-          session: Parse::AtlasSearch::Session::Resolved.new(user.id, role_names),
+          session: Parse::Authorization::Resolved.new(user.id, role_names),
+          client: client,
         )
       end
 
@@ -646,7 +659,7 @@ module Parse
       #   {.match_stage_for} for the precise predicate shape.
       # @return [Resolution]
       # @raise [ArgumentError] when the role cannot be resolved.
-      def resolve_for_role(role, strict_role: false)
+      def resolve_for_role(role, strict_role: false, client: nil)
         require_relative "model/classes/role"
         role_obj =
           case role
@@ -678,13 +691,13 @@ module Parse
         names.each { |n| perms << "role:#{n}" if n && !n.empty? }
         perms.uniq!
 
-        require_atlas_session!
         Resolution.new(
           mode: :session,
           permission_strings: perms,
           user_id: nil,
-          session: Parse::AtlasSearch::Session::Resolved.new(nil, names),
+          session: Parse::Authorization::Resolved.new(nil, names),
           strict_role: strict_role,
+          client: client,
         )
       end
 
@@ -717,18 +730,48 @@ module Parse
              "= true to make this misuse an error instead of a warning."
       end
 
-      # Lazily load the Atlas Search session resolver — it carries the
-      # token-cache / role-cache plumbing this module reuses. Loads
-      # `atlas_search.rb` (not just `atlas_search/session.rb`) so the
-      # parent module's session_cache / role_cache are initialized.
-      # Loading session.rb in isolation leaves Parse::AtlasSearch
-      # without its memory caches and Session.lookup_user_id crashes
-      # with NoMethodError. Keeping the require lazy means apps that
-      # never call an auth-resolving path don't pay the load cost.
-      def require_atlas_session!
-        return if defined?(Parse::AtlasSearch) && Parse::AtlasSearch.respond_to?(:session_cache) &&
-                  !Parse::AtlasSearch.session_cache.nil?
-        require_relative "atlas_search"
+      # The authorization context that should resolve this call.
+      #
+      # **Mutates `options`** by `delete`-ing `:client`, consistent with the
+      # other auth kwargs, so the remaining hash can be forwarded to the
+      # transport without leaking it.
+      #
+      # Defaults to `Parse.client` at this boundary. Below it,
+      # {Parse::Authorization.resolve} requires `client:` with no default: a
+      # token belonging to application B must never be validated against
+      # application A, which is exactly what a global resolver did.
+      #
+      # This used to lazily `require "atlas_search"` and call
+      # `Parse::AtlasSearch::Session.resolve`, so a plain mongo-direct query
+      # with no `$search` anywhere in it pulled in the Atlas Search namespace
+      # to decide who the caller was.
+      def authorization_for(options)
+        client = authorization_client(options)
+        if client.nil?
+          raise ACLRequired,
+                "Parse::ACLScope could not determine a Parse client to resolve this " \
+                "session token against. Pass client: explicitly, or configure a default " \
+                "client with Parse.setup."
+        end
+        client.authorization
+      end
+
+      # The client for this call, or `nil` when none can be determined.
+      #
+      # **Mutates `options`** by `delete`-ing `:client`, so calling this more
+      # than once per call is safe: the first call consumes the kwarg and
+      # later ones fall back to the default.
+      #
+      # Never raises. The master and public paths run no identity resolution
+      # and historically worked in a process that had never called
+      # `Parse.setup`, so making them raise `ConnectionError` just to label
+      # the resolution would be a regression. They still want the label when
+      # one is available, because {Parse::MongoDB.verify_client!} checks it
+      # against the application the global connection is bound to.
+      def authorization_client(options)
+        options.delete(:client) || Parse.client
+      rescue Parse::Error::ConnectionError
+        nil
       end
     end
 

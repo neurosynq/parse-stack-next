@@ -93,39 +93,79 @@ module Parse
       #   @return [Boolean]
       attr_accessor :require_session_token
 
-      # @!attribute [rw] session_cache_ttl
-      #   TTL (seconds) for {Session}'s session-token → user-id cache.
-      #   Default: 3600 (1 hour). Longer values reduce `/users/me`
-      #   round-trips but extend the window during which a revoked
-      #   session can still authenticate Atlas Search calls; apps
-      #   with sub-TTL revocation requirements should call
-      #   {Session.invalidate} from their logout path.
-      #   @return [Integer]
-      attr_accessor :session_cache_ttl
+      # --- authorization state: delegated, no longer stored here ----------
+      #
+      # These five used to be module-level ivars on Atlas Search, which made
+      # Atlas Search the owner of identity and role resolution for the whole
+      # SDK: `Parse::ACLScope` reached through this namespace, and
+      # `Parse::MongoDB.aggregate` reaches through `Parse::ACLScope`, so a
+      # plain mongo-direct query with no `$search` in it depended on them.
+      # They now read and write the DEFAULT client's
+      # {Parse::Authorization::Context}. See {Parse::Authorization}.
+      #
+      # Being module-level, they can only ever address `Parse.client`. Code
+      # running against a secondary application must use
+      # `other_client.authorization` directly, which is the whole reason the
+      # state moved onto the client.
+      #
+      # Slated for removal in 6.0.
 
-      # @!attribute [rw] role_cache_ttl
-      #   TTL (seconds) for {Session}'s user-id → role-name cache.
-      #   Default: 30. Short on purpose: stale role data yields
-      #   incorrect ACL decisions, so the cache is sized to amortize
-      #   within a single request/turn but expire well inside the
-      #   response time the operator notices a role grant or revoke.
-      #   @return [Integer]
-      attr_accessor :role_cache_ttl
+      # @deprecated Use `client.authorization.identity_cache_ttl`.
+      #   Renamed because it never stored sessions: it stores one user id per
+      #   token, and the old name led readers to reason about `_Session`
+      #   semantics that were never involved.
+      def session_cache_ttl = authorization&.identity_cache_ttl || Parse::Authorization::Context::DEFAULT_IDENTITY_TTL
+      def session_cache_ttl=(value)
+        authorization&.identity_cache_ttl = value
+      end
 
-      # @!attribute [rw] session_cache
-      #   Pluggable cache for {Session}'s session-token lookups.
-      #   Replace with a Redis/Memcached adapter for cross-process
-      #   sharing; the object must respond to `get(key)`,
-      #   `set(key, value, ttl:)`, and `invalidate(key)`. Defaults
-      #   to a process-local {Session::MemoryCache}.
-      #   @return [#get, #set, #invalidate]
-      attr_accessor :session_cache
+      # @deprecated Use `client.authorization.role_cache_ttl`.
+      def role_cache_ttl = authorization&.role_cache_ttl || Parse::Authorization::Context::DEFAULT_ROLE_TTL
+      def role_cache_ttl=(value)
+        authorization&.role_cache_ttl = value
+      end
 
-      # @!attribute [rw] role_cache
-      #   Pluggable cache for {Session}'s role-name lookups. See
-      #   {.session_cache} for the interface contract.
-      #   @return [#get, #set, #invalidate]
-      attr_accessor :role_cache
+      # @deprecated Use `client.authorization.identity_cache`.
+      def session_cache = authorization&.identity_cache
+      def session_cache=(value)
+        authorization&.identity_cache = value
+      end
+
+      # @deprecated Use `client.authorization.role_cache`.
+      def role_cache = authorization&.role_cache
+      def role_cache=(value)
+        authorization&.role_cache = value
+      end
+
+      # @deprecated Use `client.authorization.upstream_role_reader`.
+      def upstream_role_reader = authorization&.upstream_role_reader
+      def upstream_role_reader=(value)
+        authorization&.upstream_role_reader = value
+      end
+
+      # @deprecated Use `client.authorization.compare_upstream_roles`.
+      def compare_upstream_roles = authorization&.compare_upstream_roles || false
+      def compare_upstream_roles=(value)
+        authorization&.compare_upstream_roles = value
+      end
+
+      # The default client's authorization context, or `nil` when no client
+      # has been configured yet.
+      #
+      # Nil-tolerant on purpose. These delegators exist only for backward
+      # compatibility, and the module-level API they replace worked in a
+      # process that had never called `Parse.setup` (it kept its own
+      # process-local caches). Raising `ConnectionError` from what used to be
+      # a plain attribute reader would break configuration code that touches
+      # these before setting up a client, and `reset!` is a test helper that
+      # must not require a live client to run.
+      #
+      # @return [Parse::Authorization::Context, nil]
+      def authorization
+        Parse.client&.authorization
+      rescue Parse::Error::ConnectionError
+        nil
+      end
 
       # Configure Atlas Search (uses Parse::MongoDB connection)
       # @param enabled [Boolean] whether to enable Atlas Search (default: true)
@@ -142,6 +182,12 @@ module Parse
       #   (seconds). Default: 3600.
       # @param role_cache_ttl [Integer] role-name cache TTL (seconds).
       #   Default: 30.
+      # @param upstream_role_reader [#roles_for, nil] see
+      #   {#upstream_role_reader}. Default: unchanged (`nil` unless set
+      #   separately).
+      # @param compare_upstream_roles [Boolean] see
+      #   {#compare_upstream_roles}. Default: unchanged (`false` unless
+      #   set separately).
       # @example
       #   Parse::AtlasSearch.configure(enabled: true, default_index: "default")
       def configure(enabled: true,
@@ -149,14 +195,22 @@ module Parse
                     allow_raw: nil,
                     require_session_token: nil,
                     session_cache_ttl: nil,
-                    role_cache_ttl: nil)
+                    role_cache_ttl: nil,
+                    upstream_role_reader: nil,
+                    compare_upstream_roles: nil)
         Parse::MongoDB.require_gem!
         @enabled = enabled
         @default_index = default_index
         @allow_raw = allow_raw.nil? ? default_allow_raw : allow_raw
         @require_session_token = require_session_token unless require_session_token.nil?
-        @session_cache_ttl = session_cache_ttl unless session_cache_ttl.nil?
-        @role_cache_ttl = role_cache_ttl unless role_cache_ttl.nil?
+        # Authorization settings belong to the client, not to this module.
+        # Forwarded rather than stored so there is exactly one copy.
+        authorization&.configure(
+          identity_cache_ttl: session_cache_ttl,
+          role_cache_ttl: role_cache_ttl,
+          upstream_role_reader: upstream_role_reader,
+          compare_upstream_roles: compare_upstream_roles,
+        )
         IndexManager.clear_cache
       end
 
@@ -194,10 +248,15 @@ module Parse
         @default_index = "default"
         @allow_raw = default_allow_raw
         @require_session_token = false
-        @session_cache_ttl = 3600
-        @role_cache_ttl = 30
-        @session_cache = Session::MemoryCache.new
-        @role_cache = Session::MemoryCache.new
+        authorization&.configure(
+          identity_cache_ttl: Parse::Authorization::Context::DEFAULT_IDENTITY_TTL,
+          role_cache_ttl: Parse::Authorization::Context::DEFAULT_ROLE_TTL,
+          identity_cache: Parse::Authorization::MemoryCache.new,
+          role_cache: Parse::Authorization::MemoryCache.new,
+          upstream_role_reader: false,
+          compare_upstream_roles: false,
+        )
+        authorization&.upstream_role_reader = nil
         @master_warned = false
         IndexManager.clear_cache
       end
@@ -1147,10 +1206,11 @@ module Parse
     @default_index = "default"
     @allow_raw = nil
     @require_session_token = false
-    @session_cache_ttl = 3600
-    @role_cache_ttl = 30
-    @session_cache = Session::MemoryCache.new
-    @role_cache = Session::MemoryCache.new
+    # No authorization ivars here anymore. The identity and role caches, their
+    # TTLs, and the upstream reader live on each client's
+    # Parse::Authorization::Context and are initialized there, so this module
+    # cannot hold a second, divergent copy. Initializing them at load time
+    # would also require a configured client before one exists.
     @master_warned = false
   end
 end

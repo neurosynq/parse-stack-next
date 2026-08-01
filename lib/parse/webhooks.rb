@@ -182,8 +182,26 @@ module Parse
           raise ArgumentError, "Invalid Webhook registration trigger #{type} #{className}"
         end
 
-        # AfterSave/AfterDelete hooks support more than one
-        if type == :after_save || type == :after_delete
+        # Triggers whose handlers compose instead of replacing one another.
+        #
+        # `after_save` / `after_delete` have always accumulated. The remaining
+        # `after_*` triggers are added because the SDK itself now registers
+        # them for cache invalidation: without this, registering an internal
+        # `after_logout` handler would silently replace an application's own,
+        # with the winner decided by file load order and no warning.
+        #
+        # This is safe only for non-rejectable triggers. Parse Server ignores
+        # their response body, and {#call_route} normalizes their result to
+        # `true` regardless, so `.last` semantics are irrelevant.
+        # {REJECTABLE_NON_OBJECT_TRIGGERS} are deliberately excluded: a
+        # composite of those must deny if ANY handler denies, and folding with
+        # `.last` would discard an earlier rejection.
+        composable = type == :after_save || type == :after_delete ||
+                     (NON_OBJECT_TRIGGERS.include?(type) &&
+                      !REJECTABLE_NON_OBJECT_TRIGGERS.include?(type) &&
+                      type.to_s.start_with?("after_"))
+
+        if composable
           routes[type][className] ||= []
           routes[type][className].push block
         else

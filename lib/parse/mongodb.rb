@@ -85,6 +85,11 @@ module Parse
     # $accumulator, which all execute server-side JavaScript.
     class DeniedOperator < StandardError; end
 
+    # Raised when a mongo-direct query is authorized by one Parse client but
+    # this process's global MongoDB connection belongs to another. See
+    # {Parse::MongoDB.verify_client!}.
+    class ClientMismatch < StandardError; end
+
     # Error raised when an index mutation primitive is invoked but the
     # writer connection has not been configured via {.configure_writer}.
     class WriterNotConfigured < StandardError; end
@@ -269,7 +274,65 @@ module Parse
         @enabled = enabled
         @database = database || extract_database_from_uri(resolved)
         @client = nil # Reset client on reconfigure
+        # Bind this connection to whichever Parse application is configured
+        # now. See {.verify_client!} for why.
+        @bound_application_id = current_application_id
         warn_if_writeable_role! if verify_role && enabled
+      end
+
+      # @return [String, nil] the Parse application this global connection is
+      #   bound to, captured at {.configure} time.
+      attr_reader :bound_application_id
+
+      # Refuse a mongo-direct query issued by a client that is not the one
+      # this connection was configured for.
+      #
+      # The connection is process-global: one URI, one database, one driver
+      # client, chosen by whoever called {.configure}. Authorization, since
+      # 5.7, is per-client: `client.authorization` resolves a session token
+      # against that client's own Parse application. Those two facts are safe
+      # in isolation and dangerous together. A secondary client would resolve
+      # its token correctly, against its own application, produce a correct
+      # `_rperm` allow-set for a user of that application, and then run the
+      # resulting pipeline against the OTHER application's database. The user
+      # ids and role names would be matched against rows they have nothing to
+      # do with, and any collision is a cross-application read.
+      #
+      # Failing closed is the only safe answer, because the alternative is
+      # silent and looks like a working query. The connection becomes
+      # client-owned in 6.0, at which point this guard is unnecessary.
+      #
+      # No binding recorded (a connection configured before this existed, or
+      # configured with no Parse client set up at all) means there is nothing
+      # to compare and the call proceeds. The same is true when the caller
+      # cannot be identified.
+      #
+      # @param client [Parse::Client, nil] the client that authorized the call.
+      # @raise [Parse::MongoDB::ClientMismatch]
+      def verify_client!(client)
+        bound = @bound_application_id
+        return if bound.nil?
+        caller_app = client.respond_to?(:application_id) ? client.application_id : nil
+        return if caller_app.nil?
+        return if caller_app == bound
+
+        raise ClientMismatch,
+              "Parse::MongoDB is bound to application #{bound.inspect} but this query was " \
+              "authorized by a client for application #{caller_app.inspect}. The MongoDB " \
+              "connection is process-global while authorization is per-client, so running " \
+              "this would resolve one application's identity and then read the other " \
+              "application's database. Configure a separate process for each application, " \
+              "or route this query through REST instead of mongo-direct."
+      end
+
+      # @!visibility private
+      # The currently configured default Parse application, or nil when no
+      # client exists yet. Never raises: {.configure} must work in a process
+      # that sets up Mongo before Parse.
+      def current_application_id
+        Parse.client&.application_id
+      rescue StandardError
+        nil
       end
 
       # @return [String, nil] the first env-var URI found, in
@@ -383,6 +446,7 @@ module Parse
         @client = nil
         @enabled = false
         @uri = nil
+    @bound_application_id = nil
         @database = nil
         remove_instance_variable(:@gem_available) if defined?(@gem_available)
         reset_writer!
@@ -1541,6 +1605,10 @@ module Parse
           acl_role: acl_role,
         }.compact
         resolution = Parse::ACLScope.resolve!(auth_kwargs, method_name: :aggregate)
+        # The resolution above is client-scoped; the connection below is not.
+        # Refuse the combination rather than reading another application's
+        # database with this application's permission strings.
+        verify_client!(resolution.client)
         payload[:scope] = __scope_label(resolution)
 
         # Validate BEFORE rewrite so the security denylist is applied to the

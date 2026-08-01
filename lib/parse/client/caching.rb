@@ -91,6 +91,23 @@ module Parse
         ns = ns.chomp(":")
         @namespace = ns.empty? ? nil : ns
 
+        # The keyspace owns physical key layout and the patterns that clear it,
+        # so key generation and eviction cannot drift apart. Previously this
+        # middleware composed keys from its own `@namespace` while
+        # `Parse::Cache::Redis` held a separate one, and `clear_cache!` used
+        # only the latter: a client namespaced here but not there would clear
+        # every SDK key on the database instead of its own.
+        #
+        # When no keyspace is supplied the middleware keeps writing legacy
+        # un-prefixed keys, so an upgrade that does not opt in behaves exactly
+        # as before.
+        @keyspace = @opts[:keyspace]
+        # During the transition, also delete the pre-keyspace form of a key on
+        # invalidation. Without this, a rolling deploy has new workers writing
+        # keyspaced keys while old workers still read legacy ones, so a write
+        # served by a new worker never invalidates what an old worker serves.
+        @delete_legacy_variants = @opts.fetch(:delete_legacy_variants, true)
+
         unless [:key?, :[], :delete, :store].all? { |method| @store.respond_to?(method) }
           raise ArgumentError, "Caching store object must a Moneta key/value store."
         end
@@ -135,11 +152,20 @@ module Parse
         method = env.method
         @cache_key = url.to_s
 
+        # Auth discriminator. A master-key request bypasses ACL, CLP and
+        # protectedFields, so the same URL returns a strictly fuller body than a
+        # session request, and two sessions can differ from each other through
+        # protectedFields entity rules and row ACLs. These must never share a
+        # cache entry or the cache would hand privileged fields to an
+        # unprivileged caller.
+        @cache_auth = :anon
         if @request_headers.key?(SESSION_TOKEN)
           @session_token = @request_headers[SESSION_TOKEN]
           hashed_token = Digest::SHA256.hexdigest(@session_token.to_s)[0, 32]
+          @cache_auth = hashed_token
           @cache_key = "#{hashed_token}:#{@cache_key}" # prefix with hashed token
         elsif @request_headers.key?(MASTER_KEY)
+          @cache_auth = :master
           @cache_key = "mk:#{@cache_key}" # prefix for master key requests
         end
 
@@ -159,6 +185,13 @@ module Parse
         # Namespace outermost so a SCAN over `<namespace>:*` evicts a whole
         # tenant/app cleanly without touching another app's entries.
         @cache_key = "#{@namespace}:#{@cache_key}" if @namespace
+
+        # Keep the legacy key for dual-delete on invalidation, then switch the
+        # live key to the keyspace form when one is configured.
+        @legacy_cache_key = @cache_key
+        if @keyspace
+          @cache_key = @keyspace.cache_key(url, auth: @cache_auth, tenant: @cache_tenant)
+        end
 
         url_path = url.path
 
@@ -229,10 +262,17 @@ module Parse
             #non GET requets should clear the cache for that same resource path.
             #ex. a POST to /1/classes/Artist/<objectId> should delete the cache for a GET
             # request for the same '/1/classes/Artist/<objectId>' where objectId are equivalent
-            delete_cache_variants(url)
+            delete_cache_variants(url, resource: true)
             instrument_cache(:delete, method: method, url_path: url_path)
           end
-        rescue ::TypeError, Errno::EINVAL, Redis::CannotConnectError, Redis::TimeoutError, ConnectionPool::TimeoutError => e
+        # `Redis::CommandError` covers the failures a scoped eviction can now
+        # produce that a plain GET/SET never did: a NOPERM from a restricted
+        # ACL, an UNLINK the server does not implement, and a CROSSSLOT refusal
+        # under Redis Cluster. Without it those escape the middleware and turn a
+        # cache problem into a failed application request, which inverts the
+        # whole point of the cache being optional.
+        rescue ::TypeError, Errno::EINVAL, Redis::CannotConnectError, Redis::TimeoutError,
+               Redis::CommandError, ConnectionPool::TimeoutError => e
           # if the cache store fails to connect, catch the exception but proceed
           # with the regular request, but turn off caching for this request. It is possible
           # that the cache connection resumes at a later point, so this is temporary.
@@ -312,7 +352,46 @@ module Parse
       # cleanup of stale pre-namespace entries) and non-GET writes (cache
       # invalidation for the resource).
       # @!visibility private
-      def delete_cache_variants(url)
+      # @param resource [Boolean] when true, evict every auth variant of this
+      #   resource, not just the caller's own entry. Only a write should do
+      #   that. On a GET miss this method is called defensively to clear stale
+      #   siblings, and evicting resource-wide there would destroy other
+      #   sessions' perfectly valid entries on every single cache miss.
+      def delete_cache_variants(url, resource: false)
+        delete_keyspace_variants(url) if resource && @keyspace
+        delete_legacy_variants(url) if legacy_variants?
+        @store.delete @cache_key # final key
+      end
+
+      # Whether to also evict the pre-keyspace key shape. Always true before a
+      # keyspace is configured, since that shape is the only one in use.
+      # @!visibility private
+      def legacy_variants?
+        @keyspace.nil? || @delete_legacy_variants
+      end
+
+      # Evict every auth variant of this resource, not just the caller's own.
+      #
+      # The old two-variant delete could name the anonymous and master-key
+      # siblings but had no way to enumerate *other sessions'* entries, so a
+      # write by one user left every other user holding a stale copy until TTL.
+      # A scan-capable store can express that as one pattern; anything else
+      # falls back to the variants we can name.
+      # @!visibility private
+      def delete_keyspace_variants(url)
+        pattern = @keyspace.resource_pattern(url, tenant: @cache_tenant)
+        if @store.respond_to?(:delete_matching)
+          @store.delete_matching(pattern)
+        else
+          @store.delete @keyspace.cache_key(url, auth: :anon, tenant: @cache_tenant)
+          @store.delete @keyspace.cache_key(url, auth: :master, tenant: @cache_tenant)
+        end
+      end
+
+      # Evict the pre-keyspace key shape so a rolling deploy does not leave old
+      # workers serving entries that a new worker's write should have killed.
+      # @!visibility private
+      def delete_legacy_variants(url)
         if @namespace
           # Namespaced: only delete our app's variants so a write through
           # client A doesn't blow away client B's cache when both share Redis.
@@ -322,7 +401,7 @@ module Parse
           @store.delete url.to_s # regular
           @store.delete "mk:#{url.to_s}" # master key cache-key
         end
-        @store.delete @cache_key # final key
+        @store.delete @legacy_cache_key if @legacy_cache_key
       end
     end #Caching
   end #Middleware

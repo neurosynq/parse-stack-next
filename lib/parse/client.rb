@@ -32,6 +32,8 @@ require_relative "client/body_builder"
 require_relative "client/authentication"
 require_relative "client/caching"
 require_relative "cache/redis"
+require_relative "cache/invalidation"
+require_relative "authorization"
 require_relative "client/logging"
 require_relative "client/profiling"
 require_relative "api/all"
@@ -336,6 +338,19 @@ module Parse
     #   lowest-priority auth fallback on every request.
     attr_reader :session_token
     alias_method :app_id, :application_id
+
+    # This client's authorization context: the identity and role caches, and
+    # the session-token resolver that feeds every mongo-direct ACL decision.
+    #
+    # One context per client, created lazily and never shared. That is the
+    # point of it living here rather than in module-level state: two clients
+    # pointed at two Parse applications must not resolve a token against each
+    # other's caches, nor validate it against each other's `/users/me`.
+    #
+    # @return [Parse::Authorization::Context]
+    def authorization
+      @authorization ||= Parse::Authorization::Context.new(client: self)
+    end
 
     # Redacted inspection. The default Ruby `#inspect` would dump every ivar,
     # exposing the master key and any bound session token in cleartext wherever
@@ -754,6 +769,68 @@ module Parse
             end
 
             self.cache = opts[:cache]
+
+            # Build one keyspace from the effective namespace and install it on
+            # both the middleware and the store, so key generation and eviction
+            # can never disagree. Previously the middleware could hold a
+            # `cache_namespace:` the store knew nothing about, and
+            # `clear_cache!` scoped using only the store's own namespace, so a
+            # namespaced client cleared every SDK key on the database.
+            #
+            # Opt-in: without `cache_keyspace: true` the legacy key shape is
+            # kept, so an upgrade changes nothing until an operator asks for it.
+            #
+            # `scoped` derives an immutable, per-client view rather than
+            # mutating the store in place. This matters when one backend
+            # (e.g. a `Parse::Cache::Redis` connection pool) is shared across
+            # more than one `Parse::Client`: mutating a shared store's
+            # keyspace would rebind it out from under whichever client
+            # configured it first, so this client's own `self.cache` becomes
+            # the view, and the shared backend itself is never touched.
+            cache_keyspace = nil
+            if opts[:cache_keyspace]
+              cache_keyspace = Parse::Cache::Keyspace.new(
+                app_id: @application_id,
+                server_url: @server_url,
+                namespace: opts[:cache_namespace],
+              )
+              # Derive an immutable per-client view rather than mutating the
+              # backend, so two clients can share a connection pool without
+              # sharing ownership of the keyspace. There is deliberately no
+              # `keyspace=` fallback here, since reintroducing a mutable
+              # binding at the call site would restore the cross-client
+              # rebinding this replaces.
+              #
+              # A store that cannot produce a view is wrapped rather than left
+              # alone. Leaving it bare still composed keys correctly, because
+              # the middleware below receives the keyspace directly, so the
+              # deployment looked keyspaced; but `clear_cache!` then called the
+              # store's own unrestricted `clear`, which on a plain
+              # `Moneta.new(:Redis)` is FLUSHDB. Opting into keyspacing and
+              # getting a database-wide flush is the exact inversion of the
+              # option: it deletes other applications' entries and any
+              # `parse-stack:foc:v1:*` create-locks sharing the database.
+              self.cache =
+                if self.cache.respond_to?(:scoped)
+                  self.cache.scoped(cache_keyspace)
+                else
+                  Parse::Cache::KeyspacedStore.new(store: self.cache, keyspace: cache_keyspace)
+                end
+            end
+
+            # Register the invalidation triggers once a keyspace exists, so
+            # role and identity staleness is bounded by webhook rather than by
+            # application discipline. Opt-in with the keyspace, since without
+            # planes there is nothing to invalidate.
+            if cache_keyspace && self.cache.respond_to?(:roles) &&
+               opts.fetch(:cache_invalidation_hooks, true)
+              begin
+                Parse::Cache::Invalidation.install!(self.cache)
+              rescue StandardError => e
+                warn "[Parse::Client] cache invalidation hooks not installed: #{e.class}"
+              end
+            end
+
             conn.use Parse::Middleware::Caching, self.cache, {
               expires: opts[:expires].to_i,
               # Optional `cache_namespace:` prefixes every key so two Parse
@@ -761,6 +838,11 @@ module Parse
               # Explicit only — we do NOT auto-derive from app_id to keep
               # existing single-app deployments backward-compatible.
               namespace: opts[:cache_namespace],
+              keyspace: cache_keyspace,
+              # During a rolling deploy, new workers write keyspaced keys while
+              # old workers still read the legacy shape, so invalidation has to
+              # hit both until every old worker is drained.
+              delete_legacy_variants: opts.fetch(:cache_delete_legacy_variants, true),
             }
 
             # Inform about opt-in cache behavior

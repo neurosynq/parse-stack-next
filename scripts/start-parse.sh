@@ -116,6 +116,34 @@ export PARSE_SERVER_PREVENT_LOGIN_WITH_UNVERIFIED_EMAIL="${PARSE_SERVER_PREVENT_
 # both pathways: authed upload succeeds, anon upload is rejected.
 export PARSE_SERVER_FILE_UPLOAD="${PARSE_SERVER_FILE_UPLOAD:-{\"enableForPublic\":false,\"enableForAnonymousUser\":false,\"enableForAuthenticatedUser\":true}}"
 
+# Cache adapter (test-stack only). Parse Server defaults to an in-process
+# InMemoryCacheAdapter, so its session / user / role caches are invisible from
+# outside the container and the SDK's read-only consumer of
+# `<appId>:role:<userId>` (Parse::Cache::UpstreamRoles) has nothing to read.
+# Pointing the cache at Redis makes that keyspace observable and testable.
+#
+# The adapter is opt-in: it only engages when PARSE_CACHE_REDIS_URL is set
+# (docker-compose.test.yml sets it). With the variable absent, parse-server
+# keeps its in-memory cache and this script behaves exactly as before.
+#
+# CRITICAL: PARSE_CACHE_REDIS_URL must select a DIFFERENT Redis database from
+# the one the Ruby SDK caches into. Parse Server's RedisCacheAdapter#clear()
+# issues a raw FLUSHDB and is called on every _Role write, so a shared database
+# would let a role write delete the SDK's cached responses and its
+# `parse-stack:foc:v1:*` create-locks, silently dropping first_or_create!
+# mutual exclusion (parse-community/parse-server#10617). The test stack uses
+# db 0 for the SDK and db 1 for Parse Server. The adapter module refuses to
+# start on db 0.
+#
+# `cacheAdapter` cannot be expressed as a plain env var value: parse-server
+# parses PARSE_SERVER_CACHE_ADAPTER with moduleOrObjectParser and then requires
+# it as a module path, so the configuration lives in a small module
+# bind-mounted from test/cloud.
+if [ -n "${PARSE_CACHE_REDIS_URL:-}" ]; then
+  export PARSE_SERVER_CACHE_ADAPTER="${PARSE_SERVER_CACHE_ADAPTER:-/parse-server/cloud/redis-cache-adapter.js}"
+  echo "  PARSE_SERVER_CACHE_ADAPTER: $PARSE_SERVER_CACHE_ADAPTER"
+fi
+
 # Request-id idempotency — test-stack only, scoped to a single probe class so
 # it deduplicates ONLY writes the request-id integration test targets and has
 # zero effect on every other suite. Parse Server dedups POST/PUT carrying the

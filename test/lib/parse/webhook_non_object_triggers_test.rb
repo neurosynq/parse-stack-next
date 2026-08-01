@@ -405,3 +405,56 @@ class WebhookNonObjectTriggersTest < Minitest::Test
     end
   end
 end
+
+# Handler composition for the non-object `after_*` triggers.
+#
+# The SDK registers its own `after_logout` handler for cache invalidation. If
+# registration replaced rather than composed, that would silently clobber an
+# application's handler, with the winner decided by file load order.
+class WebhookAfterTriggerCompositionTest < Minitest::Test
+  def setup
+    Parse::Webhooks.instance_variable_set(:@routes, nil)
+  end
+
+  def teardown
+    Parse::Webhooks.instance_variable_set(:@routes, nil)
+  end
+
+  def routes_for(type, class_name)
+    Parse::Webhooks.routes[type][class_name]
+  end
+
+  def test_after_logout_handlers_compose_instead_of_replacing
+    Parse::Webhooks.route(:after_logout, "_Session") { :app_handler }
+    Parse::Webhooks.route(:after_logout, "_Session") { :sdk_handler }
+
+    registry = routes_for(:after_logout, "_Session")
+    assert_kind_of Array, registry, "after_logout must accumulate handlers"
+    assert_equal 2, registry.size
+    assert_equal %i[app_handler sdk_handler], registry.map(&:call)
+  end
+
+  def test_after_login_handlers_compose
+    Parse::Webhooks.route(:after_login, "_User") { :one }
+    Parse::Webhooks.route(:after_login, "_User") { :two }
+    assert_equal 2, routes_for(:after_login, "_User").size
+  end
+
+  # A composite of a rejectable trigger would need to deny if ANY handler
+  # denies, which the `.last` fold cannot express, so these must keep
+  # single-slot semantics until that fold is written.
+  def test_rejectable_before_triggers_still_replace
+    Parse::Webhooks.route(:before_login, "_User") { :first }
+    Parse::Webhooks.route(:before_login, "_User") { :second }
+
+    registry = routes_for(:before_login, "_User")
+    refute_kind_of Array, registry
+    assert_equal :second, registry.call
+  end
+
+  def test_after_save_still_composes
+    Parse::Webhooks.route(:after_save, "Post") { :a }
+    Parse::Webhooks.route(:after_save, "Post") { :b }
+    assert_equal 2, routes_for(:after_save, "Post").size
+  end
+end
