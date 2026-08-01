@@ -186,6 +186,17 @@
   for any caller who did not pass an explicit `max_depth:`. The existing
   query-time budget continues to bound traversal work.
 
+#### Users and roles can inspect effective object access
+
+- **NEW**: `Parse::User` and `Parse::Role` expose `can_read?`, `can_write?`,
+  and `can_delete?` predicates for any `Parse::Object`, including `_User` and
+  `_Role` records. Each predicate combines the target object's ACL with its
+  class's `get`, `update`, or `delete` CLP; delete access uses the ACL's write
+  grant. User checks include direct grants and recursively inherited roles,
+  while role checks include the role itself and its parent roles. Missing ACLs
+  retain Parse Server's public default, and unresolved role membership or CLP
+  conditions that a role alone cannot prove fail closed.
+
 #### Test infrastructure
 
 - **CHANGED**: The integration test stack pins Parse Server 9.10.0, up from
