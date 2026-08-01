@@ -19,7 +19,7 @@ explicitly move it to Redis.
 | Identity plane (`view.identity`) | session token to user id | token, under the `idn` keyspace family | `client.authorization.identity_cache_ttl` (3600) | Yes |
 | Role plane (`view.roles`) | user id to role-name closure | user id, under the `role` keyspace family | `client.authorization.role_cache_ttl` (30) | Yes |
 | Authorization default caches (`Parse::Authorization::MemoryCache`) | the same two mappings | token / user id | same two TTLs | No |
-| Upstream role reader (`store.upstream_roles`) | nothing, it is read-only, and role resolution does not consume it | `<appId>:role:<userId>` written by Parse Server | n/a, entries age out upstream | Reads Parse Server's database |
+| Upstream role reader (`view.upstream_roles`) | nothing, it is read-only, and role resolution does not consume it | `<appId>:role:<userId>` written by Parse Server | n/a, entries age out upstream | Reads Parse Server's database |
 | CLP schema cache (`Parse::CLPScope`) | class-level permissions per class | class name | `POSITIVE_TTL` 3600, `NEGATIVE_TTL` 5 | No |
 | Atlas index catalog (`Parse::AtlasSearch::IndexManager`) | search index definitions per collection | collection name | `DEFAULT_CACHE_TTL` 300 | No |
 | Embedding cache (`Parse::Embeddings::Cache`) | query-side embedding vectors | provider, model, dimensions, input type, digest of input | 600, disabled by default | No, unless given a Moneta store |
@@ -302,7 +302,8 @@ read again or until `context.reset_caches!` runs.
 
 ### The shared planes
 
-A keyspaced `Parse::Cache::Redis` exposes two planes shaped for those slots:
+A keyspaced client's `Parse::Cache::ScopedView` exposes two planes shaped for
+those slots:
 
 ```ruby
 store = Parse::Cache::Redis.new(url: "redis://localhost:6379/0")
@@ -322,9 +323,10 @@ context is. For a named secondary client, configure its own context directly
 instead:
 
 ```ruby
+other_view = other_client.sdk_cache
 other_client.authorization.configure(
-  identity_cache: view.identity(ttl: 3600),
-  role_cache:     view.roles(ttl: 30),
+  identity_cache: other_view.identity(ttl: 3600),
+  role_cache:     other_view.roles(ttl: 30),
 )
 ```
 
@@ -335,13 +337,10 @@ nor the response cache.
 
 Two behaviors to know before you rely on these:
 
-* Values round-trip through JSON. The identity plane stores a user id string,
-  which survives that intact. The role plane receives a Ruby `Set` from the
-  resolver, and the resolver accepts a cached role value only when it reads back
-  as a `Set`, which a JSON round-trip does not produce. In practice the shared
-  role plane does not serve hits to the Atlas Search resolver today, and role
-  lookups fall back to the role-graph walk. The process-local default does serve
-  hits, because it holds the object itself.
+* Values round-trip through JSON. The identity plane stores a generation-tagged
+  user id, while the role plane tags a Ruby `Set` before writing it and rebuilds
+  the `Set` when reading it back, so both shared planes can serve hits without
+  changing the resolver's expected value shape.
 * Sub-TTL revocation is automatic for both triggers, as long as
   `client.authorization.identity_cache` and `client.authorization.role_cache`
   are set to planes from the SAME view `Parse::Cache::Invalidation` was
@@ -371,10 +370,19 @@ scoped queries once you install them.
 
 Parse Server caches each user's transitive role closure under
 `<appId>:role:<userId>` as a JSON array of `role:NAME` strings. Attaching to it
-lets you reuse the value the server itself computed instead of walking the
-graph, which is most useful when a webhook payload already supplies a trusted
+lets the SDK compare that value with its own role-graph result, or lets trusted
+application code read it explicitly when a webhook payload already supplies a
 user id. This is optional, and nothing in the SDK reads it unless you attach it
-and call it.
+and enable comparison or call it directly.
+
+```ruby
+store = Parse::Cache::Redis.new(
+  url:             "redis://localhost:6379/0",  # the SDK's own cache
+  parse_cache_url: "redis://localhost:6379/1",  # Parse Server's cache, read-only
+)
+Parse.setup(cache: store, cache_keyspace: true, ...)
+view = Parse.client.sdk_cache
+```
 
 **Role resolution does not consume it.** `Parse::Authorization` always computes
 its own closure, and the value read here never changes an ACL decision. The
@@ -386,8 +394,9 @@ so it stays observable until the two closures have been reconciled against your
 own traffic:
 
 ```ruby
+view = Parse.client.sdk_cache
 Parse::Authorization.configure(
-  upstream_role_reader:   store.scoped(keyspace).upstream_roles,
+  upstream_role_reader:   view.upstream_roles,
   compare_upstream_roles: true,
 )
 
@@ -402,13 +411,8 @@ Role names and raw user ids are kept out of the payload; the user is
 identified by a truncated digest.
 
 ```ruby
-store = Parse::Cache::Redis.new(
-  url:             "redis://localhost:6379/0",  # the SDK's own cache
-  parse_cache_url: "redis://localhost:6379/1",  # Parse Server's cache, read-only
-)
-
 store.verify_upstream_isolation!
-roles = store.upstream_roles.roles_for(user_id)  # Set of bare role names, or nil
+roles = view.upstream_roles.roles_for(user_id) # Set of bare role names, or nil
 ```
 
 **The two URLs must address different Redis databases.** On released Parse
@@ -456,8 +460,8 @@ than 4096 roles, a role name longer than 256 characters, a remaining TTL that
 cannot be read or exceeds 60 seconds, an entry older than the SDK's last role
 invalidation, or any transport error. It never fails open.
 
-Reading that database makes it part of your authorization trust base, since
-those role names feed `permission_strings`. Restrict the credential:
+If application code consumes those role names for authorization, that database
+becomes part of its trust base. Restrict the credential:
 
 ```
 ACL SETUSER parse-stack-role-reader on >SECRET \

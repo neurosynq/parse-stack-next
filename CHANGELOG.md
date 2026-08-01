@@ -4,10 +4,10 @@
 
 #### Cache keys move into a reserved, app-scoped keyspace
 
-- **NEW**: `Parse::Cache::Keyspace` owns the physical layout of every key the
-  SDK writes to a shared cache backend along with the glob patterns that clear
-  them again, so key generation and eviction can no longer drift apart. Keys
-  are laid out as
+- **NEW**: `Parse::Cache::Keyspace` owns the physical layout of the response,
+  identity, and role-cache keys the SDK writes to a shared cache backend along
+  with the glob patterns that clear them again, so key generation and eviction
+  can no longer drift apart. Keys are laid out as
   `parse-stack:v1:<app_scope>[:<namespace>]:<family>[:T:<tenant>]:<rest>`, with
   `cache`, `idn`, and `role` as the families. `app_scope` is a digest of the
   application id and the server URL rather than the raw values, so two apps
@@ -81,9 +81,10 @@
 
 #### Identity and role caching share one backend across processes
 
-- **NEW**: `Parse::Cache::Redis#identity` and `#roles` return
-  `Parse::Cache::SubCache` planes shaped for the
-  `Parse::AtlasSearch.session_cache=` and `.role_cache=` slots. Installing them
+- **NEW**: `Parse::Cache::ScopedView#identity` and `#roles` return
+  `Parse::Cache::SubCache` planes shaped for a client's
+  `Parse::Authorization::Context#identity_cache` and `#role_cache` slots. The
+  keyspace-bound view is exposed as `client.sdk_cache`; installing its planes
   replaces the default per-process memory caches with a shared backend, so
   every Puma worker and every dyno resolves a session token or a role closure
   against the same view instead of each holding its own. Each plane writes
@@ -129,8 +130,9 @@
 - **NEW**: `Parse::Cache::UpstreamRoles` reads the `<appId>:role:<userId>`
   closure Parse Server writes for itself, so a caller holding a trusted user
   id, most usefully from a webhook payload, can skip the role-graph walk by
-  calling `roles_for`. Attach it by passing `parse_cache_url:` to
-  `Parse::Cache::Redis`. Without that option nothing upstream is read.
+  calling `client.sdk_cache.upstream_roles.roles_for`. Attach it by passing
+  `parse_cache_url:` to `Parse::Cache::Redis`. Without that option nothing
+  upstream is read.
 - **NEW**: Role resolution itself does not consume the upstream value in this
   release. `Parse::AtlasSearch::Session` always computes its own closure, and
   the only built-in integration is `compare_upstream_roles`, which reads the
@@ -351,11 +353,10 @@
   unable to see a second client at all and therefore unable to catch the case
   it was written for. Omitting the keyword resolves through `Parse.client` as
   before.
-- `cache_keyspace: true` is the single switch for this release. Left unset, the
-  key shape, the clearing behavior, the invalidation hooks, and the identity
-  and role planes are all exactly as they were, so upgrading changes nothing
-  until an operator asks for it. `parse_cache_url:` is separately opt-in, and
-  without it no upstream endpoint is contacted.
+- `cache_keyspace: true` is the switch for the new cache layout, scoped
+  clearing, invalidation hooks, and shared identity and role planes. Left
+  unset, those cache behaviors are exactly as they were. `parse_cache_url:` is
+  separately opt-in, and without it no upstream endpoint is contacted.
 - `parse_cache_url:` must address a different Redis database from `url:`. The
   two are read and written by different processes with different clearing
   semantics, and until the scoped-clear fix lands upstream a single `_Role`
@@ -365,11 +366,10 @@
   compute different lock keys during a rolling deploy, so they would stop
   contending on the same key and lose mutual exclusion for the length of the
   deploy.
-- Reading Parse Server's role cache makes that database part of the SDK's
-  authorization trust base. The array it returns feeds `permission_strings`,
-  which is the only input to both the `_rperm` match and the CLP gate on the
-  mongo-direct path, so anyone able to write that database can grant themselves
-  roles. Restrict the credential to `+get +pttl` on `<appId>:role:*`.
+- The built-in upstream-role integration is compare-only and never changes
+  `permission_strings` or an ACL decision. A caller that directly consumes
+  `roles_for` as authorization input makes that database part of its trust
+  base, so restrict the credential to `+get +pttl` on `<appId>:role:*`.
 - Webhook-driven invalidation requires the application to expose a webhook
   endpoint Parse Server can reach and to have registered the hooks. Where it is
   unregistered or unreachable, the TTL is the only bound on staleness.
@@ -398,7 +398,7 @@ store.verify_upstream_isolation!
 # Share identity and role resolution across every process. Each client owns
 # its own Parse::Authorization::Context, so a second client pointed at a
 # second application configures its own view the same way.
-view = Parse.client.cache   # the scoped view derived at setup
+view = Parse.client.sdk_cache   # the scoped view derived at setup
 Parse::Authorization.configure(
   identity_cache: view.identity(ttl: 3600),
   role_cache: view.roles(ttl: 30),

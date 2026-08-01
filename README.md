@@ -6,11 +6,13 @@ A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [
 
 ## What's new in 5.7
 
-- **5.7.0: Reserved, app-scoped cache keyspace.** `Parse::Cache::Keyspace` lays out every key the SDK writes to a shared cache backend (`parse-stack:v1:<app_scope>[:<namespace>]:<family>[:T:<tenant>]:<rest>`) and owns the glob patterns that clear them again, so key generation and eviction can no longer drift apart. `app_scope` is a digest of the application id and server URL, so two apps sharing one Redis no longer collide. Enable with `cache_keyspace: true` on `Parse.setup`; left unset, behavior is unchanged. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.7.0: Reserved, app-scoped cache keyspace.** `Parse::Cache::Keyspace` lays out response, identity, and role-cache keys on a shared backend (`parse-stack:v1:<app_scope>[:<namespace>]:<family>[:T:<tenant>]:<rest>`) and owns the glob patterns that clear them again, so key generation and eviction can no longer drift apart. `app_scope` is a digest of the application id and server URL, so two apps sharing one Redis no longer collide. Enable with `cache_keyspace: true` on `Parse.setup`; left unset, behavior is unchanged. See [CHANGELOG.md](./CHANGELOG.md)
 - **5.7.0: `clear_cache!` stops falling back to `FLUSHDB`.** With `cache_keyspace: true`, `Parse::Client#clear_cache!` performs a scoped SCAN inside the client's own keys instead of flushing the whole database, which previously could destroy co-tenant data and drop `first_or_create!` create-locks on a shared Redis. `flush_db!` remains the explicit opt-in for a full flush. See [CHANGELOG.md](./CHANGELOG.md)
 - **5.7.0: Response-cache auth separation enforced by construction.** `Parse::Cache::Keyspace#cache_key` now requires an `auth:` discriminator for the response-cache family and refuses to build a key without one, so a master-key body and a session-token body can no longer land under the same key by accident. A non-GET write now invalidates every auth variant of a resource in one scoped pattern instead of only the variants the process has already seen. See [CHANGELOG.md](./CHANGELOG.md)
-- **5.7.0: Shared identity and role planes.** `Parse::Cache::Redis#identity` and `#roles` return `Parse::Cache::SubCache` planes for `Parse::AtlasSearch.session_cache=` and `.role_cache=`, so every worker resolves a session token or role closure against one shared backend instead of its own in-process cache. Each plane invalidates by per-subject generation counter and plane-wide epoch rather than needing to enumerate entries it cannot name. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.7.0: Shared identity and role planes.** `Parse::Cache::ScopedView#identity` and `#roles`, reached through `client.sdk_cache`, return `Parse::Cache::SubCache` planes for the client's authorization context, so every worker resolves a session token or role closure against one shared backend instead of its own in-process cache. Each plane invalidates by per-subject generation counter and plane-wide epoch rather than needing to enumerate entries it cannot name. See [CHANGELOG.md](./CHANGELOG.md)
 - **5.7.0: Authorization becomes a client-owned module, not an Atlas Search internal.** `Parse::Authorization` now owns session-token resolution and role-closure expansion. `client.authorization` returns a `Parse::Authorization::Context`, one per `Parse::Client`, so two clients addressing two Parse applications no longer share one identity cache and one role cache, and a mongo-direct query with no `$search` anywhere in it no longer resolves identity through the Atlas Search namespace. `Parse::AtlasSearch.session_cache=`, `.role_cache=`, and `Parse::AtlasSearch::Session` remain as deprecated aliases for the default client's context, slated for removal in 6.0. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.7.0: Mongo-direct reads stay bound to the authorizing client.** `Parse::MongoDB.verify_client!` rejects a direct read when its authorization client belongs to a different Parse application than the process-global MongoDB connection. Direct-query entry points accept `client:` and carry it through authorization and collection binding. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.7.0: Effective access decisions for users and roles.** `Parse::Access.check`, `Parse::Access::Decision`, and the `can_read?` / `can_write?` / `can_delete?` helpers combine object ACLs with class-level permissions and inherited roles. Unknown evidence fails closed, and the eventual Parse Server request remains authoritative. See [CHANGELOG.md](./CHANGELOG.md)
 - **5.7.0: Cache invalidation no longer depends on application discipline.** `Parse::Cache::Invalidation` registers webhook triggers on `_Role`, `_User`, and `_Session` (`after_save`/`after_delete`/`after_logout`) that keep the identity and role planes honest for writes from any client, not only the app's own logout and role-mutation code paths. Installs alongside the keyspace; disable with `cache_invalidation_hooks: false`. See [CHANGELOG.md](./CHANGELOG.md)
 - **5.7.0: Optional read of Parse Server's own role cache.** `Parse::Cache::UpstreamRoles` can read the `<appId>:role:<userId>` closure Parse Server already wrote for itself. Role resolution does not consume it: the SDK still computes its own closure, and the only built-in integration is `compare_upstream_roles`, which emits a `parse.cache.role_compare` event so the two can be reconciled before anything depends on the upstream value. Call `roles_for` directly to use it. Strictly read-only, degrades to a miss on any anomaly, and `Parse::Cache::Redis#verify_upstream_isolation!` reports whether the two Redis endpoints share one database. See [CHANGELOG.md](./CHANGELOG.md)
 
@@ -691,8 +693,8 @@ The cache surface is opt-in at two layers. Object fetches (`Model.find(id)`, `ob
 
 #### `:cache_keyspace`
 
-Set `cache_keyspace: true` to place every key the SDK writes inside a reserved,
-app-scoped layout:
+Set `cache_keyspace: true` to place response, identity, and role-cache keys
+inside a reserved, app-scoped layout:
 
 ```
 parse-stack:v1:<app_scope>[:<namespace>]:<family>[:T:<tenant>]:<rest>
@@ -712,11 +714,11 @@ exclusion. With a keyspace configured, every clear is a scoped `SCAN` restricted
 to this client's own keys. `flush_db!` stays available as the explicit opt-in
 for a full flush.
 
-Enabling the keyspace also enables two behaviors that depend on it: cache keys
-gain an auth discriminator so a master-key response and a session-token response
-for the same URL can never share an entry, and the webhook invalidation triggers
-described below are registered. Pass `cache_invalidation_hooks: false` to skip
-the trigger registration.
+The keyspace's response-key builder requires an auth discriminator, so a
+master-key response and a session-token response for the same URL cannot share
+an entry by accident. Enabling the keyspace also registers the webhook
+invalidation triggers described below. Pass `cache_invalidation_hooks: false`
+to skip the trigger registration.
 
 This is opt-in and inert by default. With `cache_keyspace:` unset, the key
 shape and every behavior above are unchanged from earlier releases.
@@ -777,6 +779,7 @@ Parse::Authorization.configure(
 # context directly. Parse::Authorization.configure only ever reaches the
 # default client, by design: there is no such thing as "the" client below
 # that boundary.
+other_view = other_client.sdk_cache
 other_client.authorization.configure(
   identity_cache: other_view.identity(ttl: 3600),
   role_cache: other_view.roles(ttl: 30),
@@ -894,14 +897,16 @@ connection becomes client-owned.
 
 Parse Server keeps its own role cache, writing the transitive closure for a user
 as `<appId>:role:<userId>`. Pointing `Parse::Cache::Redis` at it lets the SDK
-reuse that value instead of walking the role graph itself, which is most useful
-when a webhook payload already supplies a trusted user id.
+compare that value with its own role-graph result, or lets trusted application
+code read it explicitly when a webhook payload already supplies a user id.
 
 ```ruby
 store = Parse::Cache::Redis.new(
   url:             "redis://localhost:6379/0",  # the SDK's own cache
   parse_cache_url: "redis://localhost:6379/1",  # Parse Server's cache, read-only
 )
+Parse.setup(cache: store, cache_keyspace: true, ...)
+view = Parse.client.sdk_cache
 
 # true (isolated), false (shared, and warned about), or :unknown.
 store.verify_upstream_isolation!
@@ -928,7 +933,8 @@ on a server carrying the scoped-clear fix.
 Role resolution never consumes the upstream value. `Parse::Authorization`
 computes its own closure, and the only built-in integration is
 `compare_upstream_roles`, which reads the upstream entry solely to emit a
-`parse.cache.role_compare` event. Call `roles_for` yourself to use the value.
+`parse.cache.role_compare` event. Call `view.upstream_roles.roles_for(user_id)`
+yourself to use the value.
 
 The attachment is strictly read-only. The SDK never writes that keyspace: its
 own closure is depth-capped while Parse Server's is not, so writing a subset
@@ -938,9 +944,8 @@ be read or is implausibly long, an entry older than the SDK's last role
 invalidation, a transport error) degrades to a miss and the closure is
 recomputed. It never fails open.
 
-Reading that database makes it part of the SDK's authorization trust base: the
-role names feed `permission_strings`, the only input to both the `_rperm` match
-and the CLP gate on the mongo-direct path. Restrict the credential accordingly:
+If application code consumes those role names for authorization, that database
+becomes part of its trust base. Restrict the credential accordingly:
 
 ```
 ACL SETUSER parse-stack-role-reader on >SECRET \
