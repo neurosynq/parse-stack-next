@@ -78,7 +78,7 @@ class VectorSearchHybridTest < Minitest::Test
   # Run `blk` with Parse::MongoDB.collection stubbed to a FakeColl whose
   # aggregate runs `behavior`.
   def with_probe_collection(behavior)
-    Parse::MongoDB.stub(:collection, ->(_name) { FakeColl.new(behavior) }) { yield }
+    Parse::MongoDB.stub(:collection, ->(_name, **_o) { FakeColl.new(behavior) }) { yield }
   end
 
   def test_probe_returns_true_when_stage_recognized
@@ -330,7 +330,7 @@ class VectorSearchHybridTest < Minitest::Test
 
     Parse::MongoDB.stub(:require_gem!, nil) do
       Parse::MongoDB.stub(:available?, true) do
-        Parse::MongoDB.stub(:collection, ->(_n) { coll }) do
+        Parse::MongoDB.stub(:collection, ->(_n, **_o) { coll }) do
           Parse::ACLScope.stub(:resolve!, ->(*, **) { resolution }) do
             Parse::ACLScope.stub(:match_stage_for, ->(_r) { nil }) do
               Parse::CLPScope.stub(:permits?, ->(*) { true }) do

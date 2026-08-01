@@ -196,17 +196,27 @@ module Parse
         requested > ceiling ? ceiling : requested
       end
 
-      # Apply the expiry INCR does not set. Uses a native `expire` where the
-      # store has one, and otherwise rewrites the value with Moneta's
-      # `expires:` option, which is a lost-update risk only in the window
-      # between the INCR and this call, and only to the extent of one bump.
+      # Apply the expiry INCR does not set, WITHOUT rewriting the value.
+      #
+      # An earlier version fell back to `store(key, value, expires: ttl)`
+      # when the backend had no `expire`. That is a lost update: two
+      # concurrent bumps interleave as INCR(2), INCR(3), store(3), store(2),
+      # and the counter moves BACKWARDS. Generation checks are equality
+      # comparisons, so a counter that goes back to a previously issued value
+      # re-admits every identity entry stamped with it. Those are exactly the
+      # entries a `_User` write was invalidating, which makes the failure a
+      # revoked session becoming resolvable again.
+      #
+      # Rewriting the value is therefore never acceptable here, no matter the
+      # width of the window. Where the backend cannot set a TTL without
+      # touching the value, the key simply stays non-expiring, which is the
+      # behavior this method was added to improve on: unbounded, but correct.
+      # {Parse::Cache::Redis} implements `expire` (PEXPIRE), so the Redis
+      # deployments where growth actually matters do get the TTL.
       def refresh_generation_expiry(key, value, ttl)
         return if ttl.nil?
-        if @store.respond_to?(:expire)
-          @store.expire(key, ttl)
-        else
-          @store.store(key, value, { expires: ttl })
-        end
+        return unless @store.respond_to?(:expire)
+        @store.expire(key, ttl)
       rescue StandardError
         # A counter without an expiry is the pre-existing behavior: correct,
         # just unbounded. Never fail a webhook over it.

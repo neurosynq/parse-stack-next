@@ -220,9 +220,11 @@ class CacheScopedViewTest < Minitest::Test
 
   # The refusal message tells the operator how to take the unscoped clear
   # deliberately, so the method it names has to exist and be callable with no
-  # arguments. It previously named `client.cache.store.clear`, but `store` is
-  # Moneta's writer and needs a key and a value, so anyone following the
-  # advice got an ArgumentError instead of a clear.
+  # arguments. It has been wrong twice: first `client.cache.store.clear`,
+  # where `store` is Moneta's writer and needs a key and a value, and then
+  # `client.cache.wrapped.clear`, which was correct only while `client.cache`
+  # returned the view. Now that `cache` is the configured store itself and
+  # `sdk_cache` is the view, the raw clear is plain `client.cache.clear`.
   def test_refusal_message_names_a_method_that_actually_works
     cleared = false
     bare = Object.new
@@ -231,10 +233,12 @@ class CacheScopedViewTest < Minitest::Test
     wrapper = Parse::Cache::KeyspacedStore.new(store: bare, keyspace: keyspace)
 
     message = assert_raises(Parse::Cache::UnscopedClearRefused) { wrapper.clear }.message
-    assert_includes message, "wrapped.clear"
+    assert_includes message, "client.cache.clear"
 
+    # `client.cache` is the configured store, which is what this wrapper
+    # wraps, so the advice resolves to the wrapped store's own clear.
     wrapper.wrapped.clear
-    assert cleared, "the method the message names must reach the wrapped store's clear"
+    assert cleared, "the method the message names must reach the configured store's clear"
   end
 
   # An enumerable store gets a real scoped clear, deleting only what sits

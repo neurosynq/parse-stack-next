@@ -276,7 +276,11 @@ module Parse
         @client = nil # Reset client on reconfigure
         # Bind this connection to whichever Parse application is configured
         # now. See {.verify_client!} for why.
-        @bound_app_scope = current_app_scope
+        BINDING_MUTEX.synchronize do
+          @bound_app_scope = current_app_scope
+          @observed_app_scopes = nil
+          note_observed_scope_unlocked(@bound_app_scope)
+        end
         warn_if_writeable_role! if verify_role && enabled
       end
 
@@ -337,18 +341,38 @@ module Parse
       # silent and looks like a working query. The connection becomes
       # client-owned in 6.0, at which point this guard is unnecessary.
       #
-      # No binding recorded (a connection configured before this existed, or
-      # configured with no Parse client set up at all) means there is nothing
-      # to compare and the call proceeds. The same is true when the caller
-      # cannot be identified.
+      # A caller of `nil` is UNIDENTIFIED, and is never silently upgraded to
+      # the default client. Substituting a default there made the
+      # fail-closed branch below unreachable: a call site that forgot to
+      # forward its client was presented as the default and passed against a
+      # default-bound database, which is exactly the omission this exists to
+      # catch.
       #
-      # @param client [Parse::Client, nil] the client that authorized the call.
+      # @param client [Parse::Client, nil] the client that authorized the
+      #   call, or nil when the caller cannot say.
       # @raise [Parse::MongoDB::ClientMismatch]
       def verify_client!(client)
-        bound = @bound_app_scope
-        return if bound.nil?
         caller_scope = app_scope_for(client)
-        return if caller_scope.nil?
+        bound = binding_scope!(caller_scope)
+        return if bound.nil?
+
+        if caller_scope.nil?
+          # An unidentified caller. Where only one application has ever been
+          # seen this is unambiguous, which covers every single-application
+          # deployment. Once a SECOND has been seen it is a real ambiguity,
+          # and allowing it meant any call site that forgot to forward its
+          # client silently read whichever database happened to be bound.
+          # Completeness of that plumbing should not be the only thing
+          # standing between two applications, so this fails closed.
+          return if observed_scopes.size <= 1
+          raise ClientMismatch,
+                "Parse::MongoDB received a direct query with no identifiable client, in a " \
+                "process where more than one Parse application has been seen " \
+                "(#{observed_scopes.map { |sc| describe_scope(sc) }.join(", ")}). " \
+                "The connection is bound to #{describe_scope(bound)}. Refusing rather than " \
+                "guessing: pass client: through this call path so the read can be checked."
+        end
+
         return if caller_scope == bound
 
         raise ClientMismatch,
@@ -368,6 +392,63 @@ module Parse
       # process that sets up Mongo before Parse.
       def current_app_scope
         app_scope_for(default_client_or_nil)
+      end
+
+      # @!visibility private
+      # Guards the binding and the observed-scope set. Both are read and
+      # written from request threads, and a lost update to either weakens a
+      # security check rather than merely losing a cache entry.
+      BINDING_MUTEX = Mutex.new
+
+      # @!visibility private
+      # The application this connection belongs to, establishing it on first
+      # use when `configure` ran before a Parse client existed.
+      #
+      # **Ownership decides the binding, never whoever calls first.** An
+      # earlier version used `@bound_app_scope ||= caller_scope`, so a process
+      # that configured MongoDB before Parse, installed default client A, and
+      # then made its first direct request explicitly as B would bind the
+      # connection to B and read A's database without complaint. The binding
+      # now always comes from the DEFAULT client, whose configuration is what
+      # produced this connection. `caller_scope` is a fallback only for a
+      # process with no default client at all, where there is nothing else to
+      # go on and nothing to conflict with.
+      def binding_scope!(caller_scope)
+        # Read outside the lock: this can construct nothing and must not run
+        # arbitrary client code while holding a mutex a request path takes.
+        owner_scope = current_app_scope
+
+        BINDING_MUTEX.synchronize do
+          if @bound_app_scope.nil?
+            @bound_app_scope = owner_scope || caller_scope
+            # Record the owner as well, so a process where only a SECOND
+            # application ever identifies itself still counts as two.
+            note_observed_scope_unlocked(@bound_app_scope)
+          end
+          # Observe the current owner on EVERY call, not only while unbound.
+          # A process that bound to explicit B before any default client
+          # existed, then installed default A afterwards, would otherwise
+          # never see A at all: the observed set held only B, so unidentified
+          # callers looked unambiguous and were allowed straight through to
+          # B's database.
+          note_observed_scope_unlocked(owner_scope)
+          note_observed_scope_unlocked(caller_scope)
+          @bound_app_scope
+        end
+      end
+
+      # @!visibility private
+      # @return [Array<String>] application scopes this guard has seen.
+      def observed_scopes
+        BINDING_MUTEX.synchronize { (@observed_app_scopes || []).dup }
+      end
+
+      # @!visibility private
+      # Caller must hold {BINDING_MUTEX}.
+      def note_observed_scope_unlocked(scope)
+        return if scope.nil?
+        @observed_app_scopes ||= []
+        @observed_app_scopes << scope unless @observed_app_scopes.include?(scope)
       end
 
       # @!visibility private
@@ -492,6 +573,7 @@ module Parse
         @enabled = false
         @uri = nil
     @bound_app_scope = nil
+    @observed_app_scopes = nil
         @database = nil
         remove_instance_variable(:@gem_available) if defined?(@gem_available)
         reset_writer!
@@ -500,26 +582,24 @@ module Parse
       # Get a MongoDB collection
       # @param name [String] the collection name
       # @return [Mongo::Collection]
-      def collection(name)
-        # The last chokepoint before the database. {.aggregate} already
-        # verifies the binding against the client that authorized the call,
-        # but not every scoped read goes through it: Atlas Search builds and
-        # runs its own `$search` pipelines (`run_atlas_pipeline!`) and hybrid
-        # vector search does the same (`run_pipeline!`), both reaching the
-        # driver through here. Checking here as well means no path can pick up
-        # a collection handle for one application while authorizing against
-        # another.
+      def collection(name, authorizing_client: nil)
+        # The last chokepoint before the database. {.aggregate} verifies the
+        # binding too, but not every scoped read goes through it: Atlas
+        # Search runs its own `$search` pipelines and hybrid vector search
+        # runs its own, both reaching the driver through here.
         #
-        # There is no client argument, so this compares the DEFAULT client,
-        # which is what those two paths resolve through. {.aggregate}'s own
-        # call passes the resolution's explicit client and is the stricter of
-        # the two; both must pass.
-        # Rescued: `Parse.client` CONSTRUCTS a default client and raises
-        # ConnectionError when none is configured. Plenty of code reaches a
-        # collection in a process that never called Parse.setup, and a guard
-        # must not turn that into a new failure. No client means nothing to
-        # compare, which verify_client! already treats as a pass.
-        verify_client!(default_client_or_nil)
+        # `authorizing_client:` must be the client that AUTHORIZED the read.
+        # An earlier version compared `Parse.client` unconditionally, which
+        # was worse than no check at all: a caller that resolved a token
+        # against client B and then asked for a collection had its default
+        # client A compared against A's own binding, so the guard reported
+        # success on exactly the case it exists to catch.
+        # NOT `authorizing_client || default_client_or_nil`. Substituting the
+        # default presented a forgotten `client:` as the default client, so
+        # it passed against a default-bound database and the fail-closed
+        # branch could never fire. A missing client is an unidentified
+        # caller, and {.verify_client!} decides what that means.
+        verify_client!(authorizing_client)
         client[name]
       end
 
@@ -1181,8 +1261,15 @@ module Parse
       #   supplied, or when both are supplied.
       # @raise [Parse::CLPScope::Denied] when `as:` is supplied and the
       #   scope cannot `find` on `_Role`.
-      def role_names_for_user(user_id, max_depth: ROLE_GRAPH_DEFAULT_DEPTH, master: false, as: nil)
-        authorize_role_graph_call!(:role_names_for_user, master: master, as: as)
+      def role_names_for_user(user_id, max_depth: ROLE_GRAPH_DEFAULT_DEPTH, master: false, as: nil,
+                              client: nil)
+        # Public entry point: resolve an omitted client to the default ONCE,
+        # here, and use the same value for the authorization and for the
+        # collection below. Passing the raw `client:` down meant an ordinary
+        # default-client call reached the sink as unidentified and was
+        # rejected once a second application had been observed.
+        client ||= default_client_or_nil
+        authorize_role_graph_call!(:role_names_for_user, master: master, as: as, client: client)
         validate_role_graph_id!(user_id, "user_id")
         depth = validate_role_graph_depth!(max_depth)
         return Set.new if depth <= 0
@@ -1199,7 +1286,9 @@ module Parse
           "parse.mongodb.role_graph",
           direction: :forward, target_id: user_id, depth: depth,
         ) do |payload|
-          docs = collection("_Join:users:_Role").aggregate(
+          # The role graph is an authorization input, so this read is
+          # checked against the client that asked for it like any other.
+          docs = collection("_Join:users:_Role", authorizing_client: client).aggregate(
             pipeline, max_time_ms: ROLE_GRAPH_MAX_TIME_MS,
           ).to_a
           names = Array(docs.first && docs.first["names"])
@@ -1255,9 +1344,13 @@ module Parse
       #   supplied, or when both are supplied.
       # @raise [Parse::CLPScope::Denied] when `as:` is supplied and the
       #   scope cannot `find` on `_Role`.
-      def users_in_role_subtree(role_id, max_depth: ROLE_GRAPH_DEFAULT_DEPTH, master: false, as: nil)
+      def users_in_role_subtree(role_id, max_depth: ROLE_GRAPH_DEFAULT_DEPTH, master: false, as: nil,
+                                client: nil)
+        # See {.role_names_for_user}: resolve the omission once at the entry
+        # point rather than letting nil travel to the collection lookup.
+        client ||= default_client_or_nil
         resolution = authorize_role_graph_call!(
-          :users_in_role_subtree, master: master, as: as,
+          :users_in_role_subtree, master: master, as: as, client: client,
         )
         validate_role_graph_id!(role_id, "role_id")
         depth = validate_role_graph_depth!(max_depth)
@@ -1285,7 +1378,7 @@ module Parse
           "parse.mongodb.role_graph",
           direction: :reverse, target_id: role_id, depth: depth,
         ) do |payload|
-          docs = collection("_Join:roles:_Role").aggregate(
+          docs = collection("_Join:roles:_Role", authorizing_client: client).aggregate(
             pipeline, max_time_ms: ROLE_GRAPH_MAX_TIME_MS,
           ).to_a
           ids = Array(docs.first && docs.first["user_ids"])
@@ -1362,7 +1455,7 @@ module Parse
       #   are provided.
       # @raise [Parse::CLPScope::Denied] when the resolved scope cannot
       #   `find` on `_Role`.
-      def authorize_role_graph_call!(method_name, master:, as:)
+      def authorize_role_graph_call!(method_name, master:, as:, client: nil)
         if master == true && !as.nil?
           raise ArgumentError,
                 "Parse::MongoDB.#{method_name}: pass exactly one of " \
@@ -1373,6 +1466,7 @@ module Parse
         if master == true
           return Parse::ACLScope::Resolution.new(
             mode: :master, permission_strings: nil, user_id: nil, session: nil,
+            client: client,
           )
         end
 
@@ -1384,7 +1478,13 @@ module Parse
                 "to run under the caller's scope (subject to `_Role` CLP)."
         end
 
-        resolution = Parse::ACLScope.resolve!({ acl_user: as }, method_name: method_name)
+        # The `as:` user's permissions must be computed against the SAME
+        # client whose connection will run the traversal. Resolving on the
+        # default while reading through another is how one application's
+        # role names end up gating another application's rows.
+        resolution = Parse::ACLScope.resolve!(
+          { acl_user: as, client: client }.compact, method_name: method_name,
+        )
         unless resolution.master?
           perms = resolution.permission_strings
           unless Parse::CLPScope.permits?(Parse::Model::CLASS_ROLE, :find, perms)
@@ -1769,7 +1869,11 @@ module Parse
         # be corrected here too. Accepts an index name (String) or a key
         # pattern (Hash).
         agg_opts[:hint] = hint unless hint.nil?
-        coll = collection(collection_name)
+        # The SAME client this call already verified against. Passing nothing
+        # here made the collection lookup an unidentified caller, so once a
+        # second application had been observed a perfectly legitimate
+        # aggregate for the bound application was refused.
+        coll = collection(collection_name, authorizing_client: Parse::ACLScope.client_of(resolution))
         if (mode = normalize_read_preference(read_preference))
           coll = coll.with(read: { mode: mode })
         end
@@ -1969,6 +2073,7 @@ module Parse
                    master: nil,
                    acl_user: nil,
                    acl_role: nil,
+                   client: nil,
                    read_preference: nil)
         stage = { :$geoNear => {
           near: geojson_point_for(near),
@@ -1995,6 +2100,7 @@ module Parse
                   master: master,
                   acl_user: acl_user,
                   acl_role: acl_role,
+                  client: client,
                   read_preference: read_preference)
       end
 
@@ -2014,6 +2120,8 @@ module Parse
       # @raise [Parse::MongoDB::ExecutionTimeout] if the query exceeds max_time_ms
       def find(collection_name, filter = {}, **options)
         max_time_ms = options.delete(:max_time_ms)
+        # Consumed like the other auth kwargs so it never reaches the driver.
+        find_client = options.delete(:client)
         # Metadata-only AS::N payload: collection, presence-of-filter
         # (NOT body), projection keys (column names, not values), limit,
         # max_time_ms, result_count. Filter / projection bodies are
@@ -2040,7 +2148,7 @@ module Parse
         ActiveSupport::Notifications.instrument("parse.mongodb.find", instrument_payload) do |payload|
         allow_internal_fields = options.delete(:allow_internal_fields) || false
         assert_no_denied_operators!(filter, allow_internal_fields: allow_internal_fields)
-        cursor = collection(collection_name).find(filter)
+        cursor = collection(collection_name, authorizing_client: find_client).find(filter)
         explicit_limit = options.key?(:limit)
         applied_default_limit = false
 

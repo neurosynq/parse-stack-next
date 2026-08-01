@@ -308,7 +308,7 @@ A keyspaced `Parse::Cache::Redis` exposes two planes shaped for those slots:
 store = Parse::Cache::Redis.new(url: "redis://localhost:6379/0")
 Parse.setup(cache: store, expires: 10, cache_keyspace: true, ...)
 
-view = Parse.client.cache   # the scoped view derived at setup
+view = Parse.client.sdk_cache   # the scoped view derived at setup
 Parse::Authorization.configure(
   identity_cache: view.identity(ttl: 3600),
   role_cache:     view.roles(ttl: 30),
@@ -346,7 +346,7 @@ Two behaviors to know before you rely on these:
   `client.authorization.identity_cache` and `client.authorization.role_cache`
   are set to planes from the SAME view `Parse::Cache::Invalidation` was
   installed against (the pattern shown above: both derived from
-  `Parse.client.cache`). The `after_logout` trigger invalidates the identity
+  `Parse.client.sdk_cache`). The `after_logout` trigger invalidates the identity
   entry using the same raw session token the resolver stores it under, so a
   logout on any client (mobile SDK, dashboard, Node cloud code) evicts the
   shared entry immediately rather than waiting out `identity_cache_ttl`.
@@ -604,16 +604,28 @@ cached response from being served on tenant B's request. Data-layer isolation is
 still the job of ACL, class-level permissions, and per-class agent scoping.
 
 Clearing is scoped along the same layout. `family:` / `tenant:` / `scope:` are
-scoped-view operations. Call them on `Parse.client.cache` (the view the
-client derived at setup with `cache_keyspace: true`), not on the bare
-`Parse::Cache::Redis` backend, which has no keyspace of its own to scope
-against:
+scoped-view operations. Call them on `Parse.client.sdk_cache` (the view the
+client derived at setup with `cache_keyspace: true`), never on `Parse.cache`
+or a bare backend, neither of which has a keyspace to scope against.
+
+What happens if you get that wrong depends on the store, and the safer
+outcome is not the default one:
+
+- **`Parse::Cache::Redis`** raises `ArgumentError`, because it can see that
+  it has no keyspace to interpret `family:` against and refuses to widen a
+  narrowing request into a `FLUSHDB`.
+- **Any other Moneta store** does something worse and quieter. `Moneta#clear`
+  takes an options hash and ignores keys it does not recognize, so
+  `store.clear(family: :role)` clears the ENTIRE store and returns normally.
+
+Route the call through `sdk_cache` rather than relying on the store to catch
+the mistake:
 
 ```ruby
 Parse.client.clear_cache!                             # everything this client wrote
-Parse.client.cache.clear(family: :role)               # one family
-Parse.client.cache.clear(family: :cache, tenant: "acme")  # one tenant of one family
-Parse.client.cache.clear(scope: "legacy_prefix")      # an explicit prefix
+Parse.client.sdk_cache.clear(family: :role)           # one family
+Parse.client.sdk_cache.clear(family: :cache, tenant: "acme") # one tenant of one family
+Parse.client.sdk_cache.clear(scope: "legacy_prefix")  # an explicit prefix
 store.flush_db!                                       # the whole database, ops tooling only
 ```
 

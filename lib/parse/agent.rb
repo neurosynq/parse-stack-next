@@ -1084,15 +1084,39 @@ module Parse
     #
     # @return [Hash]
     def acl_scope_kwargs
-      if @session_token && !@session_token.to_s.empty?
-        { session_token: @session_token }
-      elsif @acl_user_scope
-        { acl_user: @acl_user_scope }
-      elsif @acl_role_scope
-        { acl_role: @acl_role_scope }
-      else
-        { master: true }
-      end
+      scope =
+        if @session_token && !@session_token.to_s.empty?
+          { session_token: @session_token }
+        elsif @acl_user_scope
+          { acl_user: @acl_user_scope }
+        elsif @acl_role_scope
+          { acl_role: @acl_role_scope }
+        else
+          { master: true }
+        end
+      scope
+    end
+
+    # {#acl_scope_kwargs} plus the agent's own client.
+    #
+    # Separate from {#acl_scope_kwargs} rather than folded into it, because
+    # that hash is public and documented for `agent_method` bodies to splat
+    # into calls of their own. Those calls can be anything, including REST
+    # paths and user-written helpers, and a stray `client:` would be an
+    # unknown-keyword error there. Only the direct paths that understand
+    # `client:` as an auth kwarg use this variant.
+    #
+    # It matters because an agent built on a secondary client would otherwise
+    # resolve its token, walk its role graph, and read its rows against the
+    # default application. Consumers are `Parse::MongoDB.aggregate`, the
+    # `Parse::Query` direct methods, and `Parse::AtlasSearch`'s own scope
+    # resolution, all of which consume `client:` before it reaches a driver.
+    #
+    # @return [Hash]
+    def direct_auth_kwargs
+      kwargs = acl_scope_kwargs
+      kwargs = kwargs.merge(client: @client) if @client
+      kwargs
     end
 
     # The agent's resolved identity claim set — the
@@ -1203,9 +1227,9 @@ module Parse
       return nil if @acl_user_scope.nil? && @acl_role_scope.nil?
       resolved =
         if @acl_user_scope
-          Parse::ACLScope.resolve_for_user(@acl_user_scope)
+          Parse::ACLScope.resolve_for_user(@acl_user_scope, client: @client)
         else
-          Parse::ACLScope.resolve_for_role(@acl_role_scope)
+          Parse::ACLScope.resolve_for_role(@acl_role_scope, client: @client)
         end
       @acl_scope = resolved&.freeze
       @auth_context = nil # invalidate memoized auth_context — user_id may have changed
@@ -1481,11 +1505,16 @@ module Parse
     #     end,
     #   )
     #
+    # Default for the `client:` keyword, distinguishing "not specified" from
+    # an explicit `client: :default`. A plain `:default` cannot do that job:
+    # it is also a legitimate value a caller may pass on purpose.
+    INHERIT_CLIENT = Object.new.freeze
+
     def initialize(permissions: :readonly, session_token: nil,
                    acl_user: nil, acl_role: nil,
                    impersonate_user: nil, impersonate_mint: false,
                    impersonation_label: nil,
-                   client: :default,
+                   client: INHERIT_CLIENT,
                    tenant_id: nil,
                    rate_limit: DEFAULT_RATE_LIMIT, rate_window: DEFAULT_RATE_WINDOW,
                    rate_limiter: nil,
@@ -1552,6 +1581,20 @@ module Parse
       end
 
       @permissions = permissions
+      # A sub-agent inherits its parent's client unless one was named
+      # explicitly. Falling back to the default meant a child of an agent
+      # bound to a secondary application silently resolved and read against
+      # the default one, and Parse::MongoDB's binding guard would see the
+      # default and wave it through.
+      #
+      # The check is on {INHERIT_CLIENT}, not on `:default`. Those are not
+      # the same thing: `Parse::Agent.new(parent: b_agent, client: :default)`
+      # is an explicit instruction to use the default client, and treating it
+      # as "unspecified" would silently substitute the parent's and ignore
+      # what the caller asked for.
+      if client.equal?(INHERIT_CLIENT)
+        client = (parent.client if parent.respond_to?(:client) && parent.client) || :default
+      end
       @client = client.is_a?(Parse::Client) ? client : Parse::Client.client(client)
       @operation_log = []
       @max_log_size = max_log_size
@@ -1611,10 +1654,12 @@ module Parse
         # produces a `:readonly` sub-agent — the safe default. To
         # maintain parity at the call site, pass `permissions:
         # parent.permissions`; the clamp check below validates that the
-        # resolved tier does not exceed the parent's. `client:` is also
-        # not inherited; its constructor default `:default` resolves to
-        # the same client the parent uses in standard single-app
-        # deployments.
+        # resolved tier does not exceed the parent's. `client:` IS
+        # inherited, unlike permissions: a sub-agent that quietly resolved
+        # and read against the default application while its parent was
+        # bound to another is a correctness bug, not a safe default, and
+        # there is no security argument for narrowing which application a
+        # child addresses.
         # Inherit auth scope from the parent only when the child supplied
         # NO identity at all. Three reasons:
         #
@@ -1824,15 +1869,15 @@ module Parse
           # per-call validation will surface auth errors at the
           # actual usage site where the operator can act on them.
           begin
-            opts = { session_token: @session_token }
+            opts = { session_token: @session_token, client: @client }.compact
             Parse::ACLScope.resolve!(opts, method_name: :agent_init)
           rescue StandardError
             nil
           end
         elsif @acl_user_scope
-          Parse::ACLScope.resolve_for_user(@acl_user_scope)
+          Parse::ACLScope.resolve_for_user(@acl_user_scope, client: @client)
         elsif @acl_role_scope
-          Parse::ACLScope.resolve_for_role(@acl_role_scope)
+          Parse::ACLScope.resolve_for_role(@acl_role_scope, client: @client)
         else
           nil
         end

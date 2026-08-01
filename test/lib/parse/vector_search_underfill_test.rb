@@ -263,7 +263,7 @@ class VectorSearchUnderfillTest < Minitest::Test
       end
     Parse::MongoDB.stub(:require_gem!, nil) do
       Parse::MongoDB.stub(:available?, true) do
-        Parse::MongoDB.stub(:collection, ->(_n) { coll }) do
+        Parse::MongoDB.stub(:collection, ->(_n, **_o) { coll }) do
           Parse::ACLScope.stub(:resolve!, ->(*, **) { resolution }) do
             Parse::ACLScope.stub(:match_stage_for, ->(_r) { acl_stage }) do
               Parse::ACLScope.stub(:redact_results!, ->(res, _r) {

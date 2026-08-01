@@ -106,7 +106,9 @@ class AtlasSearchACLInjectionTest < Minitest::Test
     Parse::MongoDB.define_singleton_method(:available?) { true }
     @original_collection = Parse::MongoDB.method(:collection)
     collections = @collections
-    Parse::MongoDB.define_singleton_method(:collection) do |name|
+    # `collection` takes `authorizing_client:` so the binding guard can see
+    # which client authorized the read; accept and ignore it here.
+    Parse::MongoDB.define_singleton_method(:collection) do |name, **_opts|
       collections[name.to_s]
     end
   end

@@ -27,6 +27,20 @@ module Parse
     module AgentTool
       module_function
 
+      # The agent's auth kwargs for the direct path, including its client
+      # when the agent can supply one.
+      #
+      # Agents are duck-typed at this boundary, so an agent-shaped object
+      # that predates `direct_auth_kwargs` still works and simply resolves as
+      # an unidentified caller, which Parse::MongoDB's binding guard already
+      # models. Requiring the new method of every stand-in would break each
+      # one that has not been updated, to gain a field that is optional by
+      # construction.
+      def retrieval_auth_kwargs(agent)
+        return agent.direct_auth_kwargs if agent.respond_to?(:direct_auth_kwargs)
+        agent.acl_scope_kwargs
+      end
+
       # Upper bound on `k` (mirrors the registered parameter schema).
       MAX_K = 20
       # Default neighbour count for the agent tool. Intentionally lower than
@@ -126,7 +140,7 @@ module Parse
             tenant_scope: scope,
             score_quantize: score_quantize,
             source_transform: source_projector(agent, cname, scope),
-            **agent.acl_scope_kwargs,
+            **retrieval_auth_kwargs(agent),
           )
         end
 
@@ -415,6 +429,7 @@ module Parse
         )
       end
     end
+
   end
 end
 

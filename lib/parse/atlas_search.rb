@@ -556,6 +556,7 @@ module Parse
         raw_results = run_atlas_pipeline!(
           collection_name, pipeline, options[:max_time_ms],
           read_preference: read_preference,
+          authorizing_client: Parse::ACLScope.client_of(resolution),
         )
 
         unless resolution.master?
@@ -694,6 +695,7 @@ module Parse
         facet_results_raw = run_atlas_pipeline!(
           collection_name, facet_pipeline, options[:max_time_ms],
           read_preference: read_preference,
+          authorizing_client: Parse::ACLScope.client_of(resolution),
         )
 
         # Extract facet results
@@ -727,6 +729,11 @@ module Parse
             search_opts = options.merge(limit: limit, skip: skip_val)
             search_opts[:master] = true if acl[:master]
             search_opts[:read_preference] = read_preference if read_preference
+            # Re-thread the client for the same reason as the auth kwargs
+            # above: the outer faceted_search popped it in resolve_scope!, so
+            # this inner search would otherwise resolve and read as the
+            # default application.
+            search_opts[:client] = Parse::ACLScope.client_of(resolution) if Parse::ACLScope.client_of(resolution)
             search(collection_name, query, **search_opts).results
           else
             []
@@ -794,6 +801,7 @@ module Parse
         # enforcement chain inline below.
         raw_results = run_atlas_pipeline!(
           collection_name, pipeline, max_time_ms, read_preference: read_preference,
+          authorizing_client: Parse::ACLScope.client_of(resolution),
         )
 
         # Post-fetch enforcement: walk the result rows the same way
@@ -856,6 +864,10 @@ module Parse
         master = options.delete(:master)
         acl_user = options.delete(:acl_user)
         acl_role = options.delete(:acl_role)
+        # Consumed like the other auth kwargs so it never reaches the driver,
+        # and so `agent.acl_scope_kwargs` can carry the agent's own client
+        # into a `$search` the same way it carries the identity.
+        scope_client = options.delete(:client)
 
         # 4-way mutex. Mirrors Parse::ACLScope.resolve!'s
         # `provided.length > 1` check so an `acl_user:` + `acl_role:`
@@ -873,27 +885,57 @@ module Parse
                 "session_token:, master: true, acl_user:, or acl_role:. Pick one."
         end
 
+        # Resolve against the caller's own client when one was supplied.
+        # Atlas Search used to go only through the `Session` shim, which can
+        # address nothing but `Parse.client`, so a `$search` issued by a
+        # secondary client resolved its token against the wrong application.
+        #
+        # With no explicit client the RESOLUTION still goes through
+        # `Session.resolve` against the default, preserving the historical
+        # path, but the Resolution records the default client rather than
+        # nil.
+        #
+        # Recording nil was wrong. This is a public entry point, and the rule
+        # is that a public entry point resolves omission to the default once
+        # while internal sinks treat nil as unidentified. Leaving it nil here
+        # pushed an omission all the way down, so after a second application
+        # had been observed every ordinary default-client `$search` was
+        # rejected as unidentified.
+        auth_client = scope_client || default_authorizing_client
+
         if session_token
-          resolved = Session.resolve(session_token)
+          # Branch on the EXPLICIT client, not the resolved one. With none
+          # supplied this must stay on `Session.resolve` (the historical
+          # default-client path) while still recording the default on the
+          # Resolution below. Branching on `auth_client` routed the ordinary
+          # case through a different resolver.
+          resolved =
+            if scope_client
+              scope_client.authorization.resolve(session_token)
+            else
+              Session.resolve(session_token)
+            end
           return Parse::ACLScope::Resolution.new(
             mode: :session,
             permission_strings: resolved.permission_strings,
             user_id: resolved.user_id,
             session: resolved,
+            client: auth_client,
           )
         end
 
         if acl_user
-          return Parse::ACLScope.resolve_for_user(acl_user)
+          return Parse::ACLScope.resolve_for_user(acl_user, client: auth_client)
         end
 
         if acl_role
-          return Parse::ACLScope.resolve_for_role(acl_role)
+          return Parse::ACLScope.resolve_for_role(acl_role, client: auth_client)
         end
 
         if master == true
           return Parse::ACLScope::Resolution.new(
             mode: :master, permission_strings: nil, user_id: nil, session: nil,
+            client: auth_client,
           )
         end
 
@@ -913,7 +955,18 @@ module Parse
           permission_strings: anonymous.permission_strings,
           user_id: nil,
           session: anonymous,
+          client: auth_client,
         )
+      end
+
+      # @!visibility private
+      # The default Parse client, or nil when none is configured. Never
+      # raises and never constructs one: `Parse.client` does both.
+      def default_authorizing_client
+        return nil unless Parse::Client.client?
+        Parse.client
+      rescue StandardError
+        nil
       end
 
       # CLP `find` boundary check. Master-mode skips; for every other
@@ -999,10 +1052,13 @@ module Parse
       # helper {Parse::MongoDB.aggregate} uses so the kwarg semantics
       # are identical on both paths (invalid values warn and route to
       # primary; nil = no override).
-      def run_atlas_pipeline!(collection_name, pipeline, max_time_ms = nil, read_preference: nil)
+      def run_atlas_pipeline!(collection_name, pipeline, max_time_ms = nil, read_preference: nil,
+                              authorizing_client: nil)
         agg_opts = {}
         agg_opts[:max_time_ms] = max_time_ms if max_time_ms
-        coll = Parse::MongoDB.collection(collection_name)
+        # Atlas Search does not go through Parse::MongoDB.aggregate, so this
+        # is the only place its reads meet the binding guard.
+        coll = Parse::MongoDB.collection(collection_name, authorizing_client: authorizing_client)
         if (mode = Parse::MongoDB.send(:normalize_read_preference, read_preference))
           coll = coll.with(read: { mode: mode })
         end

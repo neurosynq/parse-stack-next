@@ -314,7 +314,7 @@ class PipelineSecurityTest < Minitest::Test
     # Stub the underlying client.find so we never actually hit MongoDB; the
     # denylist check happens before the cursor is built, so reaching .find
     # would itself be a bug.
-    Parse::MongoDB.stub(:collection, ->(_name) { raise "should not reach collection" }) do
+    Parse::MongoDB.stub(:collection, ->(_name, **_o) { raise "should not reach collection" }) do
       assert_raises(Parse::MongoDB::DeniedOperator) do
         Parse::MongoDB.find("Song", { "$where" => "this.plays > 0" })
       end
@@ -322,7 +322,7 @@ class PipelineSecurityTest < Minitest::Test
   end
 
   def test_mongodb_aggregate_raises_denied_operator_on_function_in_pipeline
-    Parse::MongoDB.stub(:collection, ->(_name) { raise "should not reach collection" }) do
+    Parse::MongoDB.stub(:collection, ->(_name, **_o) { raise "should not reach collection" }) do
       pipeline = [{
         "$addFields" => {
           "computed" => { "$function" => { "body" => "function() {}", "args" => [], "lang" => "js" } },
@@ -486,7 +486,7 @@ class PipelineSecurityTest < Minitest::Test
       def aggregate(_p, _opts = {}); @c end
     end.new(fake_cursor)
 
-    Parse::MongoDB.stub(:collection, ->(_name) { fake_collection }) do
+    Parse::MongoDB.stub(:collection, ->(_name, **_o) { fake_collection }) do
       # master: true bypasses Wave-3 fail-closed CLP — this test
       # exercises the validator/aggregate plumbing, not the auth path.
       results = Parse::MongoDB.aggregate("Song", [

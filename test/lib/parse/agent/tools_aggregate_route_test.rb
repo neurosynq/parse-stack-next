@@ -179,7 +179,25 @@ class ToolsAggregateRouteTest < Minitest::Test
   # mask rows the agent is authorized to see. Pre-4.4.0 parity.
   def test_mongo_direct_auth_kwargs_defaults_to_master
     kwargs = Parse::Agent::Tools.send(:mongo_direct_auth_kwargs, @agent)
-    assert_equal({ master: true }, kwargs)
+    assert_equal true, kwargs[:master]
+    assert_equal %i[master client].sort, kwargs.keys.sort
+  end
+
+  # The agent's own client rides along on the DIRECT path only. An agent
+  # built on a secondary client would otherwise resolve its token, walk its
+  # role graph, and read its rows against the default application, and
+  # Parse::MongoDB's binding guard would have nothing to check.
+  def test_mongo_direct_auth_kwargs_carries_the_agents_client
+    kwargs = Parse::Agent::Tools.send(:mongo_direct_auth_kwargs, @agent)
+    assert_same @agent.client, kwargs[:client]
+  end
+
+  # But NOT on the public hash. `acl_scope_kwargs` is documented for
+  # `agent_method` bodies to splat into calls of their own, which can be REST
+  # paths or user-written helpers where a stray `client:` is an
+  # unknown-keyword error. The two must stay separate.
+  def test_public_acl_scope_kwargs_does_not_carry_the_client
+    refute_includes @agent.acl_scope_kwargs.keys, :client
   end
 
   # Session-tokened agents thread the token through to ACLScope so
@@ -188,7 +206,8 @@ class ToolsAggregateRouteTest < Minitest::Test
   def test_mongo_direct_auth_kwargs_uses_session_token_when_present
     agent = Parse::Agent.new(session_token: "r:tok_abc123")
     kwargs = Parse::Agent::Tools.send(:mongo_direct_auth_kwargs, agent)
-    assert_equal({ session_token: "r:tok_abc123" }, kwargs)
+    assert_equal "r:tok_abc123", kwargs[:session_token]
+    assert_equal %i[session_token client].sort, kwargs.keys.sort
   end
 
   # Defense: an LLM that puts master: true in a tool call's JSON args

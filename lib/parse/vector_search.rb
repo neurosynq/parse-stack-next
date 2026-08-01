@@ -338,7 +338,8 @@ module Parse
 
         pipeline << { "$match" => filter } if filter
 
-        raw_results = run_pipeline!(collection_name, pipeline, max_time_ms: max_time_ms)
+        raw_results = run_pipeline!(collection_name, pipeline, max_time_ms: max_time_ms,
+                                    authorizing_client: Parse::ACLScope.client_of(resolution))
         # Already past the server-side ACL `$match` and any caller
         # `filter` — NOT the number $vectorSearch emitted.
         post_filter_count = raw_results.length
@@ -484,10 +485,12 @@ module Parse
       # `Parse::MongoDB.aggregate` because that helper prepends an
       # ACL `$match` at stage 0, which Atlas rejects for any pipeline
       # whose stage 0 is `$vectorSearch`.
-      def run_pipeline!(collection_name, pipeline, max_time_ms: nil)
+      def run_pipeline!(collection_name, pipeline, max_time_ms: nil, authorizing_client: nil)
         agg_opts = {}
         agg_opts[:max_time_ms] = max_time_ms if max_time_ms
-        coll = Parse::MongoDB.collection(collection_name)
+        # Vector search bypasses Parse::MongoDB.aggregate, so the binding
+        # guard only sees this read if the authorizing client arrives here.
+        coll = Parse::MongoDB.collection(collection_name, authorizing_client: authorizing_client)
         coll.aggregate(pipeline, agg_opts).to_a
       rescue => e
         Parse::MongoDB.send(:raise_if_timeout!, e, collection_name, max_time_ms)

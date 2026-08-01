@@ -221,7 +221,22 @@ module Parse
   # @return [Moneta::Transformer,Moneta::Expires] the cache instance
   # @see Parse::Client#cache
   def self.cache
-    @shared_cache ||= Parse::Client.client(:default).cache
+    # Deliberately NOT memoized. `@shared_cache ||=` pinned the first default
+    # client's store for the life of the process, so a later `Parse.setup`
+    # (a re-configuration, or a test suite swapping clients between cases)
+    # kept handing back the previous client's cache with no way to reset it.
+    Parse::Client.client(:default).cache
+  end
+
+  # The SDK-owned store for the default client: the response cache, the
+  # identity and role planes, and what {Parse::Client#clear_cache!} clears.
+  #
+  # Prefer {.cache} for application keys. This exists so the SDK's own slice
+  # is reachable and inspectable, not as a place to put application data.
+  # @return [Object]
+  # @see Parse::Client#sdk_cache
+  def self.sdk_cache
+    Parse::Client.client(:default).sdk_cache
   end
 
   # This class is the core and low level API for the Parse SDK REST interface that
@@ -338,6 +353,25 @@ module Parse
     #   lowest-priority auth fallback on every request.
     attr_reader :session_token
     alias_method :app_id, :application_id
+
+    # The store the SDK itself reads and writes: the response cache, the
+    # identity and role planes, and {#clear_cache!}.
+    #
+    # With `cache_keyspace: true` this is a {Parse::Cache::ScopedView} (or a
+    # {Parse::Cache::KeyspacedStore} for a store that cannot produce one)
+    # confined to this client's keyspace. Without it, this IS {#cache}, so
+    # nothing about an existing deployment changes.
+    #
+    # Kept separate from {#cache} because the two answer different questions.
+    # `cache` is the store the application configured and may still use for
+    # its own keys, under their original physical names. `sdk_cache` is the
+    # SDK's slice of it, and clearing that slice must not reach application
+    # data.
+    #
+    # @return [Object] the SDK-owned store.
+    def sdk_cache
+      @sdk_cache || self.cache
+    end
 
     # This client's authorization context: the identity and role caches, and
     # the session-token resolver that feeds every mongo-direct ACL decision.
@@ -785,8 +819,9 @@ module Parse
             # (e.g. a `Parse::Cache::Redis` connection pool) is shared across
             # more than one `Parse::Client`: mutating a shared store's
             # keyspace would rebind it out from under whichever client
-            # configured it first, so this client's own `self.cache` becomes
-            # the view, and the shared backend itself is never touched.
+            # configured it first, so this client's own `sdk_cache` becomes
+            # the view while `cache` stays the store that was configured, and
+            # the shared backend itself is never touched.
             cache_keyspace = nil
             if opts[:cache_keyspace]
               cache_keyspace = Parse::Cache::Keyspace.new(
@@ -810,7 +845,16 @@ module Parse
               # getting a database-wide flush is the exact inversion of the
               # option: it deletes other applications' entries and any
               # `parse-stack:foc:v1:*` create-locks sharing the database.
-              self.cache =
+              #
+              # The view is assigned to `sdk_cache`, NOT over `cache`. An
+              # earlier version replaced `cache` outright, which meant the
+              # store an application configured and passed in was no longer
+              # reachable through the accessor documented for reaching it,
+              # and application reads and writes silently moved inside the
+              # SDK's keyspace. A scoped view also cannot honestly stand in
+              # for a complete Moneta store: `clear`, `each_key`, and `close`
+              # either break scope isolation or quietly change meaning.
+              @sdk_cache =
                 if self.cache.respond_to?(:scoped)
                   self.cache.scoped(cache_keyspace)
                 else
@@ -822,16 +866,16 @@ module Parse
             # role and identity staleness is bounded by webhook rather than by
             # application discipline. Opt-in with the keyspace, since without
             # planes there is nothing to invalidate.
-            if cache_keyspace && self.cache.respond_to?(:roles) &&
+            if cache_keyspace && sdk_cache.respond_to?(:roles) &&
                opts.fetch(:cache_invalidation_hooks, true)
               begin
-                Parse::Cache::Invalidation.install!(self.cache)
+                Parse::Cache::Invalidation.install!(sdk_cache)
               rescue StandardError => e
                 warn "[Parse::Client] cache invalidation hooks not installed: #{e.class}"
               end
             end
 
-            conn.use Parse::Middleware::Caching, self.cache, {
+            conn.use Parse::Middleware::Caching, sdk_cache, {
               expires: opts[:expires].to_i,
               # Optional `cache_namespace:` prefixes every key so two Parse
               # apps sharing one Redis don't collide on `mk:/classes/Song/abc`.
@@ -1028,9 +1072,20 @@ module Parse
       @conn.url_prefix
     end
 
-    # Clear the client cache
+    # Clear the SDK's own cached entries.
+    #
+    # Operates on {#sdk_cache}, so with `cache_keyspace: true` this removes
+    # only keys under this client's keyspace and leaves application keys in
+    # the same store untouched. Without a keyspace `sdk_cache` IS `cache`,
+    # and the call has its historical whole-store meaning.
+    #
+    # To clear the underlying store outright, call `client.cache.clear`
+    # explicitly. On a Redis-backed store that is `FLUSHDB` and takes
+    # everything on the database with it, including other applications and
+    # any `parse-stack:foc:v1:*` create-locks.
     def clear_cache!
-      self.cache.clear if self.cache.present?
+      target = sdk_cache
+      target.clear if target.present?
     end
 
     # No-credentials liveness probe. Hits the Parse Server health endpoint and

@@ -2073,8 +2073,9 @@ module Parse
       # Every branch below is merged with the query's own client, so a query
       # built from a non-default client authorizes against THAT client rather
       # than silently falling back to Parse.client at the ACLScope boundary.
-      # Without this a `Post.query(client: other)` would resolve its session
-      # token against the default application.
+      # Note that a client is bound with `query.client = other`, NOT by
+      # passing `client:` to `Post.query(...)`, which builds a constraint on
+      # a field literally named `client` and silently matches nothing.
       mongo_direct_client_kwarg.merge(mongo_direct_scope_kwargs)
     end
 
@@ -2136,9 +2137,30 @@ module Parse
     # @return [Hash] zero-or-one-of { session_token:/master:/acl_user:/acl_role: }
     # @!visibility private
     def atlas_search_auth_kwargs(options)
-      explicit = %i[session_token master acl_user acl_role].select { |k| options.key?(k) }
-      return explicit.to_h { |k| [k, options[k]] } if explicit.any?
+      # The client travels with the identity on this path too. Atlas Search
+      # runs its own pipelines against the driver rather than going through
+      # Parse::MongoDB.aggregate, so a `q.client = other; q.atlas_search(...)`
+      # would otherwise resolve and read as the default application while the
+      # query it came from was bound to another.
+      #
+      # An explicitly passed client wins, matching how the identity kwargs
+      # below behave, and is dropped when it is already the default so the
+      # common single-application call carries nothing extra.
+      client_kwarg =
+        if options.key?(:client)
+          { client: options[:client] }
+        else
+          mongo_direct_client_kwarg
+        end
 
+      explicit = %i[session_token master acl_user acl_role].select { |k| options.key?(k) }
+      return client_kwarg.merge(explicit.to_h { |k| [k, options[k]] }) if explicit.any?
+
+      client_kwarg.merge(atlas_search_scope_kwargs)
+    end
+
+    # @!visibility private
+    def atlas_search_scope_kwargs
       if @acl_user
         { acl_user: @acl_user }
       elsif @acl_role
@@ -2676,6 +2698,10 @@ module Parse
         options[:class_name] = @table
         options[:limit] = limit
         options[:skip] = skip_val
+        # The query's client travels with its identity here too. Without it a
+        # `q.client = other` query reached Atlas Search as the default
+        # application. See #atlas_search_auth_kwargs.
+        options.merge!(mongo_direct_client_kwarg) unless options.key?(:client)
         # Forward the query's read_preference (set via `#read_pref`).
         # Without this, Atlas Search calls reached through the Query
         # bridge silently fall back to the client default even though
@@ -2743,6 +2769,10 @@ module Parse
       # Use query limit if set and no explicit limit provided
       options[:limit] ||= (@limit.is_a?(Numeric) && @limit > 0 ? @limit : 10)
       options[:class_name] = @table
+      # The query's client travels with its identity here too. Without it a
+      # `q.client = other` query reached Atlas Search as the default
+      # application. See #atlas_search_auth_kwargs.
+      options.merge!(mongo_direct_client_kwarg) unless options.key?(:client)
       # Forward the query's read_preference (set via `#read_pref`).
       # See #atlas_search for the parity rationale.
       if @read_preference && !options.key?(:read_preference)
@@ -2800,6 +2830,10 @@ module Parse
       options[:limit] ||= (@limit.is_a?(Numeric) && @limit > 0 ? @limit : 100)
       options[:skip] ||= (@skip > 0 ? @skip : 0)
       options[:class_name] = @table
+      # The query's client travels with its identity here too. Without it a
+      # `q.client = other` query reached Atlas Search as the default
+      # application. See #atlas_search_auth_kwargs.
+      options.merge!(mongo_direct_client_kwarg) unless options.key?(:client)
       # Forward the query's read_preference (set via `#read_pref`).
       # See #atlas_search for the parity rationale.
       if @read_preference && !options.key?(:read_preference)

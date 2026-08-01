@@ -17,10 +17,16 @@ require_relative "../../test_helper"
 class MongoDBClientBindingTest < Minitest::Test
   def setup
     @bound = Parse::MongoDB.instance_variable_get(:@bound_app_scope)
+    @observed = Parse::MongoDB.instance_variable_get(:@observed_app_scopes)
+    # Every test starts having seen nothing. The observed set decides whether
+    # an unidentified caller is ambiguous, so leaking it between tests makes
+    # results depend on run order.
+    Parse::MongoDB.instance_variable_set(:@observed_app_scopes, nil)
   end
 
   def teardown
     Parse::MongoDB.instance_variable_set(:@bound_app_scope, @bound)
+    Parse::MongoDB.instance_variable_set(:@observed_app_scopes, @observed)
   end
 
   def bind_to(app_id, server_url = "https://a.example.com/parse")
@@ -60,11 +66,147 @@ class MongoDBClientBindingTest < Minitest::Test
   # that never called Parse.setup, so they carry no client. An unidentifiable
   # caller cannot be checked, and refusing it would break paths that worked
   # before authorization was client-scoped at all.
-  def test_unidentifiable_caller_permits_the_call
+  # One application seen, so an unidentified caller is unambiguous. This is
+  # every single-application deployment, and master-mode or public-fallback
+  # resolutions produced before Parse.setup land here.
+  def test_unidentifiable_caller_permits_the_call_with_one_application
     bind_to("appA")
     Parse::MongoDB.verify_client!(nil)
     Parse::MongoDB.verify_client!(FakeClient.new(nil))
     Parse::MongoDB.verify_client!(Object.new)
+  end
+
+  # Once a SECOND application has been seen, an unidentified caller is a real
+  # ambiguity. Allowing it meant any call path that forgot to forward its
+  # client silently read whichever database happened to be bound, which made
+  # the completeness of that plumbing the only thing standing between two
+  # applications. It fails closed instead.
+  def test_unidentifiable_caller_is_refused_once_two_applications_are_seen
+    bind_to("appA")
+    Parse::MongoDB.verify_client!(FakeClient.new("appA"))
+    assert_raises(Parse::MongoDB::ClientMismatch) do
+      Parse::MongoDB.verify_client!(FakeClient.new("appB"))
+    end
+
+    error = assert_raises(Parse::MongoDB::ClientMismatch) do
+      Parse::MongoDB.verify_client!(nil)
+    end
+    assert_includes error.message, "no identifiable client"
+  end
+
+  # Configuring MongoDB before Parse.setup recorded no binding, and a nil
+  # binding disabled the check permanently. That is the most natural boot
+  # order, so it silently opted the whole process out. Binding now happens on
+  # first identified use instead.
+  def test_binds_lazily_when_configure_ran_before_any_client_existed
+    Parse::MongoDB.instance_variable_set(:@bound_app_scope, nil)
+
+    Parse::MongoDB.verify_client!(FakeClient.new("appA"))
+    refute_nil Parse::MongoDB.instance_variable_get(:@bound_app_scope),
+               "the first identified caller must establish the binding"
+
+    assert_raises(Parse::MongoDB::ClientMismatch) do
+      Parse::MongoDB.verify_client!(FakeClient.new("appB"))
+    end
+  end
+
+  # REPRODUCED P0: lazy binding used `@bound_app_scope ||= caller_scope`, so
+  # whoever called first won. Configure MongoDB before Parse, install default
+  # client A, then make the first direct request explicitly as B, and the
+  # connection bound itself to B and read A's database without complaint.
+  # Ownership decides the binding, never call order.
+  def test_first_caller_cannot_claim_the_binding_away_from_the_owner
+    Parse::MongoDB.instance_variable_set(:@bound_app_scope, nil)
+    owner = FakeClient.new("appA")
+
+    Parse::MongoDB.stub(:default_client_or_nil, owner) do
+      # B arrives first and must NOT get to define the binding.
+      assert_raises(Parse::MongoDB::ClientMismatch) do
+        Parse::MongoDB.verify_client!(FakeClient.new("appB"))
+      end
+      # The owner still matches, proving the binding followed ownership.
+      Parse::MongoDB.verify_client!(FakeClient.new("appA"))
+    end
+  end
+
+  # With no default client at all there is no ownership to read, so the first
+  # caller is the only signal available and nothing can conflict with it.
+  def test_first_caller_binds_only_when_there_is_no_owner
+    Parse::MongoDB.instance_variable_set(:@bound_app_scope, nil)
+    Parse::MongoDB.stub(:default_client_or_nil, nil) do
+      Parse::MongoDB.verify_client!(FakeClient.new("appB"))
+      assert_raises(Parse::MongoDB::ClientMismatch) do
+        Parse::MongoDB.verify_client!(FakeClient.new("appA"))
+      end
+    end
+  end
+
+  # REPRODUCED P0: `collection` passed `authorizing_client || default_client`,
+  # so a call site that forgot to forward its client was presented as the
+  # default and passed against a default-bound database. That made the
+  # fail-closed branch unreachable and contradicted the documented behavior.
+  def test_a_forgotten_client_is_unidentified_not_the_default
+    Parse::MongoDB.instance_variable_set(:@bound_app_scope, nil)
+    owner = FakeClient.new("appA")
+
+    Parse::MongoDB.stub(:default_client_or_nil, owner) do
+      Parse::MongoDB.verify_client!(owner)
+      # A second application is now in play.
+      assert_raises(Parse::MongoDB::ClientMismatch) do
+        Parse::MongoDB.verify_client!(FakeClient.new("appB"))
+      end
+      # A call that forgot to forward its client must NOT be upgraded to the
+      # default and waved through.
+      error = assert_raises(Parse::MongoDB::ClientMismatch) do
+        Parse::MongoDB.verify_client!(nil)
+      end
+      assert_includes error.message, "no identifiable client"
+    end
+  end
+
+  # The owner counts toward the observed set even when it never issues a
+  # direct read itself. Otherwise a process where only the SECOND application
+  # ever identifies itself sees one scope and waves unidentified callers past.
+  def test_the_owner_counts_toward_the_ambiguity_check
+    Parse::MongoDB.instance_variable_set(:@bound_app_scope, nil)
+
+    Parse::MongoDB.stub(:default_client_or_nil, FakeClient.new("appA")) do
+      assert_raises(Parse::MongoDB::ClientMismatch) do
+        Parse::MongoDB.verify_client!(FakeClient.new("appB"))
+      end
+      assert_raises(Parse::MongoDB::ClientMismatch) do
+        Parse::MongoDB.verify_client!(nil)
+      end
+    end
+  end
+
+  # A default client installed AFTER the connection fell back to binding on an
+  # explicit caller must still count toward the ambiguity check. Only looking
+  # at the owner while unbound meant the observed set held one scope forever,
+  # so unidentified callers looked unambiguous and went through to the wrong
+  # database.
+  def test_a_default_client_installed_after_binding_is_still_observed
+    Parse::MongoDB.instance_variable_set(:@bound_app_scope, nil)
+
+    # No owner yet, so B's explicit call establishes the binding.
+    Parse::MongoDB.stub(:default_client_or_nil, nil) do
+      Parse::MongoDB.verify_client!(FakeClient.new("appB"))
+    end
+
+    # A shows up afterwards. An unidentified caller is now ambiguous.
+    Parse::MongoDB.stub(:default_client_or_nil, FakeClient.new("appA")) do
+      assert_raises(Parse::MongoDB::ClientMismatch) do
+        Parse::MongoDB.verify_client!(nil)
+      end
+    end
+  end
+
+  # A resolution that cannot name its client is an unidentified caller, not a
+  # crash. Doubles and caller-supplied stand-ins hit this.
+  def test_client_of_tolerates_a_resolution_without_a_client
+    shape = Object.new
+    assert_nil Parse::ACLScope.client_of(shape)
+    assert_nil Parse::ACLScope.client_of(nil)
   end
 
   # Application ids are not globally unique. The same id is routinely reused

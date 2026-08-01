@@ -81,6 +81,24 @@ module Parse
       def strict_role?; strict_role == true; end
     end
 
+    # The client a resolution was produced by, or nil when it cannot say.
+    #
+    # Deliberately tolerant of objects that are resolution-shaped without
+    # being a {Resolution}: test doubles and any caller-supplied stand-in.
+    # A resolution that cannot name its client IS an unidentified caller,
+    # which is a case {Parse::MongoDB.verify_client!} models explicitly (it
+    # allows the single-application case and refuses the ambiguous one).
+    # Crashing on the missing method instead would convert an unknown into
+    # a NoMethodError far from its cause.
+    #
+    # @param resolution [Object, nil]
+    # @return [Parse::Client, nil]
+    def self.client_of(resolution)
+      return nil if resolution.nil?
+      return nil unless resolution.respond_to?(:client)
+      resolution.client
+    end
+
     class << self
       # When `true`, every call to {.resolve!} that did NOT receive
       # `session_token:` or `master: true` raises {ACLRequired} instead
@@ -612,7 +630,11 @@ module Parse
         role_names =
           begin
             require_relative "model/classes/role"
-            Parse::Role.all_for_user(user, max_depth: 10)
+            # `client:` matters here for the same reason it does on the
+            # session-token path: resolving the user against one application
+            # and then walking the role graph on another would grant that
+            # user the other application's roles by name.
+            Parse::Role.all_for_user(user, max_depth: 10, client: client)
           rescue StandardError
             Set.new
           end
@@ -667,7 +689,7 @@ module Parse
           when String, Symbol
             name = role.to_s.sub(/\Arole:/, "")
             raise ArgumentError, "[Parse::ACLScope] role name must be non-empty." if name.empty?
-            found = Parse::Role.first(name: name)
+            found = role_lookup_by_name(name, client: client)
             raise ArgumentError, "[Parse::ACLScope] no _Role found with name #{name.inspect}." if found.nil?
             found
           else
@@ -676,7 +698,7 @@ module Parse
 
         names =
           begin
-            role_obj.all_parent_role_names(max_depth: 10)
+            role_obj.all_parent_role_names(max_depth: 10, client: client)
           rescue StandardError
             Set.new([role_obj.name].compact)
           end
@@ -754,6 +776,20 @@ module Parse
                 "client with Parse.setup."
         end
         client.authorization
+      end
+
+      # Look up a `_Role` by name against a SPECIFIC client.
+      #
+      # `Parse::Role.first` resolves its client through the class, which is
+      # the default. On the `acl_role:` path that would find a role in the
+      # default application and then use its name to grant access in another,
+      # which is the same cross-application mixing the session-token path
+      # guards against. A nil client keeps the historical behavior.
+      def role_lookup_by_name(name, client: nil)
+        return Parse::Role.first(name: name) if client.nil?
+        query = Parse::Role.query(name: name)
+        query.client = client
+        query.first
       end
 
       # The client for this call, or `nil` when none can be determined.

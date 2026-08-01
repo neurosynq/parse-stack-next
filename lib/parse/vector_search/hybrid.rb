@@ -455,7 +455,8 @@ module Parse
 
           pipeline = native_pipeline_for(lex, vec, oversample, resolution,
                                          k_constant: k_constant, weights: weights, limit: oversample)
-          rows = run_pipeline!(collection_name, pipeline)
+          rows = run_pipeline!(collection_name, pipeline,
+                               authorizing_client: Parse::ACLScope.client_of(resolution))
 
           unless resolution.master?
             # Defense-in-depth top-level row gate. The in-pipeline ACL
@@ -543,6 +544,8 @@ module Parse
 
         # -- the $rankFusion support probe -------------------------------
 
+        # Capability probe only: runs `$rankFusion` with an empty input and a
+        # `$limit 0`, so it reads no rows and needs no authorization scope.
         def run_probe(collection_name)
           coll = Parse::MongoDB.collection(collection_name)
           coll.aggregate([{ "$rankFusion" => { "input" => {} } }, { "$limit" => 0 }]).to_a
@@ -642,8 +645,9 @@ module Parse
           end
         end
 
-        def run_pipeline!(collection_name, pipeline)
-          Parse::MongoDB.collection(collection_name).aggregate(pipeline).to_a
+        def run_pipeline!(collection_name, pipeline, authorizing_client: nil)
+          Parse::MongoDB.collection(collection_name, authorizing_client: authorizing_client)
+                        .aggregate(pipeline).to_a
         end
 
         def assert_clp_find!(collection_name, resolution)

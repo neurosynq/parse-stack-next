@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require_relative "keyspace"
+require_relative "moneta_surface"
 
 module Parse
   module Cache
@@ -52,6 +53,8 @@ module Parse
     # operation, not something a scoped view over one client's slice of the
     # keyspace should be able to trigger.
     class ScopedView
+      include Parse::Cache::MonetaSurface
+
       # @return [Parse::Cache::Keyspace] this view's key layout. Fixed at
       #   construction; there is no setter, so a view can never be rebound to
       #   a different keyspace after the fact.
@@ -93,6 +96,13 @@ module Parse
             @backend.increment(key, amount, options)
           end
         end
+        # Value-preserving TTL. SubCache feature-detects this to avoid the
+        # re-store that would lose a concurrent generation increment.
+        if @backend.respond_to?(:expire)
+          define_singleton_method(:expire) do |key, ttl|
+            @backend.expire(key, ttl)
+          end
+        end
       end
 
       # --- Moneta response-cache interface ---------------------------------
@@ -100,20 +110,27 @@ module Parse
       # the Faraday caching middleware requires, so a view is a drop-in
       # replacement for a bare Parse::Cache::Redis.
 
+      # `load` is the read primitive, delegated to the backend so the options
+      # argument reaches something that can honor it. Deriving it from `[]`
+      # here is what produced infinite recursion in an earlier version.
+      def load(key, options = {})
+        @backend.load(key, options || {})
+      end
+
       def [](key)
-        @backend[key]
+        load(key, {})
       end
 
-      def key?(key)
-        @backend.key?(key)
+      def key?(key, options = {})
+        @backend.key?(key, options || {})
       end
 
-      def delete(key)
-        @backend.delete(key)
+      def delete(key, options = {})
+        @backend.delete(key, options || {})
       end
 
       def store(key, value, options = {})
-        @backend.store(key, value, options)
+        @backend.store(key, value, options || {})
       end
 
       # --- scoped eviction --------------------------------------------------
@@ -217,6 +234,7 @@ module Parse
       def raw_delete_matching!(pattern)
         @backend.send(:delete_keys_matching!, pattern)
       end
+
     end
 
     # Raised when a keyspaced client is asked to clear a cache store that
@@ -244,6 +262,8 @@ module Parse
     # raises rather than widening: a store that cannot express "delete only
     # my keys" has no safe answer, and the wrong answer is unrecoverable.
     class KeyspacedStore
+      include Parse::Cache::MonetaSurface
+
       # @return [Parse::Cache::Keyspace]
       attr_reader :keyspace
 
@@ -264,25 +284,73 @@ module Parse
         # claiming them, so `respond_to?` stays truthful and callers that
         # feature-detect (the create-lock path, SubCache's atomic increment)
         # get the same answer they would from the store itself.
-        %i[create increment fetch each_key features lock_acquire lock_release].each do |name|
-          next unless @wrapped.respond_to?(name)
+        # `fetch` and `each_key` are deliberately NOT in this list.
+        #
+        # `fetch` must come from {Parse::Cache::MonetaSurface}, which routes
+        # through this wrapper's own `load`. Delegating it handed the call
+        # straight to the wrapped store and skipped the wrapper entirely.
+        #
+        # `each_key` is defined below with keyspace filtering. Delegating it
+        # enumerated the WHOLE store, so `sdk_cache.each_key` returned the
+        # application's keys alongside the SDK's, which is precisely the
+        # confusion this class exists to prevent.
+        %i[create increment expire features lock_acquire lock_release].each do |name|
+          next unless wrapped_supports?(name)
           define_singleton_method(name) { |*args, **kw, &blk| @wrapped.public_send(name, *args, **kw, &blk) }
         end
+
+        # Only claim `each_key` when the wrapped store can genuinely enumerate.
+        if wrapped_supports?(:each_key)
+          define_singleton_method(:each_key) do |&blk|
+            return enum_for(:each_key) unless blk
+            prefix = "#{@keyspace.root_prefix}:"
+            @wrapped.each_key { |k| blk.call(k) if k.to_s.start_with?(prefix) }
+            self
+          end
+        end
+
+        # Probe arity ONCE instead of rescuing at call time. See #key?.
+        @options_aware = %i[key? delete].to_h { |name| [name, accepts_options?(name)] }
       end
 
       # --- Moneta response-cache interface ---------------------------------
 
-      def [](key) = @wrapped[key]
-      def key?(key) = @wrapped.key?(key)
-      def delete(key) = @wrapped.delete(key)
-      def store(key, value, options = {}) = @wrapped.store(key, value, options)
+      # Delegated primitives. `load` falls back to `[]` for a wrapped store
+      # that predates Moneta's options argument, so an older custom store
+      # still works and simply ignores the hint.
+      def load(key, options = {})
+        return @wrapped.load(key, options || {}) if @wrapped.respond_to?(:load)
+        @wrapped[key]
+      end
+
+      def [](key) = load(key, {})
+      def store(key, value, options = {}) = @wrapped.store(key, value, options || {})
+
+      # Options are forwarded when the wrapped store can take them, decided
+      # by arity at construction.
+      #
+      # This used to call with options and `rescue ArgumentError` to retry
+      # without them. That is wrong twice over: a store's own argument
+      # validation also raises ArgumentError, so a genuine rejection was
+      # retried rather than surfaced, and for `delete` the retry meant the
+      # deletion could run TWICE, once before the raise and once after.
+      # Deciding from arity is exact and happens once.
+      def key?(key, options = {})
+        return @wrapped.key?(key, options || {}) if @options_aware[:key?]
+        @wrapped.key?(key)
+      end
+
+      def delete(key, options = {})
+        return @wrapped.delete(key, options || {}) if @options_aware[:delete]
+        @wrapped.delete(key)
+      end
 
       # Delete every entry under this keyspace, and nothing else.
       #
       # @raise [Parse::Cache::UnscopedClearRefused] when the wrapped store
       #   cannot enumerate its keys, and therefore cannot clear within a
       #   keyspace. Use a {Parse::Cache::Redis} for scoped clearing, or call
-      #   `client.cache.wrapped.clear` to take the unscoped clear deliberately.
+      #   `client.cache.clear` to take the unscoped clear deliberately.
       # @return [self]
       def clear(scope: nil, family: nil, tenant: nil)
         prefix =
@@ -293,14 +361,14 @@ module Parse
             pattern.sub(/\*\z/, "")
           end
 
-        unless @wrapped.respond_to?(:each_key)
+        unless wrapped_supports?(:each_key)
           raise UnscopedClearRefused,
                 "#{@wrapped.class} cannot enumerate its keys, so it cannot clear only the entries " \
                 "under #{@keyspace.root_prefix}. Refusing rather than falling back to an " \
                 "unscoped clear, which on a Redis-backed store is FLUSHDB and would delete " \
                 "other applications' entries and any parse-stack:foc:v1:* create-locks. " \
                 "Use Parse::Cache::Redis for scoped clearing, or call " \
-                "client.cache.wrapped.clear to take the unscoped clear deliberately."
+                "client.cache.clear to take the unscoped clear deliberately."
         end
 
         # Collect before deleting: mutating during enumeration is undefined
@@ -317,7 +385,7 @@ module Parse
       def delete_matching(pattern)
         return 0 if pattern.nil? || pattern.to_s.empty?
         return 0 unless pattern.to_s.start_with?("#{@keyspace.root_prefix}:")
-        return 0 unless @wrapped.respond_to?(:each_key)
+        return 0 unless wrapped_supports?(:each_key)
 
         doomed = []
         @wrapped.each_key { |k| doomed << k if File.fnmatch(pattern, k.to_s, File::FNM_NOESCAPE) }
@@ -328,6 +396,42 @@ module Parse
       def inspect
         "#<Parse::Cache::KeyspacedStore #{@keyspace.root_prefix} over #{@wrapped.class}>"
       end
+
+      private
+
+      # Whether the wrapped store genuinely provides a capability.
+      #
+      # `respond_to?` is not enough for a Moneta store. Moneta defines every
+      # optional method on every store and has the unsupported ones raise
+      # `NotImplementedError`, so `Moneta.new(:Null).respond_to?(:each_key)`
+      # is true while calling it raises. Advertising it on that basis made
+      # this wrapper claim `each_key`, `create`, and `increment` for a store
+      # that has none of them, and a scoped `clear` then leaked
+      # `NotImplementedError` instead of the `UnscopedClearRefused` this class
+      # promises. `supports?` is Moneta's own answer to that question.
+      #
+      # It only covers Moneta's feature vocabulary, so anything outside it
+      # (`expire`, the lock pair) still falls back to `respond_to?`.
+      MONETA_FEATURES = %i[create increment each_key].freeze
+      private_constant :MONETA_FEATURES
+
+      def wrapped_supports?(name)
+        return false unless @wrapped.respond_to?(name)
+        return true unless MONETA_FEATURES.include?(name)
+        return true unless @wrapped.respond_to?(:supports?)
+        !!@wrapped.supports?(name)
+      rescue StandardError
+        false
+      end
+
+      # @return [Boolean] whether the wrapped method takes an options argument.
+      def accepts_options?(name)
+        arity = @wrapped.method(name).arity
+        arity.negative? || arity >= 2
+      rescue NameError
+        false
+      end
+
     end
   end
 end

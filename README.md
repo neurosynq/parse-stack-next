@@ -735,14 +735,14 @@ Parse.setup(
 )
 
 # `Parse.setup` derives an immutable, per-client Parse::Cache::ScopedView
-# from `store` and installs THAT as this client's cache. `store` itself is
-# never mutated: a keyspace can only ever be bound through a scoped view,
+# from `store` and installs THAT as this client's SDK cache. `store` itself
+# is never mutated: a keyspace can only ever be bound through a scoped view,
 # so the same `store` can back several clients/apps without one's keyspace
-# ever clobbering another's. Talk to the scoped keyspace through
-# `Parse.cache`, not the original `store` variable.
+# ever clobbering another's. Reach the scoped keyspace through
+# `Parse.sdk_cache`; `Parse.cache` is still `store` itself, for your keys.
 Parse.client.clear_cache!                          # scoped SCAN over this client's keys
-Parse.cache.clear(family: :role)                   # one family only
-Parse.cache.clear(family: :cache, tenant: "acme")  # one tenant of one family
+Parse.sdk_cache.clear(family: :role)               # one family only
+Parse.sdk_cache.clear(family: :cache, tenant: "acme") # one tenant of one family
 store.flush_db!                        # explicit full flush of the WHOLE backend, ops tooling only
 ```
 
@@ -759,15 +759,15 @@ closure for every scoped mongo-direct read, including Atlas Search's
 never resolve a token against each other's caches or each other's
 `/users/me`. Both resolutions are cached in per-process memory by default, so
 each Puma worker and each dyno maintains its own copy. Once
-`cache_keyspace: true` is set, the client's scoped view (`Parse.client.cache`)
-exposes two planes that drop into those slots and move the caches to the
-shared backend:
+`cache_keyspace: true` is set, the client's scoped view
+(`Parse.client.sdk_cache`) exposes two planes that drop into those slots and
+move the caches to the shared backend:
 
 ```ruby
-# `Parse.client.cache` is the scoped view the client derived at setup. The
+# `Parse.client.sdk_cache` is the scoped view the client derived at setup. The
 # planes live on the view rather than on the backend, so two clients sharing
 # one Redis connection cannot end up sharing each other's caches.
-view = Parse.client.cache
+view = Parse.client.sdk_cache
 Parse::Authorization.configure(
   identity_cache: view.identity(ttl: 3600),
   role_cache: view.roles(ttl: 30),
@@ -817,10 +817,14 @@ authorization came from a client belonging to a different one, raising
 `Parse::MongoDB::ClientMismatch`. The check runs in two places, because
 `aggregate` is not the only way to reach the database: Atlas Search builds and
 runs its own `$search` pipelines, and hybrid vector search does the same, both
-going straight to the driver. `aggregate` verifies against the client that
-authorized the call, and `Parse::MongoDB.collection` verifies against the
-default client, so no path can take a collection handle for one application
-while authorizing against another.
+going straight to the driver. Both verify against the client that authorized
+the call: `aggregate` passes the one it resolved, and
+`Parse::MongoDB.collection` takes an `authorizing_client:` that each of those
+paths forwards. `collection` does NOT substitute the default for a missing
+one, because doing so would present a call site that forgot to forward its
+client as the default and wave it through, which is the omission the check
+exists to catch. Public entry points resolve an omitted client to the default
+once, and internal sinks treat nil as unidentified.
 
 `results_direct`, `count_direct`, `distinct_direct`,
 `distinct_direct_pointers`, and `Parse::MongoDB.aggregate` all take `client:`
@@ -836,6 +840,13 @@ other = Parse::Client.new(application_id: "appB", ...)
 # Resolves appB's token against appB, then would read appA's database. Refused.
 Post.query.results_direct(session_token: token, client: other)
 # => Parse::MongoDB::ClientMismatch
+
+# A query can carry the client instead of repeating it per call. Assign it;
+# `Post.query(client: other)` would build a constraint on a field named
+# `client` and match nothing.
+q = Post.query
+q.client = other
+q.results_direct(session_token: token)
 ```
 
 It fires the same way when the default client is replaced after MongoDB was
@@ -850,12 +861,29 @@ Post.query.results_direct(session_token: token)
 Omitting `client:` resolves through `Parse.client`, which is the existing
 behavior and what every single-application deployment gets.
 
-Two cases deliberately proceed rather than raise. A connection configured
-before this existed, or in a process that set up MongoDB before Parse, records
-no binding and has nothing to compare. A caller that cannot be identified,
-which includes master-mode and public-fallback resolutions produced before
-`Parse.setup`, is likewise unchecked. Single-application deployments are
-unaffected in every case.
+The binding comes from the default client, which is the one whose
+configuration produced the connection. It is established at `configure` time,
+or on first use when MongoDB was configured before `Parse.setup`, so that boot
+order does not leave the check disabled. It is never taken from whichever
+caller happens to arrive first: in a process that configures MongoDB early,
+installs default client A, then makes its first direct request explicitly as
+B, the connection belongs to A and B's read is refused.
+
+A caller that cannot name its client is treated as unidentified, never
+upgraded to the default. What happens next depends on how many applications
+the process has seen:
+
+- **One application.** Unidentified callers proceed. This is every
+  single-application deployment, and it includes master-mode and
+  public-fallback resolutions produced before `Parse.setup`.
+- **Two or more.** Unidentified callers are refused. A call path that fails to
+  forward its client fails loudly rather than silently reading whichever
+  database happened to be bound, so the completeness of that plumbing is not
+  the only thing keeping two applications apart.
+
+The owning client counts toward that tally even if it never issues a direct
+read itself, so a process where only the second application ever identifies
+itself still counts as two.
 
 If you genuinely need two applications in one process, give each its own
 process, or route the second one's reads through REST, where Parse Server
@@ -3706,6 +3734,33 @@ Song.query(cache: true).first        # Explicitly uses cache
 You may access the shared cache for the default client connection through `Parse.cache`. This is useful if you
 want to utilize the same cache store for other purposes.
 
+`Parse.cache` is exactly the store you configured, and it is not affected by
+`cache_keyspace: true`, which only scopes the SDK's own slice. That slice is
+`Parse.sdk_cache`.
+
+**`clear_cache!` only spares your keys when `cache_keyspace: true` is set.**
+Without it there is no keyspace to confine the clear to, `sdk_cache` and
+`cache` are the same object, and `clear_cache!` falls back to the store's own
+`clear`. What that reaches depends on the store, so there are two axes, not
+one:
+
+For `Parse::Cache::Redis`, which is the only store that implements a
+namespace:
+
+| | no `namespace:` | `namespace: "web"` |
+|---|---|---|
+| **no `cache_keyspace`** | clears everything on the store | clears `web:*` only |
+| **`cache_keyspace: true`** | clears the SDK keyspace only | clears the SDK keyspace only |
+
+For any other Moneta store there is no middle column. `cache_namespace:` is a
+key-prefix option for the SDK's own keys and does not make the store's `clear`
+selective, so without `cache_keyspace: true` a `clear_cache!` takes the whole
+store regardless of any namespace you set.
+
+Turn `cache_keyspace: true` on before relying on the separation. A Redis
+namespace narrows the blast radius but is not the same guarantee: it still
+takes any of your own keys that happen to sit under the same prefix.
+
 ```ruby
 # Access the cache instance for other uses
 Parse.cache["key"] = "value"
@@ -3719,6 +3774,38 @@ Parse.cache.fetch("all:song:records") do |key|
 end
 
 ```
+
+**`Parse.cache` versus `Parse.sdk_cache`.** The two answer different questions
+and only one of them is yours.
+
+| | `Parse.cache` | `Parse.sdk_cache` |
+|---|---|---|
+| What it is | the store you configured, unchanged | the SDK's slice of it |
+| Key names | the keys you write | prefixed with the SDK keyspace |
+| Scoped by `cache_keyspace: true` | no | yes |
+| What `clear_cache!` clears (keyspaced) | nothing | this |
+| What `clear_cache!` clears (not keyspaced) | the store's own `clear`, they are the same object | |
+
+`clear_cache!` operates on `sdk_cache`. With a keyspace that is only the SDK's
+response-cache entries and its identity and role planes. Without one, see the
+caveat above.
+
+`Parse.cache.clear` is a different thing entirely and stays available on
+purpose, but what it reaches depends on how the store was built:
+
+- **No `namespace:`** it clears the whole store. On `Parse::Cache::Redis` that
+  is `FLUSHDB`: your keys, the SDK's, any other application on that database,
+  and the `parse-stack:foc:v1:*` create-locks whose loss silently drops
+  `first_or_create!` mutual exclusion.
+- **With `namespace:`** it scan-deletes `<namespace>:*` only, so keys outside
+  that prefix survive.
+
+`Parse::Cache::Redis#flush_db!` is the unconditionally total operation. Reach
+for either only when you own the whole database.
+
+For anything beyond incidental use, give your application its own separately
+named Moneta instance rather than sharing the SDK's. Sharing one store means
+sharing its eviction policy and its failure modes.
 
 #### :use_master_key
 A true/false value. If you provided a master key as part of `Parse.setup()`, it will be sent on every request. However, if you wish to disable sending the master key on a particular request in order for the record ACLs to be enforced, you may pass `false`. If `false` is passed, caching will be disabled for this request.
@@ -6001,10 +6088,10 @@ resolves against the same view, and let webhook triggers invalidate them
 instead of calling `invalidate` from your own logout and role-mutation paths:
 
 ```ruby
-# `Parse.client.cache` is the scoped view the client derived at setup. The
+# `Parse.client.sdk_cache` is the scoped view the client derived at setup. The
 # planes live on the view rather than on the backend, so two clients sharing
 # one Redis connection cannot end up sharing each other's caches.
-view = Parse.client.cache
+view = Parse.client.sdk_cache
 Parse::Authorization.configure(
   identity_cache: view.identity(ttl: 3600),
   role_cache: view.roles(ttl: 30),

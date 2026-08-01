@@ -4463,7 +4463,7 @@ module Parse
               translated = Parse::Query.new(class_name).send(
                 :translate_pipeline_for_direct_mongodb, scoped,
               )
-              raw_rows = Parse::MongoDB.aggregate(class_name, translated, **agent.acl_scope_kwargs)
+              raw_rows = Parse::MongoDB.aggregate(class_name, translated, **mongo_direct_auth_kwargs(agent))
               raw_rows.map { |raw| Parse::MongoDB.convert_aggregation_document(raw) }
             else
               response = agent.client.aggregate_pipeline(class_name, scoped, **agent.request_opts)
@@ -4818,7 +4818,7 @@ module Parse
             translated = Parse::Query.new(class_name).send(
               :translate_pipeline_for_direct_mongodb, effective_pipeline,
             )
-            raw_rows = Parse::MongoDB.aggregate(class_name, translated, **agent.acl_scope_kwargs)
+            raw_rows = Parse::MongoDB.aggregate(class_name, translated, **mongo_direct_auth_kwargs(agent))
             rows = raw_rows.map { |raw| Parse::MongoDB.convert_aggregation_document(raw) }
           else
             response = agent.client.aggregate_pipeline(class_name, effective_pipeline, **agent.request_opts)
@@ -5848,6 +5848,10 @@ module Parse
           result = Parse::AtlasSearch.faceted_search(
             class_name, query.to_s, facets,
             limit: limit, master: true,
+            # Master mode still has to name its application: the binding
+            # guard compares the client, not the posture, and an unnamed
+            # caller is refused once two applications are in play.
+            **agent_client_kwarg(agent),
           )
           format_atlas_faceted_results(class_name, result)
         end
@@ -5871,7 +5875,7 @@ module Parse
       # compatibility with the helper signature (tests may pass it);
       # it's no longer used in the body.
       def atlas_auth_options!(agent, tool: nil)
-        agent.acl_scope_kwargs
+        agent.direct_auth_kwargs
       end
 
       # @api private
@@ -5968,7 +5972,7 @@ module Parse
           pipeline = [translated_match] + pipeline
         end
 
-        raw_rows = Parse::MongoDB.aggregate(class_name, pipeline, **agent.acl_scope_kwargs)
+        raw_rows = Parse::MongoDB.aggregate(class_name, pipeline, **mongo_direct_auth_kwargs(agent))
         raw_rows.map { |raw| Parse::MongoDB.convert_aggregation_document(raw) }
       end
       module_function :execute_find_via_direct
@@ -6024,14 +6028,25 @@ module Parse
           pipeline << translated_match
         end
         pipeline << { "$count" => "count" }
-        raw_rows = Parse::MongoDB.aggregate(class_name, pipeline, **agent.acl_scope_kwargs)
+        raw_rows = Parse::MongoDB.aggregate(class_name, pipeline, **mongo_direct_auth_kwargs(agent))
         return 0 if raw_rows.empty?
         raw_rows.first["count"] || 0
       end
       module_function :execute_count_via_direct
 
+      # @api private
+      # `{ client: agent.client }`, or empty when the agent cannot name one.
+      def agent_client_kwarg(agent)
+        return {} unless agent.respond_to?(:client)
+        client = agent.client
+        client ? { client: client } : {}
+      rescue StandardError
+        {}
+      end
+
       def mongo_direct_auth_kwargs(agent)
-        # Single point of truth: delegate to agent.acl_scope_kwargs.
+        # Single point of truth: delegate to agent.direct_auth_kwargs,
+        # which is acl_scope_kwargs plus the agent's own client.
         # The agent emits exactly one of {session_token:}, {acl_user:},
         # {acl_role:}, or {master: true} based on construction. The old
         # session_token-or-master pairing is preserved as the
@@ -6039,7 +6054,16 @@ module Parse
         # acl_user/acl_role scopes also flow through correctly so
         # ACLScope's `_rperm` $match runs on direct mongo aggregations
         # regardless of which identity input the agent was constructed
-        # with.
+        # with. Prefers direct_auth_kwargs, which adds the agent's own client
+        # so the read is resolved and checked against that application.
+        #
+        # Falls back for agent-shaped objects that predate it: agents are
+        # duck-typed at this boundary (tests and host applications supply
+        # stand-ins), and requiring a new method of all of them to gain the
+        # client would break every one that has not been updated. Without a
+        # client the read is simply an unidentified caller, which
+        # Parse::MongoDB's guard already models.
+        return agent.direct_auth_kwargs if agent.respond_to?(:direct_auth_kwargs)
         agent.acl_scope_kwargs
       end
 

@@ -6,6 +6,7 @@ require "json"
 require "securerandom"
 require_relative "pool"
 require_relative "keyspace"
+require_relative "moneta_surface"
 require_relative "sub_cache"
 require_relative "upstream_roles"
 require_relative "scoped_view"
@@ -34,6 +35,10 @@ module Parse
     # `delete`, `store` — to a pooled backend), so it can be passed
     # directly to `Parse.setup(cache:)` / `Parse::Client.new(cache:)`.
     class Redis
+      # `[]=`, `fetch`, `load`, `values_at`, `slice`, `merge!` and friends,
+      # derived from the four primitives below. See {Parse::Cache::MonetaSurface}.
+      include Parse::Cache::MonetaSurface
+
       # @return [String, nil] cache key namespace prefix (or nil if not set).
       attr_reader :namespace
 
@@ -295,20 +300,34 @@ module Parse
         end
       end
 
+      # Moneta's read primitive. Defined here rather than derived, because
+      # only this class knows how to reach its pool and how to decode what
+      # comes back.
+      def load(key, options = {})
+        decode_value(@pool.load(key, options || {}))
+      end
+
       def [](key)
-        decode_value(@pool[key])
+        load(key, {})
       end
 
-      def key?(key)
-        @pool.key?(key)
+      def key?(key, options = {})
+        @pool.key?(key, options || {})
       end
 
-      def delete(key)
-        @pool.delete(key)
+      # Returns the DECODED value, matching Moneta, which returns what was
+      # removed. This used to hand back the raw JSON string this wrapper had
+      # encoded on the way in, so `delete` and `store` returned
+      # `"{\"a\":1}"` where every other read returned `{"a" => 1}`.
+      def delete(key, options = {})
+        decode_value(@pool.delete(key, options || {}))
       end
 
+      # Returns the value as given, matching Moneta. The encoded form is an
+      # implementation detail of how it is stored and must not leak out.
       def store(key, value, options = {})
-        @pool.store(key, encode_value(value), options)
+        @pool.store(key, encode_value(value), options || {})
+        value
       end
 
       # Atomic SETNX. Required so `Parse::CreateLock` can acquire
@@ -325,6 +344,28 @@ module Parse
       # Atomic counter increment. Forwarded for Moneta surface parity.
       def increment(key, amount = 1, options = {})
         @pool.increment(key, amount, options)
+      end
+
+      # Set a TTL on an existing key WITHOUT touching its value.
+      #
+      # Exists because `INCR` sets no expiry, and the only other way to add
+      # one through Moneta is to re-`store` the value, which loses concurrent
+      # increments. For {Parse::Cache::SubCache}'s generation counters a lost
+      # increment moves the counter backwards, and since generation checks
+      # are equality comparisons, a counter returning to a previously issued
+      # value re-admits the identity entries that value had invalidated.
+      # PEXPIRE touches only the TTL, so it cannot do that.
+      #
+      # @param key [String] the physical key.
+      # @param ttl [Numeric] seconds.
+      # @return [Boolean] true when the key existed and the TTL was set.
+      def expire(key, ttl)
+        return false if ttl.nil?
+        @pool.pool.with do |store|
+          !!backend_client(store).pexpire(key, (ttl.to_f * 1000).round)
+        end
+      rescue StandardError
+        false
       end
 
       # Lua compare-and-delete: delete `key` only if its current value
