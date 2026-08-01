@@ -292,8 +292,11 @@ module Parse
         end
         if segment.match?(GLOB_METACHARS)
           raise ArgumentError,
-                "Parse::Cache::Keyspace #{label} must not contain Redis glob characters " \
-                "(*, ?, [, ], \\, or NUL); got #{value.inspect}"
+                "Parse::Cache::Keyspace #{label} must not contain \":\", Redis glob " \
+                "characters (*, ?, [, ], \\), or NUL; got #{value.inspect}. \":\" is the " \
+                "segment separator, so allowing it would let one value forge extra key " \
+                "segments and escape its own part of the keyspace. A single trailing " \
+                "\":\" is stripped for convenience, so \"web\" and \"web:\" are equivalent."
         end
         segment
       end

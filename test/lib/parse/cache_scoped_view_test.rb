@@ -205,6 +205,57 @@ class CacheScopedViewTest < Minitest::Test
     assert_equal before, node.keys.size, "the refused clear must not have deleted anything"
   end
 
+  # --- KeyspacedStore: the non-scopable fallback ---------------------------
+
+  # A store that cannot enumerate its keys cannot clear within a keyspace, and
+  # the only alternative is the database-wide clear this wrapper exists to
+  # prevent. It refuses instead.
+  def test_keyspaced_store_refuses_a_clear_it_cannot_scope
+    bare = Object.new
+    %i[[] key? delete store].each { |m| bare.define_singleton_method(m) { |*| nil } }
+    wrapper = Parse::Cache::KeyspacedStore.new(store: bare, keyspace: keyspace)
+
+    assert_raises(Parse::Cache::UnscopedClearRefused) { wrapper.clear }
+  end
+
+  # The refusal message tells the operator how to take the unscoped clear
+  # deliberately, so the method it names has to exist and be callable with no
+  # arguments. It previously named `client.cache.store.clear`, but `store` is
+  # Moneta's writer and needs a key and a value, so anyone following the
+  # advice got an ArgumentError instead of a clear.
+  def test_refusal_message_names_a_method_that_actually_works
+    cleared = false
+    bare = Object.new
+    %i[[] key? delete store].each { |m| bare.define_singleton_method(m) { |*| nil } }
+    bare.define_singleton_method(:clear) { cleared = true }
+    wrapper = Parse::Cache::KeyspacedStore.new(store: bare, keyspace: keyspace)
+
+    message = assert_raises(Parse::Cache::UnscopedClearRefused) { wrapper.clear }.message
+    assert_includes message, "wrapped.clear"
+
+    wrapper.wrapped.clear
+    assert cleared, "the method the message names must reach the wrapped store's clear"
+  end
+
+  # An enumerable store gets a real scoped clear, deleting only what sits
+  # under this keyspace.
+  def test_keyspaced_store_clears_only_its_own_keys
+    data = {
+      "#{keyspace.root_prefix}:cache:mine" => 1,
+      "someone-elses-key" => 2,
+    }
+    bare = Object.new
+    bare.define_singleton_method(:[]) { |k| data[k] }
+    bare.define_singleton_method(:key?) { |k| data.key?(k) }
+    bare.define_singleton_method(:delete) { |k| data.delete(k) }
+    bare.define_singleton_method(:store) { |k, v, _o = {}| data[k] = v }
+    bare.define_singleton_method(:each_key) { |&blk| data.keys.each(&blk) }
+
+    Parse::Cache::KeyspacedStore.new(store: bare, keyspace: keyspace).clear
+
+    assert_equal ["someone-elses-key"], data.keys
+  end
+
   # --- delete_matching refuses foreign patterns -----------------------------
 
   def test_delete_matching_refuses_a_pattern_belonging_to_another_view

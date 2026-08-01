@@ -282,7 +282,7 @@ module Parse
       # @raise [Parse::Cache::UnscopedClearRefused] when the wrapped store
       #   cannot enumerate its keys, and therefore cannot clear within a
       #   keyspace. Use a {Parse::Cache::Redis} for scoped clearing, or call
-      #   `client.cache.store.clear` to take the unscoped clear deliberately.
+      #   `client.cache.wrapped.clear` to take the unscoped clear deliberately.
       # @return [self]
       def clear(scope: nil, family: nil, tenant: nil)
         prefix =
@@ -300,7 +300,7 @@ module Parse
                 "unscoped clear, which on a Redis-backed store is FLUSHDB and would delete " \
                 "other applications' entries and any parse-stack:foc:v1:* create-locks. " \
                 "Use Parse::Cache::Redis for scoped clearing, or call " \
-                "client.cache.store.clear to take the unscoped clear deliberately."
+                "client.cache.wrapped.clear to take the unscoped clear deliberately."
         end
 
         # Collect before deleting: mutating during enumeration is undefined

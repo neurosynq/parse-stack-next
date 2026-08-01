@@ -2,7 +2,8 @@
 # frozen_string_literal: true
 
 require "digest"
-require "securerandom"
+require "json"
+require "set"
 
 module Parse
   module Cache
