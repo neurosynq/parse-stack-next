@@ -322,6 +322,15 @@
   identified, both proceed, so single-application deployments and master-mode
   calls made before `Parse.setup` are unaffected. The guard becomes
   unnecessary in 6.0.
+- **NEW**: `Parse::Query#results_direct`, `#count_direct`, `#distinct_direct`,
+  `#distinct_direct_pointers`, and `Parse::MongoDB.aggregate` accept `client:`
+  alongside the existing auth keywords. It names the authorization context
+  that resolves the call, and it is carried onto the `Parse::ACLScope`
+  resolution so the binding check above has something to compare. Without it
+  every direct read resolved through `Parse.client`, which left the check
+  unable to see a second client at all and therefore unable to catch the case
+  it was written for. Omitting the keyword resolves through `Parse.client` as
+  before.
 - `cache_keyspace: true` is the single switch for this release. Left unset, the
   key shape, the clearing behavior, the invalidation hooks, and the identity
   and role planes are all exactly as they were, so upgrading changes nothing

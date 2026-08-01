@@ -2070,6 +2070,29 @@ module Parse
     #   * Otherwise (master-key path) → forward `master: true`.
     # @!visibility private
     def mongo_direct_auth_kwargs
+      # Every branch below is merged with the query's own client, so a query
+      # built from a non-default client authorizes against THAT client rather
+      # than silently falling back to Parse.client at the ACLScope boundary.
+      # Without this a `Post.query(client: other)` would resolve its session
+      # token against the default application.
+      mongo_direct_client_kwarg.merge(mongo_direct_scope_kwargs)
+    end
+
+    # @!visibility private
+    # @return [Hash] `{ client: ... }`, or empty when this query uses the
+    #   default client. Omitted rather than passed as the default client so
+    #   the downstream fallback stays observable in one place.
+    def mongo_direct_client_kwarg
+      resolved = client
+      return {} if resolved.nil?
+      return {} if Parse::Client.client? && resolved.equal?(Parse::Client.client)
+      { client: resolved }
+    rescue StandardError
+      {}
+    end
+
+    # @!visibility private
+    def mongo_direct_scope_kwargs
       if @acl_user
         # Pre-resolved User pointer. Hand it to Parse::ACLScope as
         # acl_user: so the same three-layer simulation runs (top-level
@@ -2201,7 +2224,7 @@ module Parse
     # @raise [Parse::MongoDB::ExecutionTimeout] if the query exceeds max_time_ms
     # @note This is a read-only operation. Direct MongoDB queries cannot modify data.
     # @see Parse::MongoDB.configure
-    def results_direct(raw: false, max_time_ms: nil, session_token: nil, master: nil, acl_user: nil, acl_role: nil, &block)
+    def results_direct(raw: false, max_time_ms: nil, session_token: nil, master: nil, acl_user: nil, acl_role: nil, client: nil, &block)
       require_relative "mongodb"
       Parse::MongoDB.require_gem!
 
@@ -2210,6 +2233,17 @@ module Parse
           "Direct MongoDB queries are not enabled. " \
           "Call Parse::MongoDB.configure(uri: 'mongodb://...', enabled: true) first."
       end
+
+      # A query already owns a client. Defaulting to it means a query built
+      # from a secondary client does not have to repeat itself, and cannot
+      # silently authorize against the default application by omission.
+      #
+      # Resolved defensively: `#client` lazily constructs the DEFAULT client
+      # and raises ConnectionError when none is configured. Argument
+      # validation below must still be able to raise ArgumentError in a
+      # process that never called Parse.setup, so a missing client is left
+      # nil here and resolved at the authorization boundary instead.
+      client ||= (self.client rescue nil)
 
       # Build the aggregation pipeline for direct MongoDB execution
       pipeline = build_direct_mongodb_pipeline
@@ -2245,6 +2279,7 @@ module Parse
                                              master: master,
                                              acl_user: acl_user,
                                              acl_role: acl_role,
+                                             client: client,
                                              read_preference: @read_preference,
                                              hint: @hint)
 
@@ -2335,7 +2370,7 @@ module Parse
     # @raise [Parse::MongoDB::NotEnabled] if direct MongoDB is not configured
     # @note This is a read-only operation. Direct MongoDB queries cannot modify data.
     # @see Parse::MongoDB.configure
-    def count_direct(session_token: nil, master: nil, acl_user: nil, acl_role: nil)
+    def count_direct(session_token: nil, master: nil, acl_user: nil, acl_role: nil, client: nil)
       require_relative "mongodb"
       Parse::MongoDB.require_gem!
 
@@ -2344,6 +2379,17 @@ module Parse
           "Direct MongoDB queries are not enabled. " \
           "Call Parse::MongoDB.configure(uri: 'mongodb://...', enabled: true) first."
       end
+
+      # A query already owns a client. Defaulting to it means a query built
+      # from a secondary client does not have to repeat itself, and cannot
+      # silently authorize against the default application by omission.
+      #
+      # Resolved defensively: `#client` lazily constructs the DEFAULT client
+      # and raises ConnectionError when none is configured. Argument
+      # validation below must still be able to raise ArgumentError in a
+      # process that never called Parse.setup, so a missing client is left
+      # nil here and resolved at the authorization boundary instead.
+      client ||= (self.client rescue nil)
 
       # Build the aggregation pipeline for direct MongoDB execution
       pipeline = build_direct_mongodb_pipeline
@@ -2373,6 +2419,7 @@ module Parse
                                              master: master,
                                              acl_user: acl_user,
                                              acl_role: acl_role,
+                                             client: client,
                                              read_preference: @read_preference,
                                              hint: @hint)
 
@@ -2400,7 +2447,8 @@ module Parse
     # @note This is a read-only operation. Direct MongoDB queries cannot modify data.
     # @see Parse::MongoDB.configure
     def distinct_direct(field, return_pointers: false, order: nil,
-                        session_token: nil, master: nil, acl_user: nil, acl_role: nil)
+                        session_token: nil, master: nil, acl_user: nil, acl_role: nil,
+                        client: nil)
       require_relative "mongodb"
       Parse::MongoDB.require_gem!
 
@@ -2409,6 +2457,17 @@ module Parse
           "Direct MongoDB queries are not enabled. " \
           "Call Parse::MongoDB.configure(uri: 'mongodb://...', enabled: true) first."
       end
+
+      # A query already owns a client. Defaulting to it means a query built
+      # from a secondary client does not have to repeat itself, and cannot
+      # silently authorize against the default application by omission.
+      #
+      # Resolved defensively: `#client` lazily constructs the DEFAULT client
+      # and raises ConnectionError when none is configured. Argument
+      # validation below must still be able to raise ArgumentError in a
+      # process that never called Parse.setup, so a missing client is left
+      # nil here and resolved at the authorization boundary instead.
+      client ||= (self.client rescue nil)
 
       if field.nil? || !field.respond_to?(:to_s) || field.is_a?(Hash) || field.is_a?(Array)
         raise ArgumentError, "Invalid field name passed to `distinct_direct`."
@@ -2457,7 +2516,8 @@ module Parse
                                              session_token: session_token,
                                              master: master,
                                              acl_user: acl_user,
-                                             acl_role: acl_role)
+                                             acl_role: acl_role,
+                                             client: client)
 
       # Extract values from results
       values = raw_results.map { |doc| doc["value"] }.compact
@@ -2484,10 +2544,11 @@ module Parse
     # @return [Array] array of distinct values, with pointer fields as Parse::Pointer objects
     # @see #distinct_direct
     def distinct_direct_pointers(field, order: nil,
-                                 session_token: nil, master: nil, acl_user: nil, acl_role: nil)
+                                 session_token: nil, master: nil, acl_user: nil, acl_role: nil,
+                                 client: nil)
       distinct_direct(field, return_pointers: true, order: order,
                       session_token: session_token, master: master,
-                      acl_user: acl_user, acl_role: acl_role)
+                      acl_user: acl_user, acl_role: acl_role, client: client)
     end
 
     #----------------------------------------------------------------
@@ -6742,6 +6803,7 @@ module Parse
           "Call Parse::MongoDB.configure(uri: 'mongodb://...', enabled: true) first."
       end
 
+
       # Convert field name for direct MongoDB access
       mongo_group_field = @query.send(:convert_field_for_direct_mongodb, formatted_group_field)
 
@@ -7473,6 +7535,7 @@ module Parse
           "Direct MongoDB queries are not enabled. " \
           "Call Parse::MongoDB.configure(uri: 'mongodb://...', enabled: true) first."
       end
+
 
       # Convert date field for direct MongoDB (createdAt -> _created_at, etc.)
       mongo_date_field = @query.send(:convert_field_for_direct_mongodb, formatted_date_field)

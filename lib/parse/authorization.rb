@@ -353,7 +353,12 @@ module Parse
 
         pointer = Parse::Pointer.new(Parse::Model::CLASS_USER, user_id)
         names = begin
-            Parse::Role.all_for_user(pointer, max_depth: ROLE_GRAPH_MAX_DEPTH)
+            # `client:` matters as much here as it does for the token
+            # lookup above. Without it the identity resolves against THIS
+            # client while its role closure is walked against the default
+            # application, so a user of application B would be granted
+            # application A's roles by name.
+            Parse::Role.all_for_user(pointer, max_depth: ROLE_GRAPH_MAX_DEPTH, client: @client)
           rescue Parse::MongoDB::DeniedOperator,
                  Parse::MongoDB::ExecutionTimeout,
                  Parse::CLPScope::Denied

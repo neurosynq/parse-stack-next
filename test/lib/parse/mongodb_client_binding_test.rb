@@ -16,18 +16,23 @@ require_relative "../../test_helper"
 # failure; it looks like a query that returned few rows.
 class MongoDBClientBindingTest < Minitest::Test
   def setup
-    @bound = Parse::MongoDB.instance_variable_get(:@bound_application_id)
+    @bound = Parse::MongoDB.instance_variable_get(:@bound_app_scope)
   end
 
   def teardown
-    Parse::MongoDB.instance_variable_set(:@bound_application_id, @bound)
+    Parse::MongoDB.instance_variable_set(:@bound_app_scope, @bound)
   end
 
-  def bind_to(app_id)
-    Parse::MongoDB.instance_variable_set(:@bound_application_id, app_id)
+  def bind_to(app_id, server_url = "https://a.example.com/parse")
+    scope = app_id.nil? ? nil : Parse::MongoDB.app_scope_for(FakeClient.new(app_id, server_url))
+    Parse::MongoDB.instance_variable_set(:@bound_app_scope, scope)
   end
 
-  FakeClient = Struct.new(:application_id)
+  FakeClient = Struct.new(:application_id, :server_url) do
+    def initialize(app_id, server = "https://a.example.com/parse")
+      super(app_id, server)
+    end
+  end
 
   def test_matching_application_passes
     bind_to("appA")
@@ -59,6 +64,35 @@ class MongoDBClientBindingTest < Minitest::Test
     bind_to("appA")
     Parse::MongoDB.verify_client!(nil)
     Parse::MongoDB.verify_client!(FakeClient.new(nil))
+    Parse::MongoDB.verify_client!(Object.new)
+  end
+
+  # Application ids are not globally unique. The same id is routinely reused
+  # across a staging and a production deployment of one app, which is exactly
+  # the pair most likely to be configured together in a developer process.
+  # Comparing ids alone would call that a match and let a staging client
+  # authorize a read of the production database.
+  def test_same_app_id_on_a_different_server_is_a_mismatch
+    bind_to("appA", "https://prod.example.com/parse")
+    error = assert_raises(Parse::MongoDB::ClientMismatch) do
+      Parse::MongoDB.verify_client!(FakeClient.new("appA", "https://staging.example.com/parse"))
+    end
+    assert_includes error.message, "staging.example.com"
+    assert_includes error.message, "prod.example.com"
+  end
+
+  def test_same_app_id_on_the_same_server_matches
+    bind_to("appA", "https://prod.example.com/parse")
+    Parse::MongoDB.verify_client!(FakeClient.new("appA", "https://prod.example.com/parse"))
+  end
+
+  # The scope joins with a NUL byte, which must never reach an operator.
+  def test_message_renders_the_scope_readably
+    bind_to("appA", "https://prod.example.com/parse")
+    error = assert_raises(Parse::MongoDB::ClientMismatch) do
+      Parse::MongoDB.verify_client!(FakeClient.new("appB"))
+    end
+    refute_includes error.message, "\u0000"
   end
 
   # The message has to say what to do about it. A bare "mismatch" would send
@@ -93,5 +127,55 @@ class MongoDBClientBindingTest < Minitest::Test
     Parse::ACLScope.resolve!(options, method_name: :aggregate)
     refute options.key?(:client), "client: must be consumed like the other auth kwargs"
     assert_equal 500, options[:max_time_ms], "non-auth options must survive"
+  end
+
+  # An explicit client: must reach the Resolution, or the guard has nothing to
+  # compare and every call silently resolves through Parse.client instead.
+  # This was the gap that made the guard near-vacuous when it first landed:
+  # the check existed, but no entry point could deliver a second client to it.
+  def test_explicit_client_reaches_the_resolution
+    other = FakeClient.new("appB")
+    other.define_singleton_method(:authorization) do
+      Struct.new(:client).new(self)
+    end
+
+    resolution = Parse::ACLScope.resolve!({ master: true, client: other },
+                                          method_name: :aggregate)
+    assert_same other, resolution.client
+  end
+
+  # And the guard must then refuse it. Together with the test above this is
+  # the whole contract: a second client's authorization cannot be used to read
+  # the database another application's connection is bound to.
+  def test_a_second_clients_resolution_is_refused_against_a_foreign_binding
+    bind_to("appA")
+    other = FakeClient.new("appB")
+    other.define_singleton_method(:authorization) do
+      Struct.new(:client).new(self)
+    end
+
+    resolution = Parse::ACLScope.resolve!({ master: true, client: other },
+                                          method_name: :aggregate)
+    assert_raises(Parse::MongoDB::ClientMismatch) do
+      Parse::MongoDB.verify_client!(resolution.client)
+    end
+  end
+
+  # Every public direct-read entry point has to accept the kwarg, or the
+  # threading is only half done and the gap reopens on whichever one was
+  # missed.
+  def test_every_direct_entry_point_accepts_client
+    {
+      Parse::Query => %i[results_direct count_direct distinct_direct distinct_direct_pointers],
+      Parse::MongoDB.singleton_class => %i[aggregate],
+    }.each do |owner, methods|
+      methods.each do |name|
+        keywords = owner.instance_method(name).parameters
+                        .select { |type, _| %i[key keyreq].include?(type) }
+                        .map(&:last)
+        assert_includes keywords, :client,
+                        "#{owner}##{name} must accept client: or it cannot be scoped"
+      end
+    end
   end
 end

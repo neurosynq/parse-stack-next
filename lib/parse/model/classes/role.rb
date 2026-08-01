@@ -166,7 +166,7 @@ module Parse
       # @example
       #   names = Parse::Role.all_for_user(user, master: true)  # admin/analytics
       #   names = Parse::Role.all_for_user(user, as: current_user)  # scope-checked
-      def all_for_user(user, max_depth: 10, master: false, as: nil)
+      def all_for_user(user, max_depth: 10, master: false, as: nil, client: nil)
         names = Set.new
         return names if user.nil? || max_depth <= 0
 
@@ -196,12 +196,12 @@ module Parse
         end
 
         begin
-          direct_roles = Parse::Role.all(users: user_pointer)
+          direct_roles = role_query_all({ users: user_pointer }, client: client)
         rescue
           return names
         end
 
-        result = expand_inheritance_upward(direct_roles, max_depth: max_depth)
+        result = expand_inheritance_upward(direct_roles, max_depth: max_depth, client: client)
         ActiveSupport::Notifications.instrument(
           "parse.role.expand",
           direction: :forward, target_id: user_pointer.id,
@@ -262,7 +262,33 @@ module Parse
       # @param max_depth [Integer] maximum BFS depth.
       # @return [Set<String>] role names (no `role:` prefix) including
       #   the starting frontier and every transitive parent.
-      def expand_inheritance_upward(starting_roles, max_depth: 10)
+      # @!visibility private
+      # Run a `_Role` query against a SPECIFIC client.
+      #
+      # `Parse::Role.all(...)` resolves its client through the class, which is
+      # the default client. That was fine while identity resolution was also
+      # global, and became a split brain once it was not: a session token
+      # could be resolved against client B while the role closure for the
+      # resulting user was walked against the default application, mixing one
+      # application's identity with another's role graph.
+      #
+      # A nil client keeps the historical behavior.
+      def role_query_all(constraints, client: nil)
+        # No explicit client means the historical path, unchanged. This is not
+        # only for compatibility: `Parse::Role.all` is what callers and tests
+        # observe and stub, and routing around it when nothing asked us to
+        # would change behavior for every existing caller to fix a problem
+        # none of them have.
+        # Double-splat, not a positional Hash: `Parse::Role.all` takes
+        # keywords, and Ruby 3 does not convert one to the other.
+        return Parse::Role.all(**constraints) if client.nil?
+
+        query = Parse::Role.query(constraints)
+        query.client = client
+        query.results
+      end
+
+      def expand_inheritance_upward(starting_roles, max_depth: 10, client: nil)
         names = Set.new
         visited_ids = Set.new
         frontier = []
@@ -281,7 +307,7 @@ module Parse
           frontier.each do |role|
             next if role.nil? || role.id.nil?
             begin
-              parents = Parse::Role.all(roles: role)
+              parents = role_query_all({ roles: role }, client: client)
             rescue
               next
             end

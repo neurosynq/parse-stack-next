@@ -276,13 +276,48 @@ module Parse
         @client = nil # Reset client on reconfigure
         # Bind this connection to whichever Parse application is configured
         # now. See {.verify_client!} for why.
-        @bound_application_id = current_application_id
+        @bound_app_scope = current_app_scope
         warn_if_writeable_role! if verify_role && enabled
       end
 
-      # @return [String, nil] the Parse application this global connection is
-      #   bound to, captured at {.configure} time.
-      attr_reader :bound_application_id
+      # @return [String, nil] the application scope this global connection is
+      #   bound to, captured at {.configure} time. See {.app_scope_for}.
+      attr_reader :bound_app_scope
+
+      # Identify a Parse application by BOTH its application id and its server
+      # url.
+      #
+      # The application id alone is not enough. Parse application ids are not
+      # globally unique: the same id is routinely reused across a staging and
+      # a production deployment of the same app, which is exactly the pair
+      # most likely to be configured in one developer process. Comparing ids
+      # only would let a staging client authorize a read of the production
+      # database and call it a match, which is the failure this guard exists
+      # to prevent rather than a case it may ignore.
+      #
+      # Mirrors {Parse::Cache::Keyspace}'s app scope, which derives the same
+      # pair for the same reason.
+      #
+      # @param client [Object, nil]
+      # @return [String, nil] a stable scope string, or nil when the client
+      #   cannot be identified.
+      def app_scope_for(client)
+        return nil if client.nil?
+        return nil unless client.respond_to?(:application_id)
+        app_id = client.application_id
+        return nil if app_id.nil? || app_id.to_s.empty?
+        server = client.respond_to?(:server_url) ? client.server_url.to_s : ""
+        "#{app_id}\u0000#{server}"
+      end
+
+      # @!visibility private
+      # Human-readable form for error messages. The scope string joins with a
+      # NUL byte, which would render as garbage in a message.
+      def describe_scope(scope)
+        return "unknown" if scope.nil?
+        app_id, server = scope.split("\u0000", 2)
+        server.to_s.empty? ? app_id.inspect : "#{app_id.inspect} at #{server.inspect}"
+      end
 
       # Refuse a mongo-direct query issued by a client that is not the one
       # this connection was configured for.
@@ -310,27 +345,37 @@ module Parse
       # @param client [Parse::Client, nil] the client that authorized the call.
       # @raise [Parse::MongoDB::ClientMismatch]
       def verify_client!(client)
-        bound = @bound_application_id
+        bound = @bound_app_scope
         return if bound.nil?
-        caller_app = client.respond_to?(:application_id) ? client.application_id : nil
-        return if caller_app.nil?
-        return if caller_app == bound
+        caller_scope = app_scope_for(client)
+        return if caller_scope.nil?
+        return if caller_scope == bound
 
         raise ClientMismatch,
-              "Parse::MongoDB is bound to application #{bound.inspect} but this query was " \
-              "authorized by a client for application #{caller_app.inspect}. The MongoDB " \
+              "Parse::MongoDB is bound to #{describe_scope(bound)} but this query was " \
+              "authorized by a client for #{describe_scope(caller_scope)}. The MongoDB " \
               "connection is process-global while authorization is per-client, so running " \
               "this would resolve one application's identity and then read the other " \
-              "application's database. Configure a separate process for each application, " \
+              "application's database. Note that a matching application id is not enough: " \
+              "the same id is commonly reused across staging and production, so the server " \
+              "url is compared too. Configure a separate process for each application, " \
               "or route this query through REST instead of mongo-direct."
       end
 
       # @!visibility private
-      # The currently configured default Parse application, or nil when no
-      # client exists yet. Never raises: {.configure} must work in a process
-      # that sets up Mongo before Parse.
-      def current_application_id
-        Parse.client&.application_id
+      # The currently configured default Parse application's scope, or nil
+      # when no client exists yet. Never raises: {.configure} must work in a
+      # process that sets up Mongo before Parse.
+      def current_app_scope
+        app_scope_for(default_client_or_nil)
+      end
+
+      # @!visibility private
+      # The default Parse client, or nil when none is configured. Never
+      # raises, and never constructs one as a side effect of asking.
+      def default_client_or_nil
+        return nil unless Parse::Client.client?
+        Parse.client
       rescue StandardError
         nil
       end
@@ -446,7 +491,7 @@ module Parse
         @client = nil
         @enabled = false
         @uri = nil
-    @bound_application_id = nil
+    @bound_app_scope = nil
         @database = nil
         remove_instance_variable(:@gem_available) if defined?(@gem_available)
         reset_writer!
@@ -456,6 +501,25 @@ module Parse
       # @param name [String] the collection name
       # @return [Mongo::Collection]
       def collection(name)
+        # The last chokepoint before the database. {.aggregate} already
+        # verifies the binding against the client that authorized the call,
+        # but not every scoped read goes through it: Atlas Search builds and
+        # runs its own `$search` pipelines (`run_atlas_pipeline!`) and hybrid
+        # vector search does the same (`run_pipeline!`), both reaching the
+        # driver through here. Checking here as well means no path can pick up
+        # a collection handle for one application while authorizing against
+        # another.
+        #
+        # There is no client argument, so this compares the DEFAULT client,
+        # which is what those two paths resolve through. {.aggregate}'s own
+        # call passes the resolution's explicit client and is the stricter of
+        # the two; both must pass.
+        # Rescued: `Parse.client` CONSTRUCTS a default client and raises
+        # ConnectionError when none is configured. Plenty of code reaches a
+        # collection in a process that never called Parse.setup, and a guard
+        # must not turn that into a new failure. No client means nothing to
+        # compare, which verify_client! already treats as a pass.
+        verify_client!(default_client_or_nil)
         client[name]
       end
 
@@ -1570,7 +1634,7 @@ module Parse
       # @raise [Parse::ACLScope::ACLRequired] when neither
       #   `session_token:` nor `master: true` is supplied and
       #   {Parse::ACLScope.require_session_token} is enabled.
-      def aggregate(collection_name, pipeline, max_time_ms: nil, rewrite_lookups: nil, allow_internal_fields: false, session_token: nil, master: nil, acl_user: nil, acl_role: nil, read_preference: nil, hint: nil)
+      def aggregate(collection_name, pipeline, max_time_ms: nil, rewrite_lookups: nil, allow_internal_fields: false, session_token: nil, master: nil, acl_user: nil, acl_role: nil, client: nil, read_preference: nil, hint: nil)
         # AS::N envelope. Payload is intentionally metadata-only —
         # `stage_count`, `stage_types`, `collection`, `scope`,
         # `result_count`, `max_time_ms`, `read_preference`. Pipeline
@@ -1603,6 +1667,11 @@ module Parse
           master: master,
           acl_user: acl_user,
           acl_role: acl_role,
+          # The client whose authorization context resolves this call. Nil
+          # falls back to Parse.client at the ACLScope boundary. It is carried
+          # onto the Resolution so verify_client! below can compare it against
+          # the application this process-global connection is bound to.
+          client: client,
         }.compact
         resolution = Parse::ACLScope.resolve!(auth_kwargs, method_name: :aggregate)
         # The resolution above is client-scoped; the connection below is not.
