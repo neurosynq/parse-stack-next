@@ -236,9 +236,9 @@ module Parse
       mongo_local = "_p_#{pointer_field}"
       if foreign_has_parse_reference?(target_class)
         replace_keys(spec,
-                    "from" => from_collection,
-                    "localField" => mongo_local,
-                    "foreignField" => PARSE_REFERENCE_REMOTE)
+                     "from" => from_collection,
+                     "localField" => mongo_local,
+                     "foreignField" => PARSE_REFERENCE_REMOTE)
       else
         as_value = read_string(spec, "as")
         let_var = "rwLookupId_#{pointer_field}"
@@ -262,9 +262,9 @@ module Parse
       mongo_foreign = "_p_#{pointer_field}"
       if foreign_has_parse_reference?(local_class)
         replace_keys(spec,
-                    "from" => from_collection,
-                    "localField" => PARSE_REFERENCE_REMOTE,
-                    "foreignField" => mongo_foreign)
+                     "from" => from_collection,
+                     "localField" => PARSE_REFERENCE_REMOTE,
+                     "foreignField" => mongo_foreign)
       else
         as_value = read_string(spec, "as")
         let_var = "rwReverseId_#{pointer_field}"

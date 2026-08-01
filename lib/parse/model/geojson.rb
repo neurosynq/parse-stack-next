@@ -49,8 +49,7 @@ module Parse
       end
 
       def coordinates=(value)
-        coords =
-          case value
+        coords = case value
           when self.class
             deep_copy_array(value.coordinates)
           when Hash
@@ -76,6 +75,7 @@ module Parse
       def to_geojson
         { "type" => geojson_type, "coordinates" => deep_copy_array(@coordinates) }
       end
+
       alias_method :as_json, :to_geojson
 
       # @return [String] the JSON form, suitable for direct shipment to

@@ -96,8 +96,8 @@ class EmbeddingsLocalHTTPTest < Minitest::Test
   def test_refuses_private_endpoint_by_default
     err = assert_raises(ArgumentError) do
       Parse::Embeddings::LocalHTTP.new(
-        base_url:   "http://127.0.0.1:11434/v1",
-        model:      "nomic-embed-text",
+        base_url: "http://127.0.0.1:11434/v1",
+        model: "nomic-embed-text",
         dimensions: 768,
       )
     end
@@ -109,8 +109,8 @@ class EmbeddingsLocalHTTPTest < Minitest::Test
     # `localhost` resolves to 127.0.0.1 / ::1 — both are BLOCKED_CIDRS.
     err = assert_raises(ArgumentError) do
       Parse::Embeddings::LocalHTTP.new(
-        base_url:   "http://localhost:11434/v1",
-        model:      "nomic-embed-text",
+        base_url: "http://localhost:11434/v1",
+        model: "nomic-embed-text",
         dimensions: 768,
       )
     end
@@ -120,9 +120,9 @@ class EmbeddingsLocalHTTPTest < Minitest::Test
   def test_allows_private_endpoint_with_opt_in_and_warns
     output = capture_warnings do
       provider = Parse::Embeddings::LocalHTTP.new(
-        base_url:               "http://127.0.0.1:11434/v1",
-        model:                  "nomic-embed-text",
-        dimensions:             768,
+        base_url: "http://127.0.0.1:11434/v1",
+        model: "nomic-embed-text",
+        dimensions: 768,
         allow_private_endpoint: true,
       )
       refute_nil provider
@@ -137,8 +137,8 @@ class EmbeddingsLocalHTTPTest < Minitest::Test
     # when the operator types the literal IP.
     err = assert_raises(ArgumentError) do
       Parse::Embeddings::LocalHTTP.new(
-        base_url:   "http://169.254.169.254/v1",
-        model:      "exfil",
+        base_url: "http://169.254.169.254/v1",
+        model: "exfil",
         dimensions: 8,
       )
     end
@@ -151,8 +151,8 @@ class EmbeddingsLocalHTTPTest < Minitest::Test
     # literal in public space (8.8.8.8) so DNS doesn't affect the test.
     err = assert_raises(ArgumentError) do
       Parse::Embeddings::LocalHTTP.new(
-        base_url:   "http://8.8.8.8/v1",
-        model:      "x",
+        base_url: "http://8.8.8.8/v1",
+        model: "x",
         dimensions: 8,
       )
     end
@@ -161,9 +161,9 @@ class EmbeddingsLocalHTTPTest < Minitest::Test
 
   def test_allows_http_public_host_with_insecure_opt_in
     refute_nil Parse::Embeddings::LocalHTTP.new(
-      base_url:                "http://8.8.8.8/v1",
-      model:                   "x",
-      dimensions:              8,
+      base_url: "http://8.8.8.8/v1",
+      model: "x",
+      dimensions: 8,
       allow_insecure_base_url: true,
     )
   end
@@ -175,8 +175,8 @@ class EmbeddingsLocalHTTPTest < Minitest::Test
     # flip the record to 169.254.169.254 before the first POST.
     err = assert_raises(ArgumentError) do
       Parse::Embeddings::LocalHTTP.new(
-        base_url:   "https://does-not-resolve-anywhere.invalid/v1",
-        model:      "x",
+        base_url: "https://does-not-resolve-anywhere.invalid/v1",
+        model: "x",
         dimensions: 8,
       )
     end
@@ -188,9 +188,9 @@ class EmbeddingsLocalHTTPTest < Minitest::Test
     # already accepted the localhost-class trust model; a transient DNS
     # failure is acceptable when allow_private_endpoint is set.
     refute_nil Parse::Embeddings::LocalHTTP.new(
-      base_url:               "http://does-not-resolve-anywhere.invalid:11434/v1",
-      model:                  "x",
-      dimensions:             8,
+      base_url: "http://does-not-resolve-anywhere.invalid:11434/v1",
+      model: "x",
+      dimensions: 8,
       allow_private_endpoint: true,
     )
   end
@@ -415,8 +415,8 @@ class EmbeddingsLocalHTTPTest < Minitest::Test
   # passes without requiring allow_private_endpoint.
   def build(**overrides)
     opts = {
-      base_url:   "https://embeddings.example.com/v1",
-      model:      "test-model",
+      base_url: "https://embeddings.example.com/v1",
+      model: "test-model",
       dimensions: 8,
     }.merge(overrides)
     Parse::Embeddings::LocalHTTP.new(**opts)

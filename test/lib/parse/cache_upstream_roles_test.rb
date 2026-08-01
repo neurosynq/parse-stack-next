@@ -18,16 +18,20 @@ class CacheUpstreamRolesTest < Minitest::Test
   # redis-rb-shaped double.
   class FakeRedis
     attr_accessor :values, :ttls, :raise_on_get
+
     def initialize = (@values = {}; @ttls = {}; @raise_on_get = false)
+
     def get(k)
       raise IOError, "boom" if @raise_on_get
       @values[k]
     end
+
     def pttl(k) = @ttls.fetch(k, -2)
   end
 
   class FakeStore
     attr_reader :data
+
     def initialize = @data = {}
     def [](k) = @data[k]
     def store(k, v, _o = {}) = @data[k] = v
@@ -362,6 +366,7 @@ class CacheUpstreamRolesTest < Minitest::Test
   # sentinel sits outside the permitted key pattern and returns NOPERM.
   class FakeScanner
     def initialize(keys) = @keys = keys
+
     def scan(_cursor, match:, count: 100)
       ["0", @keys.select { |k| File.fnmatch(match, k, File::FNM_NOESCAPE) }]
     end

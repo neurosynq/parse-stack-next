@@ -784,7 +784,41 @@ module Parse
         Parse::User.new(parse_doc) if parse_doc
       end.compact
     end
+
     private :hydrate_users_under_scope
+
+    # Return whether an authenticated member of this role can read `object`
+    # under its effective `get` CLP and object-level ACL. Public access, a
+    # missing ACL (which Parse Server treats as public), authentication, a
+    # direct role grant, and grants inherited from parent roles are all
+    # honored. User-specific and pointer-field CLPs fail closed because a role
+    # does not identify an individual member.
+    #
+    # @param object [Parse::Object] the Parse object to check.
+    # @return [Boolean] whether both CLP and ACL grant this role read access.
+    def can_read?(object)
+      effective_access?(object, :read)
+    end
+
+    # Return whether an authenticated member of this role can write `object`
+    # under its effective `update` CLP and object-level ACL. See {#can_read?}
+    # for the inheritance semantics.
+    #
+    # @param object [Parse::Object] the Parse object to check.
+    # @return [Boolean] whether both CLP and ACL grant this role write access.
+    def can_write?(object)
+      effective_access?(object, :write)
+    end
+
+    # Return whether an authenticated member of this role can delete `object`
+    # under its effective `delete` CLP and object-level ACL write permission. See
+    # {#can_read?} for the inheritance semantics.
+    #
+    # @param object [Parse::Object] the Parse object to check.
+    # @return [Boolean] whether both CLP and ACL grant this role delete access.
+    def can_delete?(object)
+      effective_access?(object, :delete)
+    end
 
     # Get the set of role names whose presence in a `_rperm` array
     # grants access to this role's members. That's the role itself
@@ -858,6 +892,71 @@ module Parse
     end
 
     private
+
+    # Evaluate one operation for this role. Public and direct grants are
+    # answered before consulting the role graph; parent roles are resolved
+    # only when either ACL or CLP still needs them. Every layer fails closed.
+    def effective_access?(object, operation)
+      return false unless object.is_a?(Parse::Object)
+
+      object_acl = object.acl
+      permission_keys = if operation == :read
+          object_acl&.readable_by
+        else
+          object_acl&.writable_by
+        end
+      permission_keys = Array(permission_keys).map(&:to_s)
+      clp_operation = case operation
+        when :read then :get
+        when :write then :update
+        when :delete then :delete
+        end
+      permission_strings = [Parse::ACL::PUBLIC]
+      permission_strings << "role:#{name}" if name.present?
+
+      acl_permits = object_acl.nil? || permission_keys.any? { |key| permission_strings.include?(key) }
+      clp_permits = Parse::CLPScope.permits?(
+        object.parse_class, clp_operation, clp_permission_strings(permission_strings)
+      )
+      if acl_permits && clp_permits
+        return false if clp_requires_user?(object, clp_operation)
+        return true
+      end
+
+      role_permission_keys = permission_keys.select { |key| key.start_with?("role:") }
+      return false if (!acl_permits && role_permission_keys.empty?) || !id.present?
+
+      role_names = begin
+          all_parent_role_names(client: client)
+        rescue StandardError
+          Set.new
+        end
+      role_names.each do |role_name|
+        permission_strings << "role:#{role_name}" if role_name.present?
+      end
+      permission_strings.uniq!
+
+      acl_permits = object_acl.nil? || permission_keys.any? { |key| permission_strings.include?(key) }
+      clp_permits = Parse::CLPScope.permits?(
+        object.parse_class, clp_operation, clp_permission_strings(permission_strings)
+      )
+      acl_permits && clp_permits && !clp_requires_user?(object, clp_operation)
+    end
+
+    # Role membership implies authentication even though a role-only check has
+    # no concrete user objectId. Add a deliberately invalid objectId sentinel
+    # for CLP's `requiresAuthentication` branch only; ACL matching continues to
+    # use the real public/role permission strings above.
+    def clp_permission_strings(permission_strings)
+      permission_strings + ["__parse_authenticated_role_member__"]
+    end
+
+    # A role-only principal cannot prove an object-level pointer permission;
+    # those permissions depend on the identity of a particular role member.
+    def clp_requires_user?(object, clp_operation)
+      Parse::CLPScope.pointer_fields_for(object.parse_class, clp_operation).present? ||
+        Parse::CLPScope.user_fields_for(object.parse_class, clp_operation).present?
+    end
 
     # @!visibility private
     # Refuses a `_Role.roles` mutation that would point a role at itself.

@@ -12,6 +12,7 @@ class TestServerCapabilities < Minitest::Test
   # so `server_info` returns without a wire request.
   class FakeServerClient
     include Parse::API::Server
+
     def initialize(info)
       @server_info = info
     end

@@ -119,6 +119,7 @@ module Parse
         end
         self
       end
+
       alias_method :update, :merge!
     end
   end

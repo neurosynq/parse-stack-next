@@ -33,7 +33,7 @@ class TestSafeWarn < Minitest::Test
   end
 
   def test_redacts_access_token
-    r = make_response(error: 'oauth: access_token=ya29.LIVE-TOKEN expired')
+    r = make_response(error: "oauth: access_token=ya29.LIVE-TOKEN expired")
 
     _out, err = capture_io do
       Parse::Client._safe_warn("AuthenticationError", r)

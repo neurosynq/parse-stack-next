@@ -51,12 +51,12 @@ module Parse
       # inside the save handler (Parse Server has no create trigger); the webhook
       # router runs the destroy chain inside the beforeDelete handler.
       CALLBACK_TRIGGER_MAP = {
-        [:save,    :before] => :before_save,
-        [:create,  :before] => :before_save,
-        [:save,    :after]  => :after_save,
-        [:create,  :after]  => :after_save,
+        [:save, :before] => :before_save,
+        [:create, :before] => :before_save,
+        [:save, :after] => :after_save,
+        [:create, :after] => :after_save,
         [:destroy, :before] => :before_delete,
-        [:destroy, :after]  => :after_delete,
+        [:destroy, :after] => :after_delete,
       }.freeze
 
       # ActiveModel callback chains + phases with NO server trigger that can run
@@ -67,10 +67,10 @@ module Parse
       # trigger registration changes that. Surfaced as an informational note, not
       # a fixable gap.
       LOCAL_ONLY_MAP = {
-        [:update,     :before] => :before_update,
-        [:update,     :after]  => :after_update,
+        [:update, :before] => :before_update,
+        [:update, :after] => :after_update,
         [:validation, :before] => :before_validation,
-        [:validation, :after]  => :after_validation,
+        [:validation, :after] => :after_validation,
       }.freeze
 
       # The ActiveModel callback chains we introspect.
@@ -104,12 +104,12 @@ module Parse
 
         def initialize(parse_class:, callbacks:, local_routes:, server_triggers:,
                        findings:, modeled:)
-          @parse_class     = parse_class
-          @callbacks       = callbacks
-          @local_routes    = local_routes
+          @parse_class = parse_class
+          @callbacks = callbacks
+          @local_routes = local_routes
           @server_triggers = server_triggers
-          @findings        = findings
-          @modeled         = modeled
+          @findings = findings
+          @modeled = modeled
         end
 
         # @return [Boolean] true when the class has at least one finding.
@@ -120,12 +120,12 @@ module Parse
         # @return [Hash] a JSON-safe representation of this row.
         def to_h
           {
-            parse_class:     parse_class,
-            modeled:         modeled,
-            callbacks:       callbacks,
-            local_routes:    local_routes,
+            parse_class: parse_class,
+            modeled: modeled,
+            callbacks: callbacks,
+            local_routes: local_routes,
             server_triggers: server_triggers,
-            findings:        findings,
+            findings: findings,
           }
         end
       end
@@ -144,11 +144,11 @@ module Parse
       #   callbacks (e.g. the `_User` default-ACL callback). Off by default to keep
       #   the report focused on app-defined logic.
       def initialize(network: true, client: nil, include_framework: false)
-        @networked         = network
+        @networked = network
         @include_framework = include_framework
-        @client            = client
-        @server_lookup     = network ? fetch_server_triggers : {}
-        @classes           = build_classes
+        @client = client
+        @server_lookup = network ? fetch_server_triggers : {}
+        @classes = build_classes
       end
 
       # @return [Array<Hash>] every finding across all classes, flattened, with the
@@ -164,10 +164,11 @@ module Parse
       def to_h
         {
           networked: networked,
-          classes:   @classes.map(&:to_h),
-          summary:   summary,
+          classes: @classes.map(&:to_h),
+          summary: summary,
         }
       end
+
       alias as_json to_h
 
       # @return [Hash] finding counts keyed by kind, plus class totals.
@@ -175,9 +176,9 @@ module Parse
         counts = Hash.new(0)
         gaps.each { |g| counts[g[:kind]] += 1 }
         {
-          classes_audited:    @classes.size,
+          classes_audited: @classes.size,
           classes_with_issues: @classes.count(&:issues?),
-          findings:           counts,
+          findings: counts,
         }
       end
 
@@ -212,6 +213,7 @@ module Parse
         s[:findings].sort.each { |kind, n| lines << "  #{kind}: #{n}" }
         lines.join("\n")
       end
+
       alias to_s pretty
 
       private
@@ -231,7 +233,7 @@ module Parse
         lookup = Hash.new { |h, k| h[k] = {} }
         client.triggers.results.each do |t|
           next unless t["url"].present?
-          name  = t["triggerName"]
+          name = t["triggerName"]
           klass = t[Parse::Model::KEY_CLASS_NAME] || t["className"]
           next if name.blank? || klass.blank?
           lookup[klass.to_s][name.to_s.underscore.to_sym] = t["url"]
@@ -262,18 +264,18 @@ module Parse
       end
 
       def audit_class(name)
-        klass     = name == "*" ? nil : (Parse::Model.find_class(name) rescue nil)
+        klass = name == "*" ? nil : (Parse::Model.find_class(name) rescue nil)
         callbacks = klass ? collect_callbacks(klass) : {}
-        routes    = collect_local_routes(name)
-        server    = @server_lookup[name] || {}
-        findings  = analyze(name, callbacks, routes, server)
+        routes = collect_local_routes(name)
+        server = @server_lookup[name] || {}
+        findings = analyze(name, callbacks, routes, server)
         ClassAudit.new(
-          parse_class:     name,
-          callbacks:       callbacks,
-          local_routes:    routes,
+          parse_class: name,
+          callbacks: callbacks,
+          local_routes: routes,
           server_triggers: server,
-          findings:        findings,
-          modeled:         !klass.nil?,
+          findings: findings,
+          modeled: !klass.nil?,
         )
       end
 
@@ -373,7 +375,7 @@ module Parse
         end
 
         required.each do |trigger, cb_keys|
-          has_route  = routes.include?(trigger)
+          has_route = routes.include?(trigger)
           has_server = server.key?(trigger)
           missing = []
           missing << :route unless has_route
@@ -381,7 +383,7 @@ module Parse
           next if missing.empty?
 
           findings << {
-            kind:    :callbacks_inert,
+            kind: :callbacks_inert,
             trigger: trigger,
             missing: missing,
             callbacks: cb_keys.sort,
@@ -398,7 +400,7 @@ module Parse
             # Wildcard-only coverage is reported on the "*" row, not here.
             next unless Parse::Webhooks.routes[trigger]&.key?(name)
             findings << {
-              kind:    :route_not_registered,
+              kind: :route_not_registered,
               trigger: trigger,
               message: "Local `webhook :#{trigger}` block for #{name} is not " \
                        "registered as a server trigger — run register_triggers! " \
@@ -410,7 +412,7 @@ module Parse
           server.each_key do |trigger|
             next if routes.include?(trigger)
             findings << {
-              kind:    :orphan_server_trigger,
+              kind: :orphan_server_trigger,
               trigger: trigger,
               message: "Server trigger #{trigger} is registered for #{name} but no " \
                        "local webhook block handles it — every matching operation " \
@@ -426,7 +428,7 @@ module Parse
         end
         if local_only.any?
           findings << {
-            kind:    :local_only_callbacks,
+            kind: :local_only_callbacks,
             callbacks: local_only.sort,
             message: "#{name} has local-only callbacks (#{local_only.sort.join(", ")}) " \
                      "that no server trigger can run — they fire for Ruby-initiated " \
@@ -451,25 +453,24 @@ module Parse
 
       def inert_message(name, trigger, missing, cb_keys)
         callbacks = cb_keys.sort.join(", ")
-        reason =
-          if missing == [:route, :server]
+        reason = if missing == [:route, :server]
             "neither a local `webhook :#{trigger}` block nor a server trigger is " \
-              "registered"
+            "registered"
           elsif missing == [:route]
             "no local `webhook :#{trigger}` block is registered to handle it"
           else # [:server]
             "a local block exists but the #{trigger} server trigger is not registered"
           end
         "#{name} callbacks (#{callbacks}) will NOT run for non-Ruby clients: " \
-          "#{reason}. Register `webhook :#{trigger}` and run register_triggers!."
+        "#{reason}. Register `webhook :#{trigger}` and run register_triggers!."
       end
 
       def finding_glyph(kind)
         case kind
-        when :callbacks_inert       then "GAP "
-        when :route_not_registered  then "GAP "
+        when :callbacks_inert then "GAP "
+        when :route_not_registered then "GAP "
         when :orphan_server_trigger then "WARN"
-        when :local_only_callbacks  then "note"
+        when :local_only_callbacks then "note"
         else "    "
         end
       end
@@ -493,7 +494,7 @@ module Parse
       #   `pretty: true`.
       def trigger_audit(pretty: false, network: true, client: nil, include_framework: false)
         audit = TriggerAudit.new(
-          network: network, client: client, include_framework: include_framework
+          network: network, client: client, include_framework: include_framework,
         )
         pretty ? audit.pretty : audit.to_h
       end

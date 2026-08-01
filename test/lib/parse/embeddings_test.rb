@@ -120,7 +120,7 @@ class EmbeddingsTest < Minitest::Test
   def test_embed_video_accepts_the_contract_kwargs
     assert_raises(NotImplementedError) do
       Parse::Embeddings::Provider.new.embed_video(
-        [], input_type: :search_query, allow_insecure: true, dim: 256
+        [], input_type: :search_query, allow_insecure: true, dim: 256,
       )
     end
   end
@@ -167,9 +167,11 @@ class EmbeddingsTest < Minitest::Test
   def test_embed_text_batched_default_single_shot_when_no_batch_size
     klass = Class.new(Parse::Embeddings::Provider) do
       attr_reader :calls
+
       def initialize; @calls = 0; end
       def dimensions; 4; end
       def model_name; "x"; end
+
       def embed_text(strings, input_type: :search_document)
         @calls += 1
         strings.map { [0.0, 0.0, 0.0, 0.0] }
@@ -184,10 +186,12 @@ class EmbeddingsTest < Minitest::Test
   def test_embed_text_batched_default_slices_by_embed_batch_size
     klass = Class.new(Parse::Embeddings::Provider) do
       attr_reader :slices
+
       def initialize; @slices = []; end
       def dimensions; 4; end
       def model_name; "x"; end
       def embed_batch_size; 2; end
+
       def embed_text(strings, input_type: :search_document)
         @slices << strings.length
         strings.map { [0.0, 0.0, 0.0, 0.0] }
@@ -202,9 +206,11 @@ class EmbeddingsTest < Minitest::Test
   def test_embed_text_batched_empty_input_short_circuits
     klass = Class.new(Parse::Embeddings::Provider) do
       attr_reader :called
+
       def initialize; @called = false; end
       def dimensions; 4; end
       def model_name; "x"; end
+
       def embed_text(strings, input_type: :search_document)
         @called = true
         []
@@ -327,7 +333,7 @@ class EmbeddingsTest < Minitest::Test
 
   def test_fixture_input_type_changes_vector
     provider = Parse::Embeddings::Fixture.new(dimensions: 16)
-    as_doc   = provider.embed_text(["foo"], input_type: :search_document).first
+    as_doc = provider.embed_text(["foo"], input_type: :search_document).first
     as_query = provider.embed_text(["foo"], input_type: :search_query).first
     refute_equal as_doc, as_query,
                  "input_type must be folded into the seed so cache-key bugs surface in tests"
@@ -453,6 +459,7 @@ class EmbeddingsTest < Minitest::Test
     klass = Class.new(Parse::Embeddings::Provider) do
       def dimensions; 4; end
       def model_name; "stub-provider"; end
+
       def embed_text(strings, input_type: :search_document)
         instrument_embed(strings.length, input_type) do |payload|
           payload[:total_tokens] = 42
@@ -472,6 +479,7 @@ class EmbeddingsTest < Minitest::Test
     klass = Class.new(Parse::Embeddings::Provider) do
       def dimensions; 4; end
       def model_name; "raises"; end
+
       def embed_text(_strings, input_type: :search_document)
         instrument_embed(1, input_type) { raise Parse::Embeddings::InvalidResponseError, "boom" }
       end

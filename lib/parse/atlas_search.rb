@@ -115,36 +115,42 @@ module Parse
       #   token, and the old name led readers to reason about `_Session`
       #   semantics that were never involved.
       def session_cache_ttl = authorization&.identity_cache_ttl || Parse::Authorization::Context::DEFAULT_IDENTITY_TTL
+
       def session_cache_ttl=(value)
         authorization&.identity_cache_ttl = value
       end
 
       # @deprecated Use `client.authorization.role_cache_ttl`.
       def role_cache_ttl = authorization&.role_cache_ttl || Parse::Authorization::Context::DEFAULT_ROLE_TTL
+
       def role_cache_ttl=(value)
         authorization&.role_cache_ttl = value
       end
 
       # @deprecated Use `client.authorization.identity_cache`.
       def session_cache = authorization&.identity_cache
+
       def session_cache=(value)
         authorization&.identity_cache = value
       end
 
       # @deprecated Use `client.authorization.role_cache`.
       def role_cache = authorization&.role_cache
+
       def role_cache=(value)
         authorization&.role_cache = value
       end
 
       # @deprecated Use `client.authorization.upstream_role_reader`.
       def upstream_role_reader = authorization&.upstream_role_reader
+
       def upstream_role_reader=(value)
         authorization&.upstream_role_reader = value
       end
 
       # @deprecated Use `client.authorization.compare_upstream_roles`.
       def compare_upstream_roles = authorization&.compare_upstream_roles || false
+
       def compare_upstream_roles=(value)
         authorization&.compare_upstream_roles = value
       end
@@ -752,10 +758,10 @@ module Parse
       # `find` / pointerFields / protectedFields / highlight-field
       # checks.
       def search_pipeline!(collection_name, search_stage, resolution:,
-                           protected_fields:, pointer_fields:,
-                           highlight_field: nil, filter: nil, sort: nil,
-                           skip: 0, limit: 100, max_time_ms: nil,
-                           read_preference: nil, class_name: nil, raw: false)
+                                                          protected_fields:, pointer_fields:,
+                                                          highlight_field: nil, filter: nil, sort: nil,
+                                                          skip: 0, limit: 100, max_time_ms: nil,
+                                                          read_preference: nil, class_name: nil, raw: false)
         # Backstop the stage-safety check at the shared execution chokepoint
         # so ANY path that runs a $search stage (not just search_with_stage)
         # rejects a non-$search stage / returnStoredSource. The .search and
@@ -801,7 +807,7 @@ module Parse
         # enforcement chain inline below.
         raw_results = run_atlas_pipeline!(
           collection_name, pipeline, max_time_ms, read_preference: read_preference,
-          authorizing_client: Parse::ACLScope.client_of(resolution),
+                                                  authorizing_client: Parse::ACLScope.client_of(resolution),
         )
 
         # Post-fetch enforcement: walk the result rows the same way
@@ -909,19 +915,18 @@ module Parse
           # default-client path) while still recording the default on the
           # Resolution below. Branching on `auth_client` routed the ordinary
           # case through a different resolver.
-          resolved =
-            if scope_client
+          resolved = if scope_client
               scope_client.authorization.resolve(session_token)
             else
               Session.resolve(session_token)
             end
           return Parse::ACLScope::Resolution.new(
-            mode: :session,
-            permission_strings: resolved.permission_strings,
-            user_id: resolved.user_id,
-            session: resolved,
-            client: auth_client,
-          )
+                   mode: :session,
+                   permission_strings: resolved.permission_strings,
+                   user_id: resolved.user_id,
+                   session: resolved,
+                   client: auth_client,
+                 )
         end
 
         if acl_user
@@ -934,9 +939,9 @@ module Parse
 
         if master == true
           return Parse::ACLScope::Resolution.new(
-            mode: :master, permission_strings: nil, user_id: nil, session: nil,
-            client: auth_client,
-          )
+                   mode: :master, permission_strings: nil, user_id: nil, session: nil,
+                   client: auth_client,
+                 )
         end
 
         if @require_session_token == true
@@ -1053,7 +1058,7 @@ module Parse
       # are identical on both paths (invalid values warn and route to
       # primary; nil = no override).
       def run_atlas_pipeline!(collection_name, pipeline, max_time_ms = nil, read_preference: nil,
-                              authorizing_client: nil)
+                                                                            authorizing_client: nil)
         agg_opts = {}
         agg_opts[:max_time_ms] = max_time_ms if max_time_ms
         # Atlas Search does not go through Parse::MongoDB.aggregate, so this

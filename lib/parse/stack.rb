@@ -303,7 +303,7 @@ module Parse
             "Parse.login: credentials rejected for #{username.inspect} (server returned no session)."
     end
     Fiber[SESSION_TOKEN_STATE_KEY] = user.session_token
-    Fiber[CURRENT_USER_STATE_KEY]  = user
+    Fiber[CURRENT_USER_STATE_KEY] = user
     user
   end
 
@@ -323,7 +323,7 @@ module Parse
   def self.logout(revoke: true)
     token = Fiber[SESSION_TOKEN_STATE_KEY]
     Fiber[SESSION_TOKEN_STATE_KEY] = nil
-    Fiber[CURRENT_USER_STATE_KEY]  = nil
+    Fiber[CURRENT_USER_STATE_KEY] = nil
     if revoke && token.is_a?(String) && !token.empty?
       begin
         Parse::Client.client.logout(token)
@@ -346,7 +346,7 @@ module Parse
     resolved = token.respond_to?(:session_token) ? token.session_token : token
     resolved = resolved.to_s if resolved
     Fiber[SESSION_TOKEN_STATE_KEY] = (resolved && !resolved.empty?) ? resolved : nil
-    Fiber[CURRENT_USER_STATE_KEY]  = nil
+    Fiber[CURRENT_USER_STATE_KEY] = nil
     Fiber[SESSION_TOKEN_STATE_KEY]
   end
 
@@ -721,17 +721,16 @@ module Parse
         next if duration_ms < threshold
         logger = respond_to?(:logger) ? Parse.logger : nil
         next unless logger
-        detail =
-          if name == "parse.mongodb.aggregate"
-            "stages=#{payload[:stage_count]} types=#{Array(payload[:stage_types]).join(',')}"
+        detail = if name == "parse.mongodb.aggregate"
+            "stages=#{payload[:stage_count]} types=#{Array(payload[:stage_types]).join(",")}"
           else
-            "filter=#{!!payload[:has_filter]} projection=#{Array(payload[:projection_keys]).join(',')}"
+            "filter=#{!!payload[:has_filter]} projection=#{Array(payload[:projection_keys]).join(",")}"
           end
         logger.warn(
           "[Parse::MongoDB] SLOW #{name} #{duration_ms}ms " \
-          "collection=#{payload[:collection]} scope=#{payload[:scope] || 'n/a'} " \
-          "#{detail} result_count=#{payload[:result_count] || 'n/a'} " \
-          "max_time_ms=#{payload[:max_time_ms] || 'n/a'}",
+          "collection=#{payload[:collection]} scope=#{payload[:scope] || "n/a"} " \
+          "#{detail} result_count=#{payload[:result_count] || "n/a"} " \
+          "max_time_ms=#{payload[:max_time_ms] || "n/a"}",
         )
       end
       ActiveSupport::Notifications.subscribe("parse.mongodb.aggregate", &handler)

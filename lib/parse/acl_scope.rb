@@ -166,19 +166,19 @@ module Parse
           # "scope:admin" includes any role "scope:admin" inherits
           # from).
           return resolve_for_role(acl_role, strict_role: strict_role,
-                                  client: authorization_client(options))
+                                            client: authorization_client(options))
         end
 
         if session_token
           context = authorization_for(options)
           resolved = context.resolve(session_token)
           return Resolution.new(
-            mode: :session,
-            permission_strings: resolved.permission_strings,
-            user_id: resolved.user_id,
-            session: resolved,
-            client: context.client,
-          )
+                   mode: :session,
+                   permission_strings: resolved.permission_strings,
+                   user_id: resolved.user_id,
+                   session: resolved,
+                   client: context.client,
+                 )
         end
 
         if master == true
@@ -415,8 +415,7 @@ module Parse
         # either shape so the CLP gate fires before the String→Hash
         # upgrade — denying access to the joined class BEFORE we go
         # to the trouble of building out an upgraded sub-pipeline.
-        target =
-          if spec.is_a?(String)
+        target = if spec.is_a?(String)
             spec
           elsif spec.is_a?(Hash)
             spec["coll"] || spec[:coll]
@@ -448,8 +447,7 @@ module Parse
         # `$and`.
         acl_predicate = acl_match["$match"]
         existing = spec["restrictSearchWithMatch"] || spec[:restrictSearchWithMatch]
-        combined =
-          if existing.nil? || (existing.respond_to?(:empty?) && existing.empty?)
+        combined = if existing.nil? || (existing.respond_to?(:empty?) && existing.empty?)
             acl_predicate
           else
             { "$and" => [existing, acl_predicate] }
@@ -462,8 +460,7 @@ module Parse
       def rewrite_facet(spec, acl_match, perms)
         return spec unless spec.is_a?(Hash)
         spec.each_with_object({}) do |(branch_name, branch_pipeline), out|
-          out[branch_name] =
-            if branch_pipeline.is_a?(Array)
+          out[branch_name] = if branch_pipeline.is_a?(Array)
               # Recurse with the same perms — facet branches are
               # evaluated in the requesting session's authority, not
               # elevated.
@@ -627,8 +624,7 @@ module Parse
                 "User Pointer with a non-empty objectId."
         end
 
-        role_names =
-          begin
+        role_names = begin
             require_relative "model/classes/role"
             # `client:` matters here for the same reason it does on the
             # session-token path: resolving the user against one application
@@ -683,8 +679,7 @@ module Parse
       # @raise [ArgumentError] when the role cannot be resolved.
       def resolve_for_role(role, strict_role: false, client: nil)
         require_relative "model/classes/role"
-        role_obj =
-          case role
+        role_obj = case role
           when Parse::Role then role
           when String, Symbol
             name = role.to_s.sub(/\Arole:/, "")
@@ -696,8 +691,7 @@ module Parse
             raise ArgumentError, "[Parse::ACLScope] resolve_for_role expects Parse::Role or String."
           end
 
-        names =
-          begin
+        names = begin
             role_obj.all_parent_role_names(max_depth: 10, client: client)
           rescue StandardError
             Set.new([role_obj.name].compact)

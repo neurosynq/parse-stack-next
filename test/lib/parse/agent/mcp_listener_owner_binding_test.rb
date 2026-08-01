@@ -22,10 +22,10 @@ class MCPListenerOwnerBindingTest < Minitest::Test
 
     def initialize(session_token: nil, acl_user_scope: nil, acl_role_scope: nil)
       @correlation_id = nil
-      @session_token  = session_token
+      @session_token = session_token
       @acl_user_scope = acl_user_scope
       @acl_role_scope = acl_role_scope
-      @client         = Struct.new(:master_key).new(session_token ? nil : "mk")
+      @client = Struct.new(:master_key).new(session_token ? nil : "mk")
     end
   end
 
@@ -46,15 +46,15 @@ class MCPListenerOwnerBindingTest < Minitest::Test
     end
     Parse::Agent::MCPRackApp.new(notifications: true,
                                  principal_resolver: principal_resolver,
-                                 &factory)
+      &factory)
   end
 
   def get_env(session_id:, principal: nil)
     env = {
-      "REQUEST_METHOD"      => "GET",
-      "HTTP_ACCEPT"         => "text/event-stream",
+      "REQUEST_METHOD" => "GET",
+      "HTTP_ACCEPT" => "text/event-stream",
       "HTTP_MCP_SESSION_ID" => session_id,
-      "rack.input"          => StringIO.new(""),
+      "rack.input" => StringIO.new(""),
     }
     env["HTTP_X_PRINCIPAL"] = principal if principal
     env
@@ -62,21 +62,21 @@ class MCPListenerOwnerBindingTest < Minitest::Test
 
   def delete_env(session_id:)
     {
-      "REQUEST_METHOD"      => "DELETE",
+      "REQUEST_METHOD" => "DELETE",
       "HTTP_MCP_SESSION_ID" => session_id,
-      "rack.input"          => StringIO.new(""),
+      "rack.input" => StringIO.new(""),
     }
   end
 
   def post_initialize_env(session_id:, principal: nil)
     env = {
       "REQUEST_METHOD" => "POST",
-      "CONTENT_TYPE"   => "application/json",
-      "HTTP_ACCEPT"    => "application/json",
-      "rack.input"     => StringIO.new(JSON.generate("jsonrpc" => "2.0", "id" => 1, "method" => "initialize")),
+      "CONTENT_TYPE" => "application/json",
+      "HTTP_ACCEPT" => "application/json",
+      "rack.input" => StringIO.new(JSON.generate("jsonrpc" => "2.0", "id" => 1, "method" => "initialize")),
     }
     env["HTTP_MCP_SESSION_ID"] = session_id if session_id
-    env["HTTP_X_PRINCIPAL"]    = principal if principal
+    env["HTTP_X_PRINCIPAL"] = principal if principal
     env
   end
 
@@ -154,7 +154,7 @@ class MCPListenerOwnerBindingTest < Minitest::Test
     factory = ->(_env) { AgentStub.new } # always bare master-key
     app = Parse::Agent::MCPRackApp.new(notifications: true,
                                        principal_resolver: resolver,
-                                       &factory)
+      &factory)
     e1 = get_env(session_id: "sess-1")
     e1["HTTP_X_USER"] = "alice"
     s1, _h, b1 = app.call(e1)
@@ -210,6 +210,7 @@ class MCPListenerOwnerBindingTest < Minitest::Test
   # used #to_s instead of #id.
   class UserScopeObj
     attr_reader :id
+
     def initialize(id)
       @id = id
     end

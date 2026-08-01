@@ -963,11 +963,11 @@ module Parse
       if device_type.present? && !SUPPORTED_PUSH_DEVICE_TYPES.include?(device_type)
         if UNSUPPORTED_PUSH_DEVICE_TYPES.include?(device_type)
           warn "[Parse::Push] Warning: device_type '#{device_type}' may not be supported for push notifications. " \
-               "Supported types: #{SUPPORTED_PUSH_DEVICE_TYPES.join(', ')}"
+               "Supported types: #{SUPPORTED_PUSH_DEVICE_TYPES.join(", ")}"
         else
           warn "[Parse::Push] Warning: unknown device_type '#{device_type}' for installation #{installation_id}. " \
                "This device type may not receive push notifications. " \
-               "Supported types: #{SUPPORTED_PUSH_DEVICE_TYPES.join(', ')}"
+               "Supported types: #{SUPPORTED_PUSH_DEVICE_TYPES.join(", ")}"
         end
       end
     end

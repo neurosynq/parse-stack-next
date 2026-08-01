@@ -18,9 +18,9 @@ module Parse
     # gracefully (`{available: false, reason: ...}`) instead of raising
     # when the underlying service is unreachable or unconfigured.
     module Describe
-      LOCAL_SECTIONS   = %i[model acl].freeze
+      LOCAL_SECTIONS = %i[model acl].freeze
       NETWORK_SECTIONS = %i[schema clp atlas indexes].freeze
-      ALL_SECTIONS     = (LOCAL_SECTIONS + NETWORK_SECTIONS).freeze
+      ALL_SECTIONS = (LOCAL_SECTIONS + NETWORK_SECTIONS).freeze
 
       # Core/built-in field keys we don't report under `:model[:fields]` —
       # they're inherited from Parse::Object (in both snake_case and
@@ -55,7 +55,7 @@ module Parse
       # @return [Hash, String]
       def describe(*sections, pretty: false, network: false, usage: false, master: false, client: nil)
         requested = sections.flatten.map(&:to_sym)
-        active    = if requested.empty?
+        active = if requested.empty?
             network ? ALL_SECTIONS : LOCAL_SECTIONS
           else
             requested
@@ -72,13 +72,13 @@ module Parse
 
       def describe_section(section, client:, network:, usage: false, master: false)
         case section
-        when :model  then describe_model_section
-        when :acl    then describe_acl_section
+        when :model then describe_model_section
+        when :acl then describe_acl_section
         when :schema then network_section(network) { describe_schema_section(client) }
-        when :clp    then network_section(network) { describe_clp_section(client) }
-        when :atlas   then network_section(network) { describe_atlas_section }
+        when :clp then network_section(network) { describe_clp_section(client) }
+        when :atlas then network_section(network) { describe_atlas_section }
         when :indexes then network_section(network) { describe_indexes_section(usage: usage, master: master) }
-        else               { available: false, reason: :unknown_section }
+        else { available: false, reason: :unknown_section }
         end
       end
 
@@ -92,15 +92,15 @@ module Parse
       def describe_model_section
         local_fields = fields.reject { |k, _| CORE_FIELD_KEYS.include?(k) }
         {
-          parse_class:   parse_class,
-          fields:        local_fields,
-          field_count:   local_fields.size,
-          references:    (respond_to?(:references) ? references.dup : {}),
-          relations:     (respond_to?(:relations) ? relations.dup : {}),
-          defaults:      (respond_to?(:defaults_list) ? defaults_list.dup : []),
-          enums:         (respond_to?(:enums) ? enums.dup : {}),
-          agent_fields:  (respond_to?(:agent_field_allowlist) && agent_field_allowlist.any? ?
-                          agent_field_allowlist.map(&:to_s).sort : nil),
+          parse_class: parse_class,
+          fields: local_fields,
+          field_count: local_fields.size,
+          references: (respond_to?(:references) ? references.dup : {}),
+          relations: (respond_to?(:relations) ? relations.dup : {}),
+          defaults: (respond_to?(:defaults_list) ? defaults_list.dup : []),
+          enums: (respond_to?(:enums) ? enums.dup : {}),
+          agent_fields: (respond_to?(:agent_field_allowlist) && agent_field_allowlist.any? ?
+            agent_field_allowlist.map(&:to_s).sort : nil),
           agent_methods: agent_method_names_or_nil,
         }
       end
@@ -115,9 +115,9 @@ module Parse
       def describe_acl_section
         defaults = respond_to?(:default_acls) ? default_acls : nil
         {
-          default_acl:         defaults.respond_to?(:as_json) ? defaults.as_json : nil,
+          default_acl: defaults.respond_to?(:as_json) ? defaults.as_json : nil,
           default_acl_private: (respond_to?(:default_acl_private) ? !!default_acl_private : nil),
-          acl_policy:          instance_variable_get(:@acl_policy_setting),
+          acl_policy: instance_variable_get(:@acl_policy_setting),
         }
       end
 
@@ -126,12 +126,12 @@ module Parse
         return { available: false, reason: :class_missing_on_server } if info.nil?
         diff = Parse::Schema::SchemaDiff.new(self, info)
         {
-          available:          true,
-          in_sync:            diff.in_sync?,
+          available: true,
+          in_sync: diff.in_sync?,
           server_field_count: info.field_names.size,
-          missing_on_server:  diff.missing_on_server,
-          missing_locally:    diff.missing_locally,
-          type_mismatches:    diff.type_mismatches,
+          missing_on_server: diff.missing_on_server,
+          missing_locally: diff.missing_locally,
+          type_mismatches: diff.type_mismatches,
         }
       end
 
@@ -148,10 +148,10 @@ module Parse
         indexes = Parse::AtlasSearch::IndexManager.list_indexes(parse_class)
         {
           available: true,
-          count:     indexes.size,
-          indexes:   indexes.map { |i|
-            { name:      i["name"],
-              status:    i["status"],
+          count: indexes.size,
+          indexes: indexes.map { |i|
+            { name: i["name"],
+              status: i["status"],
               queryable: i["queryable"] }
           },
         }
@@ -183,8 +183,8 @@ module Parse
         normalized = raw.map { |idx| normalize_index_entry(idx, stats: stats) }
         result = {
           available: true,
-          count:     normalized.size,
-          indexes:   normalized,
+          count: normalized.size,
+          indexes: normalized,
         }
         if usage
           # Empty stats Hash means the role lacks clusterMonitor / Atlas
@@ -203,22 +203,22 @@ module Parse
           # plans for any `_Join:*` collections from
           # `mongo_relation_index`.
           plans = Parse::Schema::IndexMigrator.new(self).plan
-          base  = parse_class
+          base = parse_class
           parent_plan = plans[base]
           if parent_plan
-            result[:declared]      = parent_plan[:declared].map { |d| describe_decl(d) }
-            result[:drift]         = describe_drift(parent_plan)
+            result[:declared] = parent_plan[:declared].map { |d| describe_decl(d) }
+            result[:drift] = describe_drift(parent_plan)
             result[:parse_managed] = parent_plan[:parse_managed]
-            result[:capacity]      = describe_capacity(parent_plan)
+            result[:capacity] = describe_capacity(parent_plan)
           end
           join_plans = plans.reject { |k, _| k == base }
           unless join_plans.empty?
             result[:relations] = join_plans.each_with_object({}) do |(coll, p), h|
               h[coll] = {
-                declared:      p[:declared].map { |d| describe_decl(d) },
-                drift:         describe_drift(p),
+                declared: p[:declared].map { |d| describe_decl(d) },
+                drift: describe_drift(p),
                 parse_managed: p[:parse_managed],
-                capacity:      describe_capacity(p),
+                capacity: describe_capacity(p),
               }
             end
           end
@@ -234,18 +234,18 @@ module Parse
       def describe_drift(plan)
         {
           to_create: plan[:to_create].map { |d| describe_decl(d) },
-          in_sync:   plan[:in_sync].map   { |d| describe_decl(d) },
-          orphans:   plan[:orphans],
+          in_sync: plan[:in_sync].map { |d| describe_decl(d) },
+          orphans: plan[:orphans],
           conflicts: plan[:conflicts],
         }
       end
 
       def describe_capacity(plan)
         {
-          used:      plan[:capacity_used],
-          after:     plan[:capacity_after],
+          used: plan[:capacity_used],
+          after: plan[:capacity_after],
           remaining: plan[:capacity_remaining],
-          ok:        plan[:capacity_ok],
+          ok: plan[:capacity_ok],
         }
       end
 
@@ -259,11 +259,11 @@ module Parse
       def normalize_index_entry(idx, stats: {})
         name = idx["name"] || idx[:name]
         entry = {
-          name:           name,
-          implicit_id:    name == "_id_",
-          key:            coerce_bson(idx["key"] || idx[:key] || {}),
-          unique:         idx["unique"] == true,
-          sparse:         idx["sparse"] == true,
+          name: name,
+          implicit_id: name == "_id_",
+          key: coerce_bson(idx["key"] || idx[:key] || {}),
+          unique: idx["unique"] == true,
+          sparse: idx["sparse"] == true,
           partial_filter: coerce_bson(idx["partialFilterExpression"] || idx[:partialFilterExpression]),
           expire_after_seconds: idx["expireAfterSeconds"] || idx[:expireAfterSeconds],
         }
@@ -292,10 +292,10 @@ module Parse
         if (m = data[:model])
           lines << "  fields:     #{m[:field_count]}"
           lines << "  references: #{m[:references].inspect}" if m[:references].any?
-          lines << "  relations:  #{m[:relations].inspect}"  if m[:relations].any?
-          lines << "  defaults:   #{m[:defaults].inspect}"   if m[:defaults].any?
+          lines << "  relations:  #{m[:relations].inspect}" if m[:relations].any?
+          lines << "  defaults:   #{m[:defaults].inspect}" if m[:defaults].any?
           lines << "  enums:      #{m[:enums].keys.inspect}" if m[:enums].any?
-          lines << "  agent_fields:  #{m[:agent_fields].inspect}"  if m[:agent_fields]
+          lines << "  agent_fields:  #{m[:agent_fields].inspect}" if m[:agent_fields]
           lines << "  agent_methods: #{m[:agent_methods].inspect}" if m[:agent_methods]
         end
 
@@ -309,8 +309,8 @@ module Parse
             label = s[:in_sync] ? "in sync" : "drifted"
             lines << "  schema: #{label} (server fields=#{s[:server_field_count]})"
             lines << "    missing_on_server: #{s[:missing_on_server].keys.inspect}" if s[:missing_on_server].any?
-            lines << "    missing_locally:   #{s[:missing_locally].keys.inspect}"   if s[:missing_locally].any?
-            lines << "    type_mismatches:   #{s[:type_mismatches].keys.inspect}"   if s[:type_mismatches].any?
+            lines << "    missing_locally:   #{s[:missing_locally].keys.inspect}" if s[:missing_locally].any?
+            lines << "    type_mismatches:   #{s[:type_mismatches].keys.inspect}" if s[:type_mismatches].any?
           else
             lines << "  schema: unavailable (#{s[:reason]})"
           end
@@ -351,10 +351,10 @@ module Parse
             end
             if (drift = ix[:drift])
               lines << "    declared:    #{ix[:declared].size}"
-              lines << "    to_create:   #{drift[:to_create].size}"   if drift[:to_create].any?
-              lines << "    in_sync:     #{drift[:in_sync].size}"     if drift[:in_sync].any?
-              lines << "    orphans:     #{drift[:orphans].inspect}"  if drift[:orphans].any?
-              lines << "    conflicts:   #{drift[:conflicts].size}"   if drift[:conflicts].any?
+              lines << "    to_create:   #{drift[:to_create].size}" if drift[:to_create].any?
+              lines << "    in_sync:     #{drift[:in_sync].size}" if drift[:in_sync].any?
+              lines << "    orphans:     #{drift[:orphans].inspect}" if drift[:orphans].any?
+              lines << "    conflicts:   #{drift[:conflicts].size}" if drift[:conflicts].any?
             end
             if (cap = ix[:capacity])
               lines << "    capacity:    #{cap[:used]}/#{Parse::Core::Indexing::MAX_INDEXES_PER_COLLECTION} (#{cap[:remaining]} remaining)"
@@ -366,7 +366,7 @@ module Parse
                 lines << "      declared:  #{info[:declared].size}"
                 d = info[:drift]
                 lines << "      to_create: #{d[:to_create].size}" if d[:to_create].any?
-                lines << "      in_sync:   #{d[:in_sync].size}"   if d[:in_sync].any?
+                lines << "      in_sync:   #{d[:in_sync].size}" if d[:in_sync].any?
                 lines << "      orphans:   #{d[:orphans].inspect}" if d[:orphans].any?
               end
             end

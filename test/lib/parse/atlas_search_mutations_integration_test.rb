@@ -104,7 +104,7 @@ class AtlasSearchMutationsIntegrationTest < Minitest::Test
 
   def test_create_search_index_returns_created_then_exists_on_redeclare
     name = track(unique_index_name("create_redeclare"))
-    first  = Parse::MongoDB.create_search_index("Song", name, { mappings: { dynamic: true } })
+    first = Parse::MongoDB.create_search_index("Song", name, { mappings: { dynamic: true } })
     assert_equal :created, first
     # Cache will currently report BUILDING; force refresh to confirm
     # Atlas registered the index name.
@@ -120,7 +120,7 @@ class AtlasSearchMutationsIntegrationTest < Minitest::Test
     name = track(unique_index_name("drop_absent"))
     Parse::MongoDB.create_search_index("Song", name, { mappings: { dynamic: true } })
 
-    first  = Parse::MongoDB.drop_search_index("Song", name, confirm: "drop_search:Song:#{name}")
+    first = Parse::MongoDB.drop_search_index("Song", name, confirm: "drop_search:Song:#{name}")
     assert_equal :dropped, first
 
     second = Parse::MongoDB.drop_search_index("Song", name, confirm: "drop_search:Song:#{name}")
@@ -254,7 +254,7 @@ class AtlasSearchMutationsIntegrationTest < Minitest::Test
 
   def test_migrator_apply_creates_then_plan_shows_in_sync
     ix_name = track(unique_index_name("migrator_apply"))
-    klass = build_model_class("Song") {}
+    klass = build_model_class("Song") { }
     klass.mongo_search_index(ix_name, { mappings: { dynamic: true } })
 
     r = Parse::Schema::SearchIndexMigrator.new(klass).apply!(wait: true, timeout: BUILD_TIMEOUT)
@@ -273,14 +273,14 @@ class AtlasSearchMutationsIntegrationTest < Minitest::Test
 
   def test_migrator_detects_drift_when_declared_definition_diverges
     ix_name = track(unique_index_name("migrator_drift"))
-    klass = build_model_class("Song") {}
+    klass = build_model_class("Song") { }
     klass.mongo_search_index(ix_name, { mappings: { dynamic: true } })
     Parse::Schema::SearchIndexMigrator.new(klass).apply!(wait: true, timeout: BUILD_TIMEOUT)
 
     # Now declare a model class with a DIFFERENT definition for the same
     # name. The previous class can't be redeclared (DSL raises on
     # different content), so build a fresh model class for the drift check.
-    drifted_klass = build_model_class("Song") {}
+    drifted_klass = build_model_class("Song") { }
     drifted_klass.mongo_search_index(
       ix_name,
       { mappings: { dynamic: false, fields: { title: { type: "string" } } } },
@@ -295,11 +295,11 @@ class AtlasSearchMutationsIntegrationTest < Minitest::Test
 
   def test_migrator_applies_update_with_explicit_opt_in
     ix_name = track(unique_index_name("migrator_update"))
-    klass = build_model_class("Song") {}
+    klass = build_model_class("Song") { }
     klass.mongo_search_index(ix_name, { mappings: { dynamic: true } })
     Parse::Schema::SearchIndexMigrator.new(klass).apply!(wait: true, timeout: BUILD_TIMEOUT)
 
-    drifted_klass = build_model_class("Song") {}
+    drifted_klass = build_model_class("Song") { }
     drifted_klass.mongo_search_index(
       ix_name,
       { mappings: { dynamic: false, fields: { title: { type: "string" } } } },

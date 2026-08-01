@@ -147,7 +147,7 @@ class CacheKeyspaceMiddlewareTest < Minitest::Test
   end
 
   def request(path, store: @store, keyspace: :default, headers: {}, method: :get,
-              body: '{"results":[]}', delete_legacy_variants: true)
+                    body: '{"results":[]}', delete_legacy_variants: true)
     padded = body.length >= 20 ? body : body + (" " * (20 - body.length))
     stubs = Faraday::Adapter::Test::Stubs.new do |stub|
       stub.send(method, path) do |_|

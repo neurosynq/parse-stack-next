@@ -101,12 +101,12 @@ class SubAgentStub
                  acl_user_scope: nil, acl_role_scope: nil, acl_scope: nil,
                  master_key: "test-master-key", permitted: true)
     @correlation_id = correlation_id
-    @session_token  = session_token
+    @session_token = session_token
     @acl_user_scope = acl_user_scope
     @acl_role_scope = acl_role_scope
-    @acl_scope      = acl_scope
-    @client         = Struct.new(:master_key).new(master_key)
-    @permitted      = permitted
+    @acl_scope = acl_scope
+    @client = Struct.new(:master_key).new(master_key)
+    @permitted = permitted
   end
 
   # Mirrors Parse::Agent#class_filter_permits? — the per-agent `classes:`
@@ -136,7 +136,7 @@ class ScopedSubAgentStub < SubAgentStub
   def initialize(permission_strings: ["*"], using_master_key: false, **kwargs)
     super(**kwargs)
     @permission_strings = permission_strings
-    @using_master_key   = using_master_key
+    @using_master_key = using_master_key
   end
 
   # Mirrors Parse::Agent#acl_permission_strings: nil for a master-key posture
@@ -160,7 +160,7 @@ class MCPSubscriptionsHelpersTest < Minitest::Test
   M = Parse::Agent::MCPSubscriptions
 
   def test_parse_subscribable_uri_count_and_samples
-    assert_equal %w[Post count],    M.parse_subscribable_uri("parse://Post/count")
+    assert_equal %w[Post count], M.parse_subscribable_uri("parse://Post/count")
     assert_equal %w[Document samples], M.parse_subscribable_uri("parse://Document/samples")
   end
 
@@ -284,7 +284,7 @@ class MCPSubscriptionsManagerTest < Minitest::Test
     # Parse Server has no per-subscription master key, so master-posture
     # subscriptions must ride an admin connection and session-token ones a
     # scoped connection. Verify the manager routes by credential.
-    admin  = FakeLQClient.new
+    admin = FakeLQClient.new
     scoped = FakeLQClient.new
     mgr = M::Manager.new(supported: true, debounce_interval: 0,
                          live_query_admin_client: admin, live_query_scoped_client: scoped)
@@ -306,7 +306,7 @@ class MCPSubscriptionsManagerTest < Minitest::Test
     fake = ->(class_name, agent:, op:) { captured << [class_name, op] }
     Parse::Agent::Tools.stub(:assert_class_accessible!, fake) do
       mgr = build_manager
-      mgr.subscribe(session_id: "s1", uri: "parse://Post/count",   agent: SubAgentStub.new)
+      mgr.subscribe(session_id: "s1", uri: "parse://Post/count", agent: SubAgentStub.new)
       mgr.subscribe(session_id: "s1", uri: "parse://Post/samples", agent: SubAgentStub.new)
     end
     assert_equal [["Post", :count], ["Post", :find]], captured
@@ -330,7 +330,7 @@ class MCPSubscriptionsManagerTest < Minitest::Test
 
   def test_subscribe_is_idempotent_per_uri
     mgr = build_manager(interval: 0)
-    mgr.attach_listener("sess-1") {}
+    mgr.attach_listener("sess-1") { }
     mgr.subscribe(session_id: "sess-1", uri: "parse://Post/count", agent: SubAgentStub.new)
     mgr.subscribe(session_id: "sess-1", uri: "parse://Post/count", agent: SubAgentStub.new)
     assert_equal 1, @lq.subscriptions.size
@@ -416,7 +416,7 @@ class MCPSubscriptionsManagerTest < Minitest::Test
 
   def test_detach_listener_tears_down_all_session_subscriptions
     mgr = build_manager(interval: 0)
-    mgr.attach_listener("sess-1") {}
+    mgr.attach_listener("sess-1") { }
     mgr.subscribe(session_id: "sess-1", uri: "parse://Post/count", agent: SubAgentStub.new)
     mgr.subscribe(session_id: "sess-1", uri: "parse://Post/samples", agent: SubAgentStub.new)
     subs = @lq.subscriptions.map(&:subscription)
@@ -480,7 +480,7 @@ class MCPSubscriptionsAuthorizationGateTest < Minitest::Test
   M = Parse::Agent::MCPSubscriptions
 
   def setup
-    @lq  = FakeLQClient.new
+    @lq = FakeLQClient.new
     @mgr = M::Manager.new(supported: true, live_query_client: @lq, debounce_interval: 0)
     # The CLP gate reads Parse::CLPScope's process-global cache. Reset it so a
     # seeded fixture here never leaks into (or inherits from) another test.
@@ -528,7 +528,7 @@ class MCPSubscriptionsAuthorizationGateTest < Minitest::Test
     # count and refused for samples.
     Parse::CLPScope.__cache_put("Post",
                                 clp: { "count" => { "*" => true },
-                                       "find"  => { "role:Admin" => true } })
+                                       "find" => { "role:Admin" => true } })
     public_agent = ScopedSubAgentStub.new(session_token: "r:tok", permission_strings: ["*"])
     assert @mgr.subscribe(session_id: "s1", uri: "parse://Post/count", agent: public_agent)
     err = assert_raises(Parse::Agent::AccessDenied) do
@@ -630,7 +630,7 @@ class MCPSubscriptionsDispatcherTest < Minitest::Test
   def teardown
     # Re-install each stub if it was active before setup, so the stub's owner
     # test class still sees it if it runs after us in the same process.
-    MCPDispatcherStub.install!       if @mcp_stub_was_active && defined?(MCPDispatcherStub)
+    MCPDispatcherStub.install! if @mcp_stub_was_active && defined?(MCPDispatcherStub)
     StreamingDispatcherStub.install! if @streaming_stub_was_active && defined?(StreamingDispatcherStub)
   end
 
@@ -748,7 +748,7 @@ end
 # MCPRackApp GET listening stream (transport-level)
 # ---------------------------------------------------------------------------
 class MCPListeningStreamRackTest < Minitest::Test
-  M    = Parse::Agent::MCPSubscriptions
+  M = Parse::Agent::MCPSubscriptions
   Body = Parse::Agent::MCPRackApp::ListeningStreamBody
 
   def setup
@@ -766,10 +766,10 @@ class MCPListeningStreamRackTest < Minitest::Test
 
   def get_env(session_id: "sess-1", accept: "text/event-stream", origin: nil)
     env = {
-      "REQUEST_METHOD"      => "GET",
-      "HTTP_ACCEPT"         => accept,
+      "REQUEST_METHOD" => "GET",
+      "HTTP_ACCEPT" => accept,
       "HTTP_MCP_SESSION_ID" => session_id,
-      "rack.input"          => StringIO.new(""),
+      "rack.input" => StringIO.new(""),
     }
     env["HTTP_ORIGIN"] = origin if origin
     env
@@ -831,7 +831,7 @@ class MCPListeningStreamRackTest < Minitest::Test
 
   def test_listening_body_delivers_published_update_then_tears_down_on_close
     before = Parse::Agent::MCPRackApp.active_listening_stream_count
-    body   = Body.new(@manager, "sess-1", 0, nil)
+    body = Body.new(@manager, "sess-1", 0, nil)
     chunks = Queue.new
     worker = Thread.new { body.each { |c| chunks << c } }
 

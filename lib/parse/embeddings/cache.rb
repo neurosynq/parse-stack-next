@@ -313,15 +313,15 @@ module Parse
         # to the other poisons the narrower/wider field.
         def key_for(provider, input, input_type)
           model = begin
-            provider.model_name
-          rescue NotImplementedError
-            "unknown"
-          end
+              provider.model_name
+            rescue NotImplementedError
+              "unknown"
+            end
           dims = begin
-            provider.dimensions
-          rescue NotImplementedError
-            "unknown"
-          end
+              provider.dimensions
+            rescue NotImplementedError
+              "unknown"
+            end
           "#{provider.class.name}|#{model}|#{dims}|#{input_type}|#{Digest::SHA256.hexdigest(input.to_s)}"
         end
 
@@ -347,15 +347,15 @@ module Parse
         def instrument_hit(provider, input_type)
           return unless defined?(ActiveSupport::Notifications)
           model = begin
-            provider.model_name
-          rescue NotImplementedError
-            nil
-          end
+              provider.model_name
+            rescue NotImplementedError
+              nil
+            end
           dims = begin
-            provider.dimensions
-          rescue NotImplementedError
-            nil
-          end
+              provider.dimensions
+            rescue NotImplementedError
+              nil
+            end
           payload = {
             provider: provider.class.name,
             model: model,
@@ -366,7 +366,7 @@ module Parse
             cached: true,
             error: nil,
           }
-          ActiveSupport::Notifications.instrument(Provider::AS_NOTIFICATION_NAME, payload) {}
+          ActiveSupport::Notifications.instrument(Provider::AS_NOTIFICATION_NAME, payload) { }
         end
       end
     end

@@ -63,36 +63,36 @@ module Parse
       class RateLimitError < Error; end
       class TransientError < Error; end
 
-      DEFAULT_BASE_URL    = "https://api.jina.ai/v1"
-      DEFAULT_MODEL       = "jina-embeddings-v3"
-      DEFAULT_TIMEOUT     = 30
+      DEFAULT_BASE_URL = "https://api.jina.ai/v1"
+      DEFAULT_MODEL = "jina-embeddings-v3"
+      DEFAULT_TIMEOUT = 30
       DEFAULT_OPEN_TIMEOUT = 5
       DEFAULT_MAX_RETRIES = 3
-      DEFAULT_BATCH_SIZE  = 100
-      MAX_RESPONSE_BYTES  = 16 * 1024 * 1024
+      DEFAULT_BATCH_SIZE = 100
+      MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
       # Native vector widths. The Matryoshka-capable rows allow the
       # caller to truncate via the `dimensions:` kwarg.
       MODEL_DEFAULT_DIMENSIONS = {
         "jina-embeddings-v5-omni-small" => 1024,
-        "jina-embeddings-v5-omni-nano"  => 512,
+        "jina-embeddings-v5-omni-nano" => 512,
         "jina-embeddings-v5-text-small" => 1024,
-        "jina-embeddings-v5-text-nano"  => 512,
-        "jina-embeddings-v4"            => 2048,
-        "jina-embeddings-v3"            => 1024,
-        "jina-code-embeddings-1.5b"     => 1024,
-        "jina-code-embeddings-0.5b"     => 1024,
+        "jina-embeddings-v5-text-nano" => 512,
+        "jina-embeddings-v4" => 2048,
+        "jina-embeddings-v3" => 1024,
+        "jina-code-embeddings-1.5b" => 1024,
+        "jina-code-embeddings-0.5b" => 1024,
       }.freeze
 
       MODEL_MAX_INPUT_TOKENS = {
         "jina-embeddings-v5-omni-small" => 32_000,
-        "jina-embeddings-v5-omni-nano"  => 32_000,
+        "jina-embeddings-v5-omni-nano" => 32_000,
         "jina-embeddings-v5-text-small" => 32_000,
-        "jina-embeddings-v5-text-nano"  => 32_000,
-        "jina-embeddings-v4"            => 32_000,
-        "jina-embeddings-v3"            => 8_192,
-        "jina-code-embeddings-1.5b"     => 32_000,
-        "jina-code-embeddings-0.5b"     => 32_000,
+        "jina-embeddings-v5-text-nano" => 32_000,
+        "jina-embeddings-v4" => 32_000,
+        "jina-embeddings-v3" => 8_192,
+        "jina-code-embeddings-1.5b" => 32_000,
+        "jina-code-embeddings-0.5b" => 32_000,
       }.freeze
 
       # Models that accept the Matryoshka `dimensions` field. Other
@@ -108,10 +108,10 @@ module Parse
 
       # Map SDK-canonical input_type symbols to Jina `task` strings.
       INPUT_TYPE_WIRE_VALUES = {
-        search_query:    "retrieval.query",
+        search_query: "retrieval.query",
         search_document: "retrieval.passage",
-        classification:  "classification",
-        clustering:      "separation",
+        classification: "classification",
+        clustering: "separation",
       }.freeze
 
       # @param api_key [String] required. Sent as `Authorization: Bearer …`.
@@ -352,7 +352,7 @@ module Parse
       end
 
       def backoff_seconds(attempt)
-        [0.5 * (2**(attempt - 1)), 30.0].min
+        [0.5 * (2 ** (attempt - 1)), 30.0].min
       end
 
       def retry_after_seconds(response)

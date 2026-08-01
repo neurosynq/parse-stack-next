@@ -169,7 +169,7 @@ class WebhookReplayProtectionTest < Minitest::Test
     capture_io do
       _status, _headers, body_io = Parse::Webhooks.call(build_env(
         body: body, request_id: "_RB_sig1",
-        timestamp: ts, signature: sign(body, ts)
+        timestamp: ts, signature: sign(body, ts),
       ))
       payload = parse_body([nil, nil, body_io])
       assert payload.key?("success"), "valid signature must pass: #{payload.inspect}"
@@ -184,7 +184,7 @@ class WebhookReplayProtectionTest < Minitest::Test
     capture_io do
       _status, _headers, body_io = Parse::Webhooks.call(build_env(
         body: '{"functionName":"TAMPERED"}', request_id: "_RB_sig2",
-        timestamp: ts, signature: valid_sig
+        timestamp: ts, signature: valid_sig,
       ))
       payload = parse_body([nil, nil, body_io])
       assert_equal "Invalid webhook signature.", payload["error"]
@@ -199,7 +199,7 @@ class WebhookReplayProtectionTest < Minitest::Test
     capture_io do
       _status, _headers, body_io = Parse::Webhooks.call(build_env(
         body: body, request_id: "_RB_sig3",
-        timestamp: ts, signature: sign(body, ts)
+        timestamp: ts, signature: sign(body, ts),
       ))
       payload = parse_body([nil, nil, body_io])
       assert_equal "Stale webhook timestamp.", payload["error"]
@@ -214,7 +214,7 @@ class WebhookReplayProtectionTest < Minitest::Test
     capture_io do
       _status, _headers, body_io = Parse::Webhooks.call(build_env(
         body: body, request_id: "_RB_sig4",
-        timestamp: ts, signature: sign(body, ts)
+        timestamp: ts, signature: sign(body, ts),
       ))
       payload = parse_body([nil, nil, body_io])
       assert_equal "Stale webhook timestamp.", payload["error"]
@@ -227,7 +227,7 @@ class WebhookReplayProtectionTest < Minitest::Test
     capture_io do
       _status, _headers, body_io = Parse::Webhooks.call(build_env(
         body: body, request_id: "_RB_sig5",
-        timestamp: "not-a-number", signature: "deadbeef"
+        timestamp: "not-a-number", signature: "deadbeef",
       ))
       payload = parse_body([nil, nil, body_io])
       assert_equal "Invalid webhook timestamp.", payload["error"]

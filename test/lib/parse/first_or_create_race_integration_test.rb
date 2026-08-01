@@ -388,7 +388,7 @@ class FirstOrCreateRaceTest < Minitest::Test
   # engages. The writer URI is string-distinct (distinct appName) to satisfy
   # configure_writer's operator-safety check; verify_role: false because the
   # docker test user holds admin (production must run verify_role: true).
-  DSL_MONGO_URI  = (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin")
+  DSL_MONGO_URI = (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin")
   DSL_WRITER_URI = DSL_MONGO_URI + "&appName=parse-stack-foc-dsl-writer"
 
   # Self-contained reader+writer config + mutation triple-gate (mirrors

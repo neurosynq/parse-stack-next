@@ -87,7 +87,7 @@ module Parse
         end
         collisions = by_gql_name.select { |_, names| names.size > 1 }
         return if collisions.empty?
-        details = collisions.map { |gql, parse| "#{gql} ← #{parse.join(', ')}" }.join('; ')
+        details = collisions.map { |gql, parse| "#{gql} ← #{parse.join(", ")}" }.join("; ")
         raise "Parse::GraphQL::TypeGenerator: graphql_name collisions: #{details}. " \
               "Parse class names that differ only by underscores collapse to the same " \
               "GraphQL type name. Rename or generate the conflicting classes separately."

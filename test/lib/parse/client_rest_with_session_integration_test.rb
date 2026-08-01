@@ -25,7 +25,7 @@ class ClientRestWithSessionIntegrationTest < Minitest::Test
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
     super
     @alice, @alice_pw = seed_client_user("ws_alice")
-    @bob,   @bob_pw   = seed_client_user("ws_bob")
+    @bob, @bob_pw = seed_client_user("ws_bob")
   end
 
   def teardown
@@ -93,7 +93,7 @@ class ClientRestWithSessionIntegrationTest < Minitest::Test
   def test_nested_with_session_restores_outer_token_on_exit
     as_client do
       alice = Parse::User.login!(@alice.username, @alice_pw)
-      bob   = Parse::User.login!(@bob.username,   @bob_pw)
+      bob = Parse::User.login!(@bob.username, @bob_pw)
 
       Parse.with_session(alice) do
         assert_equal alice.session_token, Parse.current_session_token
@@ -114,7 +114,7 @@ class ClientRestWithSessionIntegrationTest < Minitest::Test
     doc_id = nil
     as_client do
       alice = Parse::User.login!(@alice.username, @alice_pw)
-      bob   = Parse::User.login!(@bob.username,   @bob_pw)
+      bob = Parse::User.login!(@bob.username, @bob_pw)
 
       # Alice writes a private row.
       Parse.with_session(alice) do
@@ -218,7 +218,7 @@ class ClientRestWithSessionIntegrationTest < Minitest::Test
 
       Parse.logout(revoke: false)  # avoid noisy revoke if server doesn't like the token shape
       assert_nil Parse.current_session_token, "logout must clear ambient"
-      assert_nil Parse.current_user,          "logout must clear current_user"
+      assert_nil Parse.current_user, "logout must clear current_user"
 
       # After logout, owner-private row is no longer visible.
       after = ClientWithSessionDoc.find(doc_id)

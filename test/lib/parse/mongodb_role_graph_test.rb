@@ -61,7 +61,7 @@ class MongoDBRoleGraphTest < Minitest::Test
     user.id = VALID_ID
     err = assert_raises(ArgumentError) do
       Parse::MongoDB.role_names_for_user(VALID_ID, max_depth: 5,
-                                          master: true, as: user)
+                                                   master: true, as: user)
     end
     assert_match(/mutually exclusive/, err.message)
   end
@@ -71,7 +71,7 @@ class MongoDBRoleGraphTest < Minitest::Test
     user.id = VALID_ID
     err = assert_raises(ArgumentError) do
       Parse::MongoDB.users_in_role_subtree(VALID_ID, max_depth: 5,
-                                            master: true, as: user)
+                                                     master: true, as: user)
     end
     assert_match(/mutually exclusive/, err.message)
   end
@@ -332,7 +332,7 @@ class MongoDBRoleGraphTest < Minitest::Test
     refute_nil user_lookup, "pipeline must $lookup _User to filter tombstones"
     serialized = pipeline.to_s
     assert_match(/_tombstone/, serialized,
-      "pipeline must filter on _tombstone field")
+                 "pipeline must filter on _tombstone field")
   end
 
   def test_reverse_pipeline_master_mode_does_not_inject_rperm
@@ -358,7 +358,7 @@ class MongoDBRoleGraphTest < Minitest::Test
     # CLP that permits the user to find on _Role so we get past the
     # CLP gate and reach the pipeline-build step.
     Parse::CLPScope.__cache_put(Parse::Model::CLASS_ROLE,
-      clp: { "find" => { "*" => true } })
+                                clp: { "find" => { "*" => true } })
 
     user = Parse::User.new
     user.id = VALID_ID
@@ -374,9 +374,9 @@ class MongoDBRoleGraphTest < Minitest::Test
     refute_nil or_clause, "scoped pipeline must inject _rperm $or"
     assert or_clause.is_a?(Array), "_rperm injection must be a $or array"
     assert(or_clause.any? { |c| c.dig("_rperm", "$in").is_a?(Array) },
-      "_rperm $or must include a $in branch")
+           "_rperm $or must include a $in branch")
     assert(or_clause.any? { |c| c["_rperm"] == { "$exists" => false } },
-      "_rperm $or must include the documents-with-no-acl branch")
+           "_rperm $or must include the documents-with-no-acl branch")
     # Tombstone filter still present (the scoped injection adds, not
     # replaces).
     assert match_stage.key?("_tombstone")
@@ -455,12 +455,12 @@ class MongoDBRoleGraphTest < Minitest::Test
     bad_pipeline = [
       { "$match" => { "relatedId" => "AHYeeptUZU" } },
       { "$graphLookup" => {
-          "from" => "_Join:roles:_Role",
-          "startWith" => "$owningId",
-          "connectFromField" => "evilField",  # mutated
-          "connectToField" => "relatedId",
-          "as" => "parent_chain",
-          "maxDepth" => 4,
+        "from" => "_Join:roles:_Role",
+        "startWith" => "$owningId",
+        "connectFromField" => "evilField",  # mutated
+        "connectToField" => "relatedId",
+        "as" => "parent_chain",
+        "maxDepth" => 4,
       } },
     ]
     err = assert_raises(RuntimeError) do
@@ -475,12 +475,12 @@ class MongoDBRoleGraphTest < Minitest::Test
     bad_pipeline = [
       { "$match" => { "owningId" => "AHYeeptUZU" } },
       { "$graphLookup" => {
-          "from" => "_Join:roles:_Role",
-          "startWith" => "$relatedId",
-          "connectFromField" => "relatedId",
-          "connectToField" => "evilField",   # mutated
-          "as" => "descendant_chain",
-          "maxDepth" => 4,
+        "from" => "_Join:roles:_Role",
+        "startWith" => "$relatedId",
+        "connectFromField" => "relatedId",
+        "connectToField" => "evilField",   # mutated
+        "as" => "descendant_chain",
+        "maxDepth" => 4,
       } },
     ]
     err = assert_raises(RuntimeError) do

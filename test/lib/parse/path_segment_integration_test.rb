@@ -123,7 +123,7 @@ class PathSegmentIntegrationTest < Minitest::Test
         end
 
         assert_match(/function name/, err.message,
-          "Refusal error should identify the offending parameter, got: #{err.message}")
+                     "Refusal error should identify the offending parameter, got: #{err.message}")
 
         # If the validator had allowed this through, Parse Server would have
         # returned either a 404 (NotFound) or — much worse — a 200 with the
@@ -151,7 +151,7 @@ class PathSegmentIntegrationTest < Minitest::Test
             client.schema(attack)
           end
           assert_match(/class name/, err.message,
-            "Refusal for #{attack.inspect} should identify the offending parameter")
+                       "Refusal for #{attack.inspect} should identify the offending parameter")
         end
 
         puts "Class name traversal attempts all refused locally"
@@ -173,7 +173,7 @@ class PathSegmentIntegrationTest < Minitest::Test
             client.create_file(attack, "data", "text/plain")
           end
           assert_match(/file name|path-traversal|control characters/, err.message,
-            "Refusal for #{attack.inspect} should identify the issue")
+                       "Refusal for #{attack.inspect} should identify the issue")
         end
 
         puts "File name traversal attempts all refused locally"

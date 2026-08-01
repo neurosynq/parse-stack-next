@@ -212,7 +212,7 @@ class CLPIntegrationTest < Minitest::Test
     @admin_user = Parse::User.new({
       username: @admin_username,
       password: @admin_password,
-      email: "clp_admin_#{SecureRandom.hex(4)}@test.com"
+      email: "clp_admin_#{SecureRandom.hex(4)}@test.com",
     })
     assert @admin_user.save, "Should save admin user"
 
@@ -221,7 +221,7 @@ class CLPIntegrationTest < Minitest::Test
     @regular_user = Parse::User.new({
       username: @regular_username,
       password: @regular_password,
-      email: "clp_user_#{SecureRandom.hex(4)}@test.com"
+      email: "clp_user_#{SecureRandom.hex(4)}@test.com",
     })
     assert @regular_user.save, "Should save regular user"
 
@@ -230,7 +230,7 @@ class CLPIntegrationTest < Minitest::Test
     @owner_user = Parse::User.new({
       username: @owner_username,
       password: @owner_password,
-      email: "clp_owner_#{SecureRandom.hex(4)}@test.com"
+      email: "clp_owner_#{SecureRandom.hex(4)}@test.com",
     })
     assert @owner_user.save, "Should save owner user"
 
@@ -1063,7 +1063,7 @@ class CLPIntegrationTest < Minitest::Test
         filtered_response = ProtectedDocument.filter_results_for_user(
           all_docs,
           calling_user,
-          roles: user_roles
+          roles: user_roles,
         )
 
         # 4. Verify the response is properly filtered
@@ -1079,7 +1079,7 @@ class CLPIntegrationTest < Minitest::Test
         admin_response = ProtectedDocument.filter_results_for_user(
           all_docs,
           @admin_user,
-          roles: [@admin_role_name]
+          roles: [@admin_role_name],
         )
 
         admin_response.each do |doc_hash|
@@ -1186,7 +1186,7 @@ class CLPIntegrationTest < Minitest::Test
         schema_response = Parse.client.schema("SnakeCaseTestDoc")
         clps = schema_response.result["classLevelPermissions"]
 
-        puts "Protected fields on server: #{clps['protectedFields'].inspect}"
+        puts "Protected fields on server: #{clps["protectedFields"].inspect}"
 
         # Verify camelCase conversion
         assert clps["protectedFields"]["*"].include?("internalNotes"),

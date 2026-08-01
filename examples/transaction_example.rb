@@ -4,33 +4,33 @@
 # This example demonstrates how to use transactions to ensure atomic operations
 # across multiple Parse objects.
 
-require 'parse/stack'
+require "parse/stack"
 
 # Configure your Parse application
 Parse.setup(
-  app_id: ENV['PARSE_APP_ID'] || 'your-app-id',
-  api_key: ENV['PARSE_API_KEY'] || 'your-api-key',
-  server_url: ENV['PARSE_SERVER_URL'] || 'http://localhost:1337/parse'
+  app_id: ENV["PARSE_APP_ID"] || "your-app-id",
+  api_key: ENV["PARSE_API_KEY"] || "your-api-key",
+  server_url: ENV["PARSE_SERVER_URL"] || "http://localhost:1337/parse",
 )
 
 # Define example models
 class Workspace < Parse::Object
   property :name
-  property :owner, :pointer, class_name: 'User'
+  property :owner, :pointer, class_name: "User"
   property :member_count, :integer, default: 0
 end
 
 class Subscription < Parse::Object
-  property :user, :pointer, class_name: 'User'
-  property :workspace, :pointer, class_name: 'Workspace'
+  property :user, :pointer, class_name: "User"
+  property :workspace, :pointer, class_name: "Workspace"
   property :access_level, :string
   property :grant, :string
 end
 
 class Project < Parse::Object
   property :name
-  property :workspace, :pointer, class_name: 'Workspace'
-  property :owner, :pointer, class_name: 'User'
+  property :workspace, :pointer, class_name: "Workspace"
+  property :owner, :pointer, class_name: "User"
 end
 
 # Example 1: Basic transaction with explicit batch operations
@@ -38,45 +38,45 @@ def transfer_project_ownership_basic(project, new_owner)
   Parse::Object.transaction do |batch|
     # Get old owner
     old_owner = project.owner
-    
+
     # Find or create new owner subscription
     new_owner_membership = Subscription.first(
       project: project,
-      user: new_owner
+      user: new_owner,
     )
-    
+
     if new_owner_membership.nil?
       new_owner_membership = Subscription.new(
         project: project,
         workspace: project.workspace,
         user: new_owner,
-        grant: 'project',
-        access_level: 'owner'
+        grant: "project",
+        access_level: "owner",
       )
       batch.add(new_owner_membership)
     else
-      new_owner_membership.access_level = 'owner'
+      new_owner_membership.access_level = "owner"
       batch.add(new_owner_membership)
     end
-    
+
     # Demote old owner if they have a subscription
     if old_owner.present?
       old_owner_membership = Subscription.first(
         project: project,
-        user: old_owner
+        user: old_owner,
       )
-      
+
       if old_owner_membership.present?
-        old_owner_membership.access_level = 'admin'
+        old_owner_membership.access_level = "admin"
         batch.add(old_owner_membership)
       end
     end
-    
+
     # Update project owner
     project.owner = new_owner
     batch.add(project)
   end
-  
+
   puts "Successfully transferred ownership"
 rescue Parse::Error => e
   puts "Transaction failed: #{e.message}"
@@ -88,42 +88,42 @@ def transfer_project_ownership_auto(project, new_owner)
   results = Parse::Object.transaction do
     old_owner = project.owner
     objects_to_save = []
-    
+
     # Find or create new owner subscription
     new_owner_membership = Subscription.first(
       project: project,
-      user: new_owner
+      user: new_owner,
     ) || Subscription.new(
       project: project,
       workspace: project.workspace,
       user: new_owner,
-      grant: 'project'
+      grant: "project",
     )
-    
-    new_owner_membership.access_level = 'owner'
+
+    new_owner_membership.access_level = "owner"
     objects_to_save << new_owner_membership
-    
+
     # Demote old owner
     if old_owner.present?
       old_owner_membership = Subscription.first(
         project: project,
-        user: old_owner
+        user: old_owner,
       )
-      
+
       if old_owner_membership.present?
-        old_owner_membership.access_level = 'admin'
+        old_owner_membership.access_level = "admin"
         objects_to_save << old_owner_membership
       end
     end
-    
+
     # Update project
     project.owner = new_owner
     objects_to_save << project
-    
+
     # Return array of objects to be saved in transaction
     objects_to_save
   end
-  
+
   puts "Transaction completed with #{results.count} operations"
   true
 rescue Parse::Error => e
@@ -138,32 +138,32 @@ def complex_team_operation(workspace, new_members, new_owner)
     unless new_members.include?(new_owner)
       raise Parse::Error, "New owner must be in members list"
     end
-    
+
     # Update workspace
     workspace.owner = new_owner
     workspace.member_count = new_members.count
     batch.add(workspace)
-    
+
     # Create subscriptions for all new members
     new_members.each do |member|
       subscription = Subscription.new(
         workspace: workspace,
         user: member,
-        grant: 'workspace',
-        access_level: member == new_owner ? 'owner' : 'member'
+        grant: "workspace",
+        access_level: member == new_owner ? "owner" : "member",
       )
       batch.add(subscription)
     end
-    
+
     # Create a project for the workspace
     project = Project.new(
       name: "#{workspace.name} Project",
       workspace: workspace,
-      owner: new_owner
+      owner: new_owner,
     )
     batch.add(project)
   end
-  
+
   puts "Complex operation completed successfully"
 rescue Parse::Error => e
   puts "Complex operation failed: #{e.message}"
@@ -191,16 +191,16 @@ end
 if __FILE__ == $0
   puts "Parse Transaction Examples"
   puts "========================="
-  
+
   begin
     # Example usage (requires actual Parse server and data)
     # project = Project.first
     # new_owner = Parse::User.first(username: "new_owner")
-    # 
+    #
     # if project && new_owner
     #   transfer_project_ownership_basic(project, new_owner)
     # end
-    
+
     puts "\nTransaction support has been added to parse-stack!"
     puts "\nKey features:"
     puts "1. Atomic operations - all succeed or all fail"
@@ -211,7 +211,6 @@ if __FILE__ == $0
     puts "  Parse::Object.transaction do |batch|"
     puts "    # Add operations to batch"
     puts "  end"
-    
   rescue => e
     puts "Error: #{e.message}"
     puts e.backtrace

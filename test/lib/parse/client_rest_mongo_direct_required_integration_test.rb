@@ -53,9 +53,9 @@ class ClientRestMongoDirectRequiredIntegrationTest < Minitest::Test
           "location" => { "type" => "GeoPoint" },
         },
         "classLevelPermissions" => {
-          "find"   => { "requiresAuthentication" => true },
-          "get"    => { "requiresAuthentication" => true },
-          "count"  => { "requiresAuthentication" => true },
+          "find" => { "requiresAuthentication" => true },
+          "get" => { "requiresAuthentication" => true },
+          "count" => { "requiresAuthentication" => true },
           "create" => { "requiresAuthentication" => true },
           "update" => { "requiresAuthentication" => true },
           "delete" => { "requiresAuthentication" => true },

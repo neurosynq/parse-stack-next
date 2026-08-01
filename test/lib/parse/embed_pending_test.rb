@@ -40,6 +40,7 @@ class EmbedPendingTest < Minitest::Test
   # A fake record: records save calls; carries an id.
   class FakeRecord
     attr_reader :id, :saves
+
     def initialize(id) = (@id = id; @saves = 0)
     def save(**_opts) = (@saves += 1)
   end
@@ -48,15 +49,19 @@ class EmbedPendingTest < Minitest::Test
   # `:objectId.gt` cursor it was asked to filter on.
   class FakeQuery
     attr_reader :cursors
+
     def initialize(batches) = (@batches = batches; @i = -1; @cursors = [])
+
     def where(constraints = {})
       # The only .where call in the backfill carries the objectId cursor,
       # so capture every where value (the key is a Parse operation object).
       constraints.each_value { |v| @cursors << v }
       self
     end
+
     def order(*) = self
     def limit(*) = self
+
     def results
       @i += 1
       @batches[@i] || []

@@ -212,6 +212,7 @@ module Parse
       def ==(other)
         other.is_a?(Keyspace) && other.root_prefix == root_prefix
       end
+
       alias eql? ==
 
       def hash

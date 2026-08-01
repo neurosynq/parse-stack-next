@@ -102,7 +102,7 @@ module Parse
       #   error (Parse::CreateLockUnavailableError vs
       #   Parse::Lock::UnavailableError) without coupling here.
       def handle_degraded(mode, key, source: "Parse::LockBackend",
-                          unavailable_error: nil)
+                                     unavailable_error: nil)
         case mode
         when :raise
           err = unavailable_error || Parse::Error

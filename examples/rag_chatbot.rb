@@ -43,8 +43,8 @@ Parse::Embeddings.register(
 
 Parse.setup(
   server_url: ENV.fetch("PARSE_SERVER_URL", "http://localhost:1337/parse"),
-  app_id:     ENV.fetch("PARSE_APP_ID"),
-  api_key:    ENV.fetch("PARSE_REST_KEY"),
+  app_id: ENV.fetch("PARSE_APP_ID"),
+  api_key: ENV.fetch("PARSE_REST_KEY"),
   master_key: ENV.fetch("PARSE_MASTER_KEY"),
 )
 
@@ -76,7 +76,7 @@ class KnowledgeArticle < Parse::Object
   # Declare the Atlas $vectorSearch index that retrieval needs.
   mongo_search_index "knowledge_embedding",
                      { fields: [{ type: "vector", path: "embedding",
-                                  numDimensions: 1536, similarity: "cosine" }] },
+                                 numDimensions: 1536, similarity: "cosine" }] },
                      type: "vectorSearch"
 end
 
@@ -101,26 +101,26 @@ module ChatAnswerer
   # --- OpenAI backend ---
   def openai(question, chunks, model: "gpt-4o-mini")
     post("https://api.openai.com/v1/chat/completions",
-         { "Authorization" => "Bearer #{ENV.fetch('OPENAI_API_KEY')}" },
+         { "Authorization" => "Bearer #{ENV.fetch("OPENAI_API_KEY")}" },
          { model: model,
-           messages: [
-             { role: "system", content: PROMPT },
-             { role: "user",
-               content: "Context:\n#{context(chunks)}\n\nQuestion: #{question}" },
-           ] })
+          messages: [
+      { role: "system", content: PROMPT },
+      { role: "user",
+        content: "Context:\n#{context(chunks)}\n\nQuestion: #{question}" },
+    ] })
       .dig("choices", 0, "message", "content")
   end
 
   # --- Anthropic backend ---
   def anthropic(question, chunks, model: "claude-opus-4-8")
     post("https://api.anthropic.com/v1/messages",
-         { "x-api-key"         => ENV.fetch("ANTHROPIC_API_KEY"),
+         { "x-api-key" => ENV.fetch("ANTHROPIC_API_KEY"),
            "anthropic-version" => "2023-06-01" },
          { model: model, max_tokens: 1024, system: PROMPT,
-           messages: [
-             { role: "user",
-               content: "Context:\n#{context(chunks)}\n\nQuestion: #{question}" },
-           ] })
+          messages: [
+      { role: "user",
+        content: "Context:\n#{context(chunks)}\n\nQuestion: #{question}" },
+    ] })
       .dig("content", 0, "text")
   end
 

@@ -27,36 +27,36 @@ class ToolsLargeDatasetTest < Minitest::Test
     property :email, :string
   end
 
-  TOTAL        = 100_000
-  NEEDLE_ID    = "needle_targetina"
-  NEEDLE_NAME  = "Targetina Findwell"
+  TOTAL = 100_000
+  NEEDLE_ID = "needle_targetina"
+  NEEDLE_NAME = "Targetina Findwell"
   NEEDLE_GRADE = 12
-  NEEDLE_SUBJ  = "Astronomy"
-  SUBJECTS     = %w[Algebra Biology Chemistry English History Physics].freeze
+  NEEDLE_SUBJ = "Astronomy"
+  SUBJECTS = %w[Algebra Biology Chemistry English History Physics].freeze
 
   # Lazily build the row corpus once per process. 100k hashes is ~30 MB
   # resident; cheap enough but not something we want to repeat per test.
   def self.rows
     @rows ||= begin
-      rng = Random.new(42) # deterministic
-      rows = Array.new(TOTAL) do |i|
-        {
-          "objectId" => format("id_%06d", i),
-          "name"     => "Student#{i}_#{rng.bytes(3).unpack1('H*')}",
-          "grade"    => 9 + rng.rand(4),
-          "subject"  => SUBJECTS[rng.rand(SUBJECTS.size)],
-          "email"    => "student#{i}@example.edu",
+        rng = Random.new(42) # deterministic
+        rows = Array.new(TOTAL) do |i|
+          {
+            "objectId" => format("id_%06d", i),
+            "name" => "Student#{i}_#{rng.bytes(3).unpack1("H*")}",
+            "grade" => 9 + rng.rand(4),
+            "subject" => SUBJECTS[rng.rand(SUBJECTS.size)],
+            "email" => "student#{i}@example.edu",
+          }
+        end
+        rows[42_000] = {
+          "objectId" => NEEDLE_ID,
+          "name" => NEEDLE_NAME,
+          "grade" => NEEDLE_GRADE,
+          "subject" => NEEDLE_SUBJ,
+          "email" => "targetina@example.edu",
         }
+        rows
       end
-      rows[42_000] = {
-        "objectId" => NEEDLE_ID,
-        "name"     => NEEDLE_NAME,
-        "grade"    => NEEDLE_GRADE,
-        "subject"  => NEEDLE_SUBJ,
-        "email"    => "targetina@example.edu",
-      }
-      rows
-    end
   end
 
   def setup
@@ -75,17 +75,17 @@ class ToolsLargeDatasetTest < Minitest::Test
         # count-only path (count_objects tool)
         r = Object.new
         r.define_singleton_method(:success?) { true }
-        r.define_singleton_method(:count)    { filtered.size }
-        r.define_singleton_method(:results)  { [] }
+        r.define_singleton_method(:count) { filtered.size }
+        r.define_singleton_method(:results) { [] }
         next r
       end
 
       limit = query[:limit] || filtered.size
-      page  = filtered.first(limit.to_i)
+      page = filtered.first(limit.to_i)
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { page }
-      r.define_singleton_method(:count)    { page.size }
+      r.define_singleton_method(:results) { page }
+      r.define_singleton_method(:count) { page.size }
       r
     end
 
@@ -124,7 +124,7 @@ class ToolsLargeDatasetTest < Minitest::Test
       end
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { out }
+      r.define_singleton_method(:results) { out }
       r
     end
 
@@ -173,7 +173,7 @@ class ToolsLargeDatasetTest < Minitest::Test
 
   def test_query_with_max_limit_still_caps_display_at_50
     result = @agent.execute(:query_class, class_name: "LargeStudent",
-                            limit: Parse::Agent::MAX_LIMIT)
+                                          limit: Parse::Agent::MAX_LIMIT)
     assert result[:success]
     data = result[:data]
     # Even at the MAX_LIMIT (1000) the display is still 50.
@@ -195,7 +195,7 @@ class ToolsLargeDatasetTest < Minitest::Test
     # of four values evenly distributed, so the count should be roughly
     # TOTAL/4 (the rng + needle injection produces a small variance).
     result = @agent.execute(:count_objects, class_name: "LargeStudent",
-                            where: { "grade" => 12 })
+                                            where: { "grade" => 12 })
     assert result[:success]
     count = result[:data][:count]
     assert_in_delta TOTAL / 4.0, count, TOTAL * 0.05
@@ -205,7 +205,7 @@ class ToolsLargeDatasetTest < Minitest::Test
     # The needle is one row out of 100k. With a precise equality filter the
     # query returns exactly one row and the display does not need to truncate.
     result = @agent.execute(:query_class, class_name: "LargeStudent",
-                            where: { "name" => NEEDLE_NAME })
+                                          where: { "name" => NEEDLE_NAME })
     assert result[:success]
     data = result[:data]
     assert_equal 1, data[:result_count]
@@ -213,14 +213,14 @@ class ToolsLargeDatasetTest < Minitest::Test
     found = data[:results].first
     assert_equal NEEDLE_NAME, found["name"]
     assert_equal NEEDLE_GRADE, found["grade"]
-    assert_equal NEEDLE_SUBJ,  found["subject"]
+    assert_equal NEEDLE_SUBJ, found["subject"]
   end
 
   # ---- aggregate: auto-$limit ------------------------------------------
 
   def test_aggregate_match_only_is_auto_limited
     result = @agent.execute(:aggregate, class_name: "LargeStudent",
-                            pipeline: [{ "$match" => { "grade" => 11 } }])
+                                        pipeline: [{ "$match" => { "grade" => 11 } }])
     assert result[:success]
     data = result[:data]
     assert_equal true, data[:auto_limited]
@@ -231,8 +231,8 @@ class ToolsLargeDatasetTest < Minitest::Test
 
   def test_aggregate_terminal_count_is_not_limited
     result = @agent.execute(:aggregate, class_name: "LargeStudent",
-                            pipeline: [{ "$match" => { "grade" => 12 } },
-                                       { "$count" => "total" }])
+                                        pipeline: [{ "$match" => { "grade" => 12 } },
+                                                   { "$count" => "total" }])
     assert result[:success]
     data = result[:data]
     refute data[:auto_limited]
@@ -243,8 +243,8 @@ class ToolsLargeDatasetTest < Minitest::Test
 
   def test_aggregate_explicit_terminal_limit_is_respected
     result = @agent.execute(:aggregate, class_name: "LargeStudent",
-                            pipeline: [{ "$match" => { "grade" => 10 } },
-                                       { "$limit" => 25 }])
+                                        pipeline: [{ "$match" => { "grade" => 10 } },
+                                                   { "$limit" => 25 }])
     assert result[:success]
     data = result[:data]
     refute data[:auto_limited]
@@ -257,17 +257,17 @@ class ToolsLargeDatasetTest < Minitest::Test
     # supplied. The hint is gated on result_count >= cap so small
     # aggregations don't pay the ~200-byte hint cost on every call.
     result = @agent.execute(:aggregate, class_name: "LargeStudent",
-                            pipeline: [
-                              { "$match" => { "grade" => 10 } },
-                              { "$group" => { "_id" => "$subject", "n" => { "$sum" => 1 } } },
-                            ])
+                                        pipeline: [
+                                          { "$match" => { "grade" => 10 } },
+                                          { "$group" => { "_id" => "$subject", "n" => { "$sum" => 1 } } },
+                                        ])
     assert result[:success]
     data = result[:data]
     assert data[:result_count] < 200,
            "grouped result must be smaller than the auto-cap for this regression to be meaningful"
     refute data[:auto_limited], "auto_limited must NOT be set when the cap did not fire"
-    refute data[:auto_limit],   "auto_limit must NOT be set when the cap did not fire"
-    refute data[:hint],         "hint must NOT be set when the cap did not fire"
+    refute data[:auto_limit], "auto_limit must NOT be set when the cap did not fire"
+    refute data[:hint], "hint must NOT be set when the cap did not fire"
   end
 
   # ---- export_data: row_cap truncation ----------------------------------
@@ -278,7 +278,7 @@ class ToolsLargeDatasetTest < Minitest::Test
     # therefore returns the cap's worth of rows and is not flagged
     # truncated (truncated only fires when available > cap).
     result = @agent.execute(:export_data, class_name: "LargeStudent",
-                            limit: 5_000, format: "csv")
+                                          limit: 5_000, format: "csv")
     assert result[:success]
     data = result[:data]
     # MAX_LIMIT (1000) bounds the upstream fetch; row_cap (1000) equals
@@ -293,7 +293,7 @@ class ToolsLargeDatasetTest < Minitest::Test
     # Upstream fetch limit (500) > row_cap (100) — the cap clips and the
     # truncated flag fires.
     result = @agent.execute(:export_data, class_name: "LargeStudent",
-                            limit: 500, row_cap: 100, format: "csv")
+                                          limit: 500, row_cap: 100, format: "csv")
     assert result[:success]
     data = result[:data]
     assert data[:truncated]
@@ -308,8 +308,8 @@ class ToolsLargeDatasetTest < Minitest::Test
     # gets auto-$limit:200 injected (so the upstream fetch is bounded).
     # row_cap then clips the formatted output further.
     result = @agent.execute(:export_data, class_name: "LargeStudent",
-                            pipeline: [{ "$match" => { "grade" => 11 } }],
-                            row_cap: 100, format: "csv")
+                                          pipeline: [{ "$match" => { "grade" => 11 } }],
+                                          row_cap: 100, format: "csv")
     assert result[:success]
     data = result[:data]
     # 200 rows came back from the underlying aggregate (auto-limited);
@@ -321,8 +321,8 @@ class ToolsLargeDatasetTest < Minitest::Test
 
   def test_export_data_finding_needle_returns_one_row
     result = @agent.execute(:export_data, class_name: "LargeStudent",
-                            where: { "name" => NEEDLE_NAME },
-                            format: "csv")
+                                          where: { "name" => NEEDLE_NAME },
+                                          format: "csv")
     assert result[:success]
     data = result[:data]
     assert_equal 1, data[:row_count]

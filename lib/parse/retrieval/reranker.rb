@@ -100,11 +100,10 @@ module Parse
 
         def normalize_results(pairs, doc_count, top_n)
           results = Array(pairs).map do |p|
-            idx, score =
-              case p
+            idx, score = case p
               when Result then [p.index, p.relevance_score]
-              when Array  then [p[0], p[1]]
-              when Hash   then [p[:index] || p["index"], p[:relevance_score] || p["relevance_score"]]
+              when Array then [p[0], p[1]]
+              when Hash then [p[:index] || p["index"], p[:relevance_score] || p["relevance_score"]]
               else
                 raise InvalidResponseError, "#{self.class}: unexpected rerank result element #{p.inspect}."
               end

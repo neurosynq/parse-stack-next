@@ -900,10 +900,10 @@ module Parse
                 "$expr" => {
                   "$setEquals" => [
                     { "$map" => {
-                        "input" => { "$ifNull" => ["$#{field_name}", []] },
-                        "as" => "p",
-                        "in" => "$$p.objectId",
-                      } },
+                      "input" => { "$ifNull" => ["$#{field_name}", []] },
+                      "as" => "p",
+                      "in" => "$$p.objectId",
+                    } },
                     target_ids,
                   ],
                 },
@@ -996,10 +996,10 @@ module Parse
                 "$expr" => {
                   "$eq" => [
                     { "$map" => {
-                        "input" => { "$ifNull" => ["$#{field_name}", []] },
-                        "as" => "p",
-                        "in" => "$$p.objectId",
-                      } },
+                      "input" => { "$ifNull" => ["$#{field_name}", []] },
+                      "as" => "p",
+                      "in" => "$$p.objectId",
+                    } },
                     target_ids,
                   ],
                 },
@@ -1086,10 +1086,10 @@ module Parse
                 "$expr" => {
                   "$ne" => [
                     { "$map" => {
-                        "input" => { "$ifNull" => ["$#{field_name}", []] },
-                        "as" => "p",
-                        "in" => "$$p.objectId",
-                      } },
+                      "input" => { "$ifNull" => ["$#{field_name}", []] },
+                      "as" => "p",
+                      "in" => "$$p.objectId",
+                    } },
                     target_ids,
                   ],
                 },
@@ -1178,10 +1178,10 @@ module Parse
                   "$not" => {
                     "$setEquals" => [
                       { "$map" => {
-                          "input" => { "$ifNull" => ["$#{field_name}", []] },
-                          "as" => "p",
-                          "in" => "$$p.objectId",
-                        } },
+                        "input" => { "$ifNull" => ["$#{field_name}", []] },
+                        "as" => "p",
+                        "in" => "$$p.objectId",
+                      } },
                       target_ids,
                     ],
                   },
@@ -1344,10 +1344,10 @@ module Parse
                 "$expr" => {
                   "$setIsSubset" => [
                     { "$map" => {
-                        "input" => { "$ifNull" => ["$#{field_name}", []] },
-                        "as" => "p",
-                        "in" => "$$p.objectId",
-                      } },
+                      "input" => { "$ifNull" => ["$#{field_name}", []] },
+                      "as" => "p",
+                      "in" => "$$p.objectId",
+                    } },
                     target_ids,
                   ],
                 },
@@ -1409,10 +1409,10 @@ module Parse
                 "$expr" => {
                   "$eq" => [
                     { "$arrayElemAt" => [{ "$map" => {
-                        "input" => { "$ifNull" => ["$#{field_name}", []] },
-                        "as" => "p",
-                        "in" => "$$p.objectId",
-                      } }, 0] },
+                      "input" => { "$ifNull" => ["$#{field_name}", []] },
+                      "as" => "p",
+                      "in" => "$$p.objectId",
+                    } }, 0] },
                     compare_val,
                   ],
                 },
@@ -1427,10 +1427,10 @@ module Parse
                 "$expr" => {
                   "$eq" => [
                     { "$arrayElemAt" => [{ "$map" => {
-                        "input" => { "$ifNull" => ["$#{field_name}", []] },
-                        "as" => "p",
-                        "in" => "$$p.objectId",
-                      } }, 0] },
+                      "input" => { "$ifNull" => ["$#{field_name}", []] },
+                      "as" => "p",
+                      "in" => "$$p.objectId",
+                    } }, 0] },
                     compare_val,
                   ],
                 },
@@ -1490,10 +1490,10 @@ module Parse
                 "$expr" => {
                   "$eq" => [
                     { "$arrayElemAt" => [{ "$map" => {
-                        "input" => { "$ifNull" => ["$#{field_name}", []] },
-                        "as" => "p",
-                        "in" => "$$p.objectId",
-                      } }, -1] },
+                      "input" => { "$ifNull" => ["$#{field_name}", []] },
+                      "as" => "p",
+                      "in" => "$$p.objectId",
+                    } }, -1] },
                     compare_val,
                   ],
                 },
@@ -1508,10 +1508,10 @@ module Parse
                 "$expr" => {
                   "$eq" => [
                     { "$arrayElemAt" => [{ "$map" => {
-                        "input" => { "$ifNull" => ["$#{field_name}", []] },
-                        "as" => "p",
-                        "in" => "$$p.objectId",
-                      } }, -1] },
+                      "input" => { "$ifNull" => ["$#{field_name}", []] },
+                      "as" => "p",
+                      "in" => "$$p.objectId",
+                    } }, -1] },
                     compare_val,
                   ],
                 },
@@ -1679,8 +1679,8 @@ module Parse
           Parse::RegexSecurity.validate!(pattern_str)
 
           return options.empty? ?
-            { @operation.operand => { key => pattern_str } } :
-            { @operation.operand => { key => pattern_str, :$options => options } }
+                   { @operation.operand => { key => pattern_str } } :
+                   { @operation.operand => { key => pattern_str, :$options => options } }
         end
 
         value = formatted_value
@@ -1838,8 +1838,7 @@ module Parse
           # of the chosen unit. Without this cap, an attacker-controlled
           # `max_*` (e.g. user-supplied km) can submit a huge value and
           # force a full-collection scan.
-          radians_for_check =
-            case unit
+          radians_for_check = case unit
             when :km then max_distance.to_f / KM_PER_RADIAN
             when :radians then max_distance.to_f
             else max_distance.to_f / MILES_PER_RADIAN
@@ -1851,8 +1850,7 @@ module Parse
                                  "and degenerates $nearSphere into a full collection scan."
           end
 
-          distance_key =
-            case unit
+          distance_key = case unit
             when :km then :$maxDistanceInKilometers
             when :radians then :$maxDistance
             else :$maxDistanceInMiles
@@ -2020,8 +2018,7 @@ module Parse
           raise ArgumentError, "[Parse::Query] `within_sphere` distance must be a positive number."
         end
 
-        radians =
-          case unit
+        radians = case unit
           when :radians then distance.to_f
           when :km, :kilometers then distance.to_f / KM_PER_RADIAN
           when :miles then distance.to_f / MILES_PER_RADIAN
@@ -2157,8 +2154,7 @@ module Parse
       # @return [Hash] the compiled constraint.
       def build
         value = formatted_value
-        point =
-          case value
+        point = case value
           when Parse::GeoPoint
             { __type: "GeoPoint", latitude: value.latitude, longitude: value.longitude }
           when Array
@@ -2863,6 +2859,7 @@ module Parse
     # than access simulation ("what can this principal read").
     class ACLReadableByExactConstraint < ACLReadableByConstraint
       register :readable_by_exact
+
       def strict?
         true
       end
@@ -2904,6 +2901,7 @@ module Parse
     # {ACLReadableByExactConstraint}.
     class ACLReadableByRoleExactConstraint < ACLReadableByRoleConstraint
       register :readable_by_role_exact
+
       def strict?
         true
       end
@@ -2956,6 +2954,7 @@ module Parse
     # {ACLReadableByExactConstraint}.
     class ACLWritableByExactConstraint < ACLWritableByConstraint
       register :writable_by_exact
+
       def strict?
         true
       end
@@ -2997,6 +2996,7 @@ module Parse
     # {ACLReadableByExactConstraint}.
     class ACLWritableByRoleExactConstraint < ACLWritableByRoleConstraint
       register :writable_by_role_exact
+
       def strict?
         true
       end

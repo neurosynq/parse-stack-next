@@ -30,7 +30,7 @@ class AgentSecurityHardeningTest < Minitest::Test
 
   class SHSong < Parse::Object
     parse_class "SHSong"
-    property :title,     :string
+    property :title, :string
     property :archived, :boolean
 
     agent_canonical_filter "archived" => { "$ne" => true }
@@ -64,7 +64,7 @@ class AgentSecurityHardeningTest < Minitest::Test
     Parse::Agent::Tools.reset_registry! if T.respond_to?(:reset_registry!)
     Parse::Agent.refuse_collscan = false
     @agent = Parse::Agent.new(permissions: :readonly)
-    @agg_calls  = []
+    @agg_calls = []
     @find_calls = []
   end
 
@@ -96,8 +96,8 @@ class AgentSecurityHardeningTest < Minitest::Test
       calls << [class_name, pipeline]
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { results }
-      r.define_singleton_method(:error)    { nil }
+      r.define_singleton_method(:results) { results }
+      r.define_singleton_method(:error) { nil }
       r
     end
     @agent.define_singleton_method(:client) { fake }
@@ -110,18 +110,18 @@ class AgentSecurityHardeningTest < Minitest::Test
       calls << [class_name, query]
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:count)    { results.size }
-      r.define_singleton_method(:results)  { results }
-      r.define_singleton_method(:result)   { results.first }
-      r.define_singleton_method(:error)    { nil }
+      r.define_singleton_method(:count) { results.size }
+      r.define_singleton_method(:results) { results }
+      r.define_singleton_method(:result) { results.first }
+      r.define_singleton_method(:error) { nil }
       r
     end
     fake.define_singleton_method(:aggregate_pipeline) do |cn, pl, **_opts|
       agg_calls << [cn, pl]
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { [] }
-      r.define_singleton_method(:error)    { nil }
+      r.define_singleton_method(:results) { [] }
+      r.define_singleton_method(:error) { nil }
       r
     end
     @agent.define_singleton_method(:client) { fake }
@@ -199,7 +199,7 @@ class AgentSecurityHardeningTest < Minitest::Test
     @agent.define_singleton_method(:client) { fake }
     assert_raises(CT::ConstraintSecurityError) do
       @agent.execute(:count_objects, class_name: "SHSong",
-                     where: { "_hashed_password" => { "$regex" => "^X" } })
+                                     where: { "_hashed_password" => { "$regex" => "^X" } })
     end
     refute invoked[:called], "client.find_objects must never be invoked"
   end
@@ -209,7 +209,7 @@ class AgentSecurityHardeningTest < Minitest::Test
     @agent.define_singleton_method(:client) { fake }
     assert_raises(CT::ConstraintSecurityError) do
       @agent.execute(:count_objects, class_name: "SHSong",
-                     where: { "_session_token" => { "$ne" => nil } })
+                                     where: { "_session_token" => { "$ne" => nil } })
     end
     refute invoked[:called]
   end
@@ -219,7 +219,7 @@ class AgentSecurityHardeningTest < Minitest::Test
     @agent.define_singleton_method(:client) { fake }
     assert_raises(CT::ConstraintSecurityError) do
       @agent.execute(:count_objects, class_name: "SHSong",
-                     where: { "_auth_data_facebook" => { "$exists" => true } })
+                                     where: { "_auth_data_facebook" => { "$exists" => true } })
     end
     refute invoked[:called]
   end
@@ -230,7 +230,7 @@ class AgentSecurityHardeningTest < Minitest::Test
     @agent.define_singleton_method(:client) { fake }
     assert_raises(CT::ConstraintSecurityError) do
       @agent.execute(:query_class, class_name: "SHSong",
-                     where: { "_hashed_password" => { "$regex" => "^X" } })
+                                   where: { "_hashed_password" => { "$regex" => "^X" } })
     end
     refute invoked[:called]
   end
@@ -241,7 +241,7 @@ class AgentSecurityHardeningTest < Minitest::Test
     @agent.define_singleton_method(:client) { fake }
     assert_raises(CT::ConstraintSecurityError) do
       @agent.execute(:group_by, class_name: "SHSong", field: "title",
-                     where: { "_hashed_password" => { "$regex" => "^X" } })
+                                where: { "_hashed_password" => { "$regex" => "^X" } })
     end
     refute invoked[:called]
   end
@@ -255,10 +255,10 @@ class AgentSecurityHardeningTest < Minitest::Test
     assert_raises(Parse::PipelineSecurity::Error,
                   Parse::Agent::PipelineValidator::PipelineSecurityError) do
       @agent.execute(:aggregate, class_name: "SHSong",
-                     pipeline: [
-                       { "$match" => { "_hashed_password" => { "$regex" => "^X" } } },
-                       { "$count" => "total" },
-                     ])
+                                 pipeline: [
+                                   { "$match" => { "_hashed_password" => { "$regex" => "^X" } } },
+                                   { "$count" => "total" },
+                                 ])
     end
     refute invoked[:called], "aggregate_pipeline must never be invoked"
   end
@@ -269,8 +269,8 @@ class AgentSecurityHardeningTest < Minitest::Test
     assert_raises(Parse::PipelineSecurity::Error,
                   Parse::Agent::PipelineValidator::PipelineSecurityError) do
       @agent.execute(:aggregate, class_name: "SHSong",
-                     pipeline: [{ "$match" => { "_session_token" => { "$ne" => nil } } },
-                                { "$count" => "total" }])
+                                 pipeline: [{ "$match" => { "_session_token" => { "$ne" => nil } } },
+                                            { "$count" => "total" }])
     end
     refute invoked[:called]
   end
@@ -281,8 +281,8 @@ class AgentSecurityHardeningTest < Minitest::Test
     assert_raises(Parse::PipelineSecurity::Error,
                   Parse::Agent::PipelineValidator::PipelineSecurityError) do
       @agent.execute(:aggregate, class_name: "SHSong",
-                     pipeline: [{ "$match" => { "_auth_data_facebook" => { "$exists" => true } } },
-                                { "$count" => "total" }])
+                                 pipeline: [{ "$match" => { "_auth_data_facebook" => { "$exists" => true } } },
+                                            { "$count" => "total" }])
     end
     refute invoked[:called]
   end
@@ -418,7 +418,7 @@ class AgentSecurityHardeningTest < Minitest::Test
   def test_export_via_aggregate_applies_canonical_filter
     stub_aggregate([])
     @agent.execute(:export_data, class_name: "SHSong", format: "csv",
-                   pipeline: [{ "$group" => { "_id" => "$title" } }])
+                                 pipeline: [{ "$group" => { "_id" => "$title" } }])
     _, pipeline = @agg_calls.first
     match_stages = pipeline.select { |s| s.is_a?(Hash) && s.keys.first.to_s == "$match" }
     canonical_present = match_stages.any? do |s|
@@ -484,7 +484,7 @@ class AgentSecurityHardeningTest < Minitest::Test
     refute result.key?("_auth_data_facebook"),
            "strip_internal_fields must remove _auth_data_* keys"
     assert_equal "Alice", result["name"]
-    assert_equal 5,       result["score"]
+    assert_equal 5, result["score"]
   end
 
   # =========================================================================
@@ -507,7 +507,7 @@ class AgentSecurityHardeningTest < Minitest::Test
       refute_match(/abc123|def456/, row.to_json,
                    "objectId from hidden class must be scrubbed when key is not _p_*")
       assert_kind_of Hash, row["leak"],
-                    "value should be replaced with redacted placeholder hash"
+                     "value should be replaced with redacted placeholder hash"
       assert_equal "SHHiddenClass", row["leak"]["className"]
       assert row["leak"]["__redacted"]
     end
@@ -526,7 +526,7 @@ class AgentSecurityHardeningTest < Minitest::Test
       refute_match(/abc123|def456/, row.to_json,
                    "objectId from hidden class must be scrubbed in $group._id result")
       assert_kind_of Hash, row["_id"],
-                    "_id should be replaced with redacted placeholder hash"
+                     "_id should be replaced with redacted placeholder hash"
       assert_equal "SHHiddenClass", row["_id"]["className"]
     end
   end
@@ -548,7 +548,7 @@ class AgentSecurityHardeningTest < Minitest::Test
       { "leak" => "SHHiddenClass$def456" },
     ])
     result = @agent.execute(:aggregate, class_name: "SHVisible",
-                            pipeline: [{ "$project" => { "leak" => 1 } }])
+                                        pipeline: [{ "$project" => { "leak" => 1 } }])
     assert result[:success], result.inspect
     result[:data].each do |row|
       refute_match(/abc123|def456/, row.to_json,
@@ -561,7 +561,7 @@ class AgentSecurityHardeningTest < Minitest::Test
       { "_id" => "SHHiddenClass$abc123", "count" => 5 },
     ])
     result = @agent.execute(:aggregate, class_name: "SHVisible",
-                            pipeline: [{ "$group" => { "_id" => "$label", "count" => { "$sum" => 1 } } }])
+                                        pipeline: [{ "$group" => { "_id" => "$label", "count" => { "$sum" => 1 } } }])
     assert result[:success], result.inspect
     result[:data].each do |row|
       refute_match(/abc123/, row.to_json,
@@ -640,7 +640,7 @@ class AgentSecurityHardeningTest < Minitest::Test
     assert_raises(Parse::PipelineSecurity::Error,
                   Parse::Agent::PipelineValidator::PipelineSecurityError) do
       @agent.execute(:aggregate, class_name: "SHArtist",
-                     pipeline: [{ "$project" => { "x" => "$_hashed_password" } }])
+                                 pipeline: [{ "$project" => { "x" => "$_hashed_password" } }])
     end
     refute invoked[:called]
   end
@@ -651,7 +651,7 @@ class AgentSecurityHardeningTest < Minitest::Test
     assert_raises(Parse::PipelineSecurity::Error,
                   Parse::Agent::PipelineValidator::PipelineSecurityError) do
       @agent.execute(:aggregate, class_name: "SHArtist",
-                     pipeline: [{ "$group" => { "_id" => "$_auth_data_facebook" } }])
+                                 pipeline: [{ "$group" => { "_id" => "$_auth_data_facebook" } }])
     end
     refute invoked[:called]
   end

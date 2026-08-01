@@ -807,7 +807,7 @@ class ACLConstraintsUnitTest < Minitest::Test
     puts "\n=== Testing writeable_by == writable_by ==="
 
     american = Parse::Query.new("Post").where(:ACL.writable_by => "role:Admin").pipeline
-    british  = Parse::Query.new("Post").where(:ACL.writeable_by => "role:Admin").pipeline
+    british = Parse::Query.new("Post").where(:ACL.writeable_by => "role:Admin").pipeline
     assert_equal american, british, "writeable_by must compile identically to writable_by"
     assert american.first["$match"].key?("$or"), "both are public-inclusive"
 

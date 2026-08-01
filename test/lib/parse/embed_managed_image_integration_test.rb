@@ -166,7 +166,7 @@ class EmbedManagedImageIntegrationTest < Minitest::Test
     doc.cover_art = file
     assert doc.save
     first_digest = doc.cover_embedding_digest
-    first_calls  = @provider.calls.length
+    first_calls = @provider.calls.length
     assert_equal 1, first_calls
 
     # Mutate an unrelated field; file URL unchanged.
@@ -186,9 +186,9 @@ class EmbedManagedImageIntegrationTest < Minitest::Test
     doc = EmbedImageDocE2E.new
     doc.cover_art = file_a
     assert doc.save
-    first_calls  = @provider.calls.length
+    first_calls = @provider.calls.length
     first_digest = doc.cover_embedding_digest
-    first_vec   = doc.cover_embedding.to_a.dup
+    first_vec = doc.cover_embedding.to_a.dup
 
     file_b = upload_and_rewrite_image(suffix: "b")
     refute_equal file_a.url, file_b.url, "fixtures must produce distinct URLs"

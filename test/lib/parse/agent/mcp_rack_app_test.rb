@@ -75,8 +75,8 @@ class MCPRackAppTest < Minitest::Test
                body: '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
     {
       "REQUEST_METHOD" => method,
-      "CONTENT_TYPE"   => content_type,
-      "rack.input"     => StringIO.new(body),
+      "CONTENT_TYPE" => content_type,
+      "rack.input" => StringIO.new(body),
     }
   end
 
@@ -129,8 +129,8 @@ class MCPRackAppTest < Minitest::Test
   # A GET env requesting the server→client listening stream.
   def listening_stream_env(session_id: "sess-abc123")
     {
-      "REQUEST_METHOD"      => "GET",
-      "HTTP_ACCEPT"         => "text/event-stream",
+      "REQUEST_METHOD" => "GET",
+      "HTTP_ACCEPT" => "text/event-stream",
       "HTTP_MCP_SESSION_ID" => session_id,
     }
   end

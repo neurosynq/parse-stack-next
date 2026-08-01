@@ -57,12 +57,12 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
 
   PROBE_SUBJECTS = [
     { name: "Algebra II", department: "Mathematics" },
-    { name: "Biology",    department: "Sciences"    },
+    { name: "Biology", department: "Sciences" },
   ].freeze
 
   PROBE_TEACHERS = [
     { name: "Ms. Vasquez", rating: 4.9, subject_name: "Algebra II" },
-    { name: "Mr. Okafor",  rating: 4.2, subject_name: "Biology"    },
+    { name: "Mr. Okafor", rating: 4.2, subject_name: "Biology" },
   ].freeze
 
   # NOTE: do NOT override `def setup` / `def teardown` here.
@@ -117,7 +117,7 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       agent = Parse::Agent.new(permissions: :readonly)
 
       tools_envelope = mcp_call({ "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }, agent)
-      tools          = tools_envelope.dig("result", "tools")
+      tools = tools_envelope.dig("result", "tools")
       refute_nil tools, "tools/list returned no tools"
       openai_tools = mcp_tools_to_openai(tools)
 
@@ -137,7 +137,7 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       PROMPT
 
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 8)
-      flat       = transcript.map { |m| m[:content].to_s }.join(" ")
+      flat = transcript.map { |m| m[:content].to_s }.join(" ")
       tool_calls = transcript.flat_map { |m| Array(m[:tool_calls]).map { |tc| tc[:name] } }
 
       refute_empty tool_calls, "LLM must invoke at least one MCP tool; got none"
@@ -149,7 +149,7 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
         "LLM must call get_schema to inspect the teacher class; called: #{tool_calls.inspect}"
 
       assert_match(/MCPSchemaProbeTeacher/i, flat,
-        "LLM answer must name MCPSchemaProbeTeacher; got: #{flat[0, 800]}")
+                   "LLM answer must name MCPSchemaProbeTeacher; got: #{flat[0, 800]}")
 
       # The schema has three custom fields: name, rating, subject (pointer).
       # Require at least 2 to be mentioned — LLMs sometimes omit pointer fields.
@@ -223,9 +223,9 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       schema_envelope = mcp_call(
         {
           "jsonrpc" => "2.0",
-          "id"      => 11,
-          "method"  => "resources/read",
-          "params"  => { "uri" => "parse://MCPSchemaProbeSubject/schema" },
+          "id" => 11,
+          "method" => "resources/read",
+          "params" => { "uri" => "parse://MCPSchemaProbeSubject/schema" },
         },
         agent
       )
@@ -241,9 +241,9 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       samples_envelope = mcp_call(
         {
           "jsonrpc" => "2.0",
-          "id"      => 12,
-          "method"  => "resources/read",
-          "params"  => { "uri" => "parse://MCPSchemaProbeSubject/samples" },
+          "id" => 12,
+          "method" => "resources/read",
+          "params" => { "uri" => "parse://MCPSchemaProbeSubject/samples" },
         },
         agent
       )
@@ -259,9 +259,9 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       count_envelope = mcp_call(
         {
           "jsonrpc" => "2.0",
-          "id"      => 13,
-          "method"  => "resources/read",
-          "params"  => { "uri" => "parse://MCPSchemaProbeSubject/count" },
+          "id" => 13,
+          "method" => "resources/read",
+          "params" => { "uri" => "parse://MCPSchemaProbeSubject/count" },
         },
         agent
       )
@@ -296,17 +296,17 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
 
       # No tools needed here — pure context interpretation by the LLM.
       reply = openai_chat(messages: [{ role: "user", content: prompt }], tools: [])
-      flat  = reply[:content].to_s
+      flat = reply[:content].to_s
 
       # The LLM must recognize both subject names from the samples data.
       subject_names.each do |name|
         assert_match(/#{Regexp.escape(name)}/i, flat,
-          "LLM must mention subject '#{name}' from the samples resource; got: #{flat[0, 600]}")
+                     "LLM must mention subject '#{name}' from the samples resource; got: #{flat[0, 600]}")
       end
 
       # The LLM must report the count of 2.
       assert_match(/\b2\b|two/i, flat,
-        "LLM must report 2 subjects (or 'two'); got: #{flat[0, 600]}")
+                   "LLM must report 2 subjects (or 'two'); got: #{flat[0, 600]}")
     end
   end
 
@@ -355,7 +355,7 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       prompts.each do |p|
         assert p["name"].to_s.length > 0, "prompt must have a non-empty name"
         assert p.key?("description"), "prompt #{p["name"].inspect} must have 'description'"
-        assert p.key?("arguments"),   "prompt #{p["name"].inspect} must have 'arguments'"
+        assert p.key?("arguments"), "prompt #{p["name"].inspect} must have 'arguments'"
         assert p["arguments"].is_a?(Array), "prompt #{p["name"].inspect} arguments must be an Array"
       end
 
@@ -363,16 +363,16 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       conventions_envelope = mcp_call(
         {
           "jsonrpc" => "2.0",
-          "id"      => 21,
-          "method"  => "prompts/get",
-          "params"  => { "name" => "parse_conventions", "arguments" => {} },
+          "id" => 21,
+          "method" => "prompts/get",
+          "params" => { "name" => "parse_conventions", "arguments" => {} },
         },
         agent
       )
       conventions_result = conventions_envelope.dig("result")
       refute_nil conventions_result, "prompts/get parse_conventions must return a result"
       assert conventions_result.key?("description"), "prompts/get result must have 'description'"
-      assert conventions_result.key?("messages"),    "prompts/get result must have 'messages'"
+      assert conventions_result.key?("messages"), "prompts/get result must have 'messages'"
 
       messages = conventions_result["messages"]
       assert messages.is_a?(Array) && !messages.empty?,
@@ -388,10 +388,10 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       overview_envelope = mcp_call(
         {
           "jsonrpc" => "2.0",
-          "id"      => 22,
-          "method"  => "prompts/get",
-          "params"  => {
-            "name"      => "class_overview",
+          "id" => 22,
+          "method" => "prompts/get",
+          "params" => {
+            "name" => "class_overview",
             "arguments" => { "class_name" => "MCPSchemaProbeTeacher" },
           },
         },
@@ -414,15 +414,15 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       # get_sample_objects — so tools must be available for the LLM to act on
       # the prompt's instructions.
       tools_envelope = mcp_call({ "jsonrpc" => "2.0", "id" => 23, "method" => "tools/list", "params" => {} }, agent)
-      openai_tools   = mcp_tools_to_openai(tools_envelope.dig("result", "tools") || [])
+      openai_tools = mcp_tools_to_openai(tools_envelope.dig("result", "tools") || [])
 
       transcript = llm_round_trip(
-        prompt:         overview_text,
-        tools:          openai_tools,
-        agent:          agent,
-        max_iterations: 8
+        prompt: overview_text,
+        tools: openai_tools,
+        agent: agent,
+        max_iterations: 8,
       )
-      flat       = transcript.map { |m| m[:content].to_s }.join(" ")
+      flat = transcript.map { |m| m[:content].to_s }.join(" ")
       tool_calls = transcript.flat_map { |m| Array(m[:tool_calls]).map { |tc| tc[:name] } }
 
       # The LLM should have called at least one introspection tool in response
@@ -458,7 +458,7 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       agent = Parse::Agent.new(permissions: :readonly)
 
       tools_envelope = mcp_call({ "jsonrpc" => "2.0", "id" => 30, "method" => "tools/list", "params" => {} }, agent)
-      tools          = tools_envelope.dig("result", "tools")
+      tools = tools_envelope.dig("result", "tools")
       refute_nil tools, "tools/list returned no tools"
       openai_tools = mcp_tools_to_openai(tools)
 
@@ -483,7 +483,7 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       PROMPT
 
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 10)
-      flat       = transcript.map { |m| m[:content].to_s }.join(" ")
+      flat = transcript.map { |m| m[:content].to_s }.join(" ")
       tool_calls = transcript.flat_map { |m| Array(m[:tool_calls]).map { |tc| tc[:name] } }
 
       refute_empty tool_calls, "LLM must invoke at least one MCP tool; got none"
@@ -498,9 +498,9 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
 
       # The final summary must mention both probe class names.
       assert_match(/MCPSchemaProbeSubject/i, flat,
-        "LLM summary must mention MCPSchemaProbeSubject; got: #{flat[0, 1000]}")
+                   "LLM summary must mention MCPSchemaProbeSubject; got: #{flat[0, 1000]}")
       assert_match(/MCPSchemaProbeTeacher/i, flat,
-        "LLM summary must mention MCPSchemaProbeTeacher; got: #{flat[0, 1000]}")
+                   "LLM summary must mention MCPSchemaProbeTeacher; got: #{flat[0, 1000]}")
 
       # The summary must include actual counts. Each probe class has exactly 2
       # objects (2 subjects, 2 teachers). Accept the digit "2" or word "two".
@@ -523,16 +523,16 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
     case @provider
     when "lmstudio"
       @base_url = ENV["LLM_BASE_URL"] || "http://localhost:1234/v1"
-      @model    = ENV["LLM_MODEL"]    || "qwen2.5-7b-instruct"
-      @api_key  = ENV["LLM_API_KEY"]  || "lm-studio"
+      @model = ENV["LLM_MODEL"] || "qwen2.5-7b-instruct"
+      @api_key = ENV["LLM_API_KEY"] || "lm-studio"
     when "openai"
       @base_url = ENV["LLM_BASE_URL"] || "https://api.openai.com/v1"
-      @model    = ENV["LLM_MODEL"]    || "gpt-4o-mini"
-      @api_key  = ENV["LLM_API_KEY"]
+      @model = ENV["LLM_MODEL"] || "gpt-4o-mini"
+      @api_key = ENV["LLM_API_KEY"]
     when "anthropic"
       @base_url = ENV["LLM_BASE_URL"] || "https://api.anthropic.com/v1"
-      @model    = ENV["LLM_MODEL"]    || "claude-haiku-4-5"
-      @api_key  = ENV["LLM_API_KEY"]
+      @model = ENV["LLM_MODEL"] || "claude-haiku-4-5"
+      @api_key = ENV["LLM_API_KEY"]
     else
       skip "Unknown LLM_PROVIDER=#{@provider.inspect}"
     end
@@ -554,9 +554,9 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       {
         type: "function",
         function: {
-          name:        h["name"],
+          name: h["name"],
           description: h["description"].to_s[0, 1024],
-          parameters:  h["inputSchema"] || { "type" => "object", "properties" => {} },
+          parameters: h["inputSchema"] || { "type" => "object", "properties" => {} },
         },
       }
     end
@@ -567,7 +567,7 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
   # --------------------------------------------------------------------------
 
   def llm_round_trip(prompt:, tools:, agent:, max_iterations: 6)
-    messages   = [{ role: "user", content: prompt }]
+    messages = [{ role: "user", content: prompt }]
     transcript = []
 
     max_iterations.times do
@@ -580,16 +580,16 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       reply[:tool_calls].each do |tc|
         body = {
           "jsonrpc" => "2.0",
-          "id"      => SecureRandom.hex(4),
-          "method"  => "tools/call",
-          "params"  => { "name" => tc[:name], "arguments" => tc[:arguments] },
+          "id" => SecureRandom.hex(4),
+          "method" => "tools/call",
+          "params" => { "name" => tc[:name], "arguments" => tc[:arguments] },
         }
-        result    = mcp_call(body, agent)
+        result = mcp_call(body, agent)
         tool_text = if result["result"]
-          (result.dig("result", "content", 0, "text") || result["result"].to_json)
-        else
-          result.dig("error", "message").to_s
-        end
+            (result.dig("result", "content", 0, "text") || result["result"].to_json)
+          else
+            result.dig("error", "message").to_s
+          end
         messages << { role: "tool", tool_call_id: tc[:id], content: tool_text }
       end
     end
@@ -600,7 +600,7 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
   def call_llm(messages:, tools:)
     case @provider
     when "anthropic" then anthropic_chat(messages: messages, tools: tools)
-    else                  openai_chat(messages: messages, tools: tools)
+    else openai_chat(messages: messages, tools: tools)
     end
   end
 
@@ -621,7 +621,7 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
         out = { role: "assistant", content: m[:content] }
         if m[:tool_calls] && !m[:tool_calls].empty?
           out[:tool_calls] = m[:tool_calls].map do |tc|
-            args     = tc[:arguments]
+            args = tc[:arguments]
             args_str = args.is_a?(String) ? args : JSON.generate(args || {})
             { id: tc[:id], type: "function", function: { name: tc[:name], arguments: args_str } }
           end
@@ -632,18 +632,18 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       end
     end.compact
 
-    uri  = URI("#{@base_url}/chat/completions")
+    uri = URI("#{@base_url}/chat/completions")
     body = JSON.generate({
-      model:       @model,
-      messages:    openai_messages,
-      tools:       tools.empty? ? nil : tools,
+      model: @model,
+      messages: openai_messages,
+      tools: tools.empty? ? nil : tools,
       tool_choice: tools.empty? ? nil : "auto",
     }.compact)
 
-    req                  = Net::HTTP::Post.new(uri)
-    req["Content-Type"]  = "application/json"
+    req = Net::HTTP::Post.new(uri)
+    req["Content-Type"] = "application/json"
     req["Authorization"] = "Bearer #{@api_key}"
-    req.body             = body
+    req.body = body
 
     res = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https", read_timeout: 90) do |h|
       h.request(req)
@@ -651,8 +651,8 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
     skip "LLM call failed: HTTP #{res.code} #{res.body[0, 400]}" unless res.code.to_i.between?(200, 299)
 
     parsed = JSON.parse(res.body)
-    msg    = parsed.dig("choices", 0, "message") || {}
-    calls  = Array(msg["tool_calls"]).map do |tc|
+    msg = parsed.dig("choices", 0, "message") || {}
+    calls = Array(msg["tool_calls"]).map do |tc|
       args = tc.dig("function", "arguments")
       args = JSON.parse(args) if args.is_a?(String) && !args.empty?
       { id: tc["id"] || SecureRandom.hex(4), name: tc.dig("function", "name"), arguments: args || {} }
@@ -667,8 +667,8 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
   def anthropic_chat(messages:, tools:)
     anth_tools = tools.map do |t|
       {
-        name:         t[:function][:name],
-        description:  t[:function][:description],
+        name: t[:function][:name],
+        description: t[:function][:description],
         input_schema: t[:function][:parameters],
       }
     end
@@ -682,19 +682,19 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
       end
     end.compact
 
-    uri  = URI("#{@base_url}/messages")
+    uri = URI("#{@base_url}/messages")
     body = JSON.generate({
-      model:      @model,
+      model: @model,
       max_tokens: 1024,
-      tools:      anth_tools.empty? ? nil : anth_tools,
-      messages:   anth_messages,
+      tools: anth_tools.empty? ? nil : anth_tools,
+      messages: anth_messages,
     }.compact)
 
-    req                      = Net::HTTP::Post.new(uri)
-    req["Content-Type"]      = "application/json"
-    req["x-api-key"]         = @api_key
+    req = Net::HTTP::Post.new(uri)
+    req["Content-Type"] = "application/json"
+    req["x-api-key"] = @api_key
     req["anthropic-version"] = "2023-06-01"
-    req.body                 = body
+    req.body = body
 
     res = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https", read_timeout: 90) do |h|
       h.request(req)
@@ -703,8 +703,8 @@ class MCPSchemaIntrospectionLLMTest < Minitest::Test
 
     parsed = JSON.parse(res.body)
     blocks = Array(parsed["content"])
-    text   = blocks.select { |b| b["type"] == "text" }.map { |b| b["text"] }.join("\n")
-    calls  = blocks.select { |b| b["type"] == "tool_use" }.map do |b|
+    text = blocks.select { |b| b["type"] == "text" }.map { |b| b["text"] }.join("\n")
+    calls = blocks.select { |b| b["type"] == "tool_use" }.map do |b|
       { id: b["id"], name: b["name"], arguments: b["input"] || {} }
     end
     { role: "assistant", content: text, tool_calls: calls }

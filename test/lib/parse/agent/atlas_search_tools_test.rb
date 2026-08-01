@@ -165,7 +165,7 @@ class AtlasSearchAgentToolsTest < Minitest::Test
     assert_raises(Parse::Agent::AccessDenied) do
       Parse::Agent::Tools.atlas_text_search(
         agent, class_name: "AclFieldsClass", query: "love",
-        fields: ["title", "lyrics"]
+               fields: ["title", "lyrics"],
       )
     end
   ensure
@@ -181,7 +181,7 @@ class AtlasSearchAgentToolsTest < Minitest::Test
     agent = agent_with(master_atlas: true)
     assert_raises(Parse::Agent::AccessDenied) do
       Parse::Agent::Tools.atlas_autocomplete(
-        agent, class_name: "AclAutoClass", query: "se", field: "secret"
+        agent, class_name: "AclAutoClass", query: "se", field: "secret",
       )
     end
   ensure
@@ -197,7 +197,7 @@ class AtlasSearchAgentToolsTest < Minitest::Test
     assert_raises(Parse::Agent::ValidationError) do
       Parse::Agent::Tools.atlas_faceted_search(
         agent, class_name: "Song",
-        facets: { genre: { type: :string, path: :genre } }
+               facets: { genre: { type: :string, path: :genre } },
       )
     end
   end
@@ -206,7 +206,7 @@ class AtlasSearchAgentToolsTest < Minitest::Test
     agent = agent_with(master_atlas: true)
     Parse::Agent::Tools.atlas_faceted_search(
       agent, class_name: "Song",
-      facets: { genre: { type: :string, path: :genre } }
+             facets: { genre: { type: :string, path: :genre } },
     )
     assert_equal :faceted_search, @captures.first[:op]
     assert_equal true, @captures.first[:opts][:master]
@@ -222,7 +222,7 @@ class AtlasSearchAgentToolsTest < Minitest::Test
     assert_raises(Parse::Agent::AccessDenied) do
       Parse::Agent::Tools.atlas_faceted_search(
         agent, class_name: "AclFacetClass",
-        facets: { sec: { type: :string, path: :secret } }
+               facets: { sec: { type: :string, path: :secret } },
       )
     end
   ensure

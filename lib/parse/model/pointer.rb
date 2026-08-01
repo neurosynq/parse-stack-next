@@ -118,8 +118,10 @@ module Parse
     # nil unless the instance came from the corresponding search path.
     # @return [Float, nil]
     def vector_score; @_vector_score; end
+
     # @return [Float, nil]
     def search_score; @_search_score; end
+
     # @return [Hash, nil]
     def search_highlights; @_search_highlights; end
 

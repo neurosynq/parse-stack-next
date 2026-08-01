@@ -11,7 +11,7 @@ module Parse
 
       def initialize(class_name, operation, reason = nil)
         @class_name = class_name
-        @operation  = operation
+        @operation = operation
         super(reason || "CLP denied: #{operation} on #{class_name}")
       end
     end
@@ -123,7 +123,7 @@ module Parse
       def assert_permitted!(class_name, op, permission_strings)
         return if permits?(class_name, op, permission_strings)
         raise Denied.new(class_name, op,
-          "CLP refuses #{op} on '#{class_name}' for the current scope.")
+                         "CLP refuses #{op} on '#{class_name}' for the current scope.")
       end
 
       def pointer_fields_for(class_name, op)
@@ -137,6 +137,31 @@ module Parse
         return nil unless op_map.is_a?(Hash)
         fields = op_map["pointerFields"] || op_map[:pointerFields]
         return nil if fields.nil?
+        arr = Array(fields).map(&:to_s)
+        arr.empty? ? nil : arr
+      end
+
+      # Return Parse Server's top-level `readUserFields` or
+      # `writeUserFields` row constraint for an operation. Unlike an
+      # operation's `pointerFields` grant, these keys live alongside the
+      # operation maps in `classLevelPermissions` and therefore need their
+      # own lookup.
+      #
+      # @param class_name [String] Parse class name.
+      # @param op [Symbol] CLP operation.
+      # @return [Array<String>, nil] pointer field names, or nil when the
+      #   operation has no corresponding user-field constraint.
+      def user_fields_for(class_name, op)
+        key = case op.to_sym
+          when :find, :get, :count then "readUserFields"
+          when :update, :delete then "writeUserFields"
+          end
+        return nil if key.nil?
+
+        entry = fetch(class_name)
+        return nil if entry.kind == :no_clp || entry.kind == :unresolvable
+
+        fields = entry.clp[key] || entry.clp[key.to_sym]
         arr = Array(fields).map(&:to_s)
         arr.empty? ? nil : arr
       end
@@ -241,8 +266,7 @@ module Parse
         return cached if cached && !stale?(cached)
 
         client = schema_client || default_client_safe
-        entry =
-          if client.nil?
+        entry = if client.nil?
             # No client configured (Parse.setup never called, etc.) —
             # treat as unresolvable so we fail closed instead of
             # crashing inside the begin block with NoMethodError.

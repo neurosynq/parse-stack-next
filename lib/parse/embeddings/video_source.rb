@@ -31,6 +31,7 @@ module Parse
       class InvalidVideoType < Parse::Embeddings::Error
         # @return [Symbol] failure-mode tag.
         attr_reader :reason
+
         def initialize(reason, message)
           @reason = reason
           super(message)
@@ -98,20 +99,20 @@ module Parse
       def verify!(bytes)
         if bytes.nil? || bytes.empty?
           raise InvalidVideoType.new(:empty,
-            "Parse::Embeddings::VideoSource: video payload is empty.")
+                                     "Parse::Embeddings::VideoSource: video payload is empty.")
         end
         mime = sniff_mime(bytes)
         if mime.nil?
           raise InvalidVideoType.new(:unknown_magic,
-            "Parse::Embeddings::VideoSource: leading bytes match no supported video " \
-            "container (MP4/QuickTime/WebM). The Content-Type header is not consulted — " \
-            "unrecognized content is refused outright.")
+                                     "Parse::Embeddings::VideoSource: leading bytes match no supported video " \
+                                     "container (MP4/QuickTime/WebM). The Content-Type header is not consulted — " \
+                                     "unrecognized content is refused outright.")
         end
         allowed = Parse::Embeddings.allowed_video_types
         unless allowed.include?(mime)
           raise InvalidVideoType.new(:type_not_allowed,
-            "Parse::Embeddings::VideoSource: sniffed type #{mime.inspect} is not in " \
-            "Parse::Embeddings.allowed_video_types (#{allowed.inspect}).")
+                                     "Parse::Embeddings::VideoSource: sniffed type #{mime.inspect} is not in " \
+                                     "Parse::Embeddings.allowed_video_types (#{allowed.inspect}).")
         end
         mime
       end

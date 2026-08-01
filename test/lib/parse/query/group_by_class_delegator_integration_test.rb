@@ -11,7 +11,7 @@ require_relative "../../../test_helper_integration"
 class GbdiPost < Parse::Object
   parse_class "GbdiPost"
   property :category, :string
-  property :score,    :integer
+  property :score, :integer
 end
 
 # These tests seed real records and assert that the class-method delegators
@@ -25,7 +25,7 @@ class GroupByClassDelegatorIntegrationTest < Minitest::Test
     # Seed a handful of GbdiPost objects across two categories.
     with_parse_server do
       3.times { |i| create_test_object("GbdiPost", category: "alpha", score: i + 1) }
-      2.times { |i| create_test_object("GbdiPost", category: "beta",  score: i + 10) }
+      2.times { |i| create_test_object("GbdiPost", category: "beta", score: i + 10) }
     end
   end
 
@@ -41,7 +41,7 @@ class GroupByClassDelegatorIntegrationTest < Minitest::Test
 
       # Sanity-check the actual values: we seeded 3 alpha + 2 beta.
       assert_equal 3, via_class["alpha"], "expected 3 alpha records"
-      assert_equal 2, via_class["beta"],  "expected 2 beta records"
+      assert_equal 2, via_class["beta"], "expected 2 beta records"
     end
   end
 

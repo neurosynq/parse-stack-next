@@ -57,12 +57,14 @@ class EmbedManagedMetaReembedTest < Minitest::Test
   class FakeRecord
     attr_reader :id, :saves
     attr_accessor :embedding_digest, :embedding_meta
+
     def initialize(id, digest: "old", meta: nil)
       @id = id
       @saves = 0
       @embedding_digest = digest
       @embedding_meta = meta
     end
+
     def save(**_opts) = (@saves += 1)
   end
 
@@ -71,6 +73,7 @@ class EmbedManagedMetaReembedTest < Minitest::Test
     def where(*) = self
     def order(*) = self
     def limit(*) = self
+
     def results
       @i += 1
       @batches[@i] || []
@@ -136,10 +139,12 @@ class EmbedManagedMetaReembedTest < Minitest::Test
 
   class StubBytesProvider < Parse::Embeddings::Provider
     attr_reader :calls
+
     def initialize = @calls = []
     def dimensions; 4; end
     def model_name; "stub-bytes-1"; end
     def modalities; %i[text image]; end
+
     def embed_image(sources, input_type: :search_document, allow_insecure: false)
       @calls << { sources: sources, input_type: input_type }
       sources.map { [0.1, 0.2, 0.3, 0.4] }

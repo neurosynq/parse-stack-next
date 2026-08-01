@@ -208,17 +208,17 @@ class AgentToolFilterTest < Minitest::Test
     require "parse/agent/mcp_dispatcher"
 
     dashboard_agent = Parse::Agent.new(tools: { only: [:query_class, :get_schema] })
-    external_agent  = Parse::Agent.new(tools: { only: [:get_all_schemas] })
+    external_agent = Parse::Agent.new(tools: { only: [:get_all_schemas] })
 
     body = { "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }
     dashboard_result = Parse::Agent::MCPDispatcher.call(body: body, agent: dashboard_agent)
-    external_result  = Parse::Agent::MCPDispatcher.call(body: body, agent: external_agent)
+    external_result = Parse::Agent::MCPDispatcher.call(body: body, agent: external_agent)
 
     dashboard_names = dashboard_result[:body]["result"]["tools"].map { |t| t[:name] }.sort
-    external_names  = external_result[:body]["result"]["tools"].map { |t| t[:name] }.sort
+    external_names = external_result[:body]["result"]["tools"].map { |t| t[:name] }.sort
 
     assert_equal ["get_schema", "query_class"], dashboard_names
-    assert_equal ["get_all_schemas"],           external_names
+    assert_equal ["get_all_schemas"], external_names
     refute_equal dashboard_names, external_names,
                  "Per-agent tool filter must produce distinct tools/list wire output on shared dispatcher"
   end
@@ -248,7 +248,7 @@ class AgentToolFilterTest < Minitest::Test
 
   def test_parent_kwarg_increments_agent_depth
     root = Parse::Agent.new
-    sub  = Parse::Agent.new(parent: root)
+    sub = Parse::Agent.new(parent: root)
     subsub = Parse::Agent.new(parent: sub)
     assert_equal 0, root.agent_depth
     assert_equal 1, sub.agent_depth
@@ -296,39 +296,39 @@ class AgentToolFilterTest < Minitest::Test
 
   def test_parent_inheritance_does_not_drop_session_token
     parent = Parse::Agent.new(session_token: "r:abc123")
-    sub    = Parse::Agent.new(parent: parent)
+    sub = Parse::Agent.new(parent: parent)
     assert_equal "r:abc123", sub.session_token,
                  "Session-token parent must produce session-token sub-agent (auth-scope inheritance)"
   end
 
   def test_parent_inheritance_does_not_drop_tenant_id
     parent = Parse::Agent.new(tenant_id: "org_abc")
-    sub    = Parse::Agent.new(parent: parent)
+    sub = Parse::Agent.new(parent: parent)
     assert_equal "org_abc", sub.tenant_id
   end
 
   def test_explicit_session_token_overrides_inherited
     parent = Parse::Agent.new(session_token: "r:parent_token")
-    sub    = Parse::Agent.new(parent: parent, session_token: "r:child_token")
+    sub = Parse::Agent.new(parent: parent, session_token: "r:child_token")
     assert_equal "r:child_token", sub.session_token
   end
 
   def test_parent_inheritance_does_not_inherit_permissions
     parent = Parse::Agent.new(permissions: :write)
-    sub    = Parse::Agent.new(parent: parent)
+    sub = Parse::Agent.new(parent: parent)
     assert_equal :readonly, sub.permissions,
                  "permissions: must be opt-in; sub-agents default to :readonly even with a :write parent"
   end
 
   def test_explicit_permissions_parity_with_parent_is_allowed
     parent = Parse::Agent.new(permissions: :write)
-    sub    = Parse::Agent.new(parent: parent, permissions: :write)
+    sub = Parse::Agent.new(parent: parent, permissions: :write)
     assert_equal :write, sub.permissions
   end
 
   def test_explicit_permissions_below_parent_is_allowed
     parent = Parse::Agent.new(permissions: :admin)
-    sub    = Parse::Agent.new(parent: parent, permissions: :write)
+    sub = Parse::Agent.new(parent: parent, permissions: :write)
     assert_equal :write, sub.permissions
   end
 
@@ -357,7 +357,7 @@ class AgentToolFilterTest < Minitest::Test
 
   def test_parent_inheritance_sub_agent_uses_master_key_only_when_parent_did
     parent = Parse::Agent.new # master-key
-    sub    = Parse::Agent.new(parent: parent)
+    sub = Parse::Agent.new(parent: parent)
     refute sub.session_token
     # Master-key parent → master-key sub-agent (this is correct — the
     # sub-agent inherits the parent's auth scope, which here is "no
@@ -465,9 +465,9 @@ class AgentToolFilterTest < Minitest::Test
 
   def test_sub_agent_inherits_parent_cancellation_token
     parent = Parse::Agent.new
-    token  = Parse::Agent::CancellationToken.new
+    token = Parse::Agent::CancellationToken.new
     parent.cancellation_token = token
-    sub    = Parse::Agent.new(parent: parent)
+    sub = Parse::Agent.new(parent: parent)
 
     assert_same token, sub.cancellation_token,
                 "Sub-agent must inherit parent's cancellation token so cooperative cancel reaches the delegation subtree"
@@ -487,14 +487,14 @@ class AgentToolFilterTest < Minitest::Test
 
   def test_empty_session_token_inherits_from_parent
     parent = Parse::Agent.new(session_token: "r:parent_token")
-    sub    = Parse::Agent.new(parent: parent, session_token: "")
+    sub = Parse::Agent.new(parent: parent, session_token: "")
     assert_equal "r:parent_token", sub.session_token,
                  "Empty-string session_token must be treated as unset so ACL scoping isn't silently disabled"
   end
 
   def test_empty_tenant_id_inherits_from_parent
     parent = Parse::Agent.new(tenant_id: "org_abc")
-    sub    = Parse::Agent.new(parent: parent, tenant_id: "")
+    sub = Parse::Agent.new(parent: parent, tenant_id: "")
     assert_equal "org_abc", sub.tenant_id
   end
 

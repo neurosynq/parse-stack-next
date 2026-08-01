@@ -48,11 +48,11 @@ module SinatraMountDispatcherStub
           status: 200,
           body: {
             "jsonrpc" => "2.0",
-            "id"      => body["id"],
-            "result"  => {
+            "id" => body["id"],
+            "result" => {
               "tools" => [
                 {
-                  "name"        => "ping",
+                  "name" => "ping",
                   "description" => "Stubbed ping tool",
                   "inputSchema" => { "type" => "object", "properties" => {}, "required" => [] },
                 },
@@ -68,7 +68,7 @@ module SinatraMountDispatcherStub
       orig = @original
       Parse::Agent::MCPDispatcher.define_singleton_method(:call, &orig)
       @installed = false
-      @original  = nil
+      @original = nil
     end
   end
 end
@@ -150,16 +150,16 @@ class SinatraMountTest < Minitest::Test
   end
 
   CORRECT_TOKEN = "correct-token".freeze
-  AUTH_HEADER   = "Bearer #{CORRECT_TOKEN}".freeze
+  AUTH_HEADER = "Bearer #{CORRECT_TOKEN}".freeze
 
   def setup
     skip "sinatra or rack-test gem not available" unless SINATRA_AVAILABLE
 
     unless Parse::Client.client?
       Parse.setup(
-        server_url:     "http://localhost:1337/parse",
+        server_url: "http://localhost:1337/parse",
         application_id: "test-app-id",
-        api_key:        "test-api-key",
+        api_key: "test-api-key",
       )
     end
 
@@ -169,7 +169,7 @@ class SinatraMountTest < Minitest::Test
 
     # Reset per-test counters
     MCPSinatraTestApp.factory_invocations = 0
-    MCPSinatraTestApp.last_agents         = []
+    MCPSinatraTestApp.last_agents = []
   end
 
   def teardown
@@ -217,7 +217,7 @@ class SinatraMountTest < Minitest::Test
     assert tools.size >= 1, "Expected at least one tool definition"
 
     tools.each do |t|
-      assert t.key?("name"),        "Tool missing 'name': #{t.inspect}"
+      assert t.key?("name"), "Tool missing 'name': #{t.inspect}"
       assert t.key?("inputSchema"), "Tool missing 'inputSchema': #{t.inspect}"
     end
   end

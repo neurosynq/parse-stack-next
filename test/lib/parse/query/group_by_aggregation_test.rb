@@ -192,7 +192,7 @@ class TestGroupByAggregation < Minitest::Test
     mock_response = Minitest::Mock.new
     mock_response.expect :success?, true
     mock_response.expect :result, [
-      { "_id" => "active",   "count" => 2 },
+      { "_id" => "active", "count" => 2 },
       { "_id" => "archived", "count" => 1 },
     ]
 

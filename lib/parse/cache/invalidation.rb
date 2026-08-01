@@ -58,19 +58,19 @@ module Parse
           TRIGGERS[:role].map do |(type, class_name)|
             Parse::Webhooks.route(type, class_name) do |payload|
               guard do
-              # A role write does not say which users are affected: membership
-              # and hierarchy changes arrive as relation deltas on `users` and
-              # `roles`, and the cached value is a flattened transitive closure,
-              # so a parent-role change reaches the members of every child.
-              # Clearing the whole plane is both correct and cheap under a
-              # scoped SCAN. Parse Server does the same, for the same reason.
-              cache.roles.clear
-              # Stamp the epoch so a *foreign* role entry written before this
-              # moment is rejected on read. Parse Server does not clear its own
-              # role cache on a `_Role` delete, so without this the next read
-              # would take its stale entry back and our clear would shorten
-              # revocation by nothing.
-              cache.roles.touch_epoch
+                # A role write does not say which users are affected: membership
+                # and hierarchy changes arrive as relation deltas on `users` and
+                # `roles`, and the cached value is a flattened transitive closure,
+                # so a parent-role change reaches the members of every child.
+                # Clearing the whole plane is both correct and cheap under a
+                # scoped SCAN. Parse Server does the same, for the same reason.
+                cache.roles.clear
+                # Stamp the epoch so a *foreign* role entry written before this
+                # moment is rejected on read. Parse Server does not clear its own
+                # role cache on a `_Role` delete, so without this the next read
+                # would take its stale entry back and our clear would shorten
+                # revocation by nothing.
+                cache.roles.touch_epoch
               end
               true
             end
@@ -82,39 +82,39 @@ module Parse
           TRIGGERS[:identity].map do |(type, class_name)|
             Parse::Webhooks.route(type, class_name) do |payload|
               guard do
-              case type
-              when :after_logout
-                # The only trigger Parse Server permits on `_Session`. The
-                # object's own sessionToken is scrubbed from the payload, but
-                # the token is captured from the requesting user before
-                # scrubbing, and for a logout that user *is* the session being
-                # ended. A master-key logout carries no user, so fall back to
-                # the generation bump.
-                #
-                # Pass the RAW token, not a pre-hashed digest.
-                # `Parse::Cache::SubCache#invalidate` hashes its `key`
-                # argument internally for the `:idn` family (see
-                # `SubCache#logical_key`), the same way `#get` / `#set` do —
-                # that is what makes a `set(raw_token, ...)` /
-                # `get(raw_token)` pair round-trip. Hashing here first and
-                # handing SubCache an already-hashed value made it hash the
-                # digest a second time, landing on a key nothing had ever
-                # written to, so logout silently failed to evict the entry.
-                token = payload.respond_to?(:session_token) ? payload.session_token : nil
-                if token && !token.to_s.empty?
-                  cache.identity.invalidate(token.to_s)
+                case type
+                when :after_logout
+                  # The only trigger Parse Server permits on `_Session`. The
+                  # object's own sessionToken is scrubbed from the payload, but
+                  # the token is captured from the requesting user before
+                  # scrubbing, and for a logout that user *is* the session being
+                  # ended. A master-key logout carries no user, so fall back to
+                  # the generation bump.
+                  #
+                  # Pass the RAW token, not a pre-hashed digest.
+                  # `Parse::Cache::SubCache#invalidate` hashes its `key`
+                  # argument internally for the `:idn` family (see
+                  # `SubCache#logical_key`), the same way `#get` / `#set` do —
+                  # that is what makes a `set(raw_token, ...)` /
+                  # `get(raw_token)` pair round-trip. Hashing here first and
+                  # handing SubCache an already-hashed value made it hash the
+                  # digest a second time, landing on a key nothing had ever
+                  # written to, so logout silently failed to evict the entry.
+                  token = payload.respond_to?(:session_token) ? payload.session_token : nil
+                  if token && !token.to_s.empty?
+                    cache.identity.invalidate(token.to_s)
+                  else
+                    bump_subject(cache, subject_id(payload))
+                  end
                 else
+                  # A `_User` write gives a user id, but identity entries are
+                  # keyed by session token and no reverse map exists. Bumping a
+                  # per-user generation invalidates every one of that user's
+                  # entries in O(1), including tokens this process has never
+                  # resolved, and without Parse Server's master-key `_Session`
+                  # query.
                   bump_subject(cache, subject_id(payload))
                 end
-              else
-                # A `_User` write gives a user id, but identity entries are
-                # keyed by session token and no reverse map exists. Bumping a
-                # per-user generation invalidates every one of that user's
-                # entries in O(1), including tokens this process has never
-                # resolved, and without Parse Server's master-key `_Session`
-                # query.
-                bump_subject(cache, subject_id(payload))
-              end
               end
               true
             end
@@ -134,7 +134,7 @@ module Parse
           if defined?(ActiveSupport::Notifications)
             begin
               ActiveSupport::Notifications.instrument(
-                "parse.cache.invalidation_error", error: e.class.name
+                "parse.cache.invalidation_error", error: e.class.name,
               )
             rescue StandardError
               nil

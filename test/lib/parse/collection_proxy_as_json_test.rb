@@ -194,7 +194,7 @@ class PointerCollectionProxyAsJsonTest < Minitest::Test
       "fileUrl" => "https://example.com/photo1.jpg",
       "thumbnailUrl" => "https://example.com/thumb1.jpg",
       "createdAt" => "2024-01-01T00:00:00.000Z",
-      "updatedAt" => "2024-01-01T00:00:00.000Z"
+      "updatedAt" => "2024-01-01T00:00:00.000Z",
     )
     @asset2 = PointerCollectionTestAsset.new(
       "objectId" => "asset456",
@@ -202,7 +202,7 @@ class PointerCollectionProxyAsJsonTest < Minitest::Test
       "fileUrl" => "https://example.com/photo2.jpg",
       "thumbnailUrl" => "https://example.com/thumb2.jpg",
       "createdAt" => "2024-01-01T00:00:00.000Z",
-      "updatedAt" => "2024-01-01T00:00:00.000Z"
+      "updatedAt" => "2024-01-01T00:00:00.000Z",
     )
     @pointer_only = PointerCollectionTestAsset.new("asset789") # Pointer-only (just objectId)
   end
@@ -320,7 +320,7 @@ class PointerCollectionProxyAsJsonTest < Minitest::Test
     # Create a partially fetched object by setting selective keys
     partial_asset = PointerCollectionTestAsset.new(
       "objectId" => "partial123",
-      "caption" => "Partial Photo"
+      "caption" => "Partial Photo",
     )
     # Mark it as selectively fetched (uses @_fetched_keys internally)
     partial_asset.instance_variable_set(:@_fetched_keys, Set.new([:id, :caption]))

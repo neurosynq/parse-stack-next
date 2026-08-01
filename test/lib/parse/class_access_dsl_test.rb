@@ -14,9 +14,9 @@ class ClassAccessInvitation < Parse::Object
   parse_class "ClassAccessInvitation"
   property :code, :string
   set_class_access(
-    find:   :master,
-    count:  :master,
-    get:    :public,
+    find: :master,
+    count: :master,
+    get: :public,
     create: :authenticated,
     update: :master,
     delete: :master,
@@ -27,8 +27,8 @@ class ClassAccessArticle < Parse::Object
   parse_class "ClassAccessArticle"
   property :title, :string
   set_class_access(
-    find:   :public,
-    get:    :public,
+    find: :public,
+    get: :public,
     create: "Admin",
     update: ["Admin", "Editor"],
     delete: "Admin",

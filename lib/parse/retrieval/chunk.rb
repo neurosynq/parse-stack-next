@@ -64,6 +64,7 @@ module Parse
           other.score == @score &&
           other.content == @content
       end
+
       alias eql? ==
 
       def hash

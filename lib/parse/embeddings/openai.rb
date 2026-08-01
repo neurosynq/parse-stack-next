@@ -49,12 +49,12 @@ module Parse
       class RateLimitError < Error; end
       class TransientError < Error; end
 
-      DEFAULT_BASE_URL    = "https://api.openai.com/v1"
-      DEFAULT_MODEL       = "text-embedding-3-small"
-      DEFAULT_TIMEOUT     = 30
+      DEFAULT_BASE_URL = "https://api.openai.com/v1"
+      DEFAULT_MODEL = "text-embedding-3-small"
+      DEFAULT_TIMEOUT = 30
       DEFAULT_OPEN_TIMEOUT = 5
       DEFAULT_MAX_RETRIES = 3
-      DEFAULT_BATCH_SIZE  = 100
+      DEFAULT_BATCH_SIZE = 100
 
       # Hard ceiling on the response body we'll parse. A legitimate
       # OpenAI embeddings response for the worst-case configuration
@@ -397,7 +397,7 @@ module Parse
       # synchronize the retry storm exponentially.
       def backoff_seconds(attempt)
         # 0.5, 1.0, 2.0, 4.0, 8.0 …  capped at 30s
-        [0.5 * (2**(attempt - 1)), 30.0].min
+        [0.5 * (2 ** (attempt - 1)), 30.0].min
       end
 
       def retry_after_seconds(response)

@@ -44,7 +44,7 @@ class ToolsCollscanIntegrationTest < Minitest::Test
     probes = nil
     Parse::Agent::Tools.reset_registry!
     Parse::Agent.refuse_collscan = false
-    Parse::Agent.expose_explain  = false
+    Parse::Agent.expose_explain = false
 
     probes = []
     RECORD_COUNT.times do |i|
@@ -61,7 +61,7 @@ class ToolsCollscanIntegrationTest < Minitest::Test
     probes&.each { |p| p.destroy rescue nil }
     Parse::Agent::Tools.reset_registry!
     Parse::Agent.refuse_collscan = false
-    Parse::Agent.expose_explain  = false
+    Parse::Agent.expose_explain = false
   end
 
   # =========================================================================
@@ -69,18 +69,16 @@ class ToolsCollscanIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_collscan_off_random_field_query_succeeds
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_collscan_probes do |_probes|
         Parse::Agent.refuse_collscan = false
         agent = Parse::Agent.new(permissions: :readonly)
         result = agent.execute(:query_class,
-          class_name: "MCPCollscanProbe",
-          where: { "random_field" => { "$exists" => true } },
-          limit: 5,
-        )
+                               class_name: "MCPCollscanProbe",
+                               where: { "random_field" => { "$exists" => true } },
+                               limit: 5)
         assert result[:success],
                "Query should succeed with refuse_collscan=false: #{result[:error]}"
       end
@@ -88,18 +86,16 @@ class ToolsCollscanIntegrationTest < Minitest::Test
   end
 
   def test_collscan_off_does_not_return_refused_key
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_collscan_probes do |_probes|
         Parse::Agent.refuse_collscan = false
         agent = Parse::Agent.new(permissions: :readonly)
         result = agent.execute(:query_class,
-          class_name: "MCPCollscanProbe",
-          where: { "value" => { "$gte" => 0 } },
-          limit: 3,
-        )
+                               class_name: "MCPCollscanProbe",
+                               where: { "value" => { "$gte" => 0 } },
+                               limit: 3)
         assert result[:success]
         if result[:data].is_a?(Hash)
           refute result[:data].key?(:refused),
@@ -114,8 +110,7 @@ class ToolsCollscanIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_collscan_on_random_field_query_is_refused
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_collscan_probes do |probes|
@@ -123,10 +118,9 @@ class ToolsCollscanIntegrationTest < Minitest::Test
         first_probe = probes.first
         agent = Parse::Agent.new(permissions: :readonly)
         result = agent.execute(:query_class,
-          class_name: "MCPCollscanProbe",
-          where: { "random_field" => first_probe.random_field },
-          limit: 5,
-        )
+                               class_name: "MCPCollscanProbe",
+                               where: { "random_field" => first_probe.random_field },
+                               limit: 5)
         # Two outcomes are valid:
         # (a) The explain correctly detected COLLSCAN → result[:data][:refused] == true
         # (b) The explain timed out or returned an unexpected plan → fail-open (success: true)
@@ -143,8 +137,7 @@ class ToolsCollscanIntegrationTest < Minitest::Test
   end
 
   def test_collscan_on_refusal_shape_includes_reason_and_suggestion
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_collscan_probes do |probes|
@@ -152,10 +145,9 @@ class ToolsCollscanIntegrationTest < Minitest::Test
         first_probe = probes.first
         agent = Parse::Agent.new(permissions: :readonly)
         result = agent.execute(:query_class,
-          class_name: "MCPCollscanProbe",
-          where: { "random_field" => first_probe.random_field },
-          limit: 3,
-        )
+                               class_name: "MCPCollscanProbe",
+                               where: { "random_field" => first_probe.random_field },
+                               limit: 3)
 
         if result[:success] && result[:data].is_a?(Hash) && result[:data][:refused]
           refusal = result[:data]
@@ -174,20 +166,18 @@ class ToolsCollscanIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_collscan_refusal_does_not_include_winning_plan_by_default
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_collscan_probes do |probes|
         Parse::Agent.refuse_collscan = true
-        Parse::Agent.expose_explain  = false
+        Parse::Agent.expose_explain = false
         first_probe = probes.first
         agent = Parse::Agent.new(permissions: :readonly)
         result = agent.execute(:query_class,
-          class_name: "MCPCollscanProbe",
-          where: { "random_field" => first_probe.random_field },
-          limit: 3,
-        )
+                               class_name: "MCPCollscanProbe",
+                               where: { "random_field" => first_probe.random_field },
+                               limit: 3)
 
         if result[:success] && result[:data].is_a?(Hash) && result[:data][:refused]
           refute result[:data].key?(:winning_plan),
@@ -202,20 +192,18 @@ class ToolsCollscanIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_collscan_refusal_includes_winning_plan_when_expose_explain_true
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_collscan_probes do |probes|
         Parse::Agent.refuse_collscan = true
-        Parse::Agent.expose_explain  = true
+        Parse::Agent.expose_explain = true
         first_probe = probes.first
         agent = Parse::Agent.new(permissions: :readonly)
         result = agent.execute(:query_class,
-          class_name: "MCPCollscanProbe",
-          where: { "random_field" => first_probe.random_field },
-          limit: 3,
-        )
+                               class_name: "MCPCollscanProbe",
+                               where: { "random_field" => first_probe.random_field },
+                               limit: 3)
 
         if result[:success] && result[:data].is_a?(Hash) && result[:data][:refused]
           assert result[:data].key?(:winning_plan),
@@ -231,8 +219,7 @@ class ToolsCollscanIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_agent_allow_collscan_class_bypasses_refusal
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_collscan_probes do |probes|
@@ -242,10 +229,9 @@ class ToolsCollscanIntegrationTest < Minitest::Test
         first_probe = probes.first
         agent = Parse::Agent.new(permissions: :readonly)
         result = agent.execute(:query_class,
-          class_name: "MCPCollscanProbe",
-          where: { "random_field" => first_probe.random_field },
-          limit: 5,
-        )
+                               class_name: "MCPCollscanProbe",
+                               where: { "random_field" => first_probe.random_field },
+                               limit: 5)
 
         assert result[:success],
                "Query should succeed when agent_allow_collscan is true: #{result[:error]}"
@@ -264,8 +250,7 @@ class ToolsCollscanIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_objectid_query_proceeds_with_refuse_collscan_on
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_collscan_probes do |probes|
@@ -273,10 +258,9 @@ class ToolsCollscanIntegrationTest < Minitest::Test
         first_probe = probes.first
         agent = Parse::Agent.new(permissions: :readonly)
         result = agent.execute(:query_class,
-          class_name: "MCPCollscanProbe",
-          where: { "objectId" => first_probe.id },
-          limit: 1,
-        )
+                               class_name: "MCPCollscanProbe",
+                               where: { "objectId" => first_probe.id },
+                               limit: 1)
         assert result[:success],
                "objectId query should succeed regardless of refuse_collscan: #{result[:error]}"
         if result[:data].is_a?(Hash)
@@ -292,18 +276,16 @@ class ToolsCollscanIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_empty_where_skips_collscan_preflight
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_collscan_probes do |_probes|
         Parse::Agent.refuse_collscan = true
         agent = Parse::Agent.new(permissions: :readonly)
         result = agent.execute(:query_class,
-          class_name: "MCPCollscanProbe",
-          where: {},
-          limit: 3,
-        )
+                               class_name: "MCPCollscanProbe",
+                               where: {},
+                               limit: 3)
         assert result[:success],
                "Empty where clause should succeed (preflight skipped): #{result[:error]}"
       end
@@ -315,17 +297,15 @@ class ToolsCollscanIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_nil_where_skips_collscan_preflight
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_collscan_probes do |_probes|
         Parse::Agent.refuse_collscan = true
         agent = Parse::Agent.new(permissions: :readonly)
         result = agent.execute(:query_class,
-          class_name: "MCPCollscanProbe",
-          limit: 3,
-        )
+                               class_name: "MCPCollscanProbe",
+                               limit: 3)
         assert result[:success],
                "nil where should succeed (preflight skipped): #{result[:error]}"
       end
@@ -337,8 +317,7 @@ class ToolsCollscanIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_aggregate_collscan_preflight_on_leading_match
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_collscan_probes do |probes|
@@ -352,9 +331,8 @@ class ToolsCollscanIntegrationTest < Minitest::Test
 
         agent = Parse::Agent.new(permissions: :readonly)
         result = agent.execute(:aggregate,
-          class_name: "MCPCollscanProbe",
-          pipeline: pipeline,
-        )
+                               class_name: "MCPCollscanProbe",
+                               pipeline: pipeline)
 
         if result[:success] && result[:data].is_a?(Hash) && result[:data][:refused]
           assert_equal true, result[:data][:refused]
@@ -371,8 +349,7 @@ class ToolsCollscanIntegrationTest < Minitest::Test
   # =========================================================================
 
   def test_refuse_collscan_defaults_to_false
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       Parse::Agent.refuse_collscan = false

@@ -47,16 +47,16 @@ class ClientMasterKeyEnvFallthroughTest < Minitest::Test
 
   def setup
     @prior_client_mode = Parse.client_mode
-    @prior_env_master  = ENV["PARSE_SERVER_MASTER_KEY"]
+    @prior_env_master = ENV["PARSE_SERVER_MASTER_KEY"]
     @prior_env_master2 = ENV["PARSE_MASTER_KEY"]
-    @prior_env_cmode   = ENV["PARSE_CLIENT_MODE"]
+    @prior_env_cmode = ENV["PARSE_CLIENT_MODE"]
   end
 
   def teardown
     Parse.client_mode = @prior_client_mode
     ENV["PARSE_SERVER_MASTER_KEY"] = @prior_env_master
-    ENV["PARSE_MASTER_KEY"]        = @prior_env_master2
-    ENV["PARSE_CLIENT_MODE"]       = @prior_env_cmode
+    ENV["PARSE_MASTER_KEY"] = @prior_env_master2
+    ENV["PARSE_CLIENT_MODE"] = @prior_env_cmode
   end
 
   # --------------------------------------------------------------------

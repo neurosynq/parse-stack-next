@@ -238,7 +238,7 @@ class SemanticSearchToolTest < Minitest::Test
     with_retrieve_spy do |_captured|
       assert_raises(ArgumentError) do
         call(fake_agent, class_name: "SemanticSearchDoc", query: "hi",
-             filter: { "_rperm" => ["*"] })
+                         filter: { "_rperm" => ["*"] })
       end
     end
   end
@@ -247,7 +247,7 @@ class SemanticSearchToolTest < Minitest::Test
     with_retrieve_spy do |_captured|
       err = assert_raises(Parse::Agent::ValidationError) do
         call(fake_agent, class_name: "SemanticSearchDoc", query: "hi",
-             filter: { "secret_field" => "x" })
+                         filter: { "secret_field" => "x" })
       end
       assert_match(/filter field/, err.message)
     end
@@ -256,7 +256,7 @@ class SemanticSearchToolTest < Minitest::Test
   def test_allowlisted_filter_field_passes_through
     with_retrieve_spy do |captured|
       call(fake_agent, class_name: "SemanticSearchDoc", query: "hi",
-           filter: { "category" => "news" })
+                       filter: { "category" => "news" })
       assert_equal({ "category" => "news" }, captured[:filter])
     end
   end

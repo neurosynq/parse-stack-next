@@ -48,8 +48,7 @@ class LoginErrorTaxonomyTest < Minitest::Test
   end
 
   def test_email_not_verified_caught_by_authentication_error_rescue
-    raised =
-      begin
+    raised = begin
         raise Parse::Error::EmailNotVerifiedError, "unverified"
       rescue Parse::Error::AuthenticationError => e
         e
@@ -63,7 +62,7 @@ class LoginErrorTaxonomyTest < Minitest::Test
   # =========================================================================
 
   def test_login_bang_raises_email_not_verified_error_on_code_205
-    err_body     = { "code" => 205, "error" => "User email is not verified." }
+    err_body = { "code" => 205, "error" => "User email is not verified." }
     err_response = Parse::Response.new(err_body)
     err_response.http_status = 400
 
@@ -80,7 +79,7 @@ class LoginErrorTaxonomyTest < Minitest::Test
   end
 
   def test_login_bang_error_message_includes_username_and_code_on_205
-    err_body     = { "code" => 205, "error" => "User email is not verified." }
+    err_body = { "code" => 205, "error" => "User email is not verified." }
     err_response = Parse::Response.new(err_body)
     err_response.http_status = 400
 
@@ -103,7 +102,7 @@ class LoginErrorTaxonomyTest < Minitest::Test
   # =========================================================================
 
   def test_login_bang_raises_authentication_error_on_code_101
-    err_body     = { "code" => 101, "error" => "Invalid username/password." }
+    err_body = { "code" => 101, "error" => "Invalid username/password." }
     err_response = Parse::Response.new(err_body)
     err_response.http_status = 404
 
@@ -120,7 +119,7 @@ class LoginErrorTaxonomyTest < Minitest::Test
   end
 
   def test_login_bang_raises_authentication_error_on_code_200
-    err_body     = { "code" => 200, "error" => "Username is required." }
+    err_body = { "code" => 200, "error" => "Username is required." }
     err_response = Parse::Response.new(err_body)
     err_response.http_status = 400
 
@@ -143,7 +142,7 @@ class LoginErrorTaxonomyTest < Minitest::Test
     err_response.http_status = 503
     # Simulate missing code / error (service-level failure)
     def err_response.success?; false; end
-    def err_response.error?;   true;  end
+    def err_response.error?; true; end
 
     mock_client = Minitest::Mock.new
     mock_client.expect(:login, err_response, ["carol", "pass"])
@@ -162,7 +161,7 @@ class LoginErrorTaxonomyTest < Minitest::Test
   # =========================================================================
 
   def test_login_bang_returns_user_on_success
-    ok_result   = { "objectId" => "xyz789", "username" => "dave", "sessionToken" => "r:tok123" }
+    ok_result = { "objectId" => "xyz789", "username" => "dave", "sessionToken" => "r:tok123" }
     ok_response = Parse::Response.new(ok_result)
 
     mock_client = Minitest::Mock.new
@@ -179,7 +178,7 @@ class LoginErrorTaxonomyTest < Minitest::Test
   end
 
   def test_login_bang_does_not_raise_on_success
-    ok_result   = { "objectId" => "abc001", "username" => "eve", "sessionToken" => "r:sessabc" }
+    ok_result = { "objectId" => "abc001", "username" => "eve", "sessionToken" => "r:sessabc" }
     ok_response = Parse::Response.new(ok_result)
 
     mock_client = Minitest::Mock.new
@@ -202,7 +201,7 @@ class LoginErrorTaxonomyTest < Minitest::Test
   # =========================================================================
 
   def test_email_not_verified_error_is_caught_by_authentication_error_rescue
-    err_body     = { "code" => 205, "error" => "User email is not verified." }
+    err_body = { "code" => 205, "error" => "User email is not verified." }
     err_response = Parse::Response.new(err_body)
     err_response.http_status = 400
 

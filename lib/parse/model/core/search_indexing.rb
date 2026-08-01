@@ -99,9 +99,9 @@ module Parse
         end
 
         declaration = {
-          name:       name_str,
+          name: name_str,
           definition: deep_freeze(definition),
-          type:       type_str,
+          type: type_str,
         }.freeze
 
         existing = mongo_search_index_declarations.find { |d| d[:name] == name_str }

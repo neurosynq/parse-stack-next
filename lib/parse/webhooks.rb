@@ -371,7 +371,7 @@ module Parse
             if pre_obj.respond_to?(:apply_field_guards!)
               pre_obj.apply_field_guards!(
                 master: payload.master? || false,
-                is_new: payload.original.blank?
+                is_new: payload.original.blank?,
               )
             end
           end
@@ -795,7 +795,7 @@ module Parse
           else
             if self.logging.present?
               puts "[Webhooks] --> Could not find mapping route for " \
-                   "#{Parse::Middleware::BodyBuilder.redact(payload.to_json)}"
+                "#{Parse::Middleware::BodyBuilder.redact(payload.to_json)}"
             end
           end
 

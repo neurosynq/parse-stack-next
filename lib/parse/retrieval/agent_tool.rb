@@ -74,18 +74,18 @@ module Parse
       #   token budget trims the result, `budget_truncated: true` and
       #   `budget_dropped: <n>` are added.
       def semantic_search(agent, class_name: nil, query: nil, k: DEFAULT_K,
-                          filter: nil, vector_filter: nil, text_field: nil,
-                          chunk_size: nil, chunk_overlap: nil, chunk_by: nil,
-                          max_chunks_per_document: nil, max_total_tokens: nil,
-                          # Back-compat / ergonomic aliases for direct callers:
-                          # `klass:`/`class:` for class_name, and the chunker's
-                          # own `size:`/`overlap:`/`by:` names.
-                          klass: nil, size: nil, overlap: nil, by: nil,
+                                 filter: nil, vector_filter: nil, text_field: nil,
+                                 chunk_size: nil, chunk_overlap: nil, chunk_by: nil,
+                                 max_chunks_per_document: nil, max_total_tokens: nil,
+                                 # Back-compat / ergonomic aliases for direct callers:
+                                 # `klass:`/`class:` for class_name, and the chunker's
+                                 # own `size:`/`overlap:`/`by:` names.
+                                 klass: nil, size: nil, overlap: nil, by: nil,
                           **rest)
-        class_name    ||= klass || rest.delete(:class)
-        chunk_size    ||= size
+        class_name ||= klass || rest.delete(:class)
+        chunk_size ||= size
         chunk_overlap ||= overlap
-        chunk_by      ||= by
+        chunk_by ||= by
 
         klass = Parse::Agent::MetadataRegistry.resolve_searchable!(class_name)
         cname = klass.parse_class
@@ -366,15 +366,15 @@ module Parse
       PARAMETERS = {
         "type" => "object",
         "properties" => {
-          "class_name"    => { "type" => "string", "description" => "Parse class name (must be agent_searchable)." },
-          "query"         => { "type" => "string", "description" => "Natural-language query." },
-          "k"             => { "type" => "integer", "default" => DEFAULT_K, "minimum" => 1, "maximum" => MAX_K },
-          "filter"        => { "type" => "object", "description" => "Post-search field filter (allowlisted fields only)." },
+          "class_name" => { "type" => "string", "description" => "Parse class name (must be agent_searchable)." },
+          "query" => { "type" => "string", "description" => "Natural-language query." },
+          "k" => { "type" => "integer", "default" => DEFAULT_K, "minimum" => 1, "maximum" => MAX_K },
+          "filter" => { "type" => "object", "description" => "Post-search field filter (allowlisted fields only)." },
           "vector_filter" => { "type" => "object", "description" => "Atlas pre-search filter (allowlisted fields only)." },
-          "text_field"    => { "type" => "string", "description" => "Which embedded text source to chunk and return as content. Required only when the class embeds more than one text field; must name one of those sources." },
-          "chunk_size"    => { "type" => "integer", "description" => "Override chunk window size." },
+          "text_field" => { "type" => "string", "description" => "Which embedded text source to chunk and return as content. Required only when the class embeds more than one text field; must name one of those sources." },
+          "chunk_size" => { "type" => "integer", "description" => "Override chunk window size." },
           "chunk_overlap" => { "type" => "integer", "description" => "Override chunk overlap." },
-          "chunk_by"      => { "type" => "string", "enum" => %w[chars tokens], "description" => "Chunk unit." },
+          "chunk_by" => { "type" => "string", "enum" => %w[chars tokens], "description" => "Chunk unit." },
           "max_chunks_per_document" => { "type" => "integer", "minimum" => 1, "description" => "Cap on chunks emitted per matched document." },
           "max_total_tokens" => { "type" => "integer", "minimum" => 0, "description" => "Ceiling on total returned chunk-content tokens (approx chars/4). Trims lowest-ranked chunks first and sets budget_truncated. 0 disables." },
         },
@@ -393,8 +393,8 @@ module Parse
             "items" => {
               "type" => "object",
               "properties" => {
-                "id"      => { "type" => "string" },
-                "score"   => { "type" => %w[number null] },
+                "id" => { "type" => "string" },
+                "score" => { "type" => %w[number null] },
                 "content" => { "type" => "string" },
                 "metadata" => { "type" => "object" },
               },
@@ -429,7 +429,6 @@ module Parse
         )
       end
     end
-
   end
 end
 

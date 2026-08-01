@@ -95,9 +95,9 @@ class SearchIndexMigratorTest < Minitest::Test
     m = fresh_model
     m.mongo_search_index("ix", { mappings: { dynamic: true } })
     stub_im(:list_indexes) do |_, force_refresh: false|
-      [{ "name"             => "ix",
-         "status"           => "READY",
-         "queryable"        => true,
+      [{ "name" => "ix",
+         "status" => "READY",
+         "queryable" => true,
          "latestDefinition" => { "mappings" => { "dynamic" => false, "fields" => { "title" => { "type" => "string" } } } } }]
     end
     stub_mongodb_enabled
@@ -116,8 +116,8 @@ class SearchIndexMigratorTest < Minitest::Test
     m.mongo_search_index("declared_ix", { mappings: { dynamic: true } })
     stub_im(:list_indexes) do |_, force_refresh: false|
       [{ "name" => "declared_ix", "latestDefinition" => { "mappings" => { "dynamic" => true } } },
-       { "name" => "orphan_one",  "latestDefinition" => { "mappings" => { "dynamic" => false } } },
-       { "name" => "orphan_two",  "latestDefinition" => { "mappings" => { "fields" => {} } } }]
+       { "name" => "orphan_one", "latestDefinition" => { "mappings" => { "dynamic" => false } } },
+       { "name" => "orphan_two", "latestDefinition" => { "mappings" => { "fields" => {} } } }]
     end
     stub_mongodb_enabled
     p = Migrator.new(m).plan
@@ -128,7 +128,7 @@ class SearchIndexMigratorTest < Minitest::Test
     m = fresh_model
     m.mongo_search_index("ix", { mappings: { dynamic: true, fields: { title: { type: "string" } } } })
     stub_im(:list_indexes) do |_, force_refresh: false|
-      [{ "name"             => "ix",
+      [{ "name" => "ix",
          "latestDefinition" => { "mappings" => { "dynamic" => true, "fields" => { "title" => { "type" => "string" } } } } }]
     end
     stub_mongodb_enabled
@@ -168,11 +168,11 @@ class SearchIndexMigratorTest < Minitest::Test
     m.mongo_search_index("new_ix", { mappings: { dynamic: true } })
     create_calls = []
     update_calls = []
-    drop_calls   = []
+    drop_calls = []
     stub_im(:list_indexes) { |_, force_refresh: false| [] }
     stub_im(:create_index) { |coll, name, defn, **_| create_calls << [coll, name, defn]; :created }
     stub_im(:update_index) { |*args| update_calls << args; :updated }
-    stub_im(:drop_index)   { |*args, **_| drop_calls << args; :dropped }
+    stub_im(:drop_index) { |*args, **_| drop_calls << args; :dropped }
     stub_mongodb_enabled
 
     r = Migrator.new(m).apply!
@@ -221,7 +221,7 @@ class SearchIndexMigratorTest < Minitest::Test
     drop_calls = []
     stub_im(:list_indexes) do |_, force_refresh: false|
       [{ "name" => "declared_ix", "latestDefinition" => { "mappings" => { "dynamic" => true } } },
-       { "name" => "orphan_ix",   "latestDefinition" => { "mappings" => { "dynamic" => false } } }]
+       { "name" => "orphan_ix", "latestDefinition" => { "mappings" => { "dynamic" => false } } }]
     end
     stub_im(:drop_index) { |*args, **_| drop_calls << args; :dropped }
     stub_mongodb_enabled
@@ -238,7 +238,7 @@ class SearchIndexMigratorTest < Minitest::Test
     drop_calls = []
     stub_im(:list_indexes) do |_, force_refresh: false|
       [{ "name" => "declared_ix", "latestDefinition" => { "mappings" => { "dynamic" => true } } },
-       { "name" => "orphan_ix",   "latestDefinition" => { "mappings" => { "dynamic" => false } } }]
+       { "name" => "orphan_ix", "latestDefinition" => { "mappings" => { "dynamic" => false } } }]
     end
     stub_im(:drop_index) { |coll, name, confirm:, **_| drop_calls << [coll, name, confirm]; :dropped }
     stub_mongodb_enabled

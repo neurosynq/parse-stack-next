@@ -12,6 +12,7 @@ class RetrievalRetrieveTest < Minitest::Test
   # `embed_directives` (sources + image?).
   class FakeDirective
     attr_reader :sources
+
     def initialize(sources, image: false)
       @sources = sources
       @image = image
@@ -111,7 +112,7 @@ class RetrievalRetrieveTest < Minitest::Test
     # Two hits; the vector order puts "h_low" first, but the reranker
     # (lexical-overlap Fixture) should surface "h_high" (matches query).
     FakeModel.canned_hits = [
-      hit(id: "h_low",  body: "completely unrelated text", score: 0.99),
+      hit(id: "h_low", body: "completely unrelated text", score: 0.99),
       hit(id: "h_high", body: "rain and love song", score: 0.10),
     ]
     reranker = Parse::Retrieval::Reranker::Fixture.new

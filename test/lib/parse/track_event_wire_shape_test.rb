@@ -25,8 +25,8 @@ require "json"
 # {Parse::API::Analytics#send_analytics} produces an immediate failure.
 class TrackEventWireShapeTest < Minitest::Test
   def setup
-    @prior_default     = Parse::Client.clients[:default]
-    @prior_env_master  = ENV["PARSE_SERVER_MASTER_KEY"]
+    @prior_default = Parse::Client.clients[:default]
+    @prior_env_master = ENV["PARSE_SERVER_MASTER_KEY"]
     @prior_env_master2 = ENV["PARSE_MASTER_KEY"]
     @prior_client_mode = Parse.client_mode
     # Keep the resolution chain fully deterministic.
@@ -39,7 +39,7 @@ class TrackEventWireShapeTest < Minitest::Test
     Parse::Client.clients[:default] = @prior_default
     Parse.client_mode = @prior_client_mode
     ENV["PARSE_SERVER_MASTER_KEY"] = @prior_env_master
-    ENV["PARSE_MASTER_KEY"]        = @prior_env_master2
+    ENV["PARSE_MASTER_KEY"] = @prior_env_master2
   end
 
   # --------------------------------------------------------------------

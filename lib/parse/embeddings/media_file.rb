@@ -55,14 +55,14 @@ module Parse
           mime = ImageFetch.sniff_mime(header)
           if mime.nil?
             raise ImageFetch::InvalidImageType.new(:unknown_magic,
-              "Parse::Embeddings::MediaFile.image: #{path} matches no supported image " \
-              "format (JPEG/PNG/GIF/WebP).")
+                                                   "Parse::Embeddings::MediaFile.image: #{path} matches no supported image " \
+                                                   "format (JPEG/PNG/GIF/WebP).")
           end
           allowed = Parse::Embeddings.allowed_image_types
           unless allowed.include?(mime)
             raise ImageFetch::InvalidImageType.new(:type_not_allowed,
-              "Parse::Embeddings::MediaFile.image: sniffed type #{mime.inspect} is not in " \
-              "Parse::Embeddings.allowed_image_types (#{allowed.inspect}).")
+                                                   "Parse::Embeddings::MediaFile.image: sniffed type #{mime.inspect} is not in " \
+                                                   "Parse::Embeddings.allowed_image_types (#{allowed.inspect}).")
           end
           new(path: path, mime_type: mime, kind: :image)
         end
@@ -130,6 +130,7 @@ module Parse
         "#<Parse::Embeddings::MediaFile kind=#{@kind} mime_type=#{@mime_type.inspect} " \
         "bytes=#{@byte_size} path=#{@path.inspect}>"
       end
+
       alias_method :to_s, :inspect
     end
   end

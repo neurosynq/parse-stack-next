@@ -118,8 +118,8 @@ class AtlasSearchPatternValidationTest < Minitest::Test
   def test_compound_nested_compound_validated
     assert_raises(ArgumentError) do
       @builder.build_compound(must: [{
-        "compound" => { "should" => [{ "regex" => { "query" => ".*x", "path" => "y" } }] },
-      }])
+                                "compound" => { "should" => [{ "regex" => { "query" => ".*x", "path" => "y" } }] },
+                              }])
     end
   end
 

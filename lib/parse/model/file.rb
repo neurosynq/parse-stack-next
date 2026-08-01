@@ -43,7 +43,6 @@ module Parse
     # in logs or a CDN access trail.
     class SignedUrlError < Parse::Error; end
 
-
     # Regular expression that matches the old legacy Parse hosted file name
     LEGACY_FILE_RX = /^tfss-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}-/
     # The default attributes in a Parse File hash. Matches the Parse
@@ -86,7 +85,7 @@ module Parse
       # Alibaba Cloud metadata service (public-IP-space but well-known
       # cloud-metadata endpoint that must not be reachable from SDK fetches).
       "100.100.100.200/32",
-      "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8", "::ffff:0:0/96"
+      "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8", "::ffff:0:0/96",
     ].map { |c| IPAddr.new(c) }.freeze
     # Restrictive port allowlist for Parse::File URL fetches. By default
     # only the standard HTTP/HTTPS ports are permitted. Operators may
@@ -166,12 +165,14 @@ module Parse
       # @return [Integer] Maximum byte size for a remote URL fetch via
       #   `Parse::File.create` / `Parse::File.new(url)`.
       attr_writer :max_remote_size
+
       def max_remote_size
         @max_remote_size ||= DEFAULT_MAX_REMOTE_SIZE
       end
 
       # @return [Integer] Read/open timeout (seconds) for remote URL fetches.
       attr_writer :remote_timeout
+
       def remote_timeout
         @remote_timeout ||= DEFAULT_REMOTE_TIMEOUT
       end
@@ -182,6 +183,7 @@ module Parse
       #   ".example.com" matches "files.example.com"). Default: empty (any
       #   public host is allowed; private hosts are always denied).
       attr_writer :allowed_remote_hosts
+
       def allowed_remote_hosts
         @allowed_remote_hosts ||= []
       end
@@ -202,6 +204,7 @@ module Parse
       #   entries via leading "." (e.g. `".cdn.example.com"`) match any
       #   subdomain.
       attr_writer :trusted_url_hosts
+
       def trusted_url_hosts
         @trusted_url_hosts ||= ["files.parsetfss.com"]
       end
@@ -226,6 +229,7 @@ module Parse
       #   hydration `attributes=` — asymmetric writer behavior was an
       #   explicit anti-goal of the design.
       attr_writer :signed_url_policy
+
       def signed_url_policy
         @signed_url_policy ||= :strip
       end
@@ -244,12 +248,14 @@ module Parse
       #   The default is intentionally non-breaking; integrators ready to
       #   enforce flip the policy explicitly.
       attr_writer :untrusted_url_policy
+
       def untrusted_url_policy
         @untrusted_url_policy ||= :warn
       end
 
       # @return [Array<Integer>] Allowed remote ports for URL fetches.
       attr_writer :allowed_remote_ports
+
       def allowed_remote_ports
         @allowed_remote_ports ||= DEFAULT_ALLOWED_REMOTE_PORTS.dup
       end
@@ -543,10 +549,10 @@ module Parse
         # "exceeds". Fail fast with a clear message before any DNS/host work.
         max_bytes = coerce_positive_max_bytes(max_bytes)
         uri = begin
-          URI.parse(url_string)
-        rescue URI::InvalidURIError => e
-          raise ArgumentError, "Invalid URL: #{e.message}"
-        end
+            URI.parse(url_string)
+          rescue URI::InvalidURIError => e
+            raise ArgumentError, "Invalid URL: #{e.message}"
+          end
         unless %w[http https].include?(uri.scheme)
           raise ArgumentError, "Parse::File only supports http(s) URLs (got #{uri.scheme.inspect})"
         end
@@ -603,8 +609,7 @@ module Parse
       # @return [Integer, nil]
       def coerce_positive_max_bytes(max_bytes)
         return nil if max_bytes.nil?
-        requested =
-          begin
+        requested = begin
             Integer(max_bytes)
           rescue ArgumentError, TypeError
             raise ArgumentError, "max_bytes must be a positive integer (got #{max_bytes.inspect})"
@@ -931,6 +936,7 @@ module Parse
         @url = Parse::File.sanitize_hydrated_url(value, fallback: @url, name: @name)
       end
     end
+
     private :normalize_and_store_url
 
     # @!visibility private
@@ -953,10 +959,10 @@ module Parse
       return raw unless raw.start_with?("http://") || raw.start_with?("https://")
 
       uri = begin
-        URI.parse(raw)
-      rescue URI::InvalidURIError
-        return raw  # malformed URL — leave it alone; downstream code already handles
-      end
+          URI.parse(raw)
+        rescue URI::InvalidURIError
+          return raw  # malformed URL — leave it alone; downstream code already handles
+        end
       host = uri.host.to_s.downcase
       return raw if host.empty?
 
@@ -975,7 +981,7 @@ module Parse
       when :strip
         warn_untrusted_url_host_once(host, action: "stripped")
         fallback
-      else  # :warn (default)
+      else # :warn (default)
         warn_untrusted_url_host_once(host, action: "accepted")
         raw
       end
@@ -1034,8 +1040,8 @@ module Parse
     def save(session_token: nil, use_master_key: nil)
       unless saved? || @contents.nil? || @name.nil?
         opts = {}
-        opts[:session_token]   = session_token unless session_token.nil?
-        opts[:use_master_key]  = use_master_key unless use_master_key.nil?
+        opts[:session_token] = session_token unless session_token.nil?
+        opts[:use_master_key] = use_master_key unless use_master_key.nil?
         response = client.create_file(@name, @contents, @mime_type, **opts)
         unless response.error?
           result = response.result

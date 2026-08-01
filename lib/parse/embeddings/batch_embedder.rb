@@ -83,8 +83,8 @@ module Parse
       # @param on_progress [#call, nil] callable invoked after each
       #   successful batch with `done:, total:, batch_index:, batch_count:`.
       def initialize(provider, batch_size: nil, requests_per_minute: nil,
-                     max_attempts: 5, base_delay: 2.0, max_delay: 60.0,
-                     jitter: 0.25, retry_on: nil, on_progress: nil)
+                               max_attempts: 5, base_delay: 2.0, max_delay: 60.0,
+                               jitter: 0.25, retry_on: nil, on_progress: nil)
         unless provider.is_a?(Provider)
           raise ArgumentError,
                 "Parse::Embeddings::BatchEmbedder expects a Parse::Embeddings::Provider " \
@@ -164,7 +164,7 @@ module Parse
       end
 
       def backoff_delay(attempt)
-        delay = [@base_delay * (2**(attempt - 1)), @max_delay].min
+        delay = [@base_delay * (2 ** (attempt - 1)), @max_delay].min
         delay * (1.0 + rand * @jitter)
       end
 

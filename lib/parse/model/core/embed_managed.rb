@@ -162,8 +162,7 @@ module Parse
         if directives.empty?
           raise ArgumentError, "#{self.class}#compute_embedding!: no `embed` directives declared."
         end
-        selected =
-          if field
+        selected = if field
             d = directives[field.to_sym]
             unless d
               raise ArgumentError,
@@ -211,7 +210,7 @@ module Parse
         # @return [Symbol] the target vector field name.
         # @raise [InvalidEmbedDeclaration] on declaration-time misuse.
         def embed(*source_fields, into:, input_type: :search_document, digest_field: nil,
-                  meta_field: nil)
+                                  meta_field: nil)
           if source_fields.empty?
             raise InvalidEmbedDeclaration,
                   "#{self}.embed: at least one source field is required."
@@ -325,8 +324,8 @@ module Parse
         # @return [Symbol] the target vector field name.
         # @raise [InvalidEmbedDeclaration] on declaration-time misuse.
         def embed_image(source_field, into:, input_type: :search_document,
-                        digest_field: nil, allow_insecure: false,
-                        source: :url, exif_strip: true, meta_field: nil)
+                                      digest_field: nil, allow_insecure: false,
+                                      source: :url, exif_strip: true, meta_field: nil)
           # Capture the fetch mode immediately — the legacy local
           # `source = source_field.to_sym` below shadows the kwarg.
           source_mode = source_mode_for_embed_image!(source)
@@ -489,12 +488,12 @@ module Parse
         # The provenance tuple a freshly-embedded row would carry today.
         def current_embed_identity(directive)
           model = begin
-            Parse::Embeddings.provider(directive.provider_name).model_name
-          rescue Parse::Embeddings::ProviderNotRegistered
-            raise
-          rescue NotImplementedError
-            nil
-          end
+              Parse::Embeddings.provider(directive.provider_name).model_name
+            rescue Parse::Embeddings::ProviderNotRegistered
+              raise
+            rescue NotImplementedError
+              nil
+            end
           {
             "provider" => directive.provider_name.to_s,
             "model" => model,
@@ -649,10 +648,10 @@ module Parse
       # explicit `audit_all!` path apply identical rules.
       def self.audit_binding!(klass, directive)
         provider = begin
-          Parse::Embeddings.provider(directive.provider_name)
-        rescue Parse::Embeddings::ProviderNotRegistered
-          return
-        end
+            Parse::Embeddings.provider(directive.provider_name)
+          rescue Parse::Embeddings::ProviderNotRegistered
+            return
+          end
         Parse::Embeddings::BindingAudit.verify!(klass, directive.into, provider)
       end
 
@@ -720,10 +719,10 @@ module Parse
         return if directive.meta_field.nil?
         return unless record.respond_to?(:"#{directive.meta_field}=")
         model = begin
-          provider.model_name
-        rescue NotImplementedError
-          nil
-        end
+            provider.model_name
+          rescue NotImplementedError
+            nil
+          end
         record.public_send(:"#{directive.meta_field}=", {
           "provider" => directive.provider_name.to_s,
           "model" => model,
@@ -777,8 +776,7 @@ module Parse
       # fetches it itself).
       def self.call_provider(provider, directive, input)
         if directive.image?
-          source =
-            if directive.bytes_mode?
+          source = if directive.bytes_mode?
               Parse::Embeddings::ImageFetch.fetch!(
                 input,
                 allow_insecure: directive.allow_insecure ? true : false,
@@ -788,8 +786,8 @@ module Parse
               input
             end
           provider.embed_image([source],
-            input_type: directive.input_type,
-            allow_insecure: directive.allow_insecure ? true : false)
+                               input_type: directive.input_type,
+                               allow_insecure: directive.allow_insecure ? true : false)
         else
           provider.embed_text([input], input_type: directive.input_type)
         end

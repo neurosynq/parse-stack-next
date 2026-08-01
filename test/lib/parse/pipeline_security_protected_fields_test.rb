@@ -28,9 +28,9 @@ class PipelineSecurityProtectedFieldsTest < Minitest::Test
     Parse::CLPScope.reset_cache!
     # Class under test: `ScopedClass` declares ssn protected for "*".
     Parse::CLPScope.__cache_put("ScopedClass", clp: {
-      "find" => { "*" => true },
-      "protectedFields" => { "*" => ["ssn", "internal_notes"] },
-    })
+                                                 "find" => { "*" => true },
+                                                 "protectedFields" => { "*" => ["ssn", "internal_notes"] },
+                                               })
   end
 
   def teardown

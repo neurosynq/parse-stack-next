@@ -630,9 +630,9 @@ class CreateLockTest < Minitest::Test
     end
 
     begin
-      CacheLockKeyKlass.first_or_create!({ email: "a@b.c", cache: 30 },         {}, synchronize: true)
+      CacheLockKeyKlass.first_or_create!({ email: "a@b.c", cache: 30 }, {}, synchronize: true)
       CacheLockKeyKlass.first_or_create!({ email: "a@b.c", cache: 60, limit: 3 }, {}, synchronize: true)
-      CacheLockKeyKlass.first_or_create!({ email: "a@b.c" },                    {}, synchronize: true)
+      CacheLockKeyKlass.first_or_create!({ email: "a@b.c" }, {}, synchronize: true)
     ensure
       Parse::CreateLock.singleton_class.send(:remove_method, :canonical_key)
       Parse::CreateLock.define_singleton_method(:canonical_key, original_canonical_key)

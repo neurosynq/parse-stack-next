@@ -43,8 +43,8 @@ class DiagnoseOversizeTest < Minitest::Test
     rows = Array.new(3) do |i|
       {
         "objectId" => "id_#{i}",
-        "title"    => "Book #{i}",
-        "body"     => "x" * 10_000,
+        "title" => "Book #{i}",
+        "body" => "x" * 10_000,
       }
     end
     msg = diagnose(results: rows)
@@ -62,9 +62,9 @@ class DiagnoseOversizeTest < Minitest::Test
 
   def test_handles_objects_hash_shape_from_get_objects
     out = diagnose(objects: {
-      "a" => { "objectId" => "a", "title" => "t", "body" => "x" * 5_000 },
-      "b" => { "objectId" => "b", "title" => "t", "body" => "y" * 5_000 },
-    })
+                     "a" => { "objectId" => "a", "title" => "t", "body" => "x" * 5_000 },
+                     "b" => { "objectId" => "b", "title" => "t", "body" => "y" * 5_000 },
+                   })
     refute_nil out
     assert_match(/body/, out)
   end
@@ -150,8 +150,8 @@ class AgentLargeFieldsDslTest < Minitest::Test
 
   def test_enrich_fields_injects_large_field_true
     fields = {
-      "title"    => { "type" => "String" },
-      "body"     => { "type" => "String" },
+      "title" => { "type" => "String" },
+      "body" => { "type" => "String" },
       "raw_html" => { "type" => "String" },
     }
     enriched = Parse::Agent::MetadataRegistry.send(:enrich_fields, fields, FlaggedArticle)
@@ -168,12 +168,12 @@ class AgentLargeFieldsDslTest < Minitest::Test
     # subclass for this assertion.
     stub_klass = Class.new do
       def self.agent_large_field_list; [:author, :tags]; end
-      def self.property_descriptions;  {}; end
+      def self.property_descriptions; {}; end
     end
 
     fields = {
       "author" => { "type" => "Pointer", "targetClass" => "_User" },
-      "tags"   => { "type" => "Relation", "targetClass" => "_User" },
+      "tags" => { "type" => "Relation", "targetClass" => "_User" },
     }
     enriched = Parse::Agent::MetadataRegistry.send(:enrich_fields, fields, stub_klass)
     refute enriched["author"]["large_field"]
@@ -253,7 +253,7 @@ class TruncateAndAnnotateTest < Minitest::Test
     refute_nil text
 
     payload = JSON.parse(text)
-    trunc   = payload["_truncated"]
+    trunc = payload["_truncated"]
     assert_includes trunc["dropped_fields"], "a" # or "b" — depends on tie-break
     assert_operator payload["results"].size, :<, 20, "must have dropped trailing rows"
     assert trunc.key?("next_skip"), "next_skip required when rows are trimmed"
@@ -272,10 +272,10 @@ class TruncateAndAnnotateTest < Minitest::Test
   def test_preserves_other_data_envelope_keys
     rows = [{ "objectId" => "a", "title" => "T", "body" => "x" * 20_000 }]
     data = {
-      class_name:   "Article",
+      class_name: "Article",
       result_count: 1,
-      pagination:   { limit: 100, skip: 0 },
-      results:      rows,
+      pagination: { limit: 100, skip: 0 },
+      results: rows,
     }
     text = truncate(data, 50_000)
     refute_nil text
@@ -302,18 +302,18 @@ class TruncateAndAnnotateTest < Minitest::Test
       { "objectId" => "id_#{i}", "a" => "x" * 5_000, "b" => "y" * 5_000 }
     end
     data = {
-      class_name:     "Article",
-      result_count:   20,
-      truncated:      true,
+      class_name: "Article",
+      result_count: 20,
+      truncated: true,
       truncated_note: "Showing first 50 of N results",
-      pagination:     { limit: 100, skip: 0, has_more: false },
-      results:        rows,
+      pagination: { limit: 100, skip: 0, has_more: false },
+      results: rows,
     }
     text = truncate(data, 50_000)
     refute_nil text
     payload = JSON.parse(text)
     refute payload.key?("result_count"), "stale result_count must not survive truncation"
-    refute payload.key?("truncated"),    "ResultFormatter `truncated` flag must be stripped"
+    refute payload.key?("truncated"), "ResultFormatter `truncated` flag must be stripped"
     refute payload.key?("truncated_note"), "ResultFormatter `truncated_note` must be stripped"
     # _truncated is the sole authoritative cardinality signal:
     assert payload["_truncated"]["kept_count"]
@@ -329,13 +329,13 @@ class TruncateAndAnnotateTest < Minitest::Test
     end
     data = {
       pagination: { limit: 100, skip: 100, has_more: true },
-      results:    rows,
+      results: rows,
     }
     text = truncate(data, 50_000)
     refute_nil text
-    payload  = JSON.parse(text)
-    trunc    = payload["_truncated"]
-    fit      = trunc["kept_count"]
+    payload = JSON.parse(text)
+    trunc = payload["_truncated"]
+    fit = trunc["kept_count"]
     expected = 100 + fit
     assert_equal expected, trunc["next_skip"],
                  "next_skip must add to original skip, not reset it"
@@ -368,7 +368,7 @@ class TruncateGetObjectsTest < Minitest::Test
 
   def make_objects(count, body_field_size: 20_000)
     count.times.each_with_object({}) do |i, h|
-      id = "obj#{i.to_s.rjust(6, '0')}"
+      id = "obj#{i.to_s.rjust(6, "0")}"
       h[id] = { "objectId" => id, "title" => "Record #{i}", "body" => "x" * body_field_size }
     end
   end
@@ -383,10 +383,10 @@ class TruncateGetObjectsTest < Minitest::Test
   def test_returns_nil_for_empty_objects_hash
     data = {
       class_name: "Article",
-      objects:    {},
-      missing:    [],
-      requested:  0,
-      found:      0,
+      objects: {},
+      missing: [],
+      requested: 0,
+      found: 0,
     }
     assert_nil truncate(data, 1_000)
   end
@@ -399,27 +399,27 @@ class TruncateGetObjectsTest < Minitest::Test
     objects = make_objects(5, body_field_size: 20_000)
     data = {
       class_name: "Article",
-      objects:    objects,
-      missing:    [],
-      requested:  5,
-      found:      5,
+      objects: objects,
+      missing: [],
+      requested: 5,
+      found: 5,
     }
     text = truncate(data, 50_000)
     refute_nil text
 
     payload = JSON.parse(text)
-    trunc   = payload["_truncated"]
+    trunc = payload["_truncated"]
     assert_equal "response_exceeded_max_bytes", trunc["reason"]
     assert_includes trunc["dropped_fields"], "body"
     assert_equal 5, trunc["kept_count"]
     assert_equal 5, trunc["original_count"]
-    assert_equal [],  trunc["dropped_for_size"]
+    assert_equal [], trunc["dropped_for_size"]
     assert_match(/get_object/, trunc["hint"])
 
     # Records should all be present, but without `body`
     assert_equal 5, payload["objects"].size
     payload["objects"].each_value do |rec|
-      refute rec.key?("body"),  "body must be dropped from all records"
+      refute rec.key?("body"), "body must be dropped from all records"
       assert rec.key?("title"), "title must be preserved"
     end
 
@@ -435,24 +435,24 @@ class TruncateGetObjectsTest < Minitest::Test
     objects = make_objects(10, body_field_size: 5_000)
     data = {
       class_name: "Article",
-      objects:    objects,
-      missing:    [],
-      requested:  10,
-      found:      10,
+      objects: objects,
+      missing: [],
+      requested: 10,
+      found: 10,
     }
     # After dropping body, each trimmed record is ~64 bytes. The 10-record
     # envelope is ~1157 bytes; cap at 850 so only a few records fit.
     text = truncate(data, 850)
     refute_nil text
 
-    payload      = JSON.parse(text)
-    trunc        = payload["_truncated"]
-    kept         = payload["objects"].size
-    dropped_ids  = trunc["dropped_for_size"]
+    payload = JSON.parse(text)
+    trunc = payload["_truncated"]
+    kept = payload["objects"].size
+    dropped_ids = trunc["dropped_for_size"]
 
     assert_operator kept, :<, 10, "fewer than 10 records must fit under the tight cap"
     assert_equal kept, trunc["kept_count"]
-    assert_equal 10,   trunc["original_count"]
+    assert_equal 10, trunc["original_count"]
     refute_nil dropped_ids
     assert_operator dropped_ids.size, :>, 0, "at least one record must be in dropped_for_size"
     assert_equal 10, kept + dropped_ids.size, "kept + dropped_for_size must equal original_count"
@@ -460,7 +460,7 @@ class TruncateGetObjectsTest < Minitest::Test
     # All remaining IDs must only come from the original objects hash
     original_ids = objects.keys
     payload["objects"].each_key { |k| assert_includes original_ids, k }
-    dropped_ids.each             { |k| assert_includes original_ids, k }
+    dropped_ids.each { |k| assert_includes original_ids, k }
 
     # next_skip must not appear
     refute trunc.key?("next_skip")
@@ -474,10 +474,10 @@ class TruncateGetObjectsTest < Minitest::Test
     objects = make_objects(3, body_field_size: 20_000)
     data = {
       class_name: "Article",
-      objects:    objects,
-      missing:    ["absent_id_1", "absent_id_2"],
-      requested:  5,
-      found:      3,
+      objects: objects,
+      missing: ["absent_id_1", "absent_id_2"],
+      requested: 5,
+      found: 3,
     }
     text = truncate(data, 50_000)
     refute_nil text
@@ -492,10 +492,10 @@ class TruncateGetObjectsTest < Minitest::Test
     objects = make_objects(3, body_field_size: 20_000)
     data = {
       class_name: "Article",
-      objects:    objects,
-      missing:    [],
-      requested:  3,
-      found:      3,
+      objects: objects,
+      missing: [],
+      requested: 3,
+      found: 3,
     }
     truncate(data, 50_000)
     data[:objects].each_value do |rec|
@@ -530,15 +530,15 @@ class TruncateAggregateTest < Minitest::Test
       { "objectId" => "id_#{i}", "title" => "Row #{i}", "body" => "x" * body_size }
     end
     data = {
-      class_name:     "Article",
+      class_name: "Article",
       pipeline_stages: 1,
-      result_count:   row_count,
-      results:        results,
+      result_count: row_count,
+      results: results,
     }
     if auto_limited
       data[:auto_limited] = true
-      data[:auto_limit]   = 200
-      data[:hint]         = "Pipeline auto-bounded with $limit:200 ..."
+      data[:auto_limit] = 200
+      data[:hint] = "Pipeline auto-bounded with $limit:200 ..."
     end
     data
   end
@@ -562,7 +562,7 @@ class TruncateAggregateTest < Minitest::Test
     refute_nil text
 
     payload = JSON.parse(text)
-    trunc   = payload["_truncated"]
+    trunc = payload["_truncated"]
     assert_equal "response_exceeded_max_bytes", trunc["reason"]
     assert_includes trunc["dropped_fields"], "body"
     assert_equal 5, trunc["kept_count"]
@@ -590,7 +590,7 @@ class TruncateAggregateTest < Minitest::Test
     refute_nil text
 
     payload = JSON.parse(text)
-    trunc   = payload["_truncated"]
+    trunc = payload["_truncated"]
     assert_operator payload["results"].size, :<, 20
     assert_equal payload["results"].size, trunc["kept_count"]
     assert_equal 20, trunc["original_count"]

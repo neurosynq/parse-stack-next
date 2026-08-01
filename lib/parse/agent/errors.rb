@@ -68,10 +68,10 @@ module Parse
       def initialize(class_name = nil, message = nil,
                      kind: nil, denied_field: nil, allowed_fields: nil,
                      suggested_rewrite: nil)
-        @class_name        = class_name.to_s
-        @kind              = kind
-        @denied_field      = denied_field
-        @allowed_fields    = allowed_fields&.map(&:to_s)
+        @class_name = class_name.to_s
+        @kind = kind
+        @denied_field = denied_field
+        @allowed_fields = allowed_fields&.map(&:to_s)
         @suggested_rewrite = suggested_rewrite
         super(message || "Class '#{@class_name}' is not accessible to this agent")
       end
@@ -81,9 +81,9 @@ module Parse
       # unused nil fields.
       def to_details
         {
-          kind:              kind,
-          denied_field:      denied_field,
-          allowed_fields:    allowed_fields,
+          kind: kind,
+          denied_field: denied_field,
+          allowed_fields: allowed_fields,
           suggested_rewrite: suggested_rewrite,
         }.compact
       end
@@ -116,8 +116,8 @@ module Parse
       def initialize(message = nil, depth: nil)
         @depth = depth
         super(message || "Parse::Agent recursion depth exhausted (depth=#{depth.inspect}). " \
-                          "A sub-agent attempted to construct another sub-agent past the " \
-                          "configured recursion_depth: cap.")
+        "A sub-agent attempted to construct another sub-agent past the " \
+        "configured recursion_depth: cap.")
       end
     end
 

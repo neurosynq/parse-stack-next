@@ -24,11 +24,11 @@ unless File.exist?(MANIFEST_PATH)
 end
 MANIFEST = JSON.parse(File.read(MANIFEST_PATH))
 
-MONGO_URI = ENV.fetch("ATLAS_URI", "mongodb://localhost:29020/#{MANIFEST['db']}?directConnection=true")
+MONGO_URI = ENV.fetch("ATLAS_URI", "mongodb://localhost:29020/#{MANIFEST["db"]}?directConnection=true")
 INDEX_NAME = ENV.fetch("VECTOR_INDEX", MANIFEST["index_name"])
 COLL_NAME = MANIFEST["collection"].to_sym
 
-puts "[manifest] preset=#{MANIFEST['preset']}  provider=#{MANIFEST['provider']}  dims=#{MANIFEST['dims']}  index=#{INDEX_NAME}"
+puts "[manifest] preset=#{MANIFEST["preset"]}  provider=#{MANIFEST["provider"]}  dims=#{MANIFEST["dims"]}  index=#{INDEX_NAME}"
 
 client = Mongo::Client.new(MONGO_URI)
 coll = client[COLL_NAME]
@@ -46,17 +46,17 @@ puts "[seed] #{seed["title"]}  (#{seed["embedding"].size}-dim)"
 pipeline = [
   {
     "$vectorSearch" => {
-      "index"         => INDEX_NAME,
-      "path"          => "embedding",
-      "queryVector"   => seed["embedding"],
+      "index" => INDEX_NAME,
+      "path" => "embedding",
+      "queryVector" => seed["embedding"],
       "numCandidates" => 200,
-      "limit"         => 10,
+      "limit" => 10,
     },
   },
   {
     "$project" => {
-      "_id"     => 1,
-      "title"   => 1,
+      "_id" => 1,
+      "title" => 1,
       # Project the score under _vscore (not _score) so hybrid search with
       # Atlas Search lexical scores doesn't collide. Matches the convention
       # the SDK will adopt — vector_rag_plan.md §3.

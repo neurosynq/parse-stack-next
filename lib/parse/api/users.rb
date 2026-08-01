@@ -271,6 +271,7 @@ module Parse
         body[:email] = email || body[:email]
         create_user(body, **opts)
       end
+
       private
 
       # @!visibility private
@@ -315,7 +316,7 @@ module Parse
             entry = login_rate_limits[username] || { failures: 0, locked_until: nil }
             entry[:failures] += 1
             if entry[:failures] >= LOGIN_MAX_FAILURES
-              delay = LOGIN_BASE_DELAY**(entry[:failures] - LOGIN_MAX_FAILURES + 1)
+              delay = LOGIN_BASE_DELAY ** (entry[:failures] - LOGIN_MAX_FAILURES + 1)
               delay = [delay, 300].min # cap at 5 minutes
               entry[:locked_until] = Time.now + delay
             end
@@ -337,7 +338,6 @@ module Parse
           entry[:locked_until] && (now - entry[:locked_until]) > LOGIN_RATE_LIMIT_TTL
         end
       end
-
     end # Users
   end #API
 end #Parse

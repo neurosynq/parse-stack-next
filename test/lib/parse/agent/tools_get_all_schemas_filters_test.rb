@@ -19,9 +19,9 @@ class ToolsGetAllSchemasFiltersTest < Minitest::Test
       response = Object.new
       catalog = @catalog
       response.define_singleton_method(:success?) { true }
-      response.define_singleton_method(:results)  { catalog }
-      response.define_singleton_method(:result)   { { "results" => catalog } }
-      response.define_singleton_method(:error)    { nil }
+      response.define_singleton_method(:results) { catalog }
+      response.define_singleton_method(:result) { { "results" => catalog } }
+      response.define_singleton_method(:error) { nil }
       response
     end
   end
@@ -36,7 +36,7 @@ class ToolsGetAllSchemasFiltersTest < Minitest::Test
     end
     @catalog = [
       { "className" => "Post", "fields" => { "title" => { "type" => "String" } } },
-      { "className" => "Project", "fields" => { "name"  => { "type" => "String" } } },
+      { "className" => "Project", "fields" => { "name" => { "type" => "String" } } },
       { "className" => "PostRevision", "fields" => { "body" => { "type" => "String" } } },
       { "className" => "_User", "fields" => { "username" => { "type" => "String" } } },
     ]
@@ -65,8 +65,8 @@ class ToolsGetAllSchemasFiltersTest < Minitest::Test
   def test_names_and_prefix_compose_as_intersection
     # Both filters applied: must be in the names set AND match the prefix.
     result = Parse::Agent::Tools.get_all_schemas(@agent,
-                                                names: %w[Post PostRevision Project],
-                                                prefix: "Post")
+                                                 names: %w[Post PostRevision Project],
+                                                 prefix: "Post")
     names = (result[:custom] + result[:built_in]).map { |c| c[:name] }
     assert_equal %w[Post PostRevision].sort, names.sort
   end
@@ -93,7 +93,7 @@ class ToolsGetAllSchemasFiltersTest < Minitest::Test
     Parse::Agent::MetadataRegistry.define_singleton_method(:hidden_class_names) { ["Post"] }
     begin
       result = Parse::Agent::Tools.get_all_schemas(test.instance_variable_get(:@agent),
-                                                  names: %w[Post Project])
+                                                   names: %w[Post Project])
       names = (result[:custom] + result[:built_in]).map { |c| c[:name] }
       refute_includes names, "Post",
                       "hidden class must not be returned even when named explicitly"

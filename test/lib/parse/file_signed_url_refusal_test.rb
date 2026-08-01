@@ -27,8 +27,8 @@ require_relative "../../test_helper"
 class TestFileSignedUrlNormalization < Minitest::Test
   def setup
     @original_trusted_hosts = Parse::File.instance_variable_get(:@trusted_url_hosts)
-    @original_policy        = Parse::File.instance_variable_get(:@untrusted_url_policy)
-    @original_warned        = Parse::File.instance_variable_get(:@warned_untrusted_hosts)
+    @original_policy = Parse::File.instance_variable_get(:@untrusted_url_policy)
+    @original_warned = Parse::File.instance_variable_get(:@warned_untrusted_hosts)
     @original_signed_policy = Parse::File.instance_variable_get(:@signed_url_policy)
     Parse::File.trusted_url_hosts = [
       ".s3.amazonaws.com", "bucket.s3.amazonaws.com",
@@ -132,9 +132,9 @@ class TestFileSignedUrlNormalization < Minitest::Test
     refute_nil file.presigned_url_expires_at
 
     file.url = nil
-    assert_nil file.url,                       "url must be cleared"
-    assert_nil file.presigned_url,             "presigned_url stash must be cleared"
-    assert_nil file.presigned_url_expires_at,  "expiry must be cleared"
+    assert_nil file.url, "url must be cleared"
+    assert_nil file.presigned_url, "presigned_url stash must be cleared"
+    assert_nil file.presigned_url_expires_at, "expiry must be cleared"
   end
 
   # ------------------------------------------------------------------
@@ -163,11 +163,11 @@ class TestFileSignedUrlNormalization < Minitest::Test
     # the stash rather than leaking the older one.
     file = Parse::File.new("doc.pdf")
     file.url = "https://bucket.s3.amazonaws.com/doc.pdf?X-Amz-Signature=abc&X-Amz-Date=20260528T120000Z&X-Amz-Expires=900"
-    first_stash  = file.presigned_url
+    first_stash = file.presigned_url
     first_expiry = file.presigned_url_expires_at
 
     file.url = "https://bucket.s3.amazonaws.com/doc.pdf?X-Amz-Signature=xyz&X-Amz-Date=20260528T130000Z&X-Amz-Expires=900"
-    refute_equal first_stash,  file.presigned_url
+    refute_equal first_stash, file.presigned_url
     refute_equal first_expiry, file.presigned_url_expires_at
   end
 
@@ -192,7 +192,7 @@ class TestFileSignedUrlNormalization < Minitest::Test
     assert_raises(Parse::File::SignedUrlError) do
       file.attributes = {
         "name" => "doc.pdf",
-        "url"  => "https://bucket.s3.amazonaws.com/doc.pdf?X-Amz-Signature=abc",
+        "url" => "https://bucket.s3.amazonaws.com/doc.pdf?X-Amz-Signature=abc",
       }
     end
   end
@@ -288,7 +288,7 @@ class TestFileSignedUrlNormalization < Minitest::Test
     refute_raises Parse::File::SignedUrlError do
       file.attributes = {
         "name" => "doc.pdf",
-        "url"  => "https://bucket.s3.amazonaws.com/doc.pdf?X-Amz-Signature=abc",
+        "url" => "https://bucket.s3.amazonaws.com/doc.pdf?X-Amz-Signature=abc",
       }
     end
   end
@@ -389,8 +389,8 @@ class TestFileSignedUrlNormalization < Minitest::Test
     file = Parse::File.new(name: "doc.pdf", contents: nil)
     file.attributes = {
       "name" => "doc.pdf",
-      "url"  => "https://bucket.s3.amazonaws.com/doc.pdf?" \
-                "X-Amz-Date=20261301T120000Z&X-Amz-Expires=900&X-Amz-Signature=abc",
+      "url" => "https://bucket.s3.amazonaws.com/doc.pdf?" \
+               "X-Amz-Date=20261301T120000Z&X-Amz-Expires=900&X-Amz-Signature=abc",
     }
     assert_equal "https://bucket.s3.amazonaws.com/doc.pdf", file.url
     refute_nil file.presigned_url

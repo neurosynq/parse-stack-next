@@ -14,8 +14,8 @@ require_relative "../../test_helper"
 class TestFileTrustedUrlHost < Minitest::Test
   def setup
     @original_trusted_hosts = Parse::File.instance_variable_get(:@trusted_url_hosts)
-    @original_policy        = Parse::File.instance_variable_get(:@untrusted_url_policy)
-    @original_warned        = Parse::File.instance_variable_get(:@warned_untrusted_hosts)
+    @original_policy = Parse::File.instance_variable_get(:@untrusted_url_policy)
+    @original_warned = Parse::File.instance_variable_get(:@warned_untrusted_hosts)
     Parse::File.instance_variable_set(:@trusted_url_hosts, nil)
     Parse::File.instance_variable_set(:@untrusted_url_policy, nil)
     Parse::File.instance_variable_set(:@warned_untrusted_hosts, nil)
@@ -58,7 +58,7 @@ class TestFileTrustedUrlHost < Minitest::Test
     # Even on attacker host — the tfss- name carries its own integrity contract.
     file.attributes = {
       "name" => "tfss-abcd1234-1234-1234-1234-1234567890ab-x.png",
-      "url"  => "https://cdn.thirdparty.example/tfss-abcd1234-1234-1234-1234-1234567890ab-x.png",
+      "url" => "https://cdn.thirdparty.example/tfss-abcd1234-1234-1234-1234-1234567890ab-x.png",
     }
     assert_match(%r{\Ahttps://cdn\.thirdparty\.example/}, file.url)
   end

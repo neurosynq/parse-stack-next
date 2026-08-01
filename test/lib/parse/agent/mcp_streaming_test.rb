@@ -36,11 +36,11 @@ module StreamingDispatcherStub
                   :last_cancellation_token
 
     def install!
-      @original           = Parse::Agent::MCPDispatcher.method(:call)
-      @delay              = 0
+      @original = Parse::Agent::MCPDispatcher.method(:call)
+      @delay = 0
       @pre_progress_delay = 0
-      @response           = nil
-      @raise_error        = nil
+      @response = nil
+      @raise_error = nil
       # When set to an Array of kwarg Hashes, the stub invokes
       # progress_callback once for each entry to simulate a tool reporting
       # tool-internal progress mid-dispatch. Each entry is splatted with
@@ -81,13 +81,13 @@ module StreamingDispatcherStub
         original = @original
         Parse::Agent::MCPDispatcher.define_singleton_method(:call, &original)
       end
-      @delay                   = 0
-      @pre_progress_delay      = 0
-      @response                = nil
-      @raise_error             = nil
-      @progress_calls          = nil
+      @delay = 0
+      @pre_progress_delay = 0
+      @response = nil
+      @raise_error = nil
+      @progress_calls = nil
       @last_cancellation_token = nil
-      @original                = nil
+      @original = nil
     end
 
     def installed?
@@ -104,9 +104,9 @@ class MCPStreamingTest < Minitest::Test
   def setup
     unless Parse::Client.client?
       Parse.setup(
-        server_url:     "http://localhost:1337/parse",
+        server_url: "http://localhost:1337/parse",
         application_id: "test-app-id",
-        api_key:        "test-api-key",
+        api_key: "test-api-key",
       )
     end
 
@@ -126,8 +126,8 @@ class MCPStreamingTest < Minitest::Test
                content_type: "application/json")
     env = {
       "REQUEST_METHOD" => method,
-      "CONTENT_TYPE"   => content_type,
-      "rack.input"     => StringIO.new(body),
+      "CONTENT_TYPE" => content_type,
+      "rack.input" => StringIO.new(body),
     }
     env["HTTP_ACCEPT"] = accept if accept
     env
@@ -156,10 +156,10 @@ class MCPStreamingTest < Minitest::Test
   # test_constructor_warns_when_streaming_without_concurrency_cap).
   def streaming_app(heartbeat_interval: 0.1, max_concurrent_dispatchers: 100, **kwargs)
     Parse::Agent::MCPRackApp.new(
-      agent_factory:               permissive_factory,
-      streaming:                   true,
-      heartbeat_interval:          heartbeat_interval,
-      max_concurrent_dispatchers:  max_concurrent_dispatchers,
+      agent_factory: permissive_factory,
+      streaming: true,
+      heartbeat_interval: heartbeat_interval,
+      max_concurrent_dispatchers: max_concurrent_dispatchers,
       **kwargs,
     )
   end
@@ -201,10 +201,10 @@ class MCPStreamingTest < Minitest::Test
   # Classify an SSE frame the way an MCP client does — from the envelope.
   def sse_kind(data)
     payload = begin
-      JSON.parse(data)
-    rescue StandardError
-      nil
-    end
+        JSON.parse(data)
+      rescue StandardError
+        nil
+      end
     return :unknown unless payload.is_a?(Hash)
     return :progress if payload["method"] == "notifications/progress"
     return :notification if payload.key?("method")
@@ -318,7 +318,7 @@ class MCPStreamingTest < Minitest::Test
     sse_parsed = JSON.parse(response_event[:data])
 
     assert_equal plain_parsed["jsonrpc"], sse_parsed["jsonrpc"]
-    assert_equal plain_parsed["id"],     sse_parsed["id"]
+    assert_equal plain_parsed["id"], sse_parsed["id"]
     assert_equal plain_parsed["result"], sse_parsed["result"]
   end
 
@@ -376,8 +376,8 @@ class MCPStreamingTest < Minitest::Test
   def test_unauthorized_factory_returns_plain_401_not_sse
     factory = ->(_env) { raise Parse::Agent::Unauthorized, "bad token" }
     app = Parse::Agent::MCPRackApp.new(
-      agent_factory:      factory,
-      streaming:          true,
+      agent_factory: factory,
+      streaming: true,
       heartbeat_interval: 0.1,
     )
 
@@ -437,12 +437,12 @@ class MCPStreamingTest < Minitest::Test
     token = "client-supplied-token-#{SecureRandom.hex(4)}"
     request_body = JSON.generate({
       "jsonrpc" => "2.0",
-      "id"      => 10,
-      "method"  => "tools/call",
-      "params"  => {
-        "name"      => "ping",
+      "id" => 10,
+      "method" => "tools/call",
+      "params" => {
+        "name" => "ping",
         "arguments" => {},
-        "_meta"     => { "progressToken" => token },
+        "_meta" => { "progressToken" => token },
       },
     })
 
@@ -549,8 +549,8 @@ class MCPStreamingTest < Minitest::Test
 
     progress.each do |pe|
       data = JSON.parse(pe[:data])
-      assert_equal "2.0",                     data["jsonrpc"]
-      assert_equal "notifications/progress",  data["method"]
+      assert_equal "2.0", data["jsonrpc"]
+      assert_equal "notifications/progress", data["method"]
       assert data["params"].key?("progressToken")
       assert data["params"].key?("progress")
       # `total` is optional per MCP spec and is omitted (not null) when
@@ -567,10 +567,10 @@ class MCPStreamingTest < Minitest::Test
   def test_constructor_accepts_streaming_keyword
     assert_silent do
       Parse::Agent::MCPRackApp.new(
-        agent_factory:               permissive_factory,
-        streaming:                   true,
-        heartbeat_interval:          1,
-        max_concurrent_dispatchers:  100,  # silences the orphan-DoS warning
+        agent_factory: permissive_factory,
+        streaming: true,
+        heartbeat_interval: 1,
+        max_concurrent_dispatchers: 100,  # silences the orphan-DoS warning
       )
     end
   end
@@ -580,9 +580,9 @@ class MCPStreamingTest < Minitest::Test
     # fires when the operator EXPLICITLY opts into the unbounded surface.
     warns = capture_warns do
       Parse::Agent::MCPRackApp.new(
-        agent_factory:              permissive_factory,
-        streaming:                  true,
-        heartbeat_interval:         1,
+        agent_factory: permissive_factory,
+        streaming: true,
+        heartbeat_interval: 1,
         max_concurrent_dispatchers: nil,
       )
     end
@@ -592,8 +592,8 @@ class MCPStreamingTest < Minitest::Test
   def test_constructor_does_not_warn_when_streaming_with_default_finite_cap
     warns = capture_warns do
       Parse::Agent::MCPRackApp.new(
-        agent_factory:      permissive_factory,
-        streaming:          true,
+        agent_factory: permissive_factory,
+        streaming: true,
         heartbeat_interval: 1,
       )
     end
@@ -724,7 +724,7 @@ class MCPStreamingTest < Minitest::Test
     # Deterministic heartbeat test using a mocked waiter and a release-queue
     # dispatcher. No wall-clock timing: the test drives exactly N heartbeats
     # by pushing N tokens onto a tick queue, then releases the dispatcher.
-    tick_q    = Queue.new
+    tick_q = Queue.new
     release_q = Queue.new
 
     # Dispatcher blocks until the test releases it.
@@ -962,8 +962,8 @@ class MCPStreamingTest < Minitest::Test
                  "503 response must use application/json"
 
     parsed2 = JSON.parse(body2.first)
-    assert_equal "2.0",        parsed2["jsonrpc"]
-    assert_equal(-32_000,      parsed2.dig("error", "code"))
+    assert_equal "2.0", parsed2["jsonrpc"]
+    assert_equal(-32_000, parsed2.dig("error", "code"))
     assert_equal "server busy", parsed2.dig("error", "message")
   ensure
     # Clean up: kill any lingering SSE body so the slow dispatcher finishes.
@@ -1088,16 +1088,16 @@ class MCPStreamingTest < Minitest::Test
     assert_equal 1, response_events.size
 
     first = JSON.parse(progress_events[0][:data])
-    assert_equal "2.0",                    first["jsonrpc"]
+    assert_equal "2.0", first["jsonrpc"]
     assert_equal "notifications/progress", first["method"]
-    assert_equal 25,                       first.dig("params", "progress")
-    assert_equal 100,                      first.dig("params", "total")
-    assert_equal "Fetching",               first.dig("params", "message")
+    assert_equal 25, first.dig("params", "progress")
+    assert_equal 100, first.dig("params", "total")
+    assert_equal "Fetching", first.dig("params", "message")
     assert first["params"].key?("progressToken")
 
     second = JSON.parse(progress_events[1][:data])
-    assert_equal 75,           second.dig("params", "progress")
-    assert_equal 100,          second.dig("params", "total")
+    assert_equal 75, second.dig("params", "progress")
+    assert_equal 100, second.dig("params", "total")
     assert_equal "Aggregating", second.dig("params", "message")
   end
 
@@ -1116,8 +1116,8 @@ class MCPStreamingTest < Minitest::Test
     data = JSON.parse(progress[:data])
     refute data["params"].key?("message"),
            "`message` field must be omitted from wire when nil"
-    assert_equal 10,  data.dig("params", "progress")
-    assert_nil       data.dig("params", "total")
+    assert_equal 10, data.dig("params", "progress")
+    assert_nil data.dig("params", "total")
   end
 
   def test_tool_progress_suppresses_subsequent_heartbeats
@@ -1125,8 +1125,8 @@ class MCPStreamingTest < Minitest::Test
     # tool reports progress, then the dispatcher delays further (so more
     # heartbeats would have fired if not suppressed).
     StreamingDispatcherStub.pre_progress_delay = 0.15  # 1 heartbeat at 0.1s interval
-    StreamingDispatcherStub.progress_calls     = [{ progress: 50, total: 100 }]
-    StreamingDispatcherStub.delay              = 0.5   # would fit 5 more heartbeats
+    StreamingDispatcherStub.progress_calls = [{ progress: 50, total: 100 }]
+    StreamingDispatcherStub.delay = 0.5   # would fit 5 more heartbeats
 
     app = streaming_app(heartbeat_interval: 0.1)
     _status, _headers, body = app.call(rack_env(accept: "text/event-stream"))
@@ -1137,7 +1137,7 @@ class MCPStreamingTest < Minitest::Test
 
     # Heartbeats are distinguished by their dedicated `parse-stack:heartbeat:*`
     # progressToken; tool reports use the request progressToken.
-    heartbeats   = progress_events.select { |e|
+    heartbeats = progress_events.select { |e|
       JSON.parse(e[:data]).dig("params", "progressToken").to_s.start_with?("parse-stack:heartbeat:")
     }
     tool_reports = progress_events - heartbeats
@@ -1149,17 +1149,17 @@ class MCPStreamingTest < Minitest::Test
     # further heartbeats even though the dispatcher continues for ~0.5s.
     assert heartbeats.size <= 1,
            "Expected at most 1 heartbeat before tool progress took over, got #{heartbeats.size}. " \
-           "Events: #{progress_events.map { |e| JSON.parse(e[:data]).dig('params') }.inspect}"
+           "Events: #{progress_events.map { |e| JSON.parse(e[:data]).dig("params") }.inspect}"
   end
 
   def test_tool_progress_uses_request_progress_token
     token = "supplied-#{SecureRandom.hex(4)}"
     request_body = JSON.generate({
       "jsonrpc" => "2.0", "id" => 99, "method" => "tools/call",
-      "params"  => {
-        "name"      => "any_tool",
+      "params" => {
+        "name" => "any_tool",
         "arguments" => {},
-        "_meta"     => { "progressToken" => token },
+        "_meta" => { "progressToken" => token },
       },
     })
 
@@ -1283,8 +1283,8 @@ class MCPStreamingTest < Minitest::Test
     # Now send notifications/cancelled with the same session id.
     cancel_body = JSON.generate({
       "jsonrpc" => "2.0",
-      "method"  => "notifications/cancelled",
-      "params"  => { "requestId" => request_id, "reason" => "user pressed stop" },
+      "method" => "notifications/cancelled",
+      "params" => { "requestId" => request_id, "reason" => "user pressed stop" },
     })
     env2 = rack_env(body: cancel_body)
     env2["HTTP_MCP_SESSION_ID"] = session_id
@@ -1305,7 +1305,7 @@ class MCPStreamingTest < Minitest::Test
     require "timeout"
     session_id_a = "session-a-#{SecureRandom.hex(4)}"
     session_id_b = "session-b-#{SecureRandom.hex(4)}"
-    request_id   = 7777
+    request_id = 7777
 
     StreamingDispatcherStub.delay = 1.5
 
@@ -1331,8 +1331,8 @@ class MCPStreamingTest < Minitest::Test
     # Send notifications/cancelled with a DIFFERENT session id.
     cancel_body = JSON.generate({
       "jsonrpc" => "2.0",
-      "method"  => "notifications/cancelled",
-      "params"  => { "requestId" => request_id },
+      "method" => "notifications/cancelled",
+      "params" => { "requestId" => request_id },
     })
     env2 = rack_env(body: cancel_body)
     env2["HTTP_MCP_SESSION_ID"] = session_id_b
@@ -1377,8 +1377,8 @@ class MCPStreamingTest < Minitest::Test
     # No Mcp-Session-Id header on the cancel.
     cancel_body = JSON.generate({
       "jsonrpc" => "2.0",
-      "method"  => "notifications/cancelled",
-      "params"  => { "requestId" => request_id },
+      "method" => "notifications/cancelled",
+      "params" => { "requestId" => request_id },
     })
     status, _headers, _body = app.call(rack_env(body: cancel_body))
     assert_equal 202, status
@@ -1474,11 +1474,11 @@ class MCPStreamingTest < Minitest::Test
     sleep 0.01 until StreamingDispatcherStub.last_cancellation_token || Time.now >= deadline
 
     Parse::Agent::Tools.register(
-      name:        :__test_list_changed_tool,
+      name: :__test_list_changed_tool,
       description: "test fixture",
-      parameters:  { "type" => "object", "properties" => {} },
-      permission:  :readonly,
-      handler:     ->(_a, **) { {} },
+      parameters: { "type" => "object", "properties" => {} },
+      permission: :readonly,
+      handler: ->(_a, **) { {} },
     )
 
     drain_thread.join(3)
@@ -1493,7 +1493,7 @@ class MCPStreamingTest < Minitest::Test
            "got #{tools_changed.size}. Events: #{events.map { |e| e[:kind] }.inspect}"
 
     payload = JSON.parse(tools_changed.first[:data])
-    assert_equal "2.0",                              payload["jsonrpc"]
+    assert_equal "2.0", payload["jsonrpc"]
     assert_equal "notifications/tools/list_changed", payload["method"]
     refute payload.key?("id"), "Notifications must not carry an id"
     refute payload.key?("params"),
@@ -1520,10 +1520,10 @@ class MCPStreamingTest < Minitest::Test
     sleep 0.01 until StreamingDispatcherStub.last_cancellation_token || Time.now >= deadline
 
     Parse::Agent::Prompts.register(
-      name:        "__test_list_changed_prompt",
+      name: "__test_list_changed_prompt",
       description: "test fixture",
-      arguments:   [],
-      renderer:    ->(_args) { "hello" },
+      arguments: [],
+      renderer: ->(_args) { "hello" },
     )
 
     drain_thread.join(3)
@@ -1579,7 +1579,7 @@ class MCPStreamingTest < Minitest::Test
     client_token = "client-#{SecureRandom.hex(4)}"
     request_body = JSON.generate({
       "jsonrpc" => "2.0", "id" => 1, "method" => "ping",
-      "params"  => { "_meta" => { "progressToken" => client_token } },
+      "params" => { "_meta" => { "progressToken" => client_token } },
     })
 
     StreamingDispatcherStub.delay = 0.25
@@ -1672,8 +1672,8 @@ class MCPStreamingTest < Minitest::Test
     # path without the worker-startup race that the integration path
     # would introduce.
     token = Parse::Agent::CancellationToken.new
-    body  = Parse::Agent::MCPRackApp::SSEBody.new(
-      "tok", 1, 5, nil, cancellation_token: token
+    body = Parse::Agent::MCPRackApp::SSEBody.new(
+      "tok", 1, 5, nil, cancellation_token: token,
     ) do |_pc|
       { status: 200, body: { "jsonrpc" => "2.0", "id" => 1, "result" => {} } }
     end
@@ -1692,7 +1692,7 @@ class MCPStreamingTest < Minitest::Test
   def test_sse_body_close_does_not_trip_cancellation_token_on_normal_completion
     token = Parse::Agent::CancellationToken.new
     sse_body = Parse::Agent::MCPRackApp::SSEBody.new(
-      "tok", 1, 5, nil, cancellation_token: token
+      "tok", 1, 5, nil, cancellation_token: token,
     ) do |_pc|
       { status: 200, body: { "jsonrpc" => "2.0", "id" => 1, "result" => {} } }
     end

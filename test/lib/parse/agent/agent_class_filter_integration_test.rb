@@ -51,8 +51,7 @@ class AgentClassFilterIntegrationTest < Minitest::Test
   # ---- Allowed-class read flows end-to-end --------------------------------
 
   def test_allowed_class_query_returns_rows
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     rows = []
     with_parse_server do
@@ -77,8 +76,7 @@ class AgentClassFilterIntegrationTest < Minitest::Test
   # ---- Refused-class flows refuse without server traffic ------------------
 
   def test_refused_class_query_returns_access_denied
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       agent = silence_master_key do
@@ -93,8 +91,7 @@ class AgentClassFilterIntegrationTest < Minitest::Test
   # ---- Audit payload carries the filter set -------------------------------
 
   def test_tool_call_notification_carries_classes_only
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_notif_collector do |events|
@@ -112,8 +109,7 @@ class AgentClassFilterIntegrationTest < Minitest::Test
   end
 
   def test_refusal_payload_carries_class_filter_kind
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     with_parse_server do
       with_notif_collector do |events|
@@ -135,8 +131,7 @@ class AgentClassFilterIntegrationTest < Minitest::Test
   # ---- Schema catalog filter -----------------------------------------------
 
   def test_get_all_schemas_omits_off_allowlist_classes
-    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" \
-      unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 
     rows = []
     with_parse_server do

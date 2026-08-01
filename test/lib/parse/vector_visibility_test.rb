@@ -104,10 +104,10 @@ class VectorVisibilityTest < Minitest::Test
   def test_webhook_strips_vectors_from_afterfind_objects_via_route_class
     payload = P.new(
       { trigger_name: "afterFind",
-        objects: [
-          { "title" => "a", "embedding" => [1.0, 2.0, 3.0] },
-          { "title" => "b", "embedding" => [4.0, 5.0, 6.0] },
-        ] },
+       objects: [
+        { "title" => "a", "embedding" => [1.0, 2.0, 3.0] },
+        { "title" => "b", "embedding" => [4.0, 5.0, 6.0] },
+      ] },
       "VisDefault",
     )
     payload.objects.each do |o|

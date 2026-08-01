@@ -164,7 +164,7 @@ class EmbeddingsVoyageContractTest < Minitest::Test
     body = {
       model: "voyage-multimodal-3", input_type: "document",
       inputs: [{ content: [{ type: "video_base64",
-                             video_base64: data_uri(write_mp4, "video/mp4") }] }],
+                            video_base64: data_uri(write_mp4, "video/mp4") }] }],
     }
     status, response = raw_post("multimodalembeddings", body)
     refute_infrastructure_failure(status, response, "video rejection probe")
@@ -309,8 +309,7 @@ class EmbeddingsVoyageContractTest < Minitest::Test
   end
 
   def base_url
-    atlas_key? ? Parse::Embeddings::Voyage::ATLAS_BASE_URL
-               : Parse::Embeddings::Voyage::DEFAULT_BASE_URL
+    atlas_key? ? Parse::Embeddings::Voyage::ATLAS_BASE_URL : Parse::Embeddings::Voyage::DEFAULT_BASE_URL
   end
 
   # Issue a request WITHOUT the SDK, so probes can observe the API's own
@@ -338,10 +337,10 @@ class EmbeddingsVoyageContractTest < Minitest::Test
     req.body = JSON.dump(body)
     res = http.request(req)
     parsed = begin
-      JSON.parse(res.body.to_s)
-    rescue JSON::ParserError
-      { "detail" => "unparseable body: #{res.body.to_s[0, 200]}" }
-    end
+        JSON.parse(res.body.to_s)
+      rescue JSON::ParserError
+        { "detail" => "unparseable body: #{res.body.to_s[0, 200]}" }
+      end
     [res.code.to_i, parsed]
   end
 

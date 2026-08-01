@@ -168,6 +168,7 @@ module Parse
       def index_drift_policy
         @index_drift_policy ||= :warn
       end
+
       # Low-level `$vectorSearch` entry point.
       #
       # @param collection_name [String] Parse class name / Mongo
@@ -203,8 +204,8 @@ module Parse
       #   `_vscore` rather than `_score` so hybrid pipelines with
       #   Atlas Search don't collide on the same key).
       def search(collection_name, field:, query_vector:, k: 10,
-                 num_candidates: nil, candidate_limit: nil, filter: nil,
-                 vector_filter: nil, index: nil, max_time_ms: nil, **scope_opts)
+                                  num_candidates: nil, candidate_limit: nil, filter: nil,
+                                  vector_filter: nil, index: nil, max_time_ms: nil, **scope_opts)
         candidate_limit_override = candidate_limit
         require_available!
         index_name = (index || @default_index)
@@ -239,8 +240,7 @@ module Parse
         # receives fewer than `k`. Master mode with no caller filter
         # has no attrition, so it keeps the old one-for-one cost.
         attrition_possible = !resolution.master? || !(filter.nil? || filter.empty?)
-        candidate_limit =
-          if candidate_limit_override
+        candidate_limit = if candidate_limit_override
             Integer(candidate_limit_override)
           elsif attrition_possible
             [k_int * DEFAULT_CANDIDATE_MULTIPLIER, MAX_CANDIDATE_LIMIT].min
@@ -308,13 +308,13 @@ module Parse
         )
 
         vs_stage = {
-          "index"         => index_name.to_s,
-          "path"          => path,
-          "queryVector"   => validated_vector,
+          "index" => index_name.to_s,
+          "path" => path,
+          "queryVector" => validated_vector,
           "numCandidates" => num_candidates_int,
           # Deliberately the raised candidate window, not `k` — the
           # result set is trimmed to `k` after enforcement runs.
-          "limit"         => candidate_limit,
+          "limit" => candidate_limit,
         }
         vs_stage["filter"] = vector_filter if vector_filter && !vector_filter.empty?
         pipeline = [{ "$vectorSearch" => vs_stage }]
@@ -339,7 +339,7 @@ module Parse
         pipeline << { "$match" => filter } if filter
 
         raw_results = run_pipeline!(collection_name, pipeline, max_time_ms: max_time_ms,
-                                    authorizing_client: Parse::ACLScope.client_of(resolution))
+                                                               authorizing_client: Parse::ACLScope.client_of(resolution))
         # Already past the server-side ACL `$match` and any caller
         # `filter` — NOT the number $vectorSearch emitted.
         post_filter_count = raw_results.length

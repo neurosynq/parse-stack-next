@@ -6,7 +6,7 @@ require "parse/stack/version"
 Gem::Specification.new do |spec|
   spec.name = "parse-stack-next"
   spec.version = Parse::Stack::VERSION
-  spec.authors =  ["Adrian Curtin", "Anthony Persaud", "Henry Spindell"]
+  spec.authors = ["Adrian Curtin", "Anthony Persaud", "Henry Spindell"]
   spec.email = ["adrian+parse-stack@neurosynq.net"]
 
   spec.summary = %q{Parse Server SDK for Ruby — ORM, queries, auth, and MongoDB-direct access}
@@ -15,11 +15,11 @@ Gem::Specification.new do |spec|
   spec.license = "MIT"
 
   spec.metadata = {
-    "homepage_uri"          => "https://github.com/neurosynq/parse-stack-next",
-    "source_code_uri"       => "https://github.com/neurosynq/parse-stack-next",
-    "changelog_uri"         => "https://github.com/neurosynq/parse-stack-next/blob/main/CHANGELOG.md",
-    "bug_tracker_uri"       => "https://github.com/neurosynq/parse-stack-next/issues",
-    "documentation_uri"     => "https://neurosynq.github.io/parse-stack-next/",
+    "homepage_uri" => "https://github.com/neurosynq/parse-stack-next",
+    "source_code_uri" => "https://github.com/neurosynq/parse-stack-next",
+    "changelog_uri" => "https://github.com/neurosynq/parse-stack-next/blob/main/CHANGELOG.md",
+    "bug_tracker_uri" => "https://github.com/neurosynq/parse-stack-next/issues",
+    "documentation_uri" => "https://neurosynq.github.io/parse-stack-next/",
     "rubygems_mfa_required" => "true",
   }
 

@@ -35,10 +35,10 @@ module Parse
         class BadRequestError < Error; end
 
         DEFAULT_BASE_URL = "https://api.cohere.com/v2"
-        DEFAULT_MODEL    = "rerank-v3.5"
-        DEFAULT_TIMEOUT  = 30
+        DEFAULT_MODEL = "rerank-v3.5"
+        DEFAULT_TIMEOUT = 30
         DEFAULT_OPEN_TIMEOUT = 5
-        DEFAULT_MAX_RETRIES  = 2
+        DEFAULT_MAX_RETRIES = 2
 
         # Cohere documents a cap of 1000 documents per rerank call; the
         # {Base::MAX_DOCUMENTS} cap (1000) already enforces this.
@@ -75,7 +75,7 @@ module Parse
 
         def inspect
           "#<#{self.class} model=#{@model.inspect} base=#{safe_base_host.inspect} " \
-            "retries=#{@max_retries} api_key=[REDACTED]>"
+          "retries=#{@max_retries} api_key=[REDACTED]>"
         end
 
         protected
@@ -83,10 +83,10 @@ module Parse
         def rerank_scores(query, documents, top_n)
           require_faraday!
           body = {
-            "model"     => @model,
-            "query"     => query,
+            "model" => @model,
+            "query" => query,
             "documents" => documents,
-            "top_n"     => top_n,
+            "top_n" => top_n,
           }
           payload = post_rerank(body)
           extract_results!(payload, documents.length)
@@ -158,9 +158,9 @@ module Parse
           require_faraday!
           headers = {
             "Authorization" => "Bearer #{@api_key}",
-            "Content-Type"  => "application/json",
-            "Accept"        => "application/json",
-            "User-Agent"    => "parse-stack-reranker/#{Parse::Stack::VERSION rescue "0"}",
+            "Content-Type" => "application/json",
+            "Accept" => "application/json",
+            "User-Agent" => "parse-stack-reranker/#{Parse::Stack::VERSION rescue "0"}",
           }
           # base_url must end with a trailing slash so Faraday resolves the
           # relative "rerank" path under /v2/ rather than replacing it.
@@ -177,7 +177,7 @@ module Parse
         end
 
         def backoff_seconds(attempt)
-          [0.5 * (2**(attempt - 1)), 30.0].min
+          [0.5 * (2 ** (attempt - 1)), 30.0].min
         end
 
         def retry_after_seconds(response)

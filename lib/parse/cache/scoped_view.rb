@@ -234,7 +234,6 @@ module Parse
       def raw_delete_matching!(pattern)
         @backend.send(:delete_keys_matching!, pattern)
       end
-
     end
 
     # Raised when a keyspaced client is asked to clear a cache store that
@@ -353,8 +352,7 @@ module Parse
       #   `client.cache.clear` to take the unscoped clear deliberately.
       # @return [self]
       def clear(scope: nil, family: nil, tenant: nil)
-        prefix =
-          if scope
+        prefix = if scope
             "#{@keyspace.root_prefix}:#{scope.to_s.sub(/:\z/, "")}:"
           else
             pattern = @keyspace.pattern(family: family, tenant: tenant)
@@ -431,7 +429,6 @@ module Parse
       rescue NameError
         false
       end
-
     end
   end
 end

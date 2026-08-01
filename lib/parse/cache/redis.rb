@@ -200,7 +200,7 @@ module Parse
 
         if defined?(Parse::LockBackend)
           Parse::LockBackend.handle_degraded(
-            on_degraded, "cache:shared-database", source: "Parse::Cache::Redis"
+            on_degraded, "cache:shared-database", source: "Parse::Cache::Redis",
           )
         end
         warn "[Parse::Cache::Redis] parse_cache_url resolves to the same Redis database as " \
@@ -559,13 +559,14 @@ module Parse
           [cursor, keys.select { |k| UPSTREAM_ROLE_KEY.match?(k.to_s) }]
         end
       end
+
       private_constant :ExcludeOwnKeysScanner
 
       def upstream_client
         @upstream_client ||= begin
-          require "redis"
-          ::Redis.new(url: @parse_cache_url)
-        end
+            require "redis"
+            ::Redis.new(url: @parse_cache_url)
+          end
       end
 
       # Write a random key to OUR database and ask the upstream connection to

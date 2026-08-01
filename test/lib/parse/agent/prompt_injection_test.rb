@@ -69,10 +69,10 @@ class PromptInjectionTest < Minitest::Test
     @agent = Parse::Agent.new(permissions: :readonly)
     @poisoned_rows = [
       { "objectId" => "p1", "title" => "Normal", "body" => INJECTION_DELETE_USER },
-      { "objectId" => "p2", "title" => INJECTION_DAN,           "body" => "ok" },
-      { "objectId" => "p3", "title" => "Try",    "body" => INJECTION_UNTRAMMELLED },
-      { "objectId" => "p4", "title" => "Break",  "body" => INJECTION_NEWLINE_BREAKOUT },
-      { "objectId" => "p5", "title" => "Ctrl",   "body" => INJECTION_CONTROL_CHARS },
+      { "objectId" => "p2", "title" => INJECTION_DAN, "body" => "ok" },
+      { "objectId" => "p3", "title" => "Try", "body" => INJECTION_UNTRAMMELLED },
+      { "objectId" => "p4", "title" => "Break", "body" => INJECTION_NEWLINE_BREAKOUT },
+      { "objectId" => "p5", "title" => "Ctrl", "body" => INJECTION_CONTROL_CHARS },
     ]
     rows = @poisoned_rows
     fake_client = Object.new
@@ -80,10 +80,10 @@ class PromptInjectionTest < Minitest::Test
       r = Object.new
       r.define_singleton_method(:success?) { true }
       if query[:count].to_i == 1
-        r.define_singleton_method(:count)   { rows.size }
+        r.define_singleton_method(:count) { rows.size }
         r.define_singleton_method(:results) { [] }
       else
-        r.define_singleton_method(:count)   { rows.size }
+        r.define_singleton_method(:count) { rows.size }
         r.define_singleton_method(:results) { rows }
       end
       r
@@ -102,12 +102,12 @@ class PromptInjectionTest < Minitest::Test
     # adversarial content might break into surrounding JSON keys.
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 1,
-      "method"  => "tools/call",
-      "params"  => { "name" => "query_class", "arguments" => { "class_name" => "Anything" } },
+      "id" => 1,
+      "method" => "tools/call",
+      "params" => { "name" => "query_class", "arguments" => { "class_name" => "Anything" } },
     }
     result = Parse::Agent::MCPDispatcher.call(body: body, agent: @agent)
-    text   = result[:body]["result"]["content"].first["text"]
+    text = result[:body]["result"]["content"].first["text"]
     payload = JSON.parse(text)
 
     bodies = payload["results"].map { |r| r["body"] }
@@ -128,7 +128,7 @@ class PromptInjectionTest < Minitest::Test
       "params" => { "name" => "query_class", "arguments" => { "class_name" => "Anything" } },
     }
     result = Parse::Agent::MCPDispatcher.call(body: body, agent: @agent)
-    text   = result[:body]["result"]["content"].first["text"]
+    text = result[:body]["result"]["content"].first["text"]
     # Raw control bytes must NOT appear:
     refute_includes text, "\u0000"
     refute_includes text, "\u0001"
@@ -149,16 +149,16 @@ class PromptInjectionTest < Minitest::Test
     # refusal message itself.
     big_rows = Array.new(50) do |i|
       { "objectId" => "id_#{i}",
-        "title"    => "B#{i}",
-        "body"     => INJECTION_DELETE_USER + ("x" * 100_000) }
+        "title" => "B#{i}",
+        "body" => INJECTION_DELETE_USER + ("x" * 100_000) }
     end
     fat_agent = Parse::Agent.new(permissions: :readonly)
     fc = Object.new
     fc.define_singleton_method(:find_objects) do |_c, _q, **_opts|
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { big_rows }
-      r.define_singleton_method(:count)    { big_rows.size }
+      r.define_singleton_method(:results) { big_rows }
+      r.define_singleton_method(:count) { big_rows.size }
       r
     end
     fat_agent.define_singleton_method(:client) { fc }
@@ -192,8 +192,8 @@ class PromptInjectionTest < Minitest::Test
     poison_rows = Array.new(50) do |i|
       {
         "objectId" => "p_#{i}",
-        "title"    => "T",
-        "body"     => INJECTION_DELETE_USER + ("x" * 100_000),
+        "title" => "T",
+        "body" => INJECTION_DELETE_USER + ("x" * 100_000),
       }
     end
     poison_agent = Parse::Agent.new(permissions: :readonly)
@@ -201,8 +201,8 @@ class PromptInjectionTest < Minitest::Test
     pc.define_singleton_method(:find_objects) do |_c, _q, **_opts|
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { poison_rows }
-      r.define_singleton_method(:count)    { poison_rows.size }
+      r.define_singleton_method(:results) { poison_rows }
+      r.define_singleton_method(:count) { poison_rows.size }
       r
     end
     poison_agent.define_singleton_method(:client) { pc }
@@ -255,16 +255,16 @@ class PromptInjectionTest < Minitest::Test
     # $function executes server-side JavaScript — total RCE risk.
     err = assert_security_error_raised do
       @agent.execute(:aggregate, class_name: "Anything",
-                                  pipeline: [
-                                    { "$match"   => { "title" => "x" } },
-                                    { "$project" => {
-                                        "x" => { "$function" => {
-                                          "body" => "function() { return 1; }",
-                                          "args" => [],
-                                          "lang" => "js",
-                                        } },
-                                      } },
-                                  ])
+                                 pipeline: [
+                                   { "$match" => { "title" => "x" } },
+                                   { "$project" => {
+                                     "x" => { "$function" => {
+                                       "body" => "function() { return 1; }",
+                                       "args" => [],
+                                       "lang" => "js",
+                                     } },
+                                   } },
+                                 ])
     end
     assert_match(/\$function/, err.message)
   end
@@ -273,15 +273,15 @@ class PromptInjectionTest < Minitest::Test
     # $accumulator — another server-side JS execution vector.
     err = assert_security_error_raised do
       @agent.execute(:aggregate, class_name: "Anything",
-                                  pipeline: [{ "$group" => {
-                                    "_id" => nil,
-                                    "x"   => { "$accumulator" => {
-                                      "init" => "function() { return 0; }",
-                                      "accumulate" => "function() {}",
-                                      "merge" => "function() {}",
-                                      "lang"  => "js",
-                                    } },
-                                  } }])
+                                 pipeline: [{ "$group" => {
+                                   "_id" => nil,
+                                   "x" => { "$accumulator" => {
+                                     "init" => "function() { return 0; }",
+                                     "accumulate" => "function() {}",
+                                     "merge" => "function() {}",
+                                     "lang" => "js",
+                                   } },
+                                 } }])
     end
     assert_match(/\$accumulator/, err.message)
   end
@@ -292,7 +292,7 @@ class PromptInjectionTest < Minitest::Test
     %w[$out $merge].each do |op|
       err = assert_security_error_raised do
         @agent.execute(:aggregate, class_name: "Anything",
-                                    pipeline: [{ op => "_User" }])
+                                   pipeline: [{ op => "_User" }])
       end
       assert_match(/#{Regexp.escape(op)}/, err.message)
     end
@@ -303,13 +303,13 @@ class PromptInjectionTest < Minitest::Test
     # nested under $expr should still trip the recursive validator.
     err = assert_security_error_raised do
       @agent.execute(:aggregate, class_name: "Anything",
-                                  pipeline: [{ "$match" => {
-                                    "$expr" => {
-                                      "$function" => {
-                                        "body" => "fn() {}", "args" => [], "lang" => "js",
-                                      },
-                                    },
-                                  } }])
+                                 pipeline: [{ "$match" => {
+                                   "$expr" => {
+                                     "$function" => {
+                                       "body" => "fn() {}", "args" => [], "lang" => "js",
+                                     },
+                                   },
+                                 } }])
     end
     # The recursive walker should report the nested operator, not silently
     # accept it because the top-level $expr is allowed.
@@ -329,22 +329,22 @@ class PromptInjectionTest < Minitest::Test
     # concern, but worth flagging in tests.
     formula_rows = [
       { "objectId" => "f1", "title" => INJECTION_CSV_FORMULA, "year" => 2024 },
-      { "objectId" => "f2", "title" => "Normal Book",         "year" => 2024 },
+      { "objectId" => "f2", "title" => "Normal Book", "year" => 2024 },
     ]
     fake = Parse::Agent.new(permissions: :readonly)
     fc = Object.new
     fc.define_singleton_method(:find_objects) do |_c, _q, **_opts|
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { formula_rows }
-      r.define_singleton_method(:count)    { formula_rows.size }
+      r.define_singleton_method(:results) { formula_rows }
+      r.define_singleton_method(:count) { formula_rows.size }
       r
     end
     fake.define_singleton_method(:client) { fc }
 
     result = fake.execute(:export_data, class_name: "Anything",
-                                         columns: ["title", "year"],
-                                         format: "csv")
+                                        columns: ["title", "year"],
+                                        format: "csv")
     assert result[:success]
     out = result[:data][:output]
     # CSV quoting: stdlib CSV double-quotes any value containing special
@@ -368,7 +368,7 @@ class PromptInjectionTest < Minitest::Test
     # has to be issued explicitly, must pass class-accessibility checks,
     # and must clear the env-gate.
     ENV["PARSE_AGENT_ALLOW_WRITE_TOOLS"] = "true"
-    ENV["PARSE_AGENT_ALLOW_SCHEMA_OPS"]  = "true"
+    ENV["PARSE_AGENT_ALLOW_SCHEMA_OPS"] = "true"
 
     admin = Parse::Agent.new(permissions: :admin)
     rows = @poisoned_rows
@@ -376,8 +376,8 @@ class PromptInjectionTest < Minitest::Test
     fc.define_singleton_method(:find_objects) do |_c, _q, **_opts|
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { rows }
-      r.define_singleton_method(:count)    { rows.size }
+      r.define_singleton_method(:results) { rows }
+      r.define_singleton_method(:count) { rows.size }
       r
     end
     delete_class_called = false

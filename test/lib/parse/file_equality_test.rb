@@ -79,6 +79,7 @@ class FileEqualityTest < Minitest::Test
   def test_content_signature_override_keys_off_content
     klass = Class.new(Parse::File) do
       attr_accessor :etag
+
       def content_signature
         etag || super
       end

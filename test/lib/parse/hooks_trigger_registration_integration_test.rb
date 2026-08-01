@@ -23,13 +23,13 @@ class HooksTriggerRegistrationIntegrationTest < Minitest::Test
 
   # [triggerName, className]
   NEW_TRIGGERS = [
-    [:beforeLogin,                "_User"],
-    [:afterLogin,                 "_User"],
-    [:afterLogout,                "_Session"],
+    [:beforeLogin, "_User"],
+    [:afterLogin, "_User"],
+    [:afterLogout, "_Session"],
     [:beforePasswordResetRequest, "_User"],
-    [:beforeSubscribe,            "HookRegITClass"],
-    [:afterEvent,                 "HookRegITClass"],
-    [:beforeConnect,              "_User"],
+    [:beforeSubscribe, "HookRegITClass"],
+    [:afterEvent, "HookRegITClass"],
+    [:beforeConnect, "_User"],
   ].freeze
 
   def teardown

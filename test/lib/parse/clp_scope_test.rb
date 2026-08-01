@@ -27,9 +27,9 @@ class CLPScopeTest < Minitest::Test
 
   def test_master_key_bypasses_every_op
     Parse::CLPScope.__cache_put("Song", clp: {
-      "find" => { "role:Admin" => true },
-      "delete" => { },
-    })
+                                          "find" => { "role:Admin" => true },
+                                          "delete" => {},
+                                        })
     Parse::CLPScope::OPERATIONS.each do |op|
       assert Parse::CLPScope.permits?("Song", op, nil),
              "master-key must permit #{op}"
@@ -56,8 +56,8 @@ class CLPScopeTest < Minitest::Test
 
   def test_requires_authentication_needs_user_identity
     Parse::CLPScope.__cache_put("Song", clp: {
-      "find" => { "requiresAuthentication" => true },
-    })
+                                          "find" => { "requiresAuthentication" => true },
+                                        })
     assert Parse::CLPScope.permits?("Song", :find, ["*", "u_alice"]),
            "user_id claim satisfies requiresAuthentication"
     refute Parse::CLPScope.permits?("Song", :find, ["*", "role:Admin"]),
@@ -68,8 +68,8 @@ class CLPScopeTest < Minitest::Test
 
   def test_pointer_fields_permits_user_identity_at_boundary
     Parse::CLPScope.__cache_put("Doc", clp: {
-      "update" => { "pointerFields" => ["owner"] },
-    })
+                                         "update" => { "pointerFields" => ["owner"] },
+                                       })
     assert Parse::CLPScope.permits?("Doc", :update, ["*", "u_alice"])
     refute Parse::CLPScope.permits?("Doc", :update, ["*", "role:Admin"]),
            "acl_role-only agents have no user_id to satisfy pointerFields"
@@ -177,8 +177,8 @@ class CLPScopeTest < Minitest::Test
 
   def test_pointer_fields_returns_field_names
     Parse::CLPScope.__cache_put("Doc", clp: {
-      "find" => { "pointerFields" => %w[owner editors] },
-    })
+                                         "find" => { "pointerFields" => %w[owner editors] },
+                                       })
     assert_equal %w[owner editors], Parse::CLPScope.pointer_fields_for("Doc", :find)
   end
 
@@ -191,8 +191,8 @@ class CLPScopeTest < Minitest::Test
 
   def test_protected_fields_default_for_public
     Parse::CLPScope.__cache_put("User", clp: {
-      "protectedFields" => { "*" => ["private_notes", "ssn"] },
-    })
+                                          "protectedFields" => { "*" => ["private_notes", "ssn"] },
+                                        })
     perms = ["*"]
     assert_equal Set["private_notes", "ssn"],
                  Parse::CLPScope.protected_fields_for("User", perms)
@@ -200,11 +200,11 @@ class CLPScopeTest < Minitest::Test
 
   def test_protected_fields_admin_override_strips_protection
     Parse::CLPScope.__cache_put("User", clp: {
-      "protectedFields" => {
-        "*" => ["private_notes", "ssn"],
-        "role:Admin" => [],
-      },
-    })
+                                          "protectedFields" => {
+                                            "*" => ["private_notes", "ssn"],
+                                            "role:Admin" => [],
+                                          },
+                                        })
     perms = ["*", "u_alice", "role:Admin"]
     # Admin override is [] — intersection collapses; strip-set is empty
     assert_equal Set.new, Parse::CLPScope.protected_fields_for("User", perms)
@@ -212,8 +212,8 @@ class CLPScopeTest < Minitest::Test
 
   def test_protected_fields_master_key_returns_empty
     Parse::CLPScope.__cache_put("User", clp: {
-      "protectedFields" => { "*" => ["ssn"] },
-    })
+                                          "protectedFields" => { "*" => ["ssn"] },
+                                        })
     assert_equal Set.new, Parse::CLPScope.protected_fields_for("User", nil)
   end
 
@@ -235,7 +235,7 @@ class CLPScopeTest < Minitest::Test
     docs = [{
       "objectId" => "1",
       "nested" => { "ssn" => "999", "ok" => "y" },
-      "list"   => [{ "ssn" => "888", "n" => 1 }],
+      "list" => [{ "ssn" => "888", "n" => 1 }],
     }]
     Parse::CLPScope.redact_protected_fields!(docs, Set.new(["ssn"]))
     refute_includes docs.first["nested"].keys, "ssn"

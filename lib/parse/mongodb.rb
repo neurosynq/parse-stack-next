@@ -572,8 +572,8 @@ module Parse
         @client = nil
         @enabled = false
         @uri = nil
-    @bound_app_scope = nil
-    @observed_app_scopes = nil
+        @bound_app_scope = nil
+        @observed_app_scopes = nil
         @database = nil
         remove_instance_variable(:@gem_available) if defined?(@gem_available)
         reset_writer!
@@ -743,13 +743,13 @@ module Parse
       #   identically-specified index was already present.
       # @raise [WriterNotConfigured, MutationsDisabled, ForbiddenCollection]
       def create_index(collection_name, keys, name: nil, unique: false, sparse: false,
-                       partial_filter: nil, expire_after: nil, allow_system_classes: false)
+                                              partial_filter: nil, expire_after: nil, allow_system_classes: false)
         assert_mutations_allowed!
         assert_collection_allowed!(collection_name, allow_system_classes: allow_system_classes)
         spec_keys = normalize_index_keys(keys)
         existing = writer_indexes(collection_name, allow_system_classes: allow_system_classes)
         if index_matches?(existing, spec_keys, name: name, unique: unique, sparse: sparse,
-                          partial_filter: partial_filter, expire_after: expire_after)
+                                               partial_filter: partial_filter, expire_after: expire_after)
           audit_writer_event(:create_index_skipped, collection_name, keys: spec_keys, name: name)
           return :exists
         end
@@ -986,10 +986,10 @@ module Parse
             # min_pool_size: 0 — keep idle pool drained when not in use.
             # The writer should be a rare-use connection.
             ::Mongo::Client.new(@writer_uri, min_pool_size: 0, max_pool_size: 2,
-                                              server_selection_timeout: 10,
-                                              socket_timeout: 10,
-                                              connect_timeout: 5,
-                                              monitoring: false)
+                                             server_selection_timeout: 10,
+                                             socket_timeout: 10,
+                                             connect_timeout: 5,
+                                             monitoring: false)
           rescue => e
             raise ConnectionError, "Failed to connect writer client: #{e.message}"
           end
@@ -1262,7 +1262,7 @@ module Parse
       # @raise [Parse::CLPScope::Denied] when `as:` is supplied and the
       #   scope cannot `find` on `_Role`.
       def role_names_for_user(user_id, max_depth: ROLE_GRAPH_DEFAULT_DEPTH, master: false, as: nil,
-                              client: nil)
+                                       client: nil)
         # Public entry point: resolve an omitted client to the default ONCE,
         # here, and use the same value for the authorization and for the
         # collection below. Passing the raw `client:` down meant an ordinary
@@ -1345,7 +1345,7 @@ module Parse
       # @raise [Parse::CLPScope::Denied] when `as:` is supplied and the
       #   scope cannot `find` on `_Role`.
       def users_in_role_subtree(role_id, max_depth: ROLE_GRAPH_DEFAULT_DEPTH, master: false, as: nil,
-                                client: nil)
+                                         client: nil)
         # See {.role_names_for_user}: resolve the omission once at the entry
         # point rather than letting nil travel to the collection lookup.
         client ||= default_client_or_nil
@@ -1416,10 +1416,10 @@ module Parse
       def master_key_available?
         return false unless defined?(Parse) && Parse.respond_to?(:client)
         c = begin
-              Parse.client
-            rescue StandardError
-              nil
-            end
+            Parse.client
+          rescue StandardError
+            nil
+          end
         return false if c.nil?
         key = c.respond_to?(:master_key) ? c.master_key : nil
         key.is_a?(String) && !key.empty?
@@ -1465,9 +1465,9 @@ module Parse
 
         if master == true
           return Parse::ACLScope::Resolution.new(
-            mode: :master, permission_strings: nil, user_id: nil, session: nil,
-            client: client,
-          )
+                   mode: :master, permission_strings: nil, user_id: nil, session: nil,
+                   client: client,
+                 )
         end
 
         if as.nil?
@@ -1530,26 +1530,26 @@ module Parse
         pipeline = [
           { "$match" => { "relatedId" => user_id } },
           { "$graphLookup" => {
-              "from" => "_Join:roles:_Role",
-              "startWith" => "$owningId",
-              "connectFromField" => "owningId",
-              "connectToField" => "relatedId",
-              "as" => "parent_chain",
-              "maxDepth" => graph_depth,
+            "from" => "_Join:roles:_Role",
+            "startWith" => "$owningId",
+            "connectFromField" => "owningId",
+            "connectToField" => "relatedId",
+            "as" => "parent_chain",
+            "maxDepth" => graph_depth,
           } },
           { "$project" => {
-              "_id" => 0,
-              "role_ids" => {
-                "$setUnion" => [["$owningId"], "$parent_chain.owningId"],
-              },
+            "_id" => 0,
+            "role_ids" => {
+              "$setUnion" => [["$owningId"], "$parent_chain.owningId"],
+            },
           } },
           { "$unwind" => "$role_ids" },
           { "$group" => { "_id" => nil, "ids" => { "$addToSet" => "$role_ids" } } },
           { "$lookup" => {
-              "from" => "_Role",
-              "localField" => "ids",
-              "foreignField" => "_id",
-              "as" => "roles",
+            "from" => "_Role",
+            "localField" => "ids",
+            "foreignField" => "_id",
+            "as" => "roles",
           } },
           { "$project" => { "_id" => 0, "names" => "$roles.name" } },
         ]
@@ -1580,34 +1580,34 @@ module Parse
         pipeline = [
           { "$match" => { "owningId" => role_id } },
           { "$graphLookup" => {
-              "from" => "_Join:roles:_Role",
-              "startWith" => "$relatedId",
-              "connectFromField" => "relatedId",
-              "connectToField" => "owningId",
-              "as" => "descendant_chain",
-              "maxDepth" => graph_depth,
+            "from" => "_Join:roles:_Role",
+            "startWith" => "$relatedId",
+            "connectFromField" => "relatedId",
+            "connectToField" => "owningId",
+            "as" => "descendant_chain",
+            "maxDepth" => graph_depth,
           } },
           { "$project" => {
-              "_id" => 0,
-              "role_ids" => {
-                "$setUnion" => [["$relatedId"], "$descendant_chain.relatedId"],
-              },
+            "_id" => 0,
+            "role_ids" => {
+              "$setUnion" => [["$relatedId"], "$descendant_chain.relatedId"],
+            },
           } },
           { "$unwind" => "$role_ids" },
           { "$group" => { "_id" => nil, "ids" => { "$addToSet" => "$role_ids" } } },
           { "$project" => {
-              "_id" => 0,
-              "ids" => { "$setUnion" => ["$ids", [role_id]] },
+            "_id" => 0,
+            "ids" => { "$setUnion" => ["$ids", [role_id]] },
           } },
           { "$lookup" => {
-              "from" => "_Join:users:_Role",
-              "localField" => "ids",
-              "foreignField" => "owningId",
-              "as" => "subscriptions",
+            "from" => "_Join:users:_Role",
+            "localField" => "ids",
+            "foreignField" => "owningId",
+            "as" => "subscriptions",
           } },
           { "$project" => {
-              "_id" => 0,
-              "user_id_candidates" => "$subscriptions.relatedId",
+            "_id" => 0,
+            "user_id_candidates" => "$subscriptions.relatedId",
           } },
           # Filter tombstoned _User rows AND project only `_id` server-side
           # via pipeline-form $lookup (3.6+). Without this, a role with N
@@ -1620,17 +1620,17 @@ module Parse
           # `_rperm` match is folded into the sub-pipeline filter so the
           # join honors row-level ACL.
           { "$lookup" => {
-              "from" => "_User",
-              "let" => { "ids" => "$user_id_candidates" },
-              "pipeline" => [
-                { "$match" => user_match },
-                { "$project" => { "_id" => 1 } },
-              ],
-              "as" => "active_users",
+            "from" => "_User",
+            "let" => { "ids" => "$user_id_candidates" },
+            "pipeline" => [
+              { "$match" => user_match },
+              { "$project" => { "_id" => 1 } },
+            ],
+            "as" => "active_users",
           } },
           { "$project" => {
-              "_id" => 0,
-              "user_ids" => "$active_users._id",
+            "_id" => 0,
+            "user_ids" => "$active_users._id",
           } },
         ]
         # Defense-in-depth shape assertions (see comment in
@@ -1646,47 +1646,32 @@ module Parse
       # `startWith`. These fields drive the BFS direction in MongoDB; a
       # caller value here would be a query-injection primitive.
       def assert_user_role_names_pipeline_shape!(pipeline, user_id, graph_depth)
-        raise "role-graph pipeline shape regression: $match.relatedId must equal user_id" \
-          unless pipeline[0].is_a?(Hash) && pipeline[0]["$match"].is_a?(Hash) &&
-                 pipeline[0]["$match"]["relatedId"] == user_id
+        raise "role-graph pipeline shape regression: $match.relatedId must equal user_id" unless pipeline[0].is_a?(Hash) && pipeline[0]["$match"].is_a?(Hash) &&
+                                                                                                 pipeline[0]["$match"]["relatedId"] == user_id
         gl = pipeline[1] && pipeline[1]["$graphLookup"]
-        raise "role-graph pipeline shape regression: missing $graphLookup stage" \
-          unless gl.is_a?(Hash)
-        raise "role-graph pipeline shape regression: $graphLookup.from must be a hardcoded String" \
-          unless gl["from"] == "_Join:roles:_Role"
-        raise "role-graph pipeline shape regression: $graphLookup.connectFromField must be hardcoded" \
-          unless gl["connectFromField"] == "owningId"
-        raise "role-graph pipeline shape regression: $graphLookup.connectToField must be hardcoded" \
-          unless gl["connectToField"] == "relatedId"
-        raise "role-graph pipeline shape regression: $graphLookup.startWith must be hardcoded" \
-          unless gl["startWith"] == "$owningId"
-        raise "role-graph pipeline shape regression: $graphLookup.maxDepth must be Integer" \
-          unless gl["maxDepth"].is_a?(Integer) && gl["maxDepth"] == graph_depth
+        raise "role-graph pipeline shape regression: missing $graphLookup stage" unless gl.is_a?(Hash)
+        raise "role-graph pipeline shape regression: $graphLookup.from must be a hardcoded String" unless gl["from"] == "_Join:roles:_Role"
+        raise "role-graph pipeline shape regression: $graphLookup.connectFromField must be hardcoded" unless gl["connectFromField"] == "owningId"
+        raise "role-graph pipeline shape regression: $graphLookup.connectToField must be hardcoded" unless gl["connectToField"] == "relatedId"
+        raise "role-graph pipeline shape regression: $graphLookup.startWith must be hardcoded" unless gl["startWith"] == "$owningId"
+        raise "role-graph pipeline shape regression: $graphLookup.maxDepth must be Integer" unless gl["maxDepth"].is_a?(Integer) && gl["maxDepth"] == graph_depth
       end
 
       # @!visibility private
       # Hardcoded-shape assertion for build_role_subtree_users_pipeline.
       def assert_role_subtree_users_pipeline_shape!(pipeline, role_id, graph_depth)
-        raise "role-graph pipeline shape regression: $match.owningId must equal role_id" \
-          unless pipeline[0].is_a?(Hash) && pipeline[0]["$match"].is_a?(Hash) &&
-                 pipeline[0]["$match"]["owningId"] == role_id
+        raise "role-graph pipeline shape regression: $match.owningId must equal role_id" unless pipeline[0].is_a?(Hash) && pipeline[0]["$match"].is_a?(Hash) &&
+                                                                                                pipeline[0]["$match"]["owningId"] == role_id
         gl = pipeline[1] && pipeline[1]["$graphLookup"]
-        raise "role-graph pipeline shape regression: missing $graphLookup stage" \
-          unless gl.is_a?(Hash)
-        raise "role-graph pipeline shape regression: $graphLookup.from must be a hardcoded String" \
-          unless gl["from"] == "_Join:roles:_Role"
-        raise "role-graph pipeline shape regression: $graphLookup.connectFromField must be hardcoded" \
-          unless gl["connectFromField"] == "relatedId"
-        raise "role-graph pipeline shape regression: $graphLookup.connectToField must be hardcoded" \
-          unless gl["connectToField"] == "owningId"
-        raise "role-graph pipeline shape regression: $graphLookup.startWith must be hardcoded" \
-          unless gl["startWith"] == "$relatedId"
-        raise "role-graph pipeline shape regression: $graphLookup.maxDepth must be Integer" \
-          unless gl["maxDepth"].is_a?(Integer) && gl["maxDepth"] == graph_depth
+        raise "role-graph pipeline shape regression: missing $graphLookup stage" unless gl.is_a?(Hash)
+        raise "role-graph pipeline shape regression: $graphLookup.from must be a hardcoded String" unless gl["from"] == "_Join:roles:_Role"
+        raise "role-graph pipeline shape regression: $graphLookup.connectFromField must be hardcoded" unless gl["connectFromField"] == "relatedId"
+        raise "role-graph pipeline shape regression: $graphLookup.connectToField must be hardcoded" unless gl["connectToField"] == "owningId"
+        raise "role-graph pipeline shape regression: $graphLookup.startWith must be hardcoded" unless gl["startWith"] == "$relatedId"
+        raise "role-graph pipeline shape regression: $graphLookup.maxDepth must be Integer" unless gl["maxDepth"].is_a?(Integer) && gl["maxDepth"] == graph_depth
         # Final _User $lookup carries the hardcoded foreign collection.
         user_lookup = pipeline.find { |s| s.dig("$lookup", "from") == "_User" }
-        raise "role-graph pipeline shape regression: missing _User $lookup stage" \
-          unless user_lookup.is_a?(Hash)
+        raise "role-graph pipeline shape regression: missing _User $lookup stage" unless user_lookup.is_a?(Hash)
       end
 
       # Execute an aggregation pipeline directly on MongoDB
@@ -1757,164 +1742,164 @@ module Parse
           result_count: nil,
         }
         ActiveSupport::Notifications.instrument("parse.mongodb.aggregate", instrument_payload) do |payload|
-        # Resolve auth kwargs into a Parse::ACLScope::Resolution. The
-        # call MUTATES the temporary kwargs hash (popping the auth
-        # entries) before the resolution; we package them into a hash
-        # here only so the shared helper can stay path-agnostic. The
-        # hash is local and discarded after the call.
-        auth_kwargs = {
-          session_token: session_token,
-          master: master,
-          acl_user: acl_user,
-          acl_role: acl_role,
-          # The client whose authorization context resolves this call. Nil
-          # falls back to Parse.client at the ACLScope boundary. It is carried
-          # onto the Resolution so verify_client! below can compare it against
-          # the application this process-global connection is bound to.
-          client: client,
-        }.compact
-        resolution = Parse::ACLScope.resolve!(auth_kwargs, method_name: :aggregate)
-        # The resolution above is client-scoped; the connection below is not.
-        # Refuse the combination rather than reading another application's
-        # database with this application's permission strings.
-        verify_client!(resolution.client)
-        payload[:scope] = __scope_label(resolution)
+          # Resolve auth kwargs into a Parse::ACLScope::Resolution. The
+          # call MUTATES the temporary kwargs hash (popping the auth
+          # entries) before the resolution; we package them into a hash
+          # here only so the shared helper can stay path-agnostic. The
+          # hash is local and discarded after the call.
+          auth_kwargs = {
+            session_token: session_token,
+            master: master,
+            acl_user: acl_user,
+            acl_role: acl_role,
+            # The client whose authorization context resolves this call. Nil
+            # falls back to Parse.client at the ACLScope boundary. It is carried
+            # onto the Resolution so verify_client! below can compare it against
+            # the application this process-global connection is bound to.
+            client: client,
+          }.compact
+          resolution = Parse::ACLScope.resolve!(auth_kwargs, method_name: :aggregate)
+          # The resolution above is client-scoped; the connection below is not.
+          # Refuse the combination rather than reading another application's
+          # database with this application's permission strings.
+          verify_client!(resolution.client)
+          payload[:scope] = __scope_label(resolution)
 
-        # Validate BEFORE rewrite so the security denylist is applied to the
-        # caller's original pipeline (which an attacker controls), not to
-        # the gem-rewritten form (which it doesn't). Matches the ordering
-        # used by Parse::Query#aggregate and Parse::Agent::Tools.aggregate.
-        assert_no_denied_operators!(pipeline, allow_internal_fields: allow_internal_fields)
+          # Validate BEFORE rewrite so the security denylist is applied to the
+          # caller's original pipeline (which an attacker controls), not to
+          # the gem-rewritten form (which it doesn't). Matches the ordering
+          # used by Parse::Query#aggregate and Parse::Agent::Tools.aggregate.
+          assert_no_denied_operators!(pipeline, allow_internal_fields: allow_internal_fields)
 
-        # Wave-3 TRACK-CLP-4: refuse any caller-supplied `$<field>`
-        # reference that names a protectedField for the queried class
-        # in the current scope. The post-fetch redact strips by NAME,
-        # so a pipeline can launder a protected value through a
-        # `$project: { renamed: "$ssn" }` (and similar) clauses and
-        # bypass the strip silently. Catching the reference here at
-        # parse-time refuses the join with `Parse::CLPScope::Denied`
-        # so the bypass surfaces as an explicit error rather than a
-        # quiet exfiltration. Master mode short-circuits inside the
-        # scanner (no protected set on master).
-        Parse::PipelineSecurity.refuse_protected_field_references!(
-          pipeline, collection_name, resolution,
-        )
+          # Wave-3 TRACK-CLP-4: refuse any caller-supplied `$<field>`
+          # reference that names a protectedField for the queried class
+          # in the current scope. The post-fetch redact strips by NAME,
+          # so a pipeline can launder a protected value through a
+          # `$project: { renamed: "$ssn" }` (and similar) clauses and
+          # bypass the strip silently. Catching the reference here at
+          # parse-time refuses the join with `Parse::CLPScope::Denied`
+          # so the bypass surfaces as an explicit error rather than a
+          # quiet exfiltration. Master mode short-circuits inside the
+          # scanner (no protected set on master).
+          Parse::PipelineSecurity.refuse_protected_field_references!(
+            pipeline, collection_name, resolution,
+          )
 
-        pipeline = Parse::LookupRewriter.auto_rewrite(
-          pipeline, class_name: collection_name, enabled: rewrite_lookups,
-        )
+          pipeline = Parse::LookupRewriter.auto_rewrite(
+            pipeline, class_name: collection_name, enabled: rewrite_lookups,
+          )
 
-        # Three-layer ACL simulation on the mongo-direct path:
-        #
-        # 1. Top-level $match: filter the queried collection's rows by
-        #    the session's _rperm allow-set. Mirrors Parse Server's
-        #    REST find behavior.
-        # 2. Pipeline rewriter: every $lookup / $unionWith / $graphLookup /
-        #    $facet sub-pipeline gets the same _rperm filter embedded
-        #    so joined rows from other collections are filtered at the
-        #    database. Without this, includes/joins would silently leak
-        #    rows the requesting session has no permission to read.
-        # 3. Post-fetch redaction: walk the returned documents and
-        #    scrub any embedded sub-documents whose stored _rperm
-        #    doesn't match the perms set. Catches cases the rewriter
-        #    can't reach (e.g., :object columns embedding raw pointer
-        #    hashes, or caller-supplied $lookup stages that escaped
-        #    rewriting because of unusual shapes).
-        #
-        # The security validator already ran on the caller's original
-        # pipeline above; the injected stages reference `_rperm` but
-        # are SDK-generated (not attacker-controlled), so no
-        # re-validation is needed before they're handed to MongoDB.
-        if (acl_stage = Parse::ACLScope.match_stage_for(resolution))
-          pipeline = prepend_or_fold_acl_match(pipeline, acl_stage)
-        end
-        pipeline = Parse::ACLScope.rewrite_pipeline(pipeline, resolution)
+          # Three-layer ACL simulation on the mongo-direct path:
+          #
+          # 1. Top-level $match: filter the queried collection's rows by
+          #    the session's _rperm allow-set. Mirrors Parse Server's
+          #    REST find behavior.
+          # 2. Pipeline rewriter: every $lookup / $unionWith / $graphLookup /
+          #    $facet sub-pipeline gets the same _rperm filter embedded
+          #    so joined rows from other collections are filtered at the
+          #    database. Without this, includes/joins would silently leak
+          #    rows the requesting session has no permission to read.
+          # 3. Post-fetch redaction: walk the returned documents and
+          #    scrub any embedded sub-documents whose stored _rperm
+          #    doesn't match the perms set. Catches cases the rewriter
+          #    can't reach (e.g., :object columns embedding raw pointer
+          #    hashes, or caller-supplied $lookup stages that escaped
+          #    rewriting because of unusual shapes).
+          #
+          # The security validator already ran on the caller's original
+          # pipeline above; the injected stages reference `_rperm` but
+          # are SDK-generated (not attacker-controlled), so no
+          # re-validation is needed before they're handed to MongoDB.
+          if (acl_stage = Parse::ACLScope.match_stage_for(resolution))
+            pipeline = prepend_or_fold_acl_match(pipeline, acl_stage)
+          end
+          pipeline = Parse::ACLScope.rewrite_pipeline(pipeline, resolution)
 
-        # Class-Level Permissions boundary check. Parse Server's REST
-        # aggregate endpoint runs master-key-only and does NOT enforce
-        # CLP; the mongo-direct path bypasses Parse Server entirely so
-        # the SDK is the only enforcement layer. Refuse the call when
-        # the resolved scope can't `find` on the collection. Master-
-        # key (resolution.master? / nil permission_strings) bypasses.
-        perms_for_clp = resolution&.permission_strings
-        unless resolution.nil? || resolution.master?
-          unless Parse::CLPScope.permits?(collection_name, :find, perms_for_clp)
-            raise Parse::CLPScope::Denied.new(
-              collection_name, :find,
-              "CLP refuses find on '#{collection_name}' for the current scope.",
+          # Class-Level Permissions boundary check. Parse Server's REST
+          # aggregate endpoint runs master-key-only and does NOT enforce
+          # CLP; the mongo-direct path bypasses Parse Server entirely so
+          # the SDK is the only enforcement layer. Refuse the call when
+          # the resolved scope can't `find` on the collection. Master-
+          # key (resolution.master? / nil permission_strings) bypasses.
+          perms_for_clp = resolution&.permission_strings
+          unless resolution.nil? || resolution.master?
+            unless Parse::CLPScope.permits?(collection_name, :find, perms_for_clp)
+              raise Parse::CLPScope::Denied.new(
+                collection_name, :find,
+                "CLP refuses find on '#{collection_name}' for the current scope.",
+              )
+            end
+          end
+
+          # Resolve the pointerFields constraint (if any) BEFORE running
+          # the query — we apply the filter post-fetch but want to fail
+          # loudly when the scope can't satisfy the constraint at all
+          # (acl_role-only / public agents have no user_id to match).
+          pointer_fields = nil
+          unless resolution.nil? || resolution.master?
+            pointer_fields = Parse::CLPScope.pointer_fields_for(collection_name, :find)
+            if pointer_fields && resolution.user_id.nil?
+              raise Parse::CLPScope::Denied.new(
+                collection_name, :find,
+                "CLP requires user identity (pointerFields=#{pointer_fields.inspect}) " \
+                "but the current scope has no user_id.",
+              )
+            end
+          end
+
+          agg_opts = {}
+          agg_opts[:max_time_ms] = max_time_ms if max_time_ms
+          # Forced index hint (Query#hint). Mirrors Parse Server's REST `hint`
+          # on the mongo-direct path so a bad plan diagnosed with `explain` can
+          # be corrected here too. Accepts an index name (String) or a key
+          # pattern (Hash).
+          agg_opts[:hint] = hint unless hint.nil?
+          # The SAME client this call already verified against. Passing nothing
+          # here made the collection lookup an unidentified caller, so once a
+          # second application had been observed a perfectly legitimate
+          # aggregate for the bound application was refused.
+          coll = collection(collection_name, authorizing_client: Parse::ACLScope.client_of(resolution))
+          if (mode = normalize_read_preference(read_preference))
+            coll = coll.with(read: { mode: mode })
+          end
+          results = coll.aggregate(pipeline, agg_opts).to_a
+          Parse::ACLScope.redact_results!(results, resolution)
+
+          # Post-fetch pointerFields filter: drop rows where none of the
+          # named pointer fields references the requesting user. Skipped
+          # for master-key and when the CLP has no pointerFields entry.
+          if pointer_fields
+            results = Parse::CLPScope.filter_by_pointer_fields(
+              results, pointer_fields, resolution.user_id,
             )
           end
-        end
 
-        # Resolve the pointerFields constraint (if any) BEFORE running
-        # the query — we apply the filter post-fetch but want to fail
-        # loudly when the scope can't satisfy the constraint at all
-        # (acl_role-only / public agents have no user_id to match).
-        pointer_fields = nil
-        unless resolution.nil? || resolution.master?
-          pointer_fields = Parse::CLPScope.pointer_fields_for(collection_name, :find)
-          if pointer_fields && resolution.user_id.nil?
-            raise Parse::CLPScope::Denied.new(
-              collection_name, :find,
-              "CLP requires user identity (pointerFields=#{pointer_fields.inspect}) " \
-              "but the current scope has no user_id.",
+          # Protected fields stripping. Resolve the field set per the
+          # session's claim composition and walk-delete from every
+          # row + embedded sub-document. Top-level $project would also
+          # work but doesn't reach inside `$lookup`-included sub-docs,
+          # so the post-walker is the defense-in-depth layer.
+          unless resolution.nil? || resolution.master?
+            strip_set = Parse::CLPScope.protected_fields_for(
+              collection_name, perms_for_clp,
             )
+            Parse::CLPScope.redact_protected_fields!(results, strip_set) if strip_set.any?
+
+            # Process-level floor: recursively strip Parse-internal credential
+            # columns (_hashed_password, _session_token, _auth_data_*, _rperm,
+            # ...) from every row AND every embedded sub-document. The
+            # protectedFields strip above is keyed on the OUTER class, and the
+            # ACL sub-doc walk only DROPS ACL-failing sub-docs — neither covers
+            # a foreign class (e.g. _User / _Session) pulled in via $lookup /
+            # $graphLookup / $unionWith under an arbitrary alias. Runs last, for
+            # scoped (non-master) callers only; master is unredacted by design.
+            results.each do |row|
+              Parse::PipelineSecurity.redact_internal_fields_deep!(row)
+            end
           end
-        end
 
-        agg_opts = {}
-        agg_opts[:max_time_ms] = max_time_ms if max_time_ms
-        # Forced index hint (Query#hint). Mirrors Parse Server's REST `hint`
-        # on the mongo-direct path so a bad plan diagnosed with `explain` can
-        # be corrected here too. Accepts an index name (String) or a key
-        # pattern (Hash).
-        agg_opts[:hint] = hint unless hint.nil?
-        # The SAME client this call already verified against. Passing nothing
-        # here made the collection lookup an unidentified caller, so once a
-        # second application had been observed a perfectly legitimate
-        # aggregate for the bound application was refused.
-        coll = collection(collection_name, authorizing_client: Parse::ACLScope.client_of(resolution))
-        if (mode = normalize_read_preference(read_preference))
-          coll = coll.with(read: { mode: mode })
-        end
-        results = coll.aggregate(pipeline, agg_opts).to_a
-        Parse::ACLScope.redact_results!(results, resolution)
-
-        # Post-fetch pointerFields filter: drop rows where none of the
-        # named pointer fields references the requesting user. Skipped
-        # for master-key and when the CLP has no pointerFields entry.
-        if pointer_fields
-          results = Parse::CLPScope.filter_by_pointer_fields(
-            results, pointer_fields, resolution.user_id,
-          )
-        end
-
-        # Protected fields stripping. Resolve the field set per the
-        # session's claim composition and walk-delete from every
-        # row + embedded sub-document. Top-level $project would also
-        # work but doesn't reach inside `$lookup`-included sub-docs,
-        # so the post-walker is the defense-in-depth layer.
-        unless resolution.nil? || resolution.master?
-          strip_set = Parse::CLPScope.protected_fields_for(
-            collection_name, perms_for_clp,
-          )
-          Parse::CLPScope.redact_protected_fields!(results, strip_set) if strip_set.any?
-
-          # Process-level floor: recursively strip Parse-internal credential
-          # columns (_hashed_password, _session_token, _auth_data_*, _rperm,
-          # ...) from every row AND every embedded sub-document. The
-          # protectedFields strip above is keyed on the OUTER class, and the
-          # ACL sub-doc walk only DROPS ACL-failing sub-docs — neither covers
-          # a foreign class (e.g. _User / _Session) pulled in via $lookup /
-          # $graphLookup / $unionWith under an arbitrary alias. Runs last, for
-          # scoped (non-master) callers only; master is unredacted by design.
-          results.each do |row|
-            Parse::PipelineSecurity.redact_internal_fields_deep!(row)
-          end
-        end
-
-        payload[:result_count] = results.size
-        results
+          payload[:result_count] = results.size
+          results
         end
       rescue => e
         raise_if_timeout!(e, collection_name, max_time_ms)
@@ -1947,15 +1932,9 @@ module Parse
         # either type, else follow the `$geoNear` key's type (string stage
         # → "query", symbol stage → :query). The Mongo driver normalizes
         # either way, but keeping one style avoids a duplicate query key.
-        q_key =
-          if geo.key?("query") then "query"
-          elsif geo.key?(:query) then :query
-          elsif geo_key.is_a?(String) then "query"
-          else :query
-          end
+        q_key = if geo.key?("query") then "query" elsif geo.key?(:query) then :query elsif geo_key.is_a?(String) then "query" else :query end
         existing = geo[q_key]
-        geo[q_key] =
-          if existing.is_a?(Hash) && !existing.empty?
+        geo[q_key] = if existing.is_a?(Hash) && !existing.empty?
             # `existing` is still the caller's own `$geoNear.query` hash
             # (the outer `.dup` above is shallow). Embed a copy, not the
             # original, so the folded pipeline and the caller's pipeline
@@ -2133,8 +2112,7 @@ module Parse
         # both event names must treat `payload[:scope]` as optional.
         # `result_count` is seeded nil so subscribers see a stable key
         # set even on the raise path.
-        projection_keys =
-          if options[:projection].is_a?(Hash)
+        projection_keys = if options[:projection].is_a?(Hash)
             options[:projection].keys.map(&:to_s)
           end
         instrument_payload = {
@@ -2146,41 +2124,41 @@ module Parse
           result_count: nil,
         }
         ActiveSupport::Notifications.instrument("parse.mongodb.find", instrument_payload) do |payload|
-        allow_internal_fields = options.delete(:allow_internal_fields) || false
-        assert_no_denied_operators!(filter, allow_internal_fields: allow_internal_fields)
-        cursor = collection(collection_name, authorizing_client: find_client).find(filter)
-        explicit_limit = options.key?(:limit)
-        applied_default_limit = false
+          allow_internal_fields = options.delete(:allow_internal_fields) || false
+          assert_no_denied_operators!(filter, allow_internal_fields: allow_internal_fields)
+          cursor = collection(collection_name, authorizing_client: find_client).find(filter)
+          explicit_limit = options.key?(:limit)
+          applied_default_limit = false
 
-        if explicit_limit
-          cursor = cursor.limit(options[:limit]) if options[:limit] > 0
-        else
-          # Apply the hard default BEFORE to_a so we never materialize an
-          # unbounded result set. Fetch one extra row so we can detect when
-          # callers hit the cap and warn them.
-          cursor = cursor.limit(DEFAULT_FIND_LIMIT + 1)
-          applied_default_limit = true
-        end
+          if explicit_limit
+            cursor = cursor.limit(options[:limit]) if options[:limit] > 0
+          else
+            # Apply the hard default BEFORE to_a so we never materialize an
+            # unbounded result set. Fetch one extra row so we can detect when
+            # callers hit the cap and warn them.
+            cursor = cursor.limit(DEFAULT_FIND_LIMIT + 1)
+            applied_default_limit = true
+          end
 
-        cursor = cursor.skip(options[:skip]) if options[:skip]
-        cursor = cursor.sort(options[:sort]) if options[:sort]
-        cursor = cursor.projection(options[:projection]) if options[:projection]
-        cursor = cursor.hint(options[:hint]) unless options[:hint].nil?
-        cursor = cursor.max_time_ms(max_time_ms) if max_time_ms
-        results = cursor.to_a
+          cursor = cursor.skip(options[:skip]) if options[:skip]
+          cursor = cursor.sort(options[:sort]) if options[:sort]
+          cursor = cursor.projection(options[:projection]) if options[:projection]
+          cursor = cursor.hint(options[:hint]) unless options[:hint].nil?
+          cursor = cursor.max_time_ms(max_time_ms) if max_time_ms
+          results = cursor.to_a
 
-        if applied_default_limit && results.size > DEFAULT_FIND_LIMIT
-          # Trim the sentinel row and warn — the caller asked for everything
-          # but the result set is larger than the safety cap.
-          results = results.first(DEFAULT_FIND_LIMIT)
-          warn "[Parse::MongoDB.find] on '#{collection_name}' truncated to " \
-               "#{DEFAULT_FIND_LIMIT} rows (no :limit specified). Pass an " \
-               "explicit :limit to control the size, or :limit => 0 for " \
-               "unbounded behavior."
-        end
+          if applied_default_limit && results.size > DEFAULT_FIND_LIMIT
+            # Trim the sentinel row and warn — the caller asked for everything
+            # but the result set is larger than the safety cap.
+            results = results.first(DEFAULT_FIND_LIMIT)
+            warn "[Parse::MongoDB.find] on '#{collection_name}' truncated to " \
+              "#{DEFAULT_FIND_LIMIT} rows (no :limit specified). Pass an " \
+              "explicit :limit to control the size, or :limit => 0 for " \
+              "unbounded behavior."
+          end
 
-        payload[:result_count] = results.size
-        results
+          payload[:result_count] = results.size
+          results
         end
       rescue => e
         raise_if_timeout!(e, collection_name, max_time_ms)
@@ -2261,7 +2239,7 @@ module Parse
           next unless name
           accesses = row["accesses"] || row[:accesses] || {}
           h[name] = {
-            ops:   (accesses["ops"] || accesses[:ops]).to_i,
+            ops: (accesses["ops"] || accesses[:ops]).to_i,
             since: accesses["since"] || accesses[:since],
           }
         end

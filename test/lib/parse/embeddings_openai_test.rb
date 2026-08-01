@@ -197,8 +197,8 @@ class EmbeddingsOpenAITest < Minitest::Test
     end
     provider = build(
       organization: "org-abc",
-      project:      "proj-xyz",
-      connection:   stubbed_conn(stubs, headers: { "OpenAI-Organization" => "org-abc", "OpenAI-Project" => "proj-xyz" }),
+      project: "proj-xyz",
+      connection: stubbed_conn(stubs, headers: { "OpenAI-Organization" => "org-abc", "OpenAI-Project" => "proj-xyz" }),
     )
     provider.embed_text(["x"])
     assert_equal "org-abc", captured_req.request_headers["OpenAI-Organization"]
@@ -367,7 +367,7 @@ class EmbeddingsOpenAITest < Minitest::Test
       stub.post("/v1/embeddings") { |_| [400, {}, '{"error":"bad"}'] }
     end
     provider = build(
-      base_url:   "https://customer-private-azure.example.com/openai/deployments/x/v1",
+      base_url: "https://customer-private-azure.example.com/openai/deployments/x/v1",
       connection: stubbed_conn(stubs),
     )
     err = assert_raises(Parse::Embeddings::OpenAI::BadRequestError) { provider.embed_text(["a"]) }
@@ -382,7 +382,7 @@ class EmbeddingsOpenAITest < Minitest::Test
       stub.post("/v1/embeddings") { |_| raise Faraday::ConnectionFailed, "failed to connect to https://customer-private-azure.example.com" }
     end
     provider = build(
-      base_url:   "https://customer-private-azure.example.com/v1",
+      base_url: "https://customer-private-azure.example.com/v1",
       connection: stubbed_conn(stubs),
       max_retries: 0,
     )
@@ -538,9 +538,9 @@ class EmbeddingsOpenAITest < Minitest::Test
 
   def test_build_connection_sets_credential_and_metadata_headers
     provider = Parse::Embeddings::OpenAI.new(
-      api_key:      API_KEY,
+      api_key: API_KEY,
       organization: "org-abc",
-      project:      "proj-xyz",
+      project: "proj-xyz",
     )
     conn = provider.instance_variable_get(:@connection)
     headers = conn.headers
@@ -562,13 +562,13 @@ class EmbeddingsOpenAITest < Minitest::Test
 
   def test_build_connection_propagates_timeouts
     provider = Parse::Embeddings::OpenAI.new(
-      api_key:      API_KEY,
-      timeout:      17,
+      api_key: API_KEY,
+      timeout: 17,
       open_timeout: 3,
     )
     conn = provider.instance_variable_get(:@connection)
     assert_equal 17, conn.options.timeout
-    assert_equal 3,  conn.options.open_timeout
+    assert_equal 3, conn.options.open_timeout
   end
 
   def test_build_connection_suppresses_env_proxy_by_default
@@ -582,7 +582,7 @@ class EmbeddingsOpenAITest < Minitest::Test
   def test_build_connection_uses_env_proxy_when_opted_in
     with_env("HTTPS_PROXY" => "http://corp-proxy.example:8080") do
       provider = Parse::Embeddings::OpenAI.new(
-        api_key:             API_KEY,
+        api_key: API_KEY,
         allow_faraday_proxy: true,
       )
       conn = provider.instance_variable_get(:@connection)

@@ -14,7 +14,7 @@ class ClientRestCloudConfigIntegrationTest < Minitest::Test
   include ParseStackIntegrationTest
   include Parse::Test::ClientModeHelper
 
-  PUBLIC_KEY    = "client_public_flag"
+  PUBLIC_KEY = "client_public_flag"
   MASTER_ONLY_K = "client_master_only_secret"
 
   def setup

@@ -120,8 +120,8 @@ class CanonicalFilterTest < Minitest::Test
       @received_query = query
       response = Object.new
       response.define_singleton_method(:success?) { true }
-      response.define_singleton_method(:count)    { 0 }
-      response.define_singleton_method(:results)  { [] }
+      response.define_singleton_method(:count) { 0 }
+      response.define_singleton_method(:results) { [] }
       response
     end
 
@@ -129,8 +129,8 @@ class CanonicalFilterTest < Minitest::Test
       @received_pipeline = pipeline
       response = Object.new
       response.define_singleton_method(:success?) { true }
-      response.define_singleton_method(:results)  { [] }
-      response.define_singleton_method(:error)    { nil }
+      response.define_singleton_method(:results) { [] }
+      response.define_singleton_method(:error) { nil }
       response
     end
   end
@@ -146,7 +146,7 @@ class CanonicalFilterTest < Minitest::Test
 
   def test_query_class_applies_canonical_filter_by_default
     client = FakeFilterClient.new
-    agent  = build_agent(client)
+    agent = build_agent(client)
     Parse::Agent::Tools.query_class(agent, class_name: "CFCapture")
     where = JSON.parse(client.received_query[:where])
     assert_equal({ "$ne" => true }, where["archived"])
@@ -154,7 +154,7 @@ class CanonicalFilterTest < Minitest::Test
 
   def test_query_class_opt_out_does_not_apply_filter
     client = FakeFilterClient.new
-    agent  = build_agent(client)
+    agent = build_agent(client)
     Parse::Agent::Tools.query_class(agent, class_name: "CFCapture", apply_canonical_filter: false)
     # No where: at all when caller didn't supply one.
     assert_nil client.received_query[:where]
@@ -162,7 +162,7 @@ class CanonicalFilterTest < Minitest::Test
 
   def test_count_objects_applies_canonical_filter_by_default
     client = FakeFilterClient.new
-    agent  = build_agent(client)
+    agent = build_agent(client)
     Parse::Agent::Tools.count_objects(agent, class_name: "CFCapture")
     where = JSON.parse(client.received_query[:where])
     assert_equal({ "$ne" => true }, where["archived"])
@@ -170,9 +170,9 @@ class CanonicalFilterTest < Minitest::Test
 
   def test_aggregate_prepends_canonical_filter_by_default
     client = FakeFilterClient.new
-    agent  = build_agent(client)
+    agent = build_agent(client)
     Parse::Agent::Tools.aggregate(agent, class_name: "CFCapture",
-                                  pipeline: [{ "$group" => { "_id" => "$title" } }])
+                                         pipeline: [{ "$group" => { "_id" => "$title" } }])
     first = client.received_pipeline.first
     assert_equal({ "archived" => { "$ne" => true }, "published" => true },
                  first["$match"])
@@ -180,10 +180,10 @@ class CanonicalFilterTest < Minitest::Test
 
   def test_aggregate_opt_out_skips_canonical_filter
     client = FakeFilterClient.new
-    agent  = build_agent(client)
+    agent = build_agent(client)
     Parse::Agent::Tools.aggregate(agent, class_name: "CFCapture",
-                                  pipeline: [{ "$group" => { "_id" => "$title" } }],
-                                  apply_canonical_filter: false)
+                                         pipeline: [{ "$group" => { "_id" => "$title" } }],
+                                         apply_canonical_filter: false)
     # The auto-injected $limit is appended; the canonical filter is NOT prepended.
     refute client.received_pipeline.first.dig("$match", "archived"),
            "canonical filter must not appear when opted out"
@@ -191,9 +191,9 @@ class CanonicalFilterTest < Minitest::Test
 
   def test_query_class_compose_with_caller_where_via_and
     client = FakeFilterClient.new
-    agent  = build_agent(client)
+    agent = build_agent(client)
     Parse::Agent::Tools.query_class(agent, class_name: "CFCapture",
-                                    where: { "title" => "Hello" })
+                                           where: { "title" => "Hello" })
     where = JSON.parse(client.received_query[:where])
     # $and-composed: caller constraint preserved, canonical predicate also applied.
     assert where["$and"].is_a?(Array)

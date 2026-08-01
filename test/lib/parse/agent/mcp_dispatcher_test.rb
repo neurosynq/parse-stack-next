@@ -10,7 +10,7 @@ require_relative "../../../../lib/parse/agent/mcp_dispatcher"
 class StubAgent
   STUB_TOOL_DEFS = [
     {
-      "name"        => "query_class",
+      "name" => "query_class",
       "description" => "Query objects in a Parse class",
       "inputSchema" => { "type" => "object" },
     },
@@ -41,8 +41,8 @@ class StubAgent
     case tool_name
     when :get_all_schemas
       { success: true, data: { classes: [
-        { name: "Song",  description: "Music tracks", type: "Custom" },
-        { name: "_User", description: "Auth users",   type: "System" },
+        { name: "Song", description: "Music tracks", type: "Custom" },
+        { name: "_User", description: "Auth users", type: "System" },
       ] } }
     when :get_schema
       { success: true, data: { className: kwargs[:class_name], fields: {} } }
@@ -116,10 +116,10 @@ class MCPDispatcherTest < Minitest::Test
     # Register a custom test prompt using the real Prompts.register API.
     # This exercises the extension point and isolates tests from builtin changes.
     Parse::Agent::Prompts.register(
-      name:        "test_prompt",
+      name: "test_prompt",
       description: "A test prompt",
-      arguments:   [{ "name" => "class_name", "description" => "Parse class", "required" => true }],
-      renderer:    lambda { |args|
+      arguments: [{ "name" => "class_name", "description" => "Parse class", "required" => true }],
+      renderer: lambda { |args|
         cn = args["class_name"].to_s
         raise Parse::Agent::ValidationError, "missing required argument: class_name" if cn.empty?
         "Describe the #{cn} Parse class."
@@ -143,13 +143,13 @@ class MCPDispatcherTest < Minitest::Test
   # ---------- initialize ----------------------------------------------------
 
   def test_initialize_returns_protocol_version
-    body   = { "jsonrpc" => "2.0", "id" => 1, "method" => "initialize", "params" => {} }
+    body = { "jsonrpc" => "2.0", "id" => 1, "method" => "initialize", "params" => {} }
     result = D.call(body: body, agent: @agent)
 
     assert_equal 200, result[:status]
     env = result[:body]
     assert_equal "2.0", env["jsonrpc"]
-    assert_equal 1,     env["id"]
+    assert_equal 1, env["id"]
     assert_equal Parse::Agent::MCPDispatcher::PROTOCOL_VERSION, env["result"]["protocolVersion"]
     assert_equal "parse-stack-mcp", env["result"]["serverInfo"]["name"]
   end
@@ -161,7 +161,7 @@ class MCPDispatcherTest < Minitest::Test
   def test_initialize_echoes_supported_client_protocol_version
     body = {
       "jsonrpc" => "2.0", "id" => 1, "method" => "initialize",
-      "params"  => { "protocolVersion" => "2024-11-05" },
+      "params" => { "protocolVersion" => "2024-11-05" },
     }
     result = D.call(body: body, agent: @agent)
     assert_equal "2024-11-05", result[:body]["result"]["protocolVersion"],
@@ -171,7 +171,7 @@ class MCPDispatcherTest < Minitest::Test
   def test_initialize_falls_back_to_server_version_for_unsupported_client
     body = {
       "jsonrpc" => "2.0", "id" => 1, "method" => "initialize",
-      "params"  => { "protocolVersion" => "1999-01-01" },
+      "params" => { "protocolVersion" => "1999-01-01" },
     }
     result = D.call(body: body, agent: @agent)
     assert_equal Parse::Agent::MCPDispatcher::PROTOCOL_VERSION,
@@ -203,7 +203,7 @@ class MCPDispatcherTest < Minitest::Test
     @agent.progress_callback = prev_cb
 
     body = { "jsonrpc" => "2.0", "id" => 1, "method" => "ping" }
-    D.call(body: body, agent: @agent, progress_callback: ->(**_) {})
+    D.call(body: body, agent: @agent, progress_callback: ->(**_) { })
 
     assert_same prev_cb, @agent.progress_callback,
                 "Dispatcher ensure must restore the pre-existing progress_callback, not null it"
@@ -213,7 +213,7 @@ class MCPDispatcherTest < Minitest::Test
     body = { "jsonrpc" => "2.0", "id" => 1, "method" => "ping" }
     D.call(body: body, agent: @agent,
            cancellation_token: Parse::Agent::CancellationToken.new,
-           progress_callback:  ->(**_) {})
+           progress_callback: ->(**_) { })
 
     assert_nil @agent.cancellation_token
     assert_nil @agent.progress_callback
@@ -224,7 +224,7 @@ class MCPDispatcherTest < Minitest::Test
   def test_notifications_cancelled_with_id_returns_invalid_request_error
     body = {
       "jsonrpc" => "2.0", "id" => 42, "method" => "notifications/cancelled",
-      "params"  => { "requestId" => 1 },
+      "params" => { "requestId" => 1 },
     }
     result = D.call(body: body, agent: @agent)
     assert_equal(-32600, result[:body]["error"]["code"])
@@ -240,7 +240,7 @@ class MCPDispatcherTest < Minitest::Test
   def test_notifications_cancelled_without_id_remains_a_notification
     body = {
       "jsonrpc" => "2.0", "method" => "notifications/cancelled",
-      "params"  => { "requestId" => 1 },
+      "params" => { "requestId" => 1 },
     }
     result = D.call(body: body, agent: @agent)
     assert_equal 200, result[:status]
@@ -250,7 +250,7 @@ class MCPDispatcherTest < Minitest::Test
   # ---------- ping ----------------------------------------------------------
 
   def test_ping_returns_empty_result
-    body   = { "jsonrpc" => "2.0", "id" => 2, "method" => "ping" }
+    body = { "jsonrpc" => "2.0", "id" => 2, "method" => "ping" }
     result = D.call(body: body, agent: @agent)
 
     assert_equal 200, result[:status]
@@ -261,7 +261,7 @@ class MCPDispatcherTest < Minitest::Test
   # ---------- tools/list ----------------------------------------------------
 
   def test_tools_list_returns_agent_definitions
-    body   = { "jsonrpc" => "2.0", "id" => 3, "method" => "tools/list", "params" => {} }
+    body = { "jsonrpc" => "2.0", "id" => 3, "method" => "tools/list", "params" => {} }
     result = D.call(body: body, agent: @agent)
 
     assert_equal 200, result[:status]
@@ -275,9 +275,9 @@ class MCPDispatcherTest < Minitest::Test
   def test_tools_call_success_executes_tool_and_returns_content
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 4,
-      "method"  => "tools/call",
-      "params"  => { "name" => "query_class", "arguments" => { "class_name" => "Song" } },
+      "id" => 4,
+      "method" => "tools/call",
+      "params" => { "name" => "query_class", "arguments" => { "class_name" => "Song" } },
     }
     result = D.call(body: body, agent: @agent)
 
@@ -301,9 +301,9 @@ class MCPDispatcherTest < Minitest::Test
 
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 5,
-      "method"  => "tools/call",
-      "params"  => { "name" => "query_class", "arguments" => {} },
+      "id" => 5,
+      "method" => "tools/call",
+      "params" => { "name" => "query_class", "arguments" => {} },
     }
     result = D.call(body: body, agent: failing_agent)
 
@@ -332,7 +332,7 @@ class MCPDispatcherTest < Minitest::Test
 
     body = {
       "jsonrpc" => "2.0", "id" => 7, "method" => "tools/call",
-      "params"  => { "name" => "query_class", "arguments" => {} },
+      "params" => { "name" => "query_class", "arguments" => {} },
     }
     r = D.call(body: body, agent: failing_agent)[:body]["result"]
 
@@ -352,7 +352,7 @@ class MCPDispatcherTest < Minitest::Test
     end.new
     body = {
       "jsonrpc" => "2.0", "id" => 8, "method" => "tools/call",
-      "params"  => { "name" => "query_class", "arguments" => {} },
+      "params" => { "name" => "query_class", "arguments" => {} },
     }
     r = D.call(body: body, agent: failing_agent)[:body]["result"]
     assert_equal true, r["isError"]
@@ -364,9 +364,9 @@ class MCPDispatcherTest < Minitest::Test
   def test_tools_call_without_name_returns_invalid_params
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 6,
-      "method"  => "tools/call",
-      "params"  => { "arguments" => {} },
+      "id" => 6,
+      "method" => "tools/call",
+      "params" => { "arguments" => {} },
     }
     result = D.call(body: body, agent: @agent)
 
@@ -377,7 +377,7 @@ class MCPDispatcherTest < Minitest::Test
   # ---------- unknown method → -32601 and HTTP 200 --------------------------
 
   def test_unknown_method_returns_32601_with_http_200
-    body   = { "jsonrpc" => "2.0", "id" => 7, "method" => "no_such_method/v99" }
+    body = { "jsonrpc" => "2.0", "id" => 7, "method" => "no_such_method/v99" }
     result = D.call(body: body, agent: @agent)
 
     # HTTP status must still be 200 for JSON-RPC error responses
@@ -390,7 +390,7 @@ class MCPDispatcherTest < Minitest::Test
   # ---------- malformed body → -32700 ---------------------------------------
 
   def test_missing_method_key_returns_32700
-    body   = { "jsonrpc" => "2.0", "id" => 8 }  # no "method"
+    body = { "jsonrpc" => "2.0", "id" => 8 }  # no "method"
     result = D.call(body: body, agent: @agent)
 
     assert_equal 200, result[:status]
@@ -410,9 +410,9 @@ class MCPDispatcherTest < Minitest::Test
   def test_unauthorized_error_returns_401
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 9,
-      "method"  => "tools/call",
-      "params"  => { "name" => "query_class", "arguments" => {} },
+      "id" => 9,
+      "method" => "tools/call",
+      "params" => { "name" => "query_class", "arguments" => {} },
     }
     result = D.call(body: body, agent: ErrorAgent.new)
 
@@ -426,9 +426,9 @@ class MCPDispatcherTest < Minitest::Test
   def test_security_error_returns_32602_without_leaking_details
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 10,
-      "method"  => "tools/call",
-      "params"  => { "name" => "query_class", "arguments" => {} },
+      "id" => 10,
+      "method" => "tools/call",
+      "params" => { "name" => "query_class", "arguments" => {} },
     }
     result = D.call(body: body, agent: SecurityAgent.new)
 
@@ -444,9 +444,9 @@ class MCPDispatcherTest < Minitest::Test
   def test_standard_error_returns_32603_with_sanitized_message
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 11,
-      "method"  => "tools/call",
-      "params"  => { "name" => "query_class", "arguments" => {} },
+      "id" => 11,
+      "method" => "tools/call",
+      "params" => { "name" => "query_class", "arguments" => {} },
     }
     # Capture STDERR so the dispatcher's diagnostic warn line doesn't litter
     # test output. The class+message belong in operator logs, not on the wire.
@@ -470,7 +470,7 @@ class MCPDispatcherTest < Minitest::Test
   # ---------- resources/list ------------------------------------------------
 
   def test_resources_list_returns_three_resources_per_class
-    body   = { "jsonrpc" => "2.0", "id" => 12, "method" => "resources/list", "params" => {} }
+    body = { "jsonrpc" => "2.0", "id" => 12, "method" => "resources/list", "params" => {} }
     result = D.call(body: body, agent: @agent)
 
     assert_equal 200, result[:status]
@@ -486,7 +486,7 @@ class MCPDispatcherTest < Minitest::Test
   # ---------- resources/templates/list (v4.2) -------------------------------
 
   def test_resources_templates_list_returns_three_templates
-    body   = { "jsonrpc" => "2.0", "id" => 120, "method" => "resources/templates/list", "params" => {} }
+    body = { "jsonrpc" => "2.0", "id" => 120, "method" => "resources/templates/list", "params" => {} }
     result = D.call(body: body, agent: @agent)
 
     assert_equal 200, result[:status]
@@ -500,7 +500,7 @@ class MCPDispatcherTest < Minitest::Test
     assert_includes uris, "parse://{className}/samples"
 
     templates.each do |t|
-      assert t.key?("name"),        "every template must include a name"
+      assert t.key?("name"), "every template must include a name"
       assert t.key?("description"), "every template must include a description"
       assert_equal "application/json", t["mimeType"]
     end
@@ -529,9 +529,9 @@ class MCPDispatcherTest < Minitest::Test
   def test_resources_read_schema_returns_contents
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 13,
-      "method"  => "resources/read",
-      "params"  => { "uri" => "parse://Song/schema" },
+      "id" => 13,
+      "method" => "resources/read",
+      "params" => { "uri" => "parse://Song/schema" },
     }
     result = D.call(body: body, agent: @agent)
 
@@ -545,9 +545,9 @@ class MCPDispatcherTest < Minitest::Test
   def test_resources_read_invalid_uri_returns_32602
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 14,
-      "method"  => "resources/read",
-      "params"  => { "uri" => "http://evil.com/../../etc/passwd" },
+      "id" => 14,
+      "method" => "resources/read",
+      "params" => { "uri" => "http://evil.com/../../etc/passwd" },
     }
     result = D.call(body: body, agent: @agent)
 
@@ -558,7 +558,7 @@ class MCPDispatcherTest < Minitest::Test
   # ---------- prompts/list --------------------------------------------------
 
   def test_prompts_list_delegates_to_prompts_module
-    body   = { "jsonrpc" => "2.0", "id" => 15, "method" => "prompts/list", "params" => {} }
+    body = { "jsonrpc" => "2.0", "id" => 15, "method" => "prompts/list", "params" => {} }
     result = D.call(body: body, agent: @agent)
 
     assert_equal 200, result[:status]
@@ -577,9 +577,9 @@ class MCPDispatcherTest < Minitest::Test
   def test_prompts_get_renders_known_prompt
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 16,
-      "method"  => "prompts/get",
-      "params"  => { "name" => "test_prompt", "arguments" => { "class_name" => "Song" } },
+      "id" => 16,
+      "method" => "prompts/get",
+      "params" => { "name" => "test_prompt", "arguments" => { "class_name" => "Song" } },
     }
     result = D.call(body: body, agent: @agent)
 
@@ -601,9 +601,9 @@ class MCPDispatcherTest < Minitest::Test
   def test_prompts_get_unknown_prompt_returns_32602
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 17,
-      "method"  => "prompts/get",
-      "params"  => { "name" => "no_such_prompt", "arguments" => {} },
+      "id" => 17,
+      "method" => "prompts/get",
+      "params" => { "name" => "no_such_prompt", "arguments" => {} },
     }
     result = D.call(body: body, agent: @agent)
 
@@ -619,9 +619,9 @@ class MCPDispatcherTest < Minitest::Test
   def test_prompts_get_missing_required_argument_returns_32602
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 18,
-      "method"  => "prompts/get",
-      "params"  => { "name" => "test_prompt", "arguments" => {} },
+      "id" => 18,
+      "method" => "prompts/get",
+      "params" => { "name" => "test_prompt", "arguments" => {} },
     }
     result = D.call(body: body, agent: @agent)
 
@@ -635,17 +635,17 @@ class MCPDispatcherTest < Minitest::Test
   def test_prompts_get_oversized_renderer_returns_32602
     # Register a prompt whose renderer returns text exceeding the cap.
     Parse::Agent::Prompts.register(
-      name:        "big_prompt",
+      name: "big_prompt",
       description: "A deliberately oversized prompt",
-      arguments:   [],
-      renderer:    lambda { |_args| "x" * (Parse::Agent::MCPDispatcher::MAX_TOOL_RESPONSE_BYTES + 1) },
+      arguments: [],
+      renderer: lambda { |_args| "x" * (Parse::Agent::MCPDispatcher::MAX_TOOL_RESPONSE_BYTES + 1) },
     )
 
     body = {
       "jsonrpc" => "2.0",
-      "id"      => 100,
-      "method"  => "prompts/get",
-      "params"  => { "name" => "big_prompt", "arguments" => {} },
+      "id" => 100,
+      "method" => "prompts/get",
+      "params" => { "name" => "big_prompt", "arguments" => {} },
     }
     result = D.call(body: body, agent: @agent)
 
@@ -665,16 +665,16 @@ class MCPDispatcherTest < Minitest::Test
   def test_progress_callback_is_installed_on_agent_for_duration_of_call
     captured_during_call = nil
 
-    cb = ->(*) {}
+    cb = ->(*) { }
 
     @agent.on_execute_capture_callback = ->(installed) { captured_during_call = installed }
 
     D.call(
       body: {
         "jsonrpc" => "2.0", "id" => 200, "method" => "tools/call",
-        "params"  => { "name" => "query_class", "arguments" => {} },
+        "params" => { "name" => "query_class", "arguments" => {} },
       },
-      agent:             @agent,
+      agent: @agent,
       progress_callback: cb,
     )
 
@@ -685,13 +685,13 @@ class MCPDispatcherTest < Minitest::Test
   end
 
   def test_progress_callback_cleared_even_when_dispatch_raises
-    cb = ->(*) {}
+    cb = ->(*) { }
 
     # Force the dispatch path through an unknown method to take a normal
     # success-shaped exit, then verify the agent has been cleared.
     D.call(
-      body:              { "jsonrpc" => "2.0", "id" => 201, "method" => "no_such_method" },
-      agent:             @agent,
+      body: { "jsonrpc" => "2.0", "id" => 201, "method" => "no_such_method" },
+      agent: @agent,
       progress_callback: cb,
     )
 
@@ -702,7 +702,7 @@ class MCPDispatcherTest < Minitest::Test
   def test_no_progress_callback_leaves_agent_unchanged
     @agent.progress_callback = nil
     D.call(
-      body:  { "jsonrpc" => "2.0", "id" => 202, "method" => "ping" },
+      body: { "jsonrpc" => "2.0", "id" => 202, "method" => "ping" },
       agent: @agent,
     )
     assert_nil @agent.progress_callback,
@@ -712,22 +712,22 @@ class MCPDispatcherTest < Minitest::Test
   # ---------- envelope structure --------------------------------------------
 
   def test_response_always_has_jsonrpc_and_id_keys
-    body   = { "jsonrpc" => "2.0", "id" => "req-abc", "method" => "ping" }
+    body = { "jsonrpc" => "2.0", "id" => "req-abc", "method" => "ping" }
     result = D.call(body: body, agent: @agent)
 
     env = result[:body]
     assert env.key?("jsonrpc"), "envelope must have jsonrpc key"
-    assert env.key?("id"),      "envelope must have id key"
-    assert_equal "2.0",       env["jsonrpc"]
-    assert_equal "req-abc",   env["id"]
+    assert env.key?("id"), "envelope must have id key"
+    assert_equal "2.0", env["jsonrpc"]
+    assert_equal "req-abc", env["id"]
   end
 
   def test_successful_response_has_result_not_error
-    body   = { "jsonrpc" => "2.0", "id" => 19, "method" => "ping" }
+    body = { "jsonrpc" => "2.0", "id" => 19, "method" => "ping" }
     result = D.call(body: body, agent: @agent)
 
     assert result[:body].key?("result"), "success must have result key"
-    refute result[:body].key?("error"),  "success must not have error key"
+    refute result[:body].key?("error"), "success must not have error key"
   end
 
   # ---------- cancellation (v4.2) -------------------------------------------
@@ -740,9 +740,9 @@ class MCPDispatcherTest < Minitest::Test
     D.call(
       body: {
         "jsonrpc" => "2.0", "id" => 300, "method" => "tools/call",
-        "params"  => { "name" => "query_class", "arguments" => {} },
+        "params" => { "name" => "query_class", "arguments" => {} },
       },
-      agent:              @agent,
+      agent: @agent,
       cancellation_token: token,
     )
 
@@ -762,7 +762,7 @@ class MCPDispatcherTest < Minitest::Test
 
     body = {
       "jsonrpc" => "2.0", "id" => 301, "method" => "tools/call",
-      "params"  => { "name" => "query_class", "arguments" => {} },
+      "params" => { "name" => "query_class", "arguments" => {} },
     }
     result = D.call(body: body, agent: cancelled_agent)
 
@@ -777,7 +777,7 @@ class MCPDispatcherTest < Minitest::Test
   def test_notifications_initialized_returns_no_response_body
     body = {
       "jsonrpc" => "2.0",
-      "method"  => "notifications/initialized",
+      "method" => "notifications/initialized",
     }
     result = D.call(body: body, agent: @agent)
 
@@ -791,21 +791,21 @@ class MCPDispatcherTest < Minitest::Test
       "jsonrpc" => "2.0", "id" => 30, "method" => "initialize", "params" => {},
     }
     result = D.call(body: body, agent: @agent)
-    caps   = result[:body]["result"]["capabilities"]
+    caps = result[:body]["result"]["capabilities"]
 
-    assert_equal true,  caps["tools"]["listChanged"]
-    assert_equal true,  caps["prompts"]["listChanged"]
+    assert_equal true, caps["tools"]["listChanged"]
+    assert_equal true, caps["prompts"]["listChanged"]
     assert_equal false, caps["resources"]["listChanged"]
   end
 
   def test_registered_tool_with_output_schema_emits_structuredContent
     Parse::Agent::Tools.register(
-      name:          :__test_structured_tool,
-      description:   "tool that returns structured data",
-      parameters:    { "type" => "object", "properties" => {} },
-      permission:    :readonly,
+      name: :__test_structured_tool,
+      description: "tool that returns structured data",
+      parameters: { "type" => "object", "properties" => {} },
+      permission: :readonly,
       output_schema: { "type" => "object", "properties" => { "count" => { "type" => "integer" } } },
-      handler:       ->(_a, **) { { count: 42, label: "answer" } },
+      handler: ->(_a, **) { { count: 42, label: "answer" } },
     )
 
     structured_agent = Class.new(StubAgent) do
@@ -822,7 +822,7 @@ class MCPDispatcherTest < Minitest::Test
 
     body = {
       "jsonrpc" => "2.0", "id" => 31, "method" => "tools/call",
-      "params"  => { "name" => "__test_structured_tool", "arguments" => {} },
+      "params" => { "name" => "__test_structured_tool", "arguments" => {} },
     }
     result = D.call(body: body, agent: structured_agent)
 
@@ -843,11 +843,11 @@ class MCPDispatcherTest < Minitest::Test
 
   def test_registered_tool_without_output_schema_omits_structuredContent
     Parse::Agent::Tools.register(
-      name:        :__test_plain_tool,
+      name: :__test_plain_tool,
       description: "tool without an output schema",
-      parameters:  { "type" => "object", "properties" => {} },
-      permission:  :readonly,
-      handler:     ->(_a, **) { { count: 1 } },
+      parameters: { "type" => "object", "properties" => {} },
+      permission: :readonly,
+      handler: ->(_a, **) { { count: 1 } },
     )
 
     plain_agent = Class.new(StubAgent) do
@@ -863,7 +863,7 @@ class MCPDispatcherTest < Minitest::Test
 
     body = {
       "jsonrpc" => "2.0", "id" => 32, "method" => "tools/call",
-      "params"  => { "name" => "__test_plain_tool", "arguments" => {} },
+      "params" => { "name" => "__test_plain_tool", "arguments" => {} },
     }
     result = D.call(body: body, agent: plain_agent)
 
@@ -876,12 +876,12 @@ class MCPDispatcherTest < Minitest::Test
 
   def test_tools_list_includes_outputSchema_when_declared
     Parse::Agent::Tools.register(
-      name:          :__test_with_output_schema,
-      description:   "tool with output schema",
-      parameters:    { "type" => "object", "properties" => {} },
-      permission:    :readonly,
+      name: :__test_with_output_schema,
+      description: "tool with output schema",
+      parameters: { "type" => "object", "properties" => {} },
+      permission: :readonly,
       output_schema: { "type" => "object", "properties" => { "ok" => { "type" => "boolean" } } },
-      handler:       ->(_a, **) { { ok: true } },
+      handler: ->(_a, **) { { ok: true } },
     )
 
     # StubAgent's tool_definitions hard-codes a list, so use a thin
@@ -926,7 +926,7 @@ class MCPDispatcherTest < Minitest::Test
   def test_builtin_count_objects_emits_structuredContent
     body = {
       "jsonrpc" => "2.0", "id" => 100, "method" => "tools/call",
-      "params"  => { "name" => "count_objects", "arguments" => { "class_name" => "Song" } },
+      "params" => { "name" => "count_objects", "arguments" => { "class_name" => "Song" } },
     }
     result = D.call(body: body, agent: @agent)
 
@@ -941,7 +941,7 @@ class MCPDispatcherTest < Minitest::Test
   def test_builtin_get_all_schemas_emits_structuredContent
     body = {
       "jsonrpc" => "2.0", "id" => 110, "method" => "tools/call",
-      "params"  => { "name" => "get_all_schemas", "arguments" => {} },
+      "params" => { "name" => "get_all_schemas", "arguments" => {} },
     }
     result = D.call(body: body, agent: @agent)
 
@@ -957,7 +957,7 @@ class MCPDispatcherTest < Minitest::Test
   def test_builtin_get_schema_emits_structuredContent
     body = {
       "jsonrpc" => "2.0", "id" => 111, "method" => "tools/call",
-      "params"  => { "name" => "get_schema", "arguments" => { "class_name" => "Song" } },
+      "params" => { "name" => "get_schema", "arguments" => { "class_name" => "Song" } },
     }
     result = D.call(body: body, agent: @agent)
 
@@ -977,8 +977,8 @@ class MCPDispatcherTest < Minitest::Test
   def test_builtin_query_class_emits_structuredContent_json_envelope
     body = {
       "jsonrpc" => "2.0", "id" => 112, "method" => "tools/call",
-      "params"  => {
-        "name"      => "query_class",
+      "params" => {
+        "name" => "query_class",
         "arguments" => { "class_name" => "Song" },
       },
     }
@@ -1000,18 +1000,18 @@ class MCPDispatcherTest < Minitest::Test
         return super unless tool_name == :query_class
         { success: true, data: {
           class_name: kwargs[:class_name],
-          format:     "csv",
-          headers:    %w[objectId title],
-          row_count:  1,
-          output:     "objectId,title\nabc123,Hello\n",
+          format: "csv",
+          headers: %w[objectId title],
+          row_count: 1,
+          output: "objectId,title\nabc123,Hello\n",
         } }
       end
     end.new
 
     body = {
       "jsonrpc" => "2.0", "id" => 113, "method" => "tools/call",
-      "params"  => {
-        "name"      => "query_class",
+      "params" => {
+        "name" => "query_class",
         "arguments" => { "class_name" => "Song", "format" => "csv" },
       },
     }
@@ -1040,23 +1040,23 @@ class MCPDispatcherTest < Minitest::Test
       def execute(tool_name, **kwargs)
         return super unless tool_name == :aggregate
         { success: true, data: {
-          class_name:      kwargs[:class_name],
+          class_name: kwargs[:class_name],
           pipeline_stages: 2,
-          result_count:    1,
+          result_count: 1,
           # Production coerces route to a String (`.to_s`) to satisfy the
           # aggregate output_schema's `route: { type: "string" }`. Mirror
           # that here so the stub can't mask a schema/type regression.
-          route:           "mongo_direct",
-          results:         [{ "_id" => "rock", "count" => 5 }],
+          route: "mongo_direct",
+          results: [{ "_id" => "rock", "count" => 5 }],
         } }
       end
     end.new
 
     body = {
       "jsonrpc" => "2.0", "id" => 200, "method" => "tools/call",
-      "params"  => { "name" => "aggregate", "arguments" => {
+      "params" => { "name" => "aggregate", "arguments" => {
         "class_name" => "Song",
-        "pipeline"   => [{ "$group" => { "_id" => "$genre", "count" => { "$sum" => 1 } } }],
+        "pipeline" => [{ "$group" => { "_id" => "$genre", "count" => { "$sum" => 1 } } }],
       } },
     }
     result = D.call(body: body, agent: agg_agent)
@@ -1078,17 +1078,17 @@ class MCPDispatcherTest < Minitest::Test
         return super unless tool_name == :export_data
         { success: true, data: {
           class_name: kwargs[:class_name],
-          format:     "csv",
-          headers:    %w[objectId title],
-          row_count:  1,
-          output:     "objectId,title\nabc123,Hello\n",
+          format: "csv",
+          headers: %w[objectId title],
+          row_count: 1,
+          output: "objectId,title\nabc123,Hello\n",
         } }
       end
     end.new
 
     body = {
       "jsonrpc" => "2.0", "id" => 201, "method" => "tools/call",
-      "params"  => { "name" => "export_data", "arguments" => { "class_name" => "Song" } },
+      "params" => { "name" => "export_data", "arguments" => { "class_name" => "Song" } },
     }
     result = D.call(body: body, agent: export_agent)
 
@@ -1104,16 +1104,16 @@ class MCPDispatcherTest < Minitest::Test
         return super unless tool_name == :atlas_text_search
         { success: true, data: {
           class_name: kwargs[:class_name],
-          count:      1,
-          results:    [{ "objectId" => "abc", "score" => 2.71 }],
+          count: 1,
+          results: [{ "objectId" => "abc", "score" => 2.71 }],
         } }
       end
     end.new
 
     body = {
       "jsonrpc" => "2.0", "id" => 202, "method" => "tools/call",
-      "params"  => { "name" => "atlas_text_search",
-                     "arguments" => { "class_name" => "Song", "query" => "hello" } },
+      "params" => { "name" => "atlas_text_search",
+                    "arguments" => { "class_name" => "Song", "query" => "hello" } },
     }
     result = D.call(body: body, agent: atlas_agent)
 
@@ -1130,19 +1130,19 @@ class MCPDispatcherTest < Minitest::Test
       def execute(tool_name, **kwargs)
         return super unless tool_name == :atlas_autocomplete
         { success: true, data: {
-          class_name:  kwargs[:class_name],
-          field:       "title",
+          class_name: kwargs[:class_name],
+          field: "title",
           suggestions: %w[Hello\ World Hello\ Sunshine],
-          count:       2,
-          results:     [{ "objectId" => "a" }, { "objectId" => "b" }],
+          count: 2,
+          results: [{ "objectId" => "a" }, { "objectId" => "b" }],
         } }
       end
     end.new
 
     body = {
       "jsonrpc" => "2.0", "id" => 203, "method" => "tools/call",
-      "params"  => { "name" => "atlas_autocomplete",
-                     "arguments" => { "class_name" => "Song", "query" => "Hel", "field" => "title" } },
+      "params" => { "name" => "atlas_autocomplete",
+                    "arguments" => { "class_name" => "Song", "query" => "Hel", "field" => "title" } },
     }
     result = D.call(body: body, agent: auto_agent)
 
@@ -1157,20 +1157,20 @@ class MCPDispatcherTest < Minitest::Test
       def execute(tool_name, **kwargs)
         return super unless tool_name == :atlas_faceted_search
         { success: true, data: {
-          class_name:  kwargs[:class_name],
+          class_name: kwargs[:class_name],
           total_count: 100,
-          facets:      { "genre" => { "buckets" => [{ "_id" => "rock", "count" => 50 }] } },
-          count:       1,
-          results:     [{ "objectId" => "abc" }],
+          facets: { "genre" => { "buckets" => [{ "_id" => "rock", "count" => 50 }] } },
+          count: 1,
+          results: [{ "objectId" => "abc" }],
         } }
       end
     end.new
 
     body = {
       "jsonrpc" => "2.0", "id" => 204, "method" => "tools/call",
-      "params"  => { "name" => "atlas_faceted_search",
-                     "arguments" => { "class_name" => "Song",
-                                      "facets" => { "genre" => { "type" => "string", "path" => "genre" } } } },
+      "params" => { "name" => "atlas_faceted_search",
+                   "arguments" => { "class_name" => "Song",
+                                    "facets" => { "genre" => { "type" => "string", "path" => "genre" } } } },
     }
     result = D.call(body: body, agent: facet_agent)
 
@@ -1206,8 +1206,8 @@ class MCPDispatcherTest < Minitest::Test
   def test_notifications_cancelled_returns_no_response_body
     body = {
       "jsonrpc" => "2.0",
-      "method"  => "notifications/cancelled",
-      "params"  => { "requestId" => 42 },
+      "method" => "notifications/cancelled",
+      "params" => { "requestId" => 42 },
     }
     result = D.call(body: body, agent: @agent)
 
@@ -1231,10 +1231,10 @@ class MCPDispatcherTest < Minitest::Test
 
     result = real_agent.execute(:get_all_schemas)
 
-    refute_nil result,        "execute must return a hash, never nil"
+    refute_nil result, "execute must return a hash, never nil"
     assert_equal false, result[:success]
-    assert_equal true,  result[:cancelled],
-                        "Pre-run cancellation must yield cancelled: true"
+    assert_equal true, result[:cancelled],
+                 "Pre-run cancellation must yield cancelled: true"
     assert_equal :cancelled, result[:error_code]
   ensure
     real_agent.cancellation_token = nil if real_agent
@@ -1252,11 +1252,11 @@ class MCPDispatcherTest < Minitest::Test
     # during its body — simulates "tool's blocking I/O finished, but the
     # client cancelled while it was running."
     Parse::Agent::Tools.register(
-      name:        :__test_mid_flight_cancel,
+      name: :__test_mid_flight_cancel,
       description: "test tool that trips the token mid-execution",
-      parameters:  { "type" => "object", "properties" => {}, "additionalProperties" => false },
-      permission:  :readonly,
-      handler:     ->(_agent, **_) {
+      parameters: { "type" => "object", "properties" => {}, "additionalProperties" => false },
+      permission: :readonly,
+      handler: ->(_agent, **_) {
         token.cancel!(reason: :test)
         { tool_finished: true }   # tool itself returns success
       },
@@ -1266,8 +1266,8 @@ class MCPDispatcherTest < Minitest::Test
 
     refute_nil result, "execute must return a hash, never nil (regression of bare-next bug)"
     assert_equal false, result[:success]
-    assert_equal true,  result[:cancelled],
-                        "Post-run cancellation must yield cancelled: true"
+    assert_equal true, result[:cancelled],
+                 "Post-run cancellation must yield cancelled: true"
     assert_equal :cancelled, result[:error_code]
   ensure
     Parse::Agent::Tools.reset_registry!

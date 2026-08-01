@@ -217,7 +217,7 @@ module Parse
             # check if the store was from a legacy parse-stack cache value which
             # is stored as Faraday::Env. T\he new system stores less content in a simple hash
             # for improved interoperability and access time.
-            body             = nil
+            body = nil
             response_headers = nil
             if cache_data.is_a?(Faraday::Env)
               body = cache_data.respond_to?(:body) ? cache_data.body : nil
@@ -265,12 +265,12 @@ module Parse
             delete_cache_variants(url, resource: true)
             instrument_cache(:delete, method: method, url_path: url_path)
           end
-        # `Redis::CommandError` covers the failures a scoped eviction can now
-        # produce that a plain GET/SET never did: a NOPERM from a restricted
-        # ACL, an UNLINK the server does not implement, and a CROSSSLOT refusal
-        # under Redis Cluster. Without it those escape the middleware and turn a
-        # cache problem into a failed application request, which inverts the
-        # whole point of the cache being optional.
+          # `Redis::CommandError` covers the failures a scoped eviction can now
+          # produce that a plain GET/SET never did: a NOPERM from a restricted
+          # ACL, an UNLINK the server does not implement, and a CROSSSLOT refusal
+          # under Redis Cluster. Without it those escape the middleware and turn a
+          # cache problem into a failed application request, which inverts the
+          # whole point of the cache being optional.
         rescue ::TypeError, Errno::EINVAL, Redis::CannotConnectError, Redis::TimeoutError,
                Redis::CommandError, ConnectionPool::TimeoutError => e
           # if the cache store fails to connect, catch the exception but proceed

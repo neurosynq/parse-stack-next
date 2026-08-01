@@ -14,7 +14,7 @@ require "parse/mongodb"
 # the ACL predicate into `$geoNear.query` instead, preserving stage 0.
 class MongoDBGeoNearACLFoldTest < Minitest::Test
   ACL_STAGE = { "$match" => { "$or" => [{ "_rperm" => { "$in" => %w[U1 *] } },
-                                        { "_rperm" => { "$exists" => false } }] } }.freeze
+                                      { "_rperm" => { "$exists" => false } }] } }.freeze
 
   def fold(pipeline)
     Parse::MongoDB.send(:prepend_or_fold_acl_match, pipeline, ACL_STAGE)
@@ -29,7 +29,7 @@ class MongoDBGeoNearACLFoldTest < Minitest::Test
 
   def test_geo_near_first_folds_acl_into_query_and_keeps_stage_zero
     pipeline = [{ :$geoNear => { near: { type: "Point", coordinates: [0, 0] },
-                                 distanceField: "dist", spherical: true } },
+                                distanceField: "dist", spherical: true } },
                 { :$limit => 5 }]
     result = fold(pipeline)
     # $geoNear must remain the first stage.
@@ -43,8 +43,8 @@ class MongoDBGeoNearACLFoldTest < Minitest::Test
 
   def test_geo_near_with_existing_query_combines_with_and
     pipeline = [{ :$geoNear => { near: { type: "Point", coordinates: [1, 2] },
-                                 distanceField: "dist",
-                                 query: { "status" => "published" } } }]
+                                distanceField: "dist",
+                                query: { "status" => "published" } } }]
     result = fold(pipeline)
     q = result.first[:$geoNear][:query]
     assert q.key?("$and"), "existing query and ACL predicate must combine under $and"
@@ -61,7 +61,7 @@ class MongoDBGeoNearACLFoldTest < Minitest::Test
 
   def test_string_keyed_geo_near_is_recognized
     pipeline = [{ "$geoNear" => { "near" => { "type" => "Point", "coordinates" => [0, 0] },
-                                  "distanceField" => "dist" } }]
+                                 "distanceField" => "dist" } }]
     result = fold(pipeline)
     assert result.first.key?("$geoNear"), "$geoNear (string key) must stay at stage 0"
     assert_equal ACL_STAGE["$match"], result.first["$geoNear"]["query"]
@@ -73,7 +73,7 @@ class MongoDBGeoNearACLFoldTest < Minitest::Test
   def test_folded_query_does_not_alias_callers_query_hash
     caller_query = { "status" => "published" }
     pipeline = [{ :$geoNear => { near: { type: "Point", coordinates: [1, 2] },
-                                 distanceField: "dist", query: caller_query } }]
+                                distanceField: "dist", query: caller_query } }]
     result = fold(pipeline)
     folded_existing = result.first[:$geoNear][:query]["$and"][0]
     refute_same caller_query, folded_existing,

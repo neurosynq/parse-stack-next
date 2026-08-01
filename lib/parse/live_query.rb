@@ -83,7 +83,7 @@ module Parse
         prefix_parts = []
         prefix_parts << "request_id=#{request_id}" if request_id
         prefix_parts << "class=#{class_name}" if class_name
-        prefixed = prefix_parts.empty? ? text : "#{prefix_parts.join(' ')} #{text}"
+        prefixed = prefix_parts.empty? ? text : "#{prefix_parts.join(" ")} #{text}"
         super(prefixed)
       end
     end

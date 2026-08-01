@@ -61,26 +61,26 @@ class MCPRealLLMSmokeTest < Minitest::Test
     case @provider
     when "lmstudio"
       @base_url = ENV["LLM_BASE_URL"] || "http://localhost:1234/v1"
-      @model    = ENV["LLM_MODEL"]    || "qwen2.5-7b-instruct"
-      @api_key  = ENV["LLM_API_KEY"]  || "lm-studio"  # LM Studio ignores
+      @model = ENV["LLM_MODEL"] || "qwen2.5-7b-instruct"
+      @api_key = ENV["LLM_API_KEY"] || "lm-studio"  # LM Studio ignores
     when "openai"
       skip "openai requires LLM_API_KEY" unless ENV["LLM_API_KEY"]
       @base_url = ENV["LLM_BASE_URL"] || "https://api.openai.com/v1"
-      @model    = ENV["LLM_MODEL"]    || "gpt-4o-mini"
-      @api_key  = ENV["LLM_API_KEY"]
+      @model = ENV["LLM_MODEL"] || "gpt-4o-mini"
+      @api_key = ENV["LLM_API_KEY"]
     when "anthropic"
       skip "anthropic requires LLM_API_KEY" unless ENV["LLM_API_KEY"]
       @base_url = ENV["LLM_BASE_URL"] || "https://api.anthropic.com/v1"
-      @model    = ENV["LLM_MODEL"]    || "claude-haiku-4-5"
-      @api_key  = ENV["LLM_API_KEY"]
+      @model = ENV["LLM_MODEL"] || "claude-haiku-4-5"
+      @api_key = ENV["LLM_API_KEY"]
     else
       skip "Unknown LLM_PROVIDER=#{@provider.inspect} (expected lmstudio | openai | anthropic)"
     end
 
     Parse.setup(
-      server_url:     "http://localhost:1337/parse",
+      server_url: "http://localhost:1337/parse",
       application_id: "smoke-test",
-      api_key:        "smoke-test",
+      api_key: "smoke-test",
     ) unless Parse::Client.client?
 
     @agent = stub_agent_with_canned_data
@@ -124,9 +124,9 @@ class MCPRealLLMSmokeTest < Minitest::Test
           data: {
             total: 3,
             classes: [
-              { name: "Song",        type: "Custom", description: "Music tracks" },
-              { name: "MCPE2EItem",  type: "Custom", description: "Smoke fixture" },
-              { name: "_User",       type: "System", description: "Auth users"   },
+              { name: "Song", type: "Custom", description: "Music tracks" },
+              { name: "MCPE2EItem", type: "Custom", description: "Smoke fixture" },
+              { name: "_User", type: "System", description: "Auth users" },
             ],
           },
         }
@@ -163,9 +163,9 @@ class MCPRealLLMSmokeTest < Minitest::Test
       {
         type: "function",
         function: {
-          name:        h["name"],
+          name: h["name"],
           description: h["description"].to_s[0, 1024],
-          parameters:  h["inputSchema"] || { "type" => "object", "properties" => {} },
+          parameters: h["inputSchema"] || { "type" => "object", "properties" => {} },
         },
       }
     end
@@ -190,20 +190,20 @@ class MCPRealLLMSmokeTest < Minitest::Test
       reply[:tool_calls].each do |tc|
         body = {
           "jsonrpc" => "2.0",
-          "id"      => SecureRandom.hex(4),
-          "method"  => "tools/call",
-          "params"  => { "name" => tc[:name], "arguments" => tc[:arguments] },
+          "id" => SecureRandom.hex(4),
+          "method" => "tools/call",
+          "params" => { "name" => tc[:name], "arguments" => tc[:arguments] },
         }
         result = mcp_call(body)
         tool_text = if result["result"]
-          (result.dig("result", "content", 0, "text") || result["result"].to_json)
-        else
-          result.dig("error", "message").to_s
-        end
+            (result.dig("result", "content", 0, "text") || result["result"].to_json)
+          else
+            result.dig("error", "message").to_s
+          end
         messages << {
-          role:         "tool",
+          role: "tool",
           tool_call_id: tc[:id],
-          content:      tool_text,
+          content: tool_text,
         }
       end
     end
@@ -216,7 +216,7 @@ class MCPRealLLMSmokeTest < Minitest::Test
   def call_llm(messages:, tools:)
     case @provider
     when "anthropic" then anthropic_chat(messages: messages, tools: tools)
-    else                  openai_chat(messages: messages, tools: tools)
+    else openai_chat(messages: messages, tools: tools)
     end
   end
 
@@ -246,28 +246,28 @@ class MCPRealLLMSmokeTest < Minitest::Test
 
     uri = URI("#{@base_url}/chat/completions")
     body = JSON.generate({
-      model:       @model,
-      messages:    openai_messages,
-      tools:       tools,
+      model: @model,
+      messages: openai_messages,
+      tools: tools,
       tool_choice: "auto",
     })
 
     req = Net::HTTP::Post.new(uri)
-    req["Content-Type"]   = "application/json"
-    req["Authorization"]  = "Bearer #{@api_key}"
+    req["Content-Type"] = "application/json"
+    req["Authorization"] = "Bearer #{@api_key}"
     req.body = body
 
     res = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https", read_timeout: 60) { |h| h.request(req) }
     skip "LLM call failed: HTTP #{res.code} #{res.body}" unless res.code.to_i.between?(200, 299)
 
     parsed = JSON.parse(res.body)
-    msg    = parsed.dig("choices", 0, "message") || {}
-    calls  = Array(msg["tool_calls"]).map do |tc|
+    msg = parsed.dig("choices", 0, "message") || {}
+    calls = Array(msg["tool_calls"]).map do |tc|
       args = tc.dig("function", "arguments")
       args = JSON.parse(args) if args.is_a?(String) && !args.empty?
       {
-        id:        tc["id"] || SecureRandom.hex(4),
-        name:      tc.dig("function", "name"),
+        id: tc["id"] || SecureRandom.hex(4),
+        name: tc.dig("function", "name"),
         arguments: args || {},
       }
     end
@@ -281,21 +281,21 @@ class MCPRealLLMSmokeTest < Minitest::Test
     anth_messages = messages.map { |m|
       case m[:role]
       when "user", "assistant" then { role: m[:role], content: m[:content].to_s }
-      when "tool"              then { role: "user",   content: [{ type: "tool_result", tool_use_id: m[:tool_call_id], content: m[:content] }] }
+      when "tool" then { role: "user", content: [{ type: "tool_result", tool_use_id: m[:tool_call_id], content: m[:content] }] }
       end
     }.compact
 
     uri = URI("#{@base_url}/messages")
     body = JSON.generate({
-      model:      @model,
+      model: @model,
       max_tokens: 1024,
-      tools:      anth_tools,
-      messages:   anth_messages,
+      tools: anth_tools,
+      messages: anth_messages,
     })
 
     req = Net::HTTP::Post.new(uri)
-    req["Content-Type"]      = "application/json"
-    req["x-api-key"]         = @api_key
+    req["Content-Type"] = "application/json"
+    req["x-api-key"] = @api_key
     req["anthropic-version"] = "2023-06-01"
     req.body = body
 
@@ -304,8 +304,8 @@ class MCPRealLLMSmokeTest < Minitest::Test
 
     parsed = JSON.parse(res.body)
     blocks = Array(parsed["content"])
-    text   = blocks.select { |b| b["type"] == "text" }.map { |b| b["text"] }.join("\n")
-    calls  = blocks.select { |b| b["type"] == "tool_use" }.map do |b|
+    text = blocks.select { |b| b["type"] == "text" }.map { |b| b["text"] }.join("\n")
+    calls = blocks.select { |b| b["type"] == "tool_use" }.map do |b|
       { id: b["id"], name: b["name"], arguments: b["input"] || {} }
     end
     { role: "assistant", content: text, tool_calls: calls }

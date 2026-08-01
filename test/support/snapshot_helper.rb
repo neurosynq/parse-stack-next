@@ -20,7 +20,7 @@ module SnapshotHelper
   # 24-hex BSON ObjectId — unique enough to scrub globally.
   MONGO_OID_RE = /\A[a-f0-9]{24}\z/.freeze
   # ISO-8601 timestamp at the start of the string.
-  ISO_TIME_RE  = /\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.freeze
+  ISO_TIME_RE = /\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.freeze
   # Parse objectIds are [A-Za-z0-9]{10}. That pattern matches plenty of
   # plain English words ("sequential", "ascending"), so we only scrub when
   # the hash key tells us we're looking at one.

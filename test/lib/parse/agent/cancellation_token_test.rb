@@ -21,9 +21,9 @@ class CancellationTokenTest < Minitest::Test
   end
 
   def test_cancel_is_idempotent_and_returns_false_on_subsequent_calls
-    assert_equal true,  @token.cancel!(reason: :first)
+    assert_equal true, @token.cancel!(reason: :first)
     assert_equal false, @token.cancel!(reason: :second),
-                        "Second cancel! must return false (no state change)"
+                 "Second cancel! must return false (no state change)"
     assert_equal :first, @token.reason,
                  "Idempotent cancel must not overwrite the original reason"
   end

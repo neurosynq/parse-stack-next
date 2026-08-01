@@ -112,8 +112,8 @@ module Parse
                 items: {
                   type: "object",
                   properties: {
-                    name:        { type: "string" },
-                    category:    { type: "string" },
+                    name: { type: "string" },
+                    category: { type: "string" },
                     description: { type: "string" },
                   },
                   required: %w[name category description],
@@ -138,8 +138,8 @@ module Parse
           parameters: {
             type: "object",
             properties: {
-              names:  { type: "array", items: { type: "string" },
-                        description: "Optional. Restrict the output to these class names (exact match)." },
+              names: { type: "array", items: { type: "string" },
+                       description: "Optional. Restrict the output to these class names (exact match)." },
               prefix: { type: "string",
                         description: "Optional. Restrict the output to class names that start with this prefix (case-sensitive)." },
             },
@@ -148,16 +148,16 @@ module Parse
           output_schema: {
             type: "object",
             properties: {
-              total:    { type: "integer", minimum: 0 },
-              note:     { type: "string" },
+              total: { type: "integer", minimum: 0 },
+              note: { type: "string" },
               built_in: {
                 type: "array",
                 items: {
                   type: "object",
                   properties: {
-                    name:    { type: "string" },
-                    fields:  { type: "integer", minimum: 0 },
-                    desc:    { type: "string" },
+                    name: { type: "string" },
+                    fields: { type: "integer", minimum: 0 },
+                    desc: { type: "string" },
                     methods: { type: "integer", minimum: 0 },
                   },
                   required: %w[name fields],
@@ -169,9 +169,9 @@ module Parse
                 items: {
                   type: "object",
                   properties: {
-                    name:    { type: "string" },
-                    fields:  { type: "integer", minimum: 0 },
-                    desc:    { type: "string" },
+                    name: { type: "string" },
+                    fields: { type: "integer", minimum: 0 },
+                    desc: { type: "string" },
                     methods: { type: "integer", minimum: 0 },
                   },
                   required: %w[name fields],
@@ -205,18 +205,18 @@ module Parse
           output_schema: {
             type: "object",
             properties: {
-              class_name:  { type: "string" },
-              type:        { type: "string" },
+              class_name: { type: "string" },
+              type: { type: "string" },
               description: { type: "string" },
-              usage:       { type: "string" },
-              fields:      { type: "array", items: { type: "object", additionalProperties: true } },
-              indexes:     { type: "object", additionalProperties: true },
+              usage: { type: "string" },
+              fields: { type: "array", items: { type: "object", additionalProperties: true } },
+              indexes: { type: "object", additionalProperties: true },
               permissions: { type: "object", additionalProperties: true },
-              agent_methods:     { type: "array", items: { type: "object", additionalProperties: true } },
-              canonical_filter:  { type: "object", additionalProperties: true },
-              agent_fields:      { type: "array", items: { type: "string" } },
+              agent_methods: { type: "array", items: { type: "object", additionalProperties: true } },
+              canonical_filter: { type: "object", additionalProperties: true },
+              agent_fields: { type: "array", items: { type: "string" } },
               agent_join_fields: { type: "array", items: { type: "string" } },
-              relations:         { type: "object", additionalProperties: true },
+              relations: { type: "object", additionalProperties: true },
             },
             required: %w[class_name type fields indexes permissions],
           },
@@ -249,13 +249,13 @@ module Parse
               keys: { type: "array", items: { type: "string" } },
               include: { type: "array", items: { type: "string" } },
               apply_canonical_filter: { type: "boolean",
-                                        description: "Default true. When true and the class declares an " \
-                                                     "agent_canonical_filter, it is merged into the where via " \
-                                                     "$and so the caller's constraints compose rather than override." },
+                                       description: "Default true. When true and the class declares an " \
+                                                    "agent_canonical_filter, it is merged into the where via " \
+                                                    "$and so the caller's constraints compose rather than override." },
               format: { type: "string", enum: %w[json csv markdown table],
-                        description: "Output format. Defaults to 'json' (structured row envelope). When set to " \
-                                     "csv/markdown/table the response carries {format:, headers:, row_count:, output:} " \
-                                     "instead of the row envelope; columns are inferred from the first row." },
+                       description: "Output format. Defaults to 'json' (structured row envelope). When set to " \
+                                    "csv/markdown/table the response carries {format:, headers:, row_count:, output:} " \
+                                    "instead of the row envelope; columns are inferred from the first row." },
             },
             required: ["class_name"],
           },
@@ -271,35 +271,35 @@ module Parse
           output_schema: {
             type: "object",
             properties: {
-              class_name:    { type: "string" },
+              class_name: { type: "string" },
               # json envelope
-              result_count:  { type: "integer", minimum: 0 },
+              result_count: { type: "integer", minimum: 0 },
               pagination: {
                 type: "object",
                 properties: {
-                  limit:    { type: "integer", minimum: 0 },
-                  skip:     { type: "integer", minimum: 0 },
+                  limit: { type: "integer", minimum: 0 },
+                  skip: { type: "integer", minimum: 0 },
                   has_more: { type: "boolean" },
                 },
                 required: %w[limit skip has_more],
               },
-              truncated:                { type: "boolean" },
-              truncated_note:           { type: "string" },
+              truncated: { type: "boolean" },
+              truncated_note: { type: "string" },
               truncated_include_fields: { type: "object", additionalProperties: true },
               next_call: {
                 type: "object",
                 properties: {
-                  tool:      { type: "string" },
+                  tool: { type: "string" },
                   arguments: { type: "object", additionalProperties: true },
                 },
                 required: %w[tool arguments],
               },
               results: { type: "array", items: { type: "object", additionalProperties: true } },
               # csv / markdown / table envelope
-              format:    { type: "string", enum: %w[csv markdown table] },
-              headers:   { type: "array", items: { type: "string" } },
+              format: { type: "string", enum: %w[csv markdown table] },
+              headers: { type: "array", items: { type: "string" } },
               row_count: { type: "integer", minimum: 0 },
-              output:    { type: "string" },
+              output: { type: "string" },
             },
             required: %w[class_name],
           },
@@ -327,8 +327,8 @@ module Parse
           output_schema: {
             type: "object",
             properties: {
-              class_name:  { type: "string" },
-              count:       { type: "integer", minimum: 0 },
+              class_name: { type: "string" },
+              count: { type: "integer", minimum: 0 },
               constraints: { type: "object" },
             },
             required: %w[class_name count constraints],
@@ -349,11 +349,11 @@ module Parse
               object_id: { type: "string" },
               include: { type: "array", items: { type: "string" } },
               apply_canonical_filter: { type: "boolean",
-                                        description: "Default true. When true and the class declares an " \
-                                                     "agent_canonical_filter, the fetch is rewritten as a " \
-                                                     "find_objects with where: { objectId: id, ...filter } " \
-                                                     "so a filtered-out row returns 'not found'. Set to false " \
-                                                     "to bypass the predicate and fetch the row directly." },
+                                       description: "Default true. When true and the class declares an " \
+                                                    "agent_canonical_filter, the fetch is rewritten as a " \
+                                                    "find_objects with where: { objectId: id, ...filter } " \
+                                                    "so a filtered-out row returns 'not found'. Set to false " \
+                                                    "to bypass the predicate and fetch the row directly." },
             },
             required: ["class_name", "object_id"],
           },
@@ -361,10 +361,10 @@ module Parse
             type: "object",
             properties: {
               class_name: { type: "string" },
-              object_id:  { type: "string" },
+              object_id: { type: "string" },
               created_at: { type: %w[string null] },
               updated_at: { type: %w[string null] },
-              object:     { type: "object" },
+              object: { type: "object" },
               truncated_include_fields: { type: "object" },
             },
             required: %w[class_name object_id object],
@@ -387,10 +387,10 @@ module Parse
               ids: { type: "array", items: { type: "string" }, description: "Array of objectId values (max 50, dedup'd)" },
               include: { type: "array", items: { type: "string" }, description: "Pointer fields to include/resolve" },
               apply_canonical_filter: { type: "boolean",
-                                        description: "Default true. When true and the class declares an " \
-                                                     "agent_canonical_filter, it composes with the objectId $in " \
-                                                     "constraint via $and so 'invalid state' rows are filtered out " \
-                                                     "(they appear in the :missing array). Set to false to bypass." },
+                                       description: "Default true. When true and the class declares an " \
+                                                    "agent_canonical_filter, it composes with the objectId $in " \
+                                                    "constraint via $and so 'invalid state' rows are filtered out " \
+                                                    "(they appear in the :missing array). Set to false to bypass." },
             },
             required: ["class_name", "ids"],
           },
@@ -403,9 +403,9 @@ module Parse
                 additionalProperties: { type: "object" },
                 description: "Map of objectId => fetched object. Empty when no ids resolved.",
               },
-              missing:   { type: "array", items: { type: "string" } },
+              missing: { type: "array", items: { type: "string" } },
               requested: { type: "integer", minimum: 0 },
-              found:     { type: "integer", minimum: 0 },
+              found: { type: "integer", minimum: 0 },
               truncated_include_fields: { type: "object" },
             },
             required: %w[class_name objects missing requested found],
@@ -430,10 +430,10 @@ module Parse
           output_schema: {
             type: "object",
             properties: {
-              class_name:   { type: "string" },
+              class_name: { type: "string" },
               sample_count: { type: "integer", minimum: 0 },
-              samples:      { type: "array", items: { type: "object" } },
-              note:         { type: "string" },
+              samples: { type: "array", items: { type: "object" } },
+              note: { type: "string" },
             },
             required: %w[class_name sample_count samples],
           },
@@ -456,29 +456,29 @@ module Parse
             type: "object",
             properties: {
               class_name: { type: "string" },
-              pipeline:   { type: "array", items: { type: "object" } },
+              pipeline: { type: "array", items: { type: "object" } },
               compact_pointers: { type: "boolean",
-                                  description: "Default true. When true, storage-form pointer columns (`_p_*`) are " \
-                                               "rewritten and the envelope carries a `pointer_classes` map. Set to " \
-                                               "false to receive raw Mongo shapes." },
+                                 description: "Default true. When true, storage-form pointer columns (`_p_*`) are " \
+                                              "rewritten and the envelope carries a `pointer_classes` map. Set to " \
+                                              "false to receive raw Mongo shapes." },
               apply_canonical_filter: { type: "boolean",
-                                        description: "Default true. When true and the class declares an " \
-                                                     "agent_canonical_filter, it is prepended as a $match stage so " \
-                                                     "the pipeline starts from the class's 'valid state' subset. " \
-                                                     "Set to false to operate on the full collection." },
+                                       description: "Default true. When true and the class declares an " \
+                                                    "agent_canonical_filter, it is prepended as a $match stage so " \
+                                                    "the pipeline starts from the class's 'valid state' subset. " \
+                                                    "Set to false to operate on the full collection." },
             },
             required: ["class_name", "pipeline"],
           },
           output_schema: {
             type: "object",
             properties: {
-              class_name:      { type: "string" },
+              class_name: { type: "string" },
               pipeline_stages: { type: "integer", minimum: 0 },
-              result_count:    { type: "integer", minimum: 0 },
+              result_count: { type: "integer", minimum: 0 },
               # `route` is :mongo_direct or :parse_server but serializes
               # to a Symbol-shaped String in JSON envelopes; declare it
               # permissively as string.
-              route:           { type: "string", description: "Routing tag: 'mongo_direct' or 'parse_server'." },
+              route: { type: "string", description: "Routing tag: 'mongo_direct' or 'parse_server'." },
               # Aggregation result rows are class-shape-dependent and may
               # be the output of arbitrary $project / $group / $lookup
               # stages. Object envelopes with open property sets are the
@@ -493,8 +493,8 @@ module Parse
                 description: "Optional. Field-name → Parse-class-name map when compact_pointers is on.",
               },
               auto_limited: { type: "boolean" },
-              auto_limit:   { type: "integer", minimum: 1 },
-              hint:         { type: "string" },
+              auto_limit: { type: "integer", minimum: 1 },
+              hint: { type: "string" },
             },
             required: %w[class_name pipeline_stages result_count route results],
           },
@@ -554,55 +554,55 @@ module Parse
           parameters: {
             type: "object",
             properties: {
-              class_name:     { type: "string" },
-              field:          { type: "string", description: "Field to group by (wire-format name; pointers auto-detected)" },
-              operation:      {
+              class_name: { type: "string" },
+              field: { type: "string", description: "Field to group by (wire-format name; pointers auto-detected)" },
+              operation: {
                 type: "string",
                 enum: %w[count sum avg average min max],
                 description: "Aggregation to apply per group. Default: count.",
               },
-              value_field:    { type: "string", description: "Required for sum/avg/min/max — the field to aggregate within each group." },
-              where:          { type: "object", description: "Optional constraints applied via $match before grouping." },
+              value_field: { type: "string", description: "Required for sum/avg/min/max — the field to aggregate within each group." },
+              where: { type: "object", description: "Optional constraints applied via $match before grouping." },
               flatten_arrays: { type: "boolean", description: "When true, $unwind the field before grouping so individual array elements are counted." },
-              sort:           {
+              sort: {
                 type: "string",
                 enum: %w[value_desc value_asc key_desc key_asc],
                 description: "Sort the result. Use value_desc for top-K. Default: server-natural order.",
               },
-              limit:          { type: "integer", description: "Cap the number of groups returned. Default: 200, max: 1000." },
-              dry_run:        { type: "boolean", description: "When true, return the constructed MongoDB pipeline without executing it. Use to inspect / hand-modify before running via the aggregate tool." },
+              limit: { type: "integer", description: "Cap the number of groups returned. Default: 200, max: 1000." },
+              dry_run: { type: "boolean", description: "When true, return the constructed MongoDB pipeline without executing it. Use to inspect / hand-modify before running via the aggregate tool." },
               apply_canonical_filter: { type: "boolean",
-                                        description: "Default true. When true and the class declares an " \
-                                                     "agent_canonical_filter, it is prepended as a $match stage " \
-                                                     "so the group operates only on the class's 'valid state' " \
-                                                     "subset. Set to false to group across the full collection." },
+                                       description: "Default true. When true and the class declares an " \
+                                                    "agent_canonical_filter, it is prepended as a $match stage " \
+                                                    "so the group operates only on the class's 'valid state' " \
+                                                    "subset. Set to false to group across the full collection." },
             },
             required: ["class_name", "field"],
           },
           output_schema: {
             type: "object",
             properties: {
-              class_name:     { type: "string" },
-              field:          { type: "string" },
-              operation:      { type: "string" },
-              group_count:    { type: "integer", minimum: 0 },
+              class_name: { type: "string" },
+              field: { type: "string" },
+              operation: { type: "string" },
+              group_count: { type: "integer", minimum: 0 },
               groups: {
                 type: "array",
                 items: {
                   type: "object",
                   properties: {
-                    key:   {},
+                    key: {},
                     value: { type: %w[number null] },
                   },
                   required: %w[key value],
                 },
               },
-              value_field:    { type: "string" },
-              pointer_class:  { type: "string" },
+              value_field: { type: "string" },
+              pointer_class: { type: "string" },
               flatten_arrays: { type: "boolean" },
-              sort:           { type: "string" },
-              truncated:      { type: "boolean" },
-              limit:          { type: "integer" },
+              sort: { type: "string" },
+              truncated: { type: "boolean" },
+              limit: { type: "integer" },
             },
             required: %w[class_name field operation group_count groups limit],
           },
@@ -621,60 +621,60 @@ module Parse
           parameters: {
             type: "object",
             properties: {
-              class_name:  { type: "string" },
-              field:       { type: "string", description: "Date field to bucket on (e.g. 'createdAt', 'updatedAt', or a custom Date column)." },
-              interval:    {
+              class_name: { type: "string" },
+              field: { type: "string", description: "Date field to bucket on (e.g. 'createdAt', 'updatedAt', or a custom Date column)." },
+              interval: {
                 type: "string",
                 enum: %w[year month week day hour minute second],
                 description: "Bucket size.",
               },
-              operation:   {
+              operation: {
                 type: "string",
                 enum: %w[count sum avg average min max],
                 description: "Aggregation per bucket. Default: count.",
               },
               value_field: { type: "string", description: "Required for sum/avg/min/max — the field to aggregate within each bucket." },
-              where:       { type: "object", description: "Optional constraints applied via $match before grouping." },
-              timezone:    { type: "string", description: "IANA tz name (e.g. 'America/New_York') or fixed offset ('+05:00'). Default: UTC." },
-              sort:        {
+              where: { type: "object", description: "Optional constraints applied via $match before grouping." },
+              timezone: { type: "string", description: "IANA tz name (e.g. 'America/New_York') or fixed offset ('+05:00'). Default: UTC." },
+              sort: {
                 type: "string",
                 enum: %w[key_asc key_desc value_asc value_desc],
                 description: "Sort the result. Default: key_asc (chronological).",
               },
-              limit:       { type: "integer", description: "Cap the number of buckets returned. Default: 200, max: 1000." },
-              dry_run:     { type: "boolean", description: "When true, return the constructed MongoDB pipeline without executing it." },
+              limit: { type: "integer", description: "Cap the number of buckets returned. Default: 200, max: 1000." },
+              dry_run: { type: "boolean", description: "When true, return the constructed MongoDB pipeline without executing it." },
               apply_canonical_filter: { type: "boolean",
-                                        description: "Default true. When true and the class declares an " \
-                                                     "agent_canonical_filter, it is prepended as a $match stage " \
-                                                     "so the buckets reflect only the class's 'valid state' " \
-                                                     "subset. Set to false to bucket the full collection." },
+                                       description: "Default true. When true and the class declares an " \
+                                                    "agent_canonical_filter, it is prepended as a $match stage " \
+                                                    "so the buckets reflect only the class's 'valid state' " \
+                                                    "subset. Set to false to bucket the full collection." },
             },
             required: ["class_name", "field", "interval"],
           },
           output_schema: {
             type: "object",
             properties: {
-              class_name:   { type: "string" },
-              field:        { type: "string" },
-              interval:     { type: "string" },
-              operation:    { type: "string" },
-              group_count:  { type: "integer", minimum: 0 },
+              class_name: { type: "string" },
+              field: { type: "string" },
+              interval: { type: "string" },
+              operation: { type: "string" },
+              group_count: { type: "integer", minimum: 0 },
               groups: {
                 type: "array",
                 items: {
                   type: "object",
                   properties: {
-                    key:   { type: %w[string null] },
+                    key: { type: %w[string null] },
                     value: { type: %w[number null] },
                   },
                   required: %w[key value],
                 },
               },
-              value_field:  { type: "string" },
-              timezone:     { type: "string" },
-              sort:         { type: "string" },
-              truncated:    { type: "boolean" },
-              limit:        { type: "integer" },
+              value_field: { type: "string" },
+              timezone: { type: "string" },
+              sort: { type: "string" },
+              truncated: { type: "boolean" },
+              limit: { type: "integer" },
             },
             required: %w[class_name field interval operation group_count groups sort limit],
           },
@@ -692,35 +692,35 @@ module Parse
             type: "object",
             properties: {
               class_name: { type: "string" },
-              field:      { type: "string", description: "Field to extract distinct values from (wire-format name; pointers auto-detected)." },
-              where:      { type: "object", description: "Optional constraints applied via $match before distinct." },
-              sort:       {
+              field: { type: "string", description: "Field to extract distinct values from (wire-format name; pointers auto-detected)." },
+              where: { type: "object", description: "Optional constraints applied via $match before distinct." },
+              sort: {
                 type: "string",
                 enum: %w[asc desc],
                 description: "Sort the returned values alphanumerically. Default: server-natural order.",
               },
-              limit:      { type: "integer", description: "Cap the number of distinct values returned. Default: 1000, max: 5000." },
-              dry_run:    { type: "boolean", description: "When true, return the constructed MongoDB pipeline without executing it." },
+              limit: { type: "integer", description: "Cap the number of distinct values returned. Default: 1000, max: 5000." },
+              dry_run: { type: "boolean", description: "When true, return the constructed MongoDB pipeline without executing it." },
               apply_canonical_filter: { type: "boolean",
-                                        description: "Default true. When true and the class declares an " \
-                                                     "agent_canonical_filter, it is prepended as a $match stage " \
-                                                     "so values are extracted only from the class's 'valid state' " \
-                                                     "subset. Set to false to extract across the full collection." },
+                                       description: "Default true. When true and the class declares an " \
+                                                    "agent_canonical_filter, it is prepended as a $match stage " \
+                                                    "so values are extracted only from the class's 'valid state' " \
+                                                    "subset. Set to false to extract across the full collection." },
             },
             required: ["class_name", "field"],
           },
           output_schema: {
             type: "object",
             properties: {
-              class_name:    { type: "string" },
-              field:         { type: "string" },
-              count:         { type: "integer", minimum: 0 },
-              values:        { type: "array",
-                               items: { type: %w[string number boolean null] } },
+              class_name: { type: "string" },
+              field: { type: "string" },
+              count: { type: "integer", minimum: 0 },
+              values: { type: "array",
+                        items: { type: %w[string number boolean null] } },
               pointer_class: { type: "string" },
-              sort:          { type: "string" },
-              truncated:     { type: "boolean" },
-              limit:         { type: "integer" },
+              sort: { type: "string" },
+              truncated: { type: "boolean" },
+              limit: { type: "integer" },
             },
             required: %w[class_name field count values limit],
           },
@@ -744,16 +744,16 @@ module Parse
             properties: {
               class_name: { type: "string" },
               # query mode
-              where:    { type: "object" },
-              keys:     { type: "array", items: { type: "string" } },
-              include:  { type: "array", items: { type: "string" } },
-              order:    { type: "string" },
-              limit:    { type: "integer" },
-              skip:     { type: "integer" },
+              where: { type: "object" },
+              keys: { type: "array", items: { type: "string" } },
+              include: { type: "array", items: { type: "string" } },
+              order: { type: "string" },
+              limit: { type: "integer" },
+              skip: { type: "integer" },
               # aggregate mode (mutually exclusive with where/keys/order/limit)
               pipeline: { type: "array", items: { type: "object" } },
               # output control
-              columns:  {
+              columns: {
                 type: "array",
                 # Each entry is either a string (used as both path and header) or a
                 # single-entry { "<field>" => "<Header>" } object for renaming.
@@ -768,7 +768,7 @@ module Parse
                 description: "Column spec. Each entry is either a string (field name, used as header) " \
                              "or an object {field => header} to rename. Dotted paths supported.",
               },
-              format:   {
+              format: {
                 type: "string",
                 enum: %w[csv markdown table],
                 description: "Output format. Defaults to 'csv'.",
@@ -788,16 +788,16 @@ module Parse
               class_name: { type: "string" },
               # `format` is one of csv|markdown|table; same shape as the
               # input enum.
-              format:  { type: "string", enum: %w[csv markdown table] },
+              format: { type: "string", enum: %w[csv markdown table] },
               headers: { type: "array", items: { type: "string" } },
               row_count: { type: "integer", minimum: 0 },
               # The serialized output is the formatted CSV / Markdown /
               # text-table string itself — clients render it as-is.
-              output:  { type: "string" },
-              truncated:      { type: "boolean" },
+              output: { type: "string" },
+              truncated: { type: "boolean" },
               available_rows: { type: "integer", minimum: 0 },
-              row_cap:        { type: "integer", minimum: 1 },
-              hint:           { type: "string" },
+              row_cap: { type: "integer", minimum: 1 },
+              hint: { type: "string" },
             },
             required: %w[class_name format headers row_count output],
           },
@@ -819,14 +819,14 @@ module Parse
             type: "object",
             properties: {
               class_name: { type: "string" },
-              query:      { type: "string", description: "Search query text. Non-empty." },
-              fields:     {
+              query: { type: "string", description: "Search query text. Non-empty." },
+              fields: {
                 type: "array",
                 items: { type: "string" },
                 description: "Optional. Restrict search to these fields. When omitted, all indexed fields are " \
                              "searched. Subject to the class's agent_fields allowlist when one is declared.",
               },
-              limit:      {
+              limit: {
                 type: "integer",
                 description: "Optional. Max results, default 10, hard cap 20.",
               },
@@ -834,16 +834,16 @@ module Parse
                 type: "string",
                 description: "Optional. Field to return highlight snippets for. Subject to agent_fields allowlist.",
               },
-              filter:     {
+              filter: {
                 type: "object",
                 description: "Optional. Additional MongoDB filter applied after the $search stage. Same security " \
                              "validation as aggregate's pipeline: no $where / $function / $accumulator.",
               },
               apply_canonical_filter: { type: "boolean",
-                                        description: "Default true. When true and the class declares an " \
-                                                     "agent_canonical_filter, it is AND-merged into the " \
-                                                     "post-$search $match (alongside any caller filter:) " \
-                                                     "so search results come from the 'valid state' subset only." },
+                                       description: "Default true. When true and the class declares an " \
+                                                    "agent_canonical_filter, it is AND-merged into the " \
+                                                    "post-$search $match (alongside any caller filter:) " \
+                                                    "so search results come from the 'valid state' subset only." },
             },
             required: %w[class_name query],
           },
@@ -851,7 +851,7 @@ module Parse
             type: "object",
             properties: {
               class_name: { type: "string" },
-              count:      { type: "integer", minimum: 0 },
+              count: { type: "integer", minimum: 0 },
               # Each row is a Parse object projected through the class's
               # agent_fields allowlist, with an Atlas-supplied `score`
               # numeric and an optional `highlights` array when the
@@ -875,7 +875,7 @@ module Parse
                               type: "object",
                               properties: {
                                 value: { type: "string" },
-                                type:  { type: "string", description: "'hit' or 'text' per Atlas spec." },
+                                type: { type: "string", description: "'hit' or 'text' per Atlas spec." },
                               },
                               required: %w[value],
                             },
@@ -908,25 +908,25 @@ module Parse
             type: "object",
             properties: {
               class_name: { type: "string" },
-              query:      { type: "string", description: "Prefix to autocomplete against. Non-empty." },
-              field:      {
+              query: { type: "string", description: "Prefix to autocomplete against. Non-empty." },
+              field: {
                 type: "string",
                 description: "Field name configured for autocomplete in the search index. Must be in " \
                              "agent_fields allowlist when one is declared.",
               },
-              limit:      {
+              limit: {
                 type: "integer",
                 description: "Optional. Max suggestions, default 10, hard cap 20.",
               },
-              fuzzy:      {
+              fuzzy: {
                 type: "boolean",
                 description: "Optional. Enable single-edit fuzzy matching. Default false.",
               },
               apply_canonical_filter: { type: "boolean",
-                                        description: "Default true. When true and the class declares an " \
-                                                     "agent_canonical_filter, it is applied as a post-$search " \
-                                                     "$match so autocomplete suggestions exclude 'invalid state' " \
-                                                     "rows that the rest of the read-tool surface hides." },
+                                       description: "Default true. When true and the class declares an " \
+                                                    "agent_canonical_filter, it is applied as a post-$search " \
+                                                    "$match so autocomplete suggestions exclude 'invalid state' " \
+                                                    "rows that the rest of the read-tool surface hides." },
             },
             required: %w[class_name query field],
           },
@@ -934,12 +934,12 @@ module Parse
             type: "object",
             properties: {
               class_name: { type: "string" },
-              field:      { type: "string" },
+              field: { type: "string" },
               # `suggestions` is the list of distinct field values that
               # matched the autocomplete query (deduped, ordered by Atlas
               # ranking). Strings only — autocomplete operates on text.
               suggestions: { type: "array", items: { type: "string" } },
-              count:       { type: "integer", minimum: 0 },
+              count: { type: "integer", minimum: 0 },
               # Full matching Parse objects, projected through the class
               # agent_fields allowlist.
               results: {
@@ -968,29 +968,29 @@ module Parse
             type: "object",
             properties: {
               class_name: { type: "string" },
-              query:      { type: "string", description: "Optional. Search query text; pass empty for match-all." },
-              facets:     {
+              query: { type: "string", description: "Optional. Search query text; pass empty for match-all." },
+              facets: {
                 type: "object",
                 description: "Facet definitions keyed by facet name. Each value is " \
                              "{ type: 'string'|'number'|'date', path: <field>, boundaries?: [...] }. " \
                              "Paths must be in agent_fields allowlist when one is declared.",
               },
-              limit:      {
+              limit: {
                 type: "integer",
                 description: "Optional. Max documents in the result list (NOT bucket counts), default 10, max 20.",
               },
               apply_canonical_filter: { type: "boolean",
-                                        description: "Default true. When the class declares an " \
-                                                     "agent_canonical_filter, this tool refuses by default. " \
-                                                     "Pass false to acknowledge that $searchMeta bucket counts " \
-                                                     "WILL include rows the canonical filter normally hides." },
+                                       description: "Default true. When the class declares an " \
+                                                    "agent_canonical_filter, this tool refuses by default. " \
+                                                    "Pass false to acknowledge that $searchMeta bucket counts " \
+                                                    "WILL include rows the canonical filter normally hides." },
             },
             required: %w[class_name facets],
           },
           output_schema: {
             type: "object",
             properties: {
-              class_name:  { type: "string" },
+              class_name: { type: "string" },
               # $searchMeta lower-bound count. May be approximate for very
               # large corpora — Atlas documents this; downstream clients
               # should treat it as informative, not a precise total.
@@ -1013,7 +1013,7 @@ module Parse
                   required: %w[buckets],
                 },
               },
-              count:   { type: "integer", minimum: 0 },
+              count: { type: "integer", minimum: 0 },
               results: {
                 type: "array",
                 items: { type: "object", additionalProperties: true },
@@ -1030,12 +1030,12 @@ module Parse
       # `category:` value via `Tools.register(category: "...")`; the
       # default for un-categorized registrations is "custom".
       BUILTIN_CATEGORIES = {
-        "schema"    => "Class introspection — discover available classes, fields, indexes, and permissions.",
-        "query"     => "Read-only data access — fetch records, counts, samples, and execution plans.",
+        "schema" => "Class introspection — discover available classes, fields, indexes, and permissions.",
+        "query" => "Read-only data access — fetch records, counts, samples, and execution plans.",
         "aggregate" => "MongoDB aggregation pipelines for grouping, statistics, and joins.",
-        "mutation"  => "Domain-action methods declared via agent_method.",
-        "export"    => "Bulk data export in CSV, Markdown, or fixed-width text.",
-        "custom"    => "Application-registered tools not assigned to a built-in category.",
+        "mutation" => "Domain-action methods declared via agent_method.",
+        "export" => "Bulk data export in CSV, Markdown, or fixed-width text.",
+        "custom" => "Application-registered tools not assigned to a built-in category.",
       }.freeze
 
       # ============================================================
@@ -1173,12 +1173,12 @@ module Parse
 
           REGISTRY_MUTEX.synchronize do
             @registry[sym] = {
-              definition:    definition,
-              permission:    permission,
-              timeout:       timeout.to_i,
-              handler:       handler,
+              definition: definition,
+              permission: permission,
+              timeout: timeout.to_i,
+              handler: handler,
               output_schema: output_schema,
-              client_safe:   client_safe == true,
+              client_safe: client_safe == true,
             }
           end
           notify_subscribers
@@ -1496,7 +1496,7 @@ module Parse
         # leading-substring filter. Both nil/empty means no filter.
         if names.respond_to?(:any?) && names.any?
           name_set = names.map(&:to_s)
-          schemas  = schemas.select { |s| name_set.include?(s["className"]) }
+          schemas = schemas.select { |s| name_set.include?(s["className"]) }
         end
         if prefix.is_a?(String) && !prefix.empty?
           schemas = schemas.select { |s| s["className"].to_s.start_with?(prefix) }
@@ -1610,7 +1610,7 @@ module Parse
           raise Parse::Agent::AccessDenied.new(
             class_name,
             "Class '#{class_name}' is outside this agent's classes: allowlist",
-            kind: :class_filter
+            kind: :class_filter,
           )
         end
 
@@ -1633,6 +1633,7 @@ module Parse
           end
         end
       end
+
       module_function :assert_class_accessible!
 
       # NEW-TOOLS-9: validate an object_id argument format. objectIds in Parse
@@ -1648,6 +1649,7 @@ module Parse
                 "Must be 1-32 characters of letters, digits, hyphens, or underscores."
         end
       end
+
       module_function :assert_object_id!
 
       # NEW-TOOLS-9: validate a method_name argument format.
@@ -1662,6 +1664,7 @@ module Parse
                 "letters, digits, and underscores (max 128 chars, optional !/?/= suffix)."
         end
       end
+
       module_function :assert_method_name!
 
       # Resolve the effective tenant scope for a class and agent.
@@ -1678,6 +1681,7 @@ module Parse
       def resolve_tenant_scope!(agent, class_name)
         Parse::Agent::MetadataRegistry.resolve_tenant_scope(class_name, agent)
       end
+
       module_function :resolve_tenant_scope!
 
       # Merge tenant scope into a caller-supplied `where:` hash (or nil).
@@ -1697,8 +1701,8 @@ module Parse
       # @raise [Parse::Agent::AccessDenied]
       def apply_tenant_scope_to_where(where, scope, class_name)
         return where unless scope
-        field     = scope[:field]
-        value     = scope[:value]
+        field = scope[:field]
+        value = scope[:value]
         field_str = field.to_s
         field_sym = field.to_sym
         # Also check the camelCase wire form (e.g. org_id -> orgId) because an LLM
@@ -1712,10 +1716,10 @@ module Parse
 
         where_h = (where || {})
         # Collect candidate values from all four key forms (snake str/sym, camel str/sym).
-        candidate_keys   = [field_str, field_sym, camel_str, camel_sym]
-        present_keys     = candidate_keys.select { |k| where_h.key?(k) }
-        caller_value     = present_keys.any? ? where_h[present_keys.first] : nil
-        field_present    = present_keys.any?
+        candidate_keys = [field_str, field_sym, camel_str, camel_sym]
+        present_keys = candidate_keys.select { |k| where_h.key?(k) }
+        caller_value = present_keys.any? ? where_h[present_keys.first] : nil
+        field_present = present_keys.any?
 
         if !field_present
           # Case 1: field absent in any form — inject using snake_case string key.
@@ -1731,6 +1735,7 @@ module Parse
           )
         end
       end
+
       module_function :apply_tenant_scope_to_where
 
       # Prepend a $match tenant scope stage at index 0 of an aggregation pipeline.
@@ -1747,10 +1752,11 @@ module Parse
         # as Parse Server's stored field names). Camelize the scope field so the
         # prepended $match stage is structurally equivalent to what the LLM would
         # write when querying by the field directly.
-        field     = scope[:field].to_s
-        wire_key  = field.gsub(/_([a-z])/) { Regexp.last_match(1).upcase }
+        field = scope[:field].to_s
+        wire_key = field.gsub(/_([a-z])/) { Regexp.last_match(1).upcase }
         [{ "$match" => { wire_key => scope[:value] } }] + pipeline
       end
+
       module_function :apply_tenant_scope_to_pipeline
 
       # Default-deny joins under an active tenant scope. A field-based
@@ -1787,6 +1793,7 @@ module Parse
           )
         end
       end
+
       module_function :assert_joins_tenant_safe!
 
       # Yield each join-target collection name found in `$lookup` /
@@ -1824,6 +1831,7 @@ module Parse
           end
         end
       end
+
       module_function :each_join_target
 
       # === Per-agent filter and canonical filter helpers ===
@@ -1863,6 +1871,7 @@ module Parse
         per_agent = agent && agent.respond_to?(:filter_for) ? agent.filter_for(class_name) : nil
         compose_filter_into_where(where, per_agent, class_name, helper_name: "apply_per_agent_filter_to_where")
       end
+
       module_function :apply_per_agent_filter_to_where
 
       # Merge the class's canonical "valid state" filter (declared via
@@ -1881,6 +1890,7 @@ module Parse
         canonical = Parse::Agent::MetadataRegistry.canonical_filter(class_name)
         compose_filter_into_where(where, canonical, class_name, helper_name: "apply_canonical_filter_to_where")
       end
+
       module_function :apply_canonical_filter_to_where
 
       # @api private
@@ -1908,6 +1918,7 @@ module Parse
                 "got #{where.class}"
         end
       end
+
       module_function :compose_filter_into_where
 
       # Prepend the per-agent per-class filter (declared via
@@ -1919,6 +1930,7 @@ module Parse
         per_agent = agent && agent.respond_to?(:filter_for) ? agent.filter_for(class_name) : nil
         compose_filter_into_pipeline(pipeline, per_agent)
       end
+
       module_function :apply_per_agent_filter_to_pipeline
 
       # Prepend the class's canonical filter as a `$match` stage.
@@ -1930,6 +1942,7 @@ module Parse
         canonical = Parse::Agent::MetadataRegistry.canonical_filter(class_name)
         compose_filter_into_pipeline(pipeline, canonical)
       end
+
       module_function :apply_canonical_filter_to_pipeline
 
       # @api private
@@ -1945,6 +1958,7 @@ module Parse
           [match_stage] + pipeline
         end
       end
+
       module_function :compose_filter_into_pipeline
 
       # Verify that a fetched record's scope field matches the bound scope value.
@@ -1956,8 +1970,8 @@ module Parse
       # @raise [Parse::Agent::AccessDenied]
       def assert_record_in_tenant_scope!(record, scope, class_name)
         return unless scope
-        field     = scope[:field].to_s
-        value     = scope[:value]
+        field = scope[:field].to_s
+        value = scope[:value]
         # Parse Server returns camelCase field names on the wire (e.g. orgId for
         # the Ruby field org_id). A mongo-direct hit (semantic_search's raw
         # $vectorSearch path) instead carries the field under its STORAGE column
@@ -1972,9 +1986,9 @@ module Parse
         camel_field = field.gsub(/_([a-z])/) { Regexp.last_match(1).upcase }
         # Assign unconditionally (the modifier-if is the RHS, yielding nil when
         # false) so neither local is ever read before initialization.
-        klass       = (Parse::Model.find_class(class_name) if defined?(Parse::Model))
-        mapped      = (klass.field_map[field.to_sym].to_s if klass.respond_to?(:field_map))
-        rec_value   = if record.is_a?(Hash)
+        klass = (Parse::Model.find_class(class_name) if defined?(Parse::Model))
+        mapped = (klass.field_map[field.to_sym].to_s if klass.respond_to?(:field_map))
+        rec_value = if record.is_a?(Hash)
             keys = [field, camel_field]
             keys << mapped if mapped && !mapped.empty?
             found = keys.find { |k| record.key?(k) }
@@ -1987,6 +2001,7 @@ module Parse
           )
         end
       end
+
       module_function :assert_record_in_tenant_scope!
 
       # Walk an aggregation pipeline and enforce two boundaries that
@@ -2027,6 +2042,7 @@ module Parse
           agent: agent,
         )
       end
+
       module_function :enforce_pipeline_access_policy!
 
       # @api private
@@ -2039,6 +2055,7 @@ module Parse
         return nil unless allowlist && allowlist.any?
         allowlist.map(&:to_s) | Parse::Agent::MetadataRegistry::ALWAYS_KEEP_FIELDS
       end
+
       module_function :compute_source_allowlist_for
 
       # @api private
@@ -2072,6 +2089,7 @@ module Parse
           end
         end
       end
+
       module_function :walk_pipeline_with_state!
 
       # @api private
@@ -2087,6 +2105,7 @@ module Parse
         set |= available
         set
       end
+
       module_function :effective_permitted_set
 
       # @api private
@@ -2185,6 +2204,7 @@ module Parse
           [[], false]
         end
       end
+
       module_function :stage_field_delta
 
       # @api private
@@ -2193,6 +2213,7 @@ module Parse
       def keys_excluding_operators(hash)
         hash.keys.map(&:to_s).reject { |k| k.empty? || k.start_with?("$") }
       end
+
       module_function :keys_excluding_operators
 
       # @api private
@@ -2203,18 +2224,21 @@ module Parse
       def root_keys_excluding_operators(hash)
         keys_excluding_operators(hash).map { |k| k.split(".").first }.uniq
       end
+
       module_function :root_keys_excluding_operators
 
       # @api private
       def projection_is_inclusion?(expr)
         expr == 1 || expr == true
       end
+
       module_function :projection_is_inclusion?
 
       # @api private
       def projection_is_exclusion?(expr)
         expr == 0 || expr == false
       end
+
       module_function :projection_is_exclusion?
 
       # @api private
@@ -2225,6 +2249,7 @@ module Parse
       def project_is_exclusion_only?(value)
         value.any? && value.values.all? { |v| projection_is_exclusion?(v) }
       end
+
       module_function :project_is_exclusion_only?
 
       # @api private
@@ -2236,6 +2261,7 @@ module Parse
         included = value.reject { |_, v| projection_is_exclusion?(v) }
         root_keys_excluding_operators(included)
       end
+
       module_function :project_introduced_roots
 
       # @api private
@@ -2255,6 +2281,7 @@ module Parse
           )
         end
       end
+
       module_function :assert_output_key_not_internal!
 
       # @api private
@@ -2269,8 +2296,8 @@ module Parse
       # that pass only `permitted_fields:` (the existing single-stage
       # test surface).
       def walk_pipeline_stage!(stage, permitted_fields:, agent: nil,
-                               source_permitted: nil, available: [],
-                               source_addressable: true)
+                                      source_permitted: nil, available: [],
+                                      source_addressable: true)
         return unless stage.is_a?(Hash)
         stage.each do |op, value|
           case op.to_s
@@ -2279,8 +2306,7 @@ module Parse
             # `{ "$unionWith" => "Collection" }`. Extract that target too,
             # otherwise the underscore denylist, hidden?, class-filter
             # allowlist, and CLP-find gates below silently skip it.
-            target =
-              if value.is_a?(Hash)
+            target = if value.is_a?(Hash)
                 value["from"] || value[:from] || value["coll"] || value[:coll]
               elsif value.is_a?(String)
                 value
@@ -2310,7 +2336,7 @@ module Parse
                 raise Parse::Agent::AccessDenied.new(
                   target_str,
                   "Pipeline target '#{target_str}' is outside this agent's classes: allowlist",
-                  kind: :class_filter
+                  kind: :class_filter,
                 )
               end
               # CLP gate for joined classes. A $lookup / $graphLookup /
@@ -2474,6 +2500,7 @@ module Parse
           end
         end
       end
+
       module_function :walk_pipeline_stage!
 
       # @api private
@@ -2505,6 +2532,7 @@ module Parse
           end
         end
       end
+
       module_function :check_match_keys_for_restricted_fields!
 
       # @api private
@@ -2526,6 +2554,7 @@ module Parse
           expr.each_value { |v| check_expression_for_restricted_fields!(v, permitted_fields) }
         end
       end
+
       module_function :check_expression_for_restricted_fields!
 
       # @api private
@@ -2551,7 +2580,7 @@ module Parse
         msg = +"#{context} '#{fname}' (#{root.inspect}) outside agent_fields allowlist"
         if permitted_fields.is_a?(Array) && permitted_fields.any?
           preview = permitted_fields.first(ALLOWLIST_PREVIEW_CAP)
-          suffix  = permitted_fields.size > ALLOWLIST_PREVIEW_CAP ?
+          suffix = permitted_fields.size > ALLOWLIST_PREVIEW_CAP ?
             " (+#{permitted_fields.size - ALLOWLIST_PREVIEW_CAP} more)" : ""
           msg << ". Allowed: #{preview.join(", ")}#{suffix}"
         end
@@ -2568,13 +2597,14 @@ module Parse
           end
         end
         {
-          message:           msg,
-          kind:              kind,
-          denied_field:      root.is_a?(String) ? root : root.to_s,
-          allowed_fields:    permitted_fields.is_a?(Array) ? permitted_fields.first(ALLOWLIST_PREVIEW_CAP).map(&:to_s) : nil,
+          message: msg,
+          kind: kind,
+          denied_field: root.is_a?(String) ? root : root.to_s,
+          allowed_fields: permitted_fields.is_a?(Array) ? permitted_fields.first(ALLOWLIST_PREVIEW_CAP).map(&:to_s) : nil,
           suggested_rewrite: suggested,
         }
       end
+
       module_function :build_allowlist_refusal
 
       # @api private
@@ -2585,12 +2615,13 @@ module Parse
         info = build_allowlist_refusal(context, fname, root, permitted_fields)
         raise Parse::Agent::AccessDenied.new(
           nil, info[:message],
-          kind:              info[:kind],
-          denied_field:      info[:denied_field],
-          allowed_fields:    info[:allowed_fields],
+          kind: info[:kind],
+          denied_field: info[:denied_field],
+          allowed_fields: info[:allowed_fields],
           suggested_rewrite: info[:suggested_rewrite],
         )
       end
+
       module_function :raise_allowlist_refusal!
 
       # Resolve each dotted `include:` path through belongs_to / has_one
@@ -2613,6 +2644,7 @@ module Parse
           walk_pointer_path!(klass, path.to_s.split("."), agent: agent)
         end
       end
+
       module_function :assert_include_paths_accessible!
 
       # Auto-projection for `keys: + include:`. When the caller passed a
@@ -2709,6 +2741,7 @@ module Parse
         effective = (keys_str | appended)
         { effective_keys: effective, truncated: truncated }
       end
+
       module_function :apply_include_projection
 
       # @api private
@@ -2718,11 +2751,12 @@ module Parse
       def resolve_pointer_target(parent_klass, pointer_field)
         refs = parent_klass.references
         return nil unless refs
-        seg_str   = pointer_field.to_s
+        seg_str = pointer_field.to_s
         camel_str = seg_str.include?("_") ? seg_str.gsub(/_([a-z])/) { Regexp.last_match(1).upcase } : seg_str
         target = refs[seg_str.to_sym] || refs[seg_str] || refs[camel_str.to_sym] || refs[camel_str]
         target&.to_s
       end
+
       module_function :resolve_pointer_target
 
       # @api private
@@ -2734,7 +2768,7 @@ module Parse
           # `references` is keyed by the Parse field name (camelCase). Accept
           # both forms: snake_case as Ruby methods are usually named, and
           # camelCase as it appears on the wire and in the schema.
-          seg_str   = seg.to_s
+          seg_str = seg.to_s
           camel_str = seg_str.include?("_") ? seg_str.gsub(/_([a-z])/) { Regexp.last_match(1).upcase } : seg_str
           target = refs[seg_str.to_sym] || refs[seg_str] || refs[camel_str.to_sym] || refs[camel_str]
           return unless target
@@ -2754,7 +2788,7 @@ module Parse
             raise Parse::Agent::AccessDenied.new(
               target_name,
               "Pointer-include target '#{target_name}' is outside this agent's classes: allowlist",
-              kind: :class_filter
+              kind: :class_filter,
             )
           end
           current = begin
@@ -2765,6 +2799,7 @@ module Parse
           return unless current
         end
       end
+
       module_function :walk_pointer_path!
 
       # Post-fetch defense-in-depth: walk the result data and replace any
@@ -2792,6 +2827,7 @@ module Parse
         # rows. The walker scrubs them post-fetch.
         walk_and_redact(data, hidden, agent: agent)
       end
+
       module_function :redact_hidden_classes!
 
       # Parse-on-Mongo pointer column shape: a string value paired with a
@@ -2863,6 +2899,7 @@ module Parse
           obj
         end
       end
+
       module_function :walk_and_redact
 
       # Compact Parse-on-Mongo storage-form pointer columns.
@@ -2923,6 +2960,7 @@ module Parse
         rewrite_pointer_columns!(data, compressible)
         compressible
       end
+
       module_function :compact_pointers!
 
       # @api private
@@ -2971,6 +3009,7 @@ module Parse
           obj.each { |v| scan_for_pointer_columns(v, acc) }
         end
       end
+
       module_function :scan_for_pointer_columns
 
       # @api private
@@ -3006,6 +3045,7 @@ module Parse
           obj.each { |v| rewrite_pointer_columns!(v, compressible) }
         end
       end
+
       module_function :rewrite_pointer_columns!
 
       # Discovery: return a lightweight catalog of every tool this agent
@@ -3023,13 +3063,13 @@ module Parse
         rows = defs.map do |entry|
           fn = entry[:function] || entry
           {
-            name:        fn[:name],
-            category:    fn[:category] || "custom",
+            name: fn[:name],
+            category: fn[:category] || "custom",
             description: fn[:description],
           }
         end
         {
-          tools:      rows,
+          tools: rows,
           categories: BUILTIN_CATEGORIES,
         }
       end
@@ -3080,6 +3120,7 @@ module Parse
         hidden = reg.respond_to?(:hidden_class_names) ? Array(reg.hidden_class_names) : []
         names.compact.map(&:to_s).uniq - hidden.map(&:to_s)
       end
+
       module_function :known_class_names_for_suggestions
 
       # Up to `limit` known class names within a small edit distance of the
@@ -3096,6 +3137,7 @@ module Parse
           .first(limit)
           .map(&:first)
       end
+
       module_function :suggest_class_names
 
       # Compact iterative Levenshtein distance.
@@ -3113,6 +3155,7 @@ module Parse
         end
         prev[b.length]
       end
+
       module_function :name_edit_distance
 
       # ============================================================
@@ -3148,7 +3191,7 @@ module Parse
         # the effective where (with scope injected) is what everything else sees.
         # TRACK-AGENT-7 split: per-agent filter is UNCONDITIONAL; canonical
         # filter remains LLM-controllable via apply_canonical_filter:.
-        scope        = resolve_tenant_scope!(agent, class_name)
+        scope = resolve_tenant_scope!(agent, class_name)
         effective_where = apply_tenant_scope_to_where(where, scope, class_name)
         effective_where = apply_per_agent_filter_to_where(effective_where, class_name, agent: agent)
         effective_where = apply_canonical_filter_to_where(effective_where, class_name, agent: agent) if apply_canonical_filter
@@ -3159,7 +3202,6 @@ module Parse
         if effective_where && !effective_where.empty? &&
            Parse::Agent.refuse_collscan? &&
            !MetadataRegistry.allow_collscan?(class_name)
-
           refusal = collscan_preflight(agent, class_name, effective_where)
           return refusal if refusal
         end
@@ -3184,8 +3226,7 @@ module Parse
         validated_keys = validate_keys!(keys)
         allowlist = MetadataRegistry.field_allowlist(class_name)
         caller_keys = validated_keys&.any? ? validated_keys : nil
-        effective_keys =
-          if allowlist && allowlist.any?
+        effective_keys = if allowlist && allowlist.any?
             permitted = allowlist.map(&:to_s) | MetadataRegistry::ALWAYS_KEEP_FIELDS
             caller_keys ? (caller_keys & permitted) : allowlist.map(&:to_s)
           else
@@ -3228,8 +3269,7 @@ module Parse
         end
 
         with_timeout(:query_class) do
-          results =
-            if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
+          results = if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
               # Auto-route through Parse::MongoDB.aggregate so ACLScope's
               # `_rperm` $match injection runs — REST find_objects has
               # no "act as role" affordance for acl_user/acl_role agents.
@@ -3275,23 +3315,24 @@ module Parse
       # standard text-export envelope shape.
       def format_query_results_as(format, class_name, results)
         col_specs = results.any? ? infer_export_columns_from(results.first) : []
-        headers   = col_specs.map { |s| s[:header] }
-        rows      = results.map do |obj|
+        headers = col_specs.map { |s| s[:header] }
+        rows = results.map do |obj|
           col_specs.map { |s| stringify_export_value(extract_export_value(obj, s[:path])) }
         end
         output = case format
-          when "csv"      then format_export_csv(headers, rows)
+          when "csv" then format_export_csv(headers, rows)
           when "markdown" then format_export_markdown(headers, rows)
-          when "table"    then format_export_text_table(headers, rows)
+          when "table" then format_export_text_table(headers, rows)
           end
         {
           class_name: class_name,
-          format:     format,
-          headers:    headers,
-          row_count:  rows.size,
-          output:     output,
+          format: format,
+          headers: headers,
+          row_count: rows.size,
+          output: output,
         }
       end
+
       module_function :format_query_results_as
 
       # Count objects in a Parse class
@@ -3304,7 +3345,7 @@ module Parse
         assert_class_accessible!(class_name, agent: agent, op: :count)
         # Tenant scope enforcement. TRACK-AGENT-7 split: per-agent filter is
         # UNCONDITIONAL, canonical filter is LLM-controllable.
-        scope           = resolve_tenant_scope!(agent, class_name)
+        scope = resolve_tenant_scope!(agent, class_name)
         effective_where = apply_tenant_scope_to_where(where, scope, class_name)
         effective_where = apply_per_agent_filter_to_where(effective_where, class_name, agent: agent)
         effective_where = apply_canonical_filter_to_where(effective_where, class_name, agent: agent) if apply_canonical_filter
@@ -3317,8 +3358,7 @@ module Parse
           query[:where] = translated_where.to_json
         end
 
-        count =
-          if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
+        count = if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
             execute_count_via_direct(agent, class_name, where: translated_where)
           else
             response = agent.client.find_objects(class_name, query, **agent.request_opts)
@@ -3344,7 +3384,7 @@ module Parse
       # @return [Hash] the object data
       # @raise [Parse::Agent::ValidationError] for invalid class_name or object_id
       def get_object(agent, class_name:, object_id:, include: nil,
-                     apply_canonical_filter: true, **_kwargs)
+                            apply_canonical_filter: true, **_kwargs)
         assert_class_accessible!(class_name, agent: agent, op: :get)
         assert_object_id!(object_id)
         # Resolve tenant scope early so we can verify after fetch.
@@ -3395,15 +3435,13 @@ module Parse
           # Compose the objectId match into the filter; a hit returns exactly
           # one row, a filtered-out match returns zero rows (treated as not-
           # found below, identical to the genuine missing-row case).
-          combined_where =
-            if composed_filter.is_a?(Hash) && composed_filter.key?("$and")
+          combined_where = if composed_filter.is_a?(Hash) && composed_filter.key?("$and")
               { "$and" => composed_filter["$and"] + [{ "objectId" => object_id }] }
             else
               { "$and" => [composed_filter, { "objectId" => object_id }] }
             end
           translated_combined = ConstraintTranslator.translate(combined_where, agent)
-          rows =
-            if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
+          rows = if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
               execute_find_via_direct(
                 agent, class_name,
                 where: translated_combined, limit: 1,
@@ -3461,7 +3499,7 @@ module Parse
         assert_record_in_tenant_scope!(result, scope, class_name)
 
         ResultFormatter.format_object(class_name, result,
-                                       truncated_include_fields: truncated_includes)
+                                      truncated_include_fields: truncated_includes)
       end
 
       # Batch-fetch multiple Parse objects by id in a single query.
@@ -3475,7 +3513,7 @@ module Parse
       # @raise [Parse::Agent::ValidationError] if class_name invalid, ids not an Array,
       #   any id has invalid format, or more than 50 unique ids are requested
       def get_objects(agent, class_name:, ids: nil, include: [],
-                      apply_canonical_filter: true, **_kwargs)
+                             apply_canonical_filter: true, **_kwargs)
         assert_class_accessible!(class_name, agent: agent, op: :get)
         # Resolve tenant scope early — verified post-fetch (oracle-prevention).
         # TRACK-AGENT-1 / TRACK-AGENT-6 / TRACK-AGENT-7 fix: per-agent
@@ -3500,12 +3538,12 @@ module Parse
         # Short-circuit on empty array — no query needed
         if ids.empty?
           return {
-            class_name: class_name,
-            objects: {},
-            missing: [],
-            requested: 0,
-            found: 0,
-          }
+                   class_name: class_name,
+                   objects: {},
+                   missing: [],
+                   requested: 0,
+                   found: 0,
+                 }
         end
 
         unique_ids = ids.uniq
@@ -3533,9 +3571,9 @@ module Parse
         # three layers reach the server in one query. Then route through
         # ConstraintTranslator so snake_case keys are camelized to Parse
         # Server wire format (mirrors count_objects / query_class).
-        base_in_where    = { "objectId" => { "$in" => unique_ids } }
-        composed         = apply_per_agent_filter_to_where(base_in_where, class_name, agent: agent)
-        composed         = apply_canonical_filter_to_where(composed, class_name, agent: agent) if apply_canonical_filter
+        base_in_where = { "objectId" => { "$in" => unique_ids } }
+        composed = apply_per_agent_filter_to_where(base_in_where, class_name, agent: agent)
+        composed = apply_canonical_filter_to_where(composed, class_name, agent: agent) if apply_canonical_filter
         translated_where = ConstraintTranslator.translate(composed, agent)
 
         # Build query
@@ -3560,8 +3598,7 @@ module Parse
         query[:keys] = effective_keys.join(",") if effective_keys&.any?
 
         with_timeout(:get_objects) do
-          rows =
-            if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
+          rows = if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
               # Feed the translated (already-composed) where into the
               # direct-route helper. The $in constraint composes with
               # the per-agent / canonical filter via the same $and the
@@ -3657,8 +3694,7 @@ module Parse
         allowlist = MetadataRegistry.field_allowlist(class_name)
         query[:keys] = allowlist.join(",") if allowlist&.any?
 
-        rows =
-          if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
+        rows = if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
             execute_find_via_direct(
               agent, class_name,
               where: translated_where, limit: limit, order: "-createdAt",
@@ -3713,7 +3749,7 @@ module Parse
       AGGREGATE_DEFAULT_MONGO_DIRECT = true
 
       def aggregate(agent, class_name:, pipeline:, rewrite_lookups: nil, compact_pointers: true,
-                    apply_canonical_filter: true, mongo_direct: AGGREGATE_DEFAULT_MONGO_DIRECT,
+                           apply_canonical_filter: true, mongo_direct: AGGREGATE_DEFAULT_MONGO_DIRECT,
                     **_kwargs)
         assert_class_accessible!(class_name, agent: agent, op: :find)
         # SECURITY: Validate pipeline BEFORE execution.
@@ -3740,12 +3776,12 @@ module Parse
         # Tenant scope enforcement: prepend a $match stage at index 0.
         # Done after pipeline validation so the injected stage doesn't
         # interfere with the validator's denylist walk.
-        scope              = resolve_tenant_scope!(agent, class_name)
+        scope = resolve_tenant_scope!(agent, class_name)
         # Default-deny joins into tenant-incompatible classes BEFORE the
         # outer $match is prepended (the outer scope can't reach a join
         # sub-pipeline).
         assert_joins_tenant_safe!(pipeline, scope)
-        scoped_pipeline    = apply_tenant_scope_to_pipeline(pipeline, scope)
+        scoped_pipeline = apply_tenant_scope_to_pipeline(pipeline, scope)
 
         # Per-agent filter (declared via Parse::Agent.new(filters: ...)) is
         # UNCONDITIONAL — TRACK-AGENT-7 split. No LLM kwarg can drop it.
@@ -3773,7 +3809,6 @@ module Parse
         if Parse::Agent.refuse_collscan? &&
            !MetadataRegistry.allow_collscan?(class_name) &&
            (match_stage = effective_pipeline.first&.dig("$match"))&.any?
-
           refusal = collscan_preflight(agent, class_name, match_stage)
           return refusal if refusal
         end
@@ -3876,10 +3911,10 @@ module Parse
           # and the hint text is ~200 bytes on every call.
           if auto_limited && results.size >= AGGREGATE_DEFAULT_LIMIT
             result[:auto_limited] = true
-            result[:auto_limit]   = AGGREGATE_DEFAULT_LIMIT
-            result[:hint]         = "Pipeline auto-bounded with $limit:#{AGGREGATE_DEFAULT_LIMIT} (no terminal $limit/$count supplied). " \
-                                    "Add an explicit { \"$limit\": N } stage at the end of your pipeline to control the cap, " \
-                                    "or call count_objects first to size the result before fetching rows."
+            result[:auto_limit] = AGGREGATE_DEFAULT_LIMIT
+            result[:hint] = "Pipeline auto-bounded with $limit:#{AGGREGATE_DEFAULT_LIMIT} (no terminal $limit/$count supplied). " \
+                            "Add an explicit { \"$limit\": N } stage at the end of your pipeline to control the cap, " \
+                            "or call count_objects first to size the result before fetching rows."
           end
           result
         end
@@ -3898,6 +3933,7 @@ module Parse
         return [pipeline, false] if op == "$limit" || op == "$count"
         [pipeline + [{ "$limit" => AGGREGATE_DEFAULT_LIMIT }], true]
       end
+
       module_function :ensure_aggregate_terminal_limit
 
       # ============================================================
@@ -3908,28 +3944,28 @@ module Parse
       # grouped count (think tags, statuses, customer ids), so it gets
       # a larger ceiling while group_by/group_by_date stay aligned with
       # AGGREGATE_DEFAULT_LIMIT for context-safety.
-      GROUP_DEFAULT_LIMIT    = 200
-      GROUP_MAX_LIMIT        = 1000
+      GROUP_DEFAULT_LIMIT = 200
+      GROUP_MAX_LIMIT = 1000
       DISTINCT_DEFAULT_LIMIT = 1000
-      DISTINCT_MAX_LIMIT     = 5000
+      DISTINCT_MAX_LIMIT = 5000
 
       # Supported aggregation operations for group_by / group_by_date.
       # Maps the LLM-facing name to the MongoDB accumulator operator.
       GROUP_OPERATIONS = {
-        "count"   => "$sum",   # value_field is ignored; accumulator is { $sum: 1 }
-        "sum"     => "$sum",
-        "avg"     => "$avg",
+        "count" => "$sum",   # value_field is ignored; accumulator is { $sum: 1 }
+        "sum" => "$sum",
+        "avg" => "$avg",
         "average" => "$avg",
-        "min"     => "$min",
-        "max"     => "$max",
+        "min" => "$min",
+        "max" => "$max",
       }.freeze
 
       GROUP_DATE_INTERVALS = %w[year month week day hour minute second].freeze
 
       # Group records by a field and aggregate. See TOOL_DEFINITIONS[:group_by].
       def group_by(agent, class_name:, field:, operation: nil, value_field: nil,
-                   where: nil, flatten_arrays: false, sort: nil, limit: nil,
-                   dry_run: false, apply_canonical_filter: true, **_kwargs)
+                          where: nil, flatten_arrays: false, sort: nil, limit: nil,
+                          dry_run: false, apply_canonical_filter: true, **_kwargs)
         assert_class_accessible!(class_name, agent: agent, op: :find)
         validated_field = validate_group_field!(field, name: :field)
         op_key, accumulator = resolve_group_operation!(operation, value_field)
@@ -3961,9 +3997,9 @@ module Parse
         append_sort_limit!(pipeline, sort_choice: sort_choice, cap: cap, default_sort: nil)
 
         return dry_run_envelope(class_name: class_name, pipeline: pipeline, params: {
-          field: validated_field, operation: op_key, value_field: value_field,
-          flatten_arrays: flatten_arrays, sort: sort_choice, limit: cap,
-        }) if dry_run
+                                  field: validated_field, operation: op_key, value_field: value_field,
+                                  flatten_arrays: flatten_arrays, sort: sort_choice, limit: cap,
+                                }) if dry_run
 
         result = run_aggregation_for_group_tool!(
           agent,
@@ -3995,27 +4031,27 @@ module Parse
           group_count: groups.size,
           groups: groups.map { |k, v| { key: normalize_group_key(k), value: v } },
         }
-        envelope[:value_field]    = value_field if value_field
-        envelope[:pointer_class]  = pointer_class if pointer_class
+        envelope[:value_field] = value_field if value_field
+        envelope[:pointer_class] = pointer_class if pointer_class
         envelope[:flatten_arrays] = true if flatten_arrays
-        envelope[:sort]           = sort_choice if sort_choice
-        envelope[:truncated]      = true if truncated
-        envelope[:limit]          = cap
+        envelope[:sort] = sort_choice if sort_choice
+        envelope[:truncated] = true if truncated
+        envelope[:limit] = cap
         envelope
       end
 
       # Group records by a date field bucketed at an interval. See
       # TOOL_DEFINITIONS[:group_by_date].
       def group_by_date(agent, class_name:, field:, interval:, operation: nil,
-                        value_field: nil, where: nil, timezone: nil, sort: nil,
-                        limit: nil, dry_run: false, apply_canonical_filter: true, **_kwargs)
+                               value_field: nil, where: nil, timezone: nil, sort: nil,
+                               limit: nil, dry_run: false, apply_canonical_filter: true, **_kwargs)
         assert_class_accessible!(class_name, agent: agent, op: :find)
-        validated_field    = validate_group_field!(field, name: :field)
-        interval_sym       = validate_group_date_interval!(interval)
+        validated_field = validate_group_field!(field, name: :field)
+        interval_sym = validate_group_date_interval!(interval)
         op_key, accumulator = resolve_group_operation!(operation, value_field)
-        cap                = clamp_group_limit(limit, default: GROUP_DEFAULT_LIMIT, max: GROUP_MAX_LIMIT)
-        sort_choice        = normalize_group_sort(sort) || "key_asc"
-        tz                 = validate_timezone!(timezone)
+        cap = clamp_group_limit(limit, default: GROUP_DEFAULT_LIMIT, max: GROUP_MAX_LIMIT)
+        sort_choice = normalize_group_sort(sort) || "key_asc"
+        tz = validate_timezone!(timezone)
 
         referenced = [validated_field]
         referenced << validate_group_field!(value_field, name: :value_field) if value_field
@@ -4058,9 +4094,9 @@ module Parse
         append_sort_limit!(pipeline, sort_choice: sort_choice, cap: cap, default_sort: "key_asc")
 
         return dry_run_envelope(class_name: class_name, pipeline: pipeline, params: {
-          field: validated_field, interval: interval_sym.to_s, operation: op_key,
-          value_field: value_field, timezone: tz, sort: sort_choice, limit: cap,
-        }) if dry_run
+                                  field: validated_field, interval: interval_sym.to_s, operation: op_key,
+                                  value_field: value_field, timezone: tz, sort: sort_choice, limit: cap,
+                                }) if dry_run
 
         result = run_aggregation_for_group_tool!(
           agent,
@@ -4089,25 +4125,25 @@ module Parse
           groups: groups.map { |k, v| { key: k, value: v } },
         }
         envelope[:value_field] = value_field if value_field
-        envelope[:timezone]    = tz          if tz
-        envelope[:sort]        = sort_choice
-        envelope[:truncated]   = true        if truncated
-        envelope[:limit]       = cap
+        envelope[:timezone] = tz if tz
+        envelope[:sort] = sort_choice
+        envelope[:truncated] = true if truncated
+        envelope[:limit] = cap
         envelope
       end
 
       # Return distinct values of a field. See TOOL_DEFINITIONS[:distinct].
       def distinct(agent, class_name:, field:, where: nil, sort: nil, limit: nil,
-                   dry_run: false, apply_canonical_filter: true, **_kwargs)
+                          dry_run: false, apply_canonical_filter: true, **_kwargs)
         assert_class_accessible!(class_name, agent: agent, op: :find)
         validated_field = validate_group_field!(field, name: :field)
         cap = clamp_group_limit(limit, default: DISTINCT_DEFAULT_LIMIT, max: DISTINCT_MAX_LIMIT)
         sort_choice = case sort.to_s
-                      when "asc", "desc" then sort.to_s
-                      when "", "none", nil then nil
-                      else raise Parse::Agent::ValidationError,
-                                 "Invalid sort #{sort.inspect}. Must be 'asc' or 'desc'."
-                      end
+          when "asc", "desc" then sort.to_s
+          when "", "none", nil then nil
+          else raise Parse::Agent::ValidationError,
+                     "Invalid sort #{sort.inspect}. Must be 'asc' or 'desc'."
+          end
 
         assert_fields_in_allowlist!(class_name, [validated_field])
         assert_where_fields_in_allowlist!(class_name, where)
@@ -4126,14 +4162,14 @@ module Parse
         # append_sort_limit! (which expects key_*/value_*). Distinct has
         # no value column to sort on.
         wire_sort = case sort_choice
-                    when "asc"  then "key_asc"
-                    when "desc" then "key_desc"
-                    end
+          when "asc" then "key_asc"
+          when "desc" then "key_desc"
+          end
         append_sort_limit!(pipeline, sort_choice: wire_sort, cap: cap, default_sort: nil)
 
         return dry_run_envelope(class_name: class_name, pipeline: pipeline, params: {
-          field: validated_field, sort: sort_choice, limit: cap,
-        }) if dry_run
+                                  field: validated_field, sort: sort_choice, limit: cap,
+                                }) if dry_run
 
         result = run_aggregation_for_group_tool!(
           agent,
@@ -4160,9 +4196,9 @@ module Parse
           values: values,
         }
         envelope[:pointer_class] = pointer_class if pointer_class
-        envelope[:sort]          = sort_choice   if sort_choice
-        envelope[:truncated]     = true          if truncated
-        envelope[:limit]         = cap
+        envelope[:sort] = sort_choice if sort_choice
+        envelope[:truncated] = true if truncated
+        envelope[:limit] = cap
         envelope
       end
 
@@ -4184,6 +4220,7 @@ module Parse
         end
         s
       end
+
       module_function :validate_group_field!
 
       # @api private
@@ -4192,10 +4229,11 @@ module Parse
         unless GROUP_DATE_INTERVALS.include?(sym.to_s)
           raise Parse::Agent::ValidationError,
                 "interval #{interval.inspect} is invalid. Must be one of " \
-                "#{GROUP_DATE_INTERVALS.join(', ')}."
+                "#{GROUP_DATE_INTERVALS.join(", ")}."
         end
         sym
       end
+
       module_function :validate_group_date_interval!
 
       # @api private
@@ -4212,6 +4250,7 @@ module Parse
         end
         s
       end
+
       module_function :validate_timezone!
 
       # @api private
@@ -4223,7 +4262,7 @@ module Parse
         unless GROUP_OPERATIONS.key?(op_raw)
           raise Parse::Agent::ValidationError,
                 "operation #{operation.inspect} is invalid. Must be one of " \
-                "#{GROUP_OPERATIONS.keys.uniq.join(', ')}."
+                "#{GROUP_OPERATIONS.keys.uniq.join(", ")}."
         end
         op_key = op_raw == "average" ? "avg" : op_raw
         if op_key == "count"
@@ -4236,6 +4275,7 @@ module Parse
           [op_key, { GROUP_OPERATIONS[op_raw] => "$__VALUE__" }] # placeholder; substituted by build_group_pipeline
         end
       end
+
       module_function :resolve_group_operation!
 
       # @api private
@@ -4244,10 +4284,11 @@ module Parse
         allowed = %w[value_desc value_asc key_desc key_asc]
         unless allowed.include?(sort.to_s)
           raise Parse::Agent::ValidationError,
-                "sort #{sort.inspect} is invalid. Must be one of #{allowed.join(', ')}."
+                "sort #{sort.inspect} is invalid. Must be one of #{allowed.join(", ")}."
         end
         sort.to_s
       end
+
       module_function :normalize_group_sort
 
       # @api private
@@ -4259,6 +4300,7 @@ module Parse
         end
         n
       end
+
       module_function :clamp_group_limit
 
       # @api private
@@ -4273,6 +4315,7 @@ module Parse
         permitted = allowlist.map(&:to_s) | MetadataRegistry::ALWAYS_KEEP_FIELDS
         check_match_keys_for_restricted_fields!(where, permitted)
       end
+
       module_function :assert_where_fields_in_allowlist!
 
       # @api private
@@ -4292,6 +4335,7 @@ module Parse
           end
         end
       end
+
       module_function :assert_fields_in_allowlist!
 
       # @api private
@@ -4316,6 +4360,7 @@ module Parse
           wire
         end
       end
+
       module_function :resolve_aggregation_field
 
       # @api private
@@ -4349,6 +4394,7 @@ module Parse
         pipeline << { "$group" => group_stage }
         pipeline
       end
+
       module_function :build_group_pipeline
 
       # @api private
@@ -4374,17 +4420,18 @@ module Parse
           { "year" => op.call("$year"), "month" => op.call("$month"), "day" => op.call("$dayOfMonth") }
         when :hour
           { "year" => op.call("$year"), "month" => op.call("$month"),
-            "day"  => op.call("$dayOfMonth"), "hour" => op.call("$hour") }
+            "day" => op.call("$dayOfMonth"), "hour" => op.call("$hour") }
         when :minute
-          { "year"   => op.call("$year"),  "month"  => op.call("$month"),
-            "day"    => op.call("$dayOfMonth"), "hour" => op.call("$hour"),
+          { "year" => op.call("$year"), "month" => op.call("$month"),
+            "day" => op.call("$dayOfMonth"), "hour" => op.call("$hour"),
             "minute" => op.call("$minute") }
         when :second
-          { "year"   => op.call("$year"),  "month"  => op.call("$month"),
-            "day"    => op.call("$dayOfMonth"), "hour" => op.call("$hour"),
+          { "year" => op.call("$year"), "month" => op.call("$month"),
+            "day" => op.call("$dayOfMonth"), "hour" => op.call("$hour"),
             "minute" => op.call("$minute"), "second" => op.call("$second") }
         end
       end
+
       module_function :build_date_group_expression
 
       # @api private
@@ -4398,17 +4445,18 @@ module Parse
         return "null" unless key.is_a?(Hash)
         y, mo, d = key["year"], key["month"], key["day"]
         h, mi, s = key["hour"], key["minute"], key["second"]
-        wk       = key["week"]
+        wk = key["week"]
         case interval
-        when :month  then (y.nil? || mo.nil?) ? "null" : sprintf("%04d-%02d", y, mo)
-        when :week   then (y.nil? || wk.nil?) ? "null" : sprintf("%04d-W%02d", y, wk)
-        when :day    then (y.nil? || mo.nil? || d.nil?) ? "null" : sprintf("%04d-%02d-%02d", y, mo, d)
-        when :hour   then (y.nil? || mo.nil? || d.nil? || h.nil?) ? "null" : sprintf("%04d-%02d-%02d %02d:00", y, mo, d, h)
+        when :month then (y.nil? || mo.nil?) ? "null" : sprintf("%04d-%02d", y, mo)
+        when :week then (y.nil? || wk.nil?) ? "null" : sprintf("%04d-W%02d", y, wk)
+        when :day then (y.nil? || mo.nil? || d.nil?) ? "null" : sprintf("%04d-%02d-%02d", y, mo, d)
+        when :hour then (y.nil? || mo.nil? || d.nil? || h.nil?) ? "null" : sprintf("%04d-%02d-%02d %02d:00", y, mo, d, h)
         when :minute then (y.nil? || mo.nil? || d.nil? || h.nil? || mi.nil?) ? "null" : sprintf("%04d-%02d-%02d %02d:%02d", y, mo, d, h, mi)
         when :second then (y.nil? || mo.nil? || d.nil? || h.nil? || mi.nil? || s.nil?) ? "null" : sprintf("%04d-%02d-%02d %02d:%02d:%02d", y, mo, d, h, mi, s)
         else "null"
         end
       end
+
       module_function :format_date_key
 
       # @api private
@@ -4423,7 +4471,7 @@ module Parse
       #   - { rows: [...] } on success
       #   - { refused: true, reason: ..., ... } when COLLSCAN refused
       def run_aggregation_for_group_tool!(agent, class_name:, pipeline:, tool:,
-                                          apply_canonical_filter: true)
+                                                 apply_canonical_filter: true)
         scope = resolve_tenant_scope!(agent, class_name)
         assert_joins_tenant_safe!(pipeline, scope)
         scoped = apply_tenant_scope_to_pipeline(pipeline, scope)
@@ -4458,8 +4506,7 @@ module Parse
                      defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
 
         with_timeout(tool) do
-          rows =
-            if use_direct
+          rows = if use_direct
               translated = Parse::Query.new(class_name).send(
                 :translate_pipeline_for_direct_mongodb, scoped,
               )
@@ -4474,6 +4521,7 @@ module Parse
           { rows: rows }
         end
       end
+
       module_function :run_aggregation_for_group_tool!
 
       # @api private
@@ -4491,6 +4539,7 @@ module Parse
         rewritten = pairs.map { |k, v| [k.is_a?(String) ? k.sub(/\A#{cls}\$/, "") : k, v] }
         [cls, rewritten]
       end
+
       module_function :extract_pointer_class!
 
       # @api private
@@ -4511,6 +4560,7 @@ module Parse
         redacted_pairs = pairs.map { |_k, v| [nil, v] }
         [nil, redacted_pairs]
       end
+
       module_function :redact_hidden_pointer_groups!
 
       # @api private
@@ -4531,12 +4581,13 @@ module Parse
         effective_sort = sort_choice || default_sort
         if effective_sort
           direction = effective_sort.end_with?("_desc") ? -1 : 1
-          key       = effective_sort.start_with?("value") ? "value" : "_id"
+          key = effective_sort.start_with?("value") ? "value" : "_id"
           pipeline << { "$sort" => { key => direction } }
         end
         pipeline << { "$limit" => cap + 1 }
         pipeline
       end
+
       module_function :append_sort_limit!
 
       # @api private
@@ -4556,6 +4607,7 @@ module Parse
                 "to the aggregate tool (modified as needed) for full pipeline control.",
         }
       end
+
       module_function :dry_run_envelope
 
       # @api private
@@ -4564,12 +4616,13 @@ module Parse
         return pairs if sort_choice.nil?
         case sort_choice
         when "value_desc" then pairs.sort_by { |_, v| -sort_key_numeric(v) }
-        when "value_asc"  then pairs.sort_by { |_, v|  sort_key_numeric(v) }
-        when "key_desc"   then pairs.sort_by { |k, _| sort_key_for(k) }.reverse
-        when "key_asc"    then pairs.sort_by { |k, _| sort_key_for(k) }
+        when "value_asc" then pairs.sort_by { |_, v| sort_key_numeric(v) }
+        when "key_desc" then pairs.sort_by { |k, _| sort_key_for(k) }.reverse
+        when "key_asc" then pairs.sort_by { |k, _| sort_key_for(k) }
         else pairs
         end
       end
+
       module_function :sort_groups
 
       # @api private
@@ -4577,24 +4630,26 @@ module Parse
       # last (regardless of direction; callers reverse for desc).
       def sort_key_for(value)
         case value
-        when nil      then [1, ""]
-        when Numeric  then [0, value]
-        when String   then [0, value]
-        else               [0, value.to_s]
+        when nil then [1, ""]
+        when Numeric then [0, value]
+        when String then [0, value]
+        else [0, value.to_s]
         end
       end
+
       module_function :sort_key_for
 
       # @api private
       def sort_key_numeric(value)
         case value
         when Numeric then value
-        when nil     then 0
+        when nil then 0
         else
           n = Float(value) rescue 0
           n
         end
       end
+
       module_function :sort_key_numeric
 
       # @api private
@@ -4604,6 +4659,7 @@ module Parse
       def normalize_group_key(key)
         key.nil? ? "null" : key
       end
+
       module_function :normalize_group_key
 
       # ============================================================
@@ -4680,36 +4736,36 @@ module Parse
           end
 
         available_rows = rows.size
-        truncated      = available_rows > effective_cap
-        rows           = rows.first(effective_cap) if truncated
+        truncated = available_rows > effective_cap
+        rows = rows.first(effective_cap) if truncated
 
-        column_specs   = normalize_export_columns(columns, rows.first)
-        headers        = column_specs.map { |spec| spec[:header] }
+        column_specs = normalize_export_columns(columns, rows.first)
+        headers = column_specs.map { |spec| spec[:header] }
         extracted_rows = rows.map do |row|
           column_specs.map { |spec| stringify_export_value(extract_export_value(row, spec[:path])) }
         end
 
         output = case format_s
-          when "csv"      then format_export_csv(headers, extracted_rows)
+          when "csv" then format_export_csv(headers, extracted_rows)
           when "markdown" then format_export_markdown(headers, extracted_rows)
-          when "table"    then format_export_text_table(headers, extracted_rows)
+          when "table" then format_export_text_table(headers, extracted_rows)
           end
 
         result = {
           class_name: class_name,
-          format:     format_s,
-          headers:    headers,
-          row_count:  extracted_rows.size,
-          output:     output,
+          format: format_s,
+          headers: headers,
+          row_count: extracted_rows.size,
+          output: output,
         }
         if truncated
-          result[:truncated]      = true
+          result[:truncated] = true
           result[:available_rows] = available_rows
-          result[:row_cap]        = effective_cap
-          result[:hint]           = "Output truncated at row_cap=#{effective_cap} of #{available_rows} available rows. " \
-                                    "Narrow with where:/pipeline filters, or set row_cap: explicitly (max #{MAX_EXPORT_ROW_CAP}). " \
-                                    "For full exports of larger sets use the operator-facing rake mcp:tool[export_data,...] " \
-                                    "directly rather than reading the rows back through the LLM."
+          result[:row_cap] = effective_cap
+          result[:hint] = "Output truncated at row_cap=#{effective_cap} of #{available_rows} available rows. " \
+                          "Narrow with where:/pipeline filters, or set row_cap: explicitly (max #{MAX_EXPORT_ROW_CAP}). " \
+                          "For full exports of larger sets use the operator-facing rake mcp:tool[export_data,...] " \
+                          "directly rather than reading the rows back through the LLM."
         end
         result
       end
@@ -4720,7 +4776,7 @@ module Parse
         # query_class returns a ResultFormatter-wrapped hash; we want the raw rows.
         query = {}
         query[:limit] = [limit || Agent::DEFAULT_LIMIT, Agent::MAX_LIMIT].min
-        query[:skip]  = skip if skip && skip > 0
+        query[:skip] = skip if skip && skip > 0
         query[:order] = order if order
 
         # NEW-TOOLS-5: validate keys: against identifier regex before
@@ -4731,8 +4787,7 @@ module Parse
         validated_keys = validate_keys!(keys)
         allowlist = MetadataRegistry.field_allowlist(class_name)
         caller_keys = validated_keys&.any? ? validated_keys : nil
-        effective_keys =
-          if allowlist && allowlist.any?
+        effective_keys = if allowlist && allowlist.any?
             permitted = allowlist.map(&:to_s) | MetadataRegistry::ALWAYS_KEEP_FIELDS
             caller_keys ? (caller_keys & permitted) : allowlist.map(&:to_s)
           else
@@ -4783,6 +4838,7 @@ module Parse
 
         redact_hidden_classes!(rows, agent: agent)
       end
+
       module_function :export_via_query
 
       # @api private
@@ -4829,6 +4885,7 @@ module Parse
 
         redact_hidden_classes!(rows, agent: agent)
       end
+
       module_function :export_via_aggregate
 
       # @api private
@@ -4882,6 +4939,7 @@ module Parse
           end
         end
       end
+
       module_function :normalize_export_columns
 
       # @api private
@@ -4925,6 +4983,7 @@ module Parse
         end
         s
       end
+
       module_function :validate_export_column_path!
 
       # @api private
@@ -4936,6 +4995,7 @@ module Parse
           { path: k.to_s, header: k.to_s }
         end
       end
+
       module_function :infer_export_columns_from
 
       # @api private
@@ -4952,19 +5012,21 @@ module Parse
           end
         end
       end
+
       module_function :extract_export_value
 
       # @api private
       def stringify_export_value(value)
         case value
-        when nil           then ""
-        when String        then value
-        when Hash, Array   then value.to_json
+        when nil then ""
+        when String then value
+        when Hash, Array then value.to_json
         when Time, DateTime then value.iso8601
-        when Date          then value.to_s
-        else                    value.to_s
+        when Date then value.to_s
+        else value.to_s
         end
       end
+
       module_function :stringify_export_value
 
       # @api private
@@ -4975,6 +5037,7 @@ module Parse
           rows.each { |r| csv << r }
         end
       end
+
       module_function :format_export_csv
 
       # @api private
@@ -4986,6 +5049,7 @@ module Parse
         rows.each { |r| lines << "| #{r.map { |c| c.to_s.gsub(/\r?\n/, " ").gsub(/([\\|])/, '\\\\\1') }.join(" | ")} |" }
         lines.join("\n")
       end
+
       module_function :format_export_markdown
 
       # @api private
@@ -5000,6 +5064,7 @@ module Parse
         }
         ([sep, fmt.call(headers), sep] + rows.map(&fmt) + [sep]).join("\n")
       end
+
       module_function :format_export_text_table
 
       # Explain a query's execution plan
@@ -5148,11 +5213,10 @@ module Parse
         # remains responsible for any internal queries it runs —
         # this gate is the BOUNDARY check at the method-name level.
         if agent.respond_to?(:acl_permission_strings)
-          clp_op =
-            case required_perm
-            when :admin   then :delete
-            when :write   then :update
-            else               :find
+          clp_op = case required_perm
+            when :admin then :delete
+            when :write then :update
+            else :find
             end
           perms = agent.acl_permission_strings
           unless Parse::CLPScope.permits?(class_name.to_s, clp_op, perms)
@@ -5257,22 +5321,22 @@ module Parse
             end
           end
           return {
-            class_name:             class_name,
-            method:                 method_name,
-            object_id:              object_id,
-            dry_run:                true,
-            supports_real_dry_run:  false,
-            would_call: {
-              class:     class_name,
-              method:    method_name,
-              type:      method_info[:type]&.to_s,
-              object_id: object_id,
-              args:      preview_args,
-            },
-            note: "The method '#{class_name}.#{method_name}' did not declare supports_dry_run: true, so no method-side preview is available. " \
-                  "This response confirms the call would pass the permission/args/object gates the agent enforces; the method body was NOT invoked. " \
-                  "Remove dry_run to execute the operation for real.",
-          }
+                   class_name: class_name,
+                   method: method_name,
+                   object_id: object_id,
+                   dry_run: true,
+                   supports_real_dry_run: false,
+                   would_call: {
+                     class: class_name,
+                     method: method_name,
+                     type: method_info[:type]&.to_s,
+                     object_id: object_id,
+                     args: preview_args,
+                   },
+                   note: "The method '#{class_name}.#{method_name}' did not declare supports_dry_run: true, so no method-side preview is available. " \
+                         "This response confirms the call would pass the permission/args/object gates the agent enforces; the method body was NOT invoked. " \
+                         "Remove dry_run to execute the operation for real.",
+                 }
         end
 
         # If the method didn't declare dry-run support and the caller
@@ -5308,8 +5372,7 @@ module Parse
           # Master agents (no token) run unbound by design; acl_user/acl_role
           # write/admin instance methods were already refused above.
           token = agent.respond_to?(:session_token) ? agent.session_token : nil
-          result =
-            if token.is_a?(String) && !token.strip.empty?
+          result = if token.is_a?(String) && !token.strip.empty?
               Parse.with_session(token) { invoke.call }
             else
               invoke.call
@@ -5554,6 +5617,7 @@ module Parse
           s
         end
       end
+
       module_function :validate_keys!
 
       # Validate an include array (pointer fields to resolve) before forwarding
@@ -5658,6 +5722,7 @@ module Parse
           acc[k] = v if allowed.include?(ks)
         end
       end
+
       module_function :project_object_to_allowlist
 
       # Stamp each row hash with an SDK-added `_source` provenance
@@ -5682,13 +5747,14 @@ module Parse
           next if row.key?("_source") || row.key?(:_source)
           oid = row[id_key] || row[id_key.to_sym]
           row["_source"] = {
-            "class"     => class_name.to_s,
-            "tool"      => tool.to_s,
+            "class" => class_name.to_s,
+            "tool" => tool.to_s,
             "object_id" => oid,
           }
         end
         rows
       end
+
       module_function :stamp_source!
 
       # ============================================================
@@ -5743,7 +5809,7 @@ module Parse
         # half can shadow the other.
         effective_filter = compose_atlas_filter(
           filter, class_name, agent: agent,
-          apply_canonical_filter: apply_canonical_filter,
+                              apply_canonical_filter: apply_canonical_filter,
         )
 
         opts = { limit: limit }.merge(auth)
@@ -5759,7 +5825,7 @@ module Parse
 
       # @api private
       def atlas_autocomplete(agent, class_name:, query:, field:, limit: nil, fuzzy: nil,
-                             apply_canonical_filter: true, **_kwargs)
+                                    apply_canonical_filter: true, **_kwargs)
         assert_class_accessible!(class_name, agent: agent, op: :find)
         unless query.is_a?(String) && !query.strip.empty?
           raise Parse::Agent::ValidationError, "query must be a non-empty string"
@@ -5777,7 +5843,7 @@ module Parse
         # a $match stage AFTER the ACL $match (see atlas_search.rb:385-388).
         effective_filter = compose_atlas_filter(
           nil, class_name, agent: agent,
-          apply_canonical_filter: apply_canonical_filter,
+                           apply_canonical_filter: apply_canonical_filter,
         )
 
         opts = { limit: limit }.merge(auth)
@@ -5792,7 +5858,7 @@ module Parse
 
       # @api private
       def atlas_faceted_search(agent, class_name:, facets:, query: "", limit: nil,
-                               apply_canonical_filter: true, **_kwargs)
+                                      apply_canonical_filter: true, **_kwargs)
         assert_class_accessible!(class_name, agent: agent, op: :find)
         # Faceted Atlas Search cannot ACL-filter $searchMeta bucket
         # counts (see Parse::AtlasSearch::FacetedSearchNotACLSafe), so
@@ -5825,7 +5891,7 @@ module Parse
         unless active_filters.empty?
           raise Parse::Agent::AccessDenied.new(
             class_name,
-            "atlas_faceted_search cannot enforce #{active_filters.join(' / ')} on " \
+            "atlas_faceted_search cannot enforce #{active_filters.join(" / ")} on " \
             "$searchMeta bucket counts (the matched documents are not in the output " \
             "stream). Use atlas_text_search (which applies these filters via $match) " \
             "or pass apply_canonical_filter: false (and arrange your agent without a " \
@@ -5939,7 +6005,7 @@ module Parse
       # @param include [Array<String>, nil] pointer paths to $lookup.
       # @return [Array<Hash>]
       def execute_find_via_direct(agent, class_name, where: nil, limit: nil,
-                                  skip: 0, order: nil, keys: nil, include: nil)
+                                                     skip: 0, order: nil, keys: nil, include: nil)
         q = Parse::Query.new(class_name)
         q.limit(limit) if limit && limit > 0
         q.skip(skip) if skip && skip > 0
@@ -5975,6 +6041,7 @@ module Parse
         raw_rows = Parse::MongoDB.aggregate(class_name, pipeline, **mongo_direct_auth_kwargs(agent))
         raw_rows.map { |raw| Parse::MongoDB.convert_aggregation_document(raw) }
       end
+
       module_function :execute_find_via_direct
 
       # @api private
@@ -5995,8 +6062,7 @@ module Parse
       # found") via {#assert_record_in_tenant_scope!}, matching get_object.
       def fetch_call_method_receiver(agent, klass, class_name, object_id)
         scope = resolve_tenant_scope!(agent, class_name)
-        result =
-          if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
+        result = if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
             where_id = ConstraintTranslator.translate({ "objectId" => object_id }, agent)
             rows = execute_find_via_direct(agent, class_name, where: where_id, limit: 1)
             rows && rows.first
@@ -6012,6 +6078,7 @@ module Parse
         assert_record_in_tenant_scope!(result, scope, class_name)
         (klass || Parse::Object).build(result, class_name)
       end
+
       module_function :fetch_call_method_receiver
 
       # @api private
@@ -6032,6 +6099,7 @@ module Parse
         return 0 if raw_rows.empty?
         raw_rows.first["count"] || 0
       end
+
       module_function :execute_count_via_direct
 
       # @api private
@@ -6110,8 +6178,8 @@ module Parse
       def compose_atlas_filter(caller_filter, class_name, agent:, apply_canonical_filter: true)
         per_agent = agent && agent.respond_to?(:filter_for) ? agent.filter_for(class_name) : nil
         canonical = apply_canonical_filter ?
-                      Parse::Agent::MetadataRegistry.canonical_filter(class_name) :
-                      nil
+          Parse::Agent::MetadataRegistry.canonical_filter(class_name) :
+          nil
 
         parts = []
         parts << per_agent.dup if per_agent && !per_agent.empty?
@@ -6121,9 +6189,10 @@ module Parse
         case parts.size
         when 0 then nil
         when 1 then parts.first
-        else        { "$and" => parts }
+        else { "$and" => parts }
         end
       end
+
       module_function :compose_atlas_filter
 
       # @api private

@@ -220,7 +220,7 @@ module Parse
         def drop_index(collection_name, index_name, confirm:, allow_system_classes: false)
           result = Parse::MongoDB.drop_search_index(
             collection_name, index_name, confirm: confirm,
-            allow_system_classes: allow_system_classes,
+                                         allow_system_classes: allow_system_classes,
           )
           clear_cache(collection_name)
           result

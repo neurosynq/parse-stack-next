@@ -83,8 +83,7 @@ class ClientLiveQueryIntegrationTest < Minitest::Test
   # same class — but with an ACL-private row — should NOT receive it.
   # --------------------------------------------------------------------
   def test_livequery_receives_create_event_under_session_token
-    skip "LiveQuery event delivery is flaky on cold Parse Server boot; gate with PARSE_TEST_LIVEQUERY_FLAKY=true" \
-         unless ENV["PARSE_TEST_LIVEQUERY_FLAKY"] == "true"
+    skip "LiveQuery event delivery is flaky on cold Parse Server boot; gate with PARSE_TEST_LIVEQUERY_FLAKY=true" unless ENV["PARSE_TEST_LIVEQUERY_FLAKY"] == "true"
 
     bob, bob_password = seed_client_user("lq_bob")
 
@@ -108,7 +107,7 @@ class ClientLiveQueryIntegrationTest < Minitest::Test
     end
 
     received_alice = []
-    received_bob   = []
+    received_bob = []
 
     alice_sub = @lq_client.subscribe("TestLiveQuery", session_token: alice.session_token)
     alice_sub.on(:create) { |obj| received_alice << obj }
@@ -132,6 +131,6 @@ class ClientLiveQueryIntegrationTest < Minitest::Test
     end
 
     refute_empty received_alice, "Alice's subscription must receive her own create"
-    assert_empty received_bob,   "Bob must not receive Alice's ACL-private create"
+    assert_empty received_bob, "Bob must not receive Alice's ACL-private create"
   end
 end

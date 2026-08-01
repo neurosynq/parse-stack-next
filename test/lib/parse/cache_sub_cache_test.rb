@@ -196,6 +196,7 @@ class CacheSubCacheTest < Minitest::Test
   def test_atomic_increment_path_applies_the_expiry_without_rewriting
     store = Class.new(FakeStore) do
       attr_reader :expiries
+
       def increment(k, amount = 1, _o = {})
         @data[k] = (@data[k] || 0).to_i + amount
       end

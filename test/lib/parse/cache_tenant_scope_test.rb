@@ -116,7 +116,7 @@ class CacheTenantScopeTest < Minitest::Test
     # AFTER the setter's `with_cache_tenant` block exits — the
     # observer would still see nil (correct outcome) but for the
     # wrong reason ("observed after restore", not "isolated").
-    setter_ready  = Queue.new
+    setter_ready = Queue.new
     observer_done = Queue.new
     leaked = :uninitialized
 
@@ -153,8 +153,8 @@ class CacheTenantScopeTest < Minitest::Test
       end
     end
 
-    inside_setter   = setter_fiber.resume
-    observer_fiber  = Fiber.new { Parse.current_cache_tenant }
+    inside_setter = setter_fiber.resume
+    observer_fiber = Fiber.new { Parse.current_cache_tenant }
     inside_observer = observer_fiber.resume
     inside_setter_again = setter_fiber.resume
 

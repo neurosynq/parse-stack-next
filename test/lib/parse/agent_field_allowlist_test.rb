@@ -14,9 +14,9 @@ class AgentFieldAllowlistTest < Minitest::Test
 
     agent_description "A workspace grouping users on a project"
     agent_usage <<~USAGE
-      `status` values: "active" | "archived" | "frozen".
-      `member_count` is denormalized; recompute via _User pointer.
-    USAGE
+                  `status` values: "active" | "archived" | "frozen".
+                  `member_count` is denormalized; recompute via _User pointer.
+                USAGE
     agent_fields :name, :status, :member_count
 
     property :name, :string

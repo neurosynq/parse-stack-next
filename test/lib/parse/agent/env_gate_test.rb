@@ -17,6 +17,7 @@ class AgentEnvGateTest < Minitest::Test
 
     # A method registered for agent_method to exercise the call_method gate.
     agent_method :touch_title, permission: :write
+
     def touch_title
       "touched"
     end
@@ -93,7 +94,7 @@ class AgentEnvGateTest < Minitest::Test
   def test_create_object_refused_when_raw_crud_env_unset
     agent = Parse::Agent.new(permissions: :write)
     result = agent.execute(:create_object, class_name: "EnvGateArticle",
-                                            data: { title: "T" })
+                                           data: { title: "T" })
     refute result[:success]
     assert_equal :access_denied, result[:error_code]
     assert_includes result[:error], "PARSE_AGENT_ALLOW_RAW_CRUD"
@@ -102,7 +103,7 @@ class AgentEnvGateTest < Minitest::Test
   def test_update_object_refused_when_raw_crud_env_unset
     agent = Parse::Agent.new(permissions: :write)
     result = agent.execute(:update_object, class_name: "EnvGateArticle",
-                                            object_id: "abc", data: { title: "T" })
+                                           object_id: "abc", data: { title: "T" })
     refute result[:success]
     assert_equal :access_denied, result[:error_code]
     assert_includes result[:error], "PARSE_AGENT_ALLOW_RAW_CRUD"
@@ -111,7 +112,7 @@ class AgentEnvGateTest < Minitest::Test
   def test_delete_object_refused_when_raw_crud_env_unset
     agent = Parse::Agent.new(permissions: :admin)
     result = agent.execute(:delete_object, class_name: "EnvGateArticle",
-                                            object_id: "abc")
+                                           object_id: "abc")
     refute result[:success]
     assert_equal :access_denied, result[:error_code]
     assert_includes result[:error], "PARSE_AGENT_ALLOW_RAW_CRUD"
@@ -143,7 +144,7 @@ class AgentEnvGateTest < Minitest::Test
     ENV["PARSE_AGENT_ALLOW_WRITE_TOOLS"] = "true"
     agent = Parse::Agent.new(permissions: :write)
     result = agent.execute(:create_object, class_name: "EnvGateArticle",
-                                            data: { title: "T" })
+                                           data: { title: "T" })
     refute result[:success]
     assert_equal :access_denied, result[:error_code]
     assert_includes result[:error], "PARSE_AGENT_ALLOW_RAW_CRUD"
@@ -166,7 +167,7 @@ class AgentEnvGateTest < Minitest::Test
     # only relevant for misconfigured :write/:admin factories.
     agent = Parse::Agent.new(permissions: :readonly)
     result = agent.execute(:create_object, class_name: "EnvGateArticle",
-                                            data: { title: "T" })
+                                           data: { title: "T" })
     refute result[:success]
     assert_equal :permission_denied, result[:error_code]
     refute_match(/PARSE_AGENT_ALLOW/, result[:error])
@@ -219,7 +220,7 @@ class AgentEnvGateTest < Minitest::Test
     ENV["PARSE_AGENT_ALLOW_RAW_CRUD"] = "true"
     agent = Parse::Agent.new(permissions: :write)
     result = agent.execute(:create_object, class_name: "EnvGateArticle",
-                                            data: { title: "T" })
+                                           data: { title: "T" })
     refute result[:success]
     assert_equal :access_denied, result[:error_code]
     assert_includes result[:error], "PARSE_AGENT_ALLOW_WRITE_TOOLS"
@@ -229,10 +230,10 @@ class AgentEnvGateTest < Minitest::Test
 
   def test_both_write_envs_set_allows_create_object_to_proceed_to_dispatch
     ENV["PARSE_AGENT_ALLOW_WRITE_TOOLS"] = "true"
-    ENV["PARSE_AGENT_ALLOW_RAW_CRUD"]    = "true"
+    ENV["PARSE_AGENT_ALLOW_RAW_CRUD"] = "true"
     agent = Parse::Agent.new(permissions: :write)
     result = agent.execute(:create_object, class_name: "EnvGateArticle",
-                                            data: { title: "T" })
+                                           data: { title: "T" })
     # Both vars set → env-gate passes; downstream failure (no Parse server)
     # surfaces a different error_code, not :access_denied.
     refute_equal :access_denied, result[:error_code]

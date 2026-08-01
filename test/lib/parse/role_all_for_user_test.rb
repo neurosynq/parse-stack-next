@@ -86,7 +86,7 @@ class RoleAllForUserTest < Minitest::Test
 
   def test_single_parent_role_via_upward_walk
     member = Role.new("R1", "Member")
-    admin  = Role.new("R2", "Admin")
+    admin = Role.new("R2", "Admin")
     # Admin.roles contains Member -> Member's users inherit Admin's
     # permissions, i.e. Admin is a PARENT in the upward walk.
     stub_role_graph(direct_for_user: [member], parents_for: { member => [admin] })

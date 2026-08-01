@@ -108,28 +108,28 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
   # --------------------------------------------------------------------------
 
   SUBJECT_FIXTURES = [
-    { name: "Algebra II",       department: "Mathematics", level: "advanced" },
-    { name: "World Literature", department: "English",     level: "intro"    },
-    { name: "Biology",          department: "Sciences",    level: "advanced" },
+    { name: "Algebra II", department: "Mathematics", level: "advanced" },
+    { name: "World Literature", department: "English", level: "intro" },
+    { name: "Biology", department: "Sciences", level: "advanced" },
   ].freeze
 
   # Each teacher maps 1:1 to one subject, keeping assertion language clean.
   TEACHER_TO_SUBJECT = {
     "Ms. Vasquez" => "Algebra II",
-    "Mr. Okafor"  => "World Literature",
+    "Mr. Okafor" => "World Literature",
     "Mrs. Davies" => "Biology",
   }.freeze
 
   TEACHER_FIXTURES = [
     { name: "Ms. Vasquez", rating: 4.9, years_experience: 12 },
-    { name: "Mr. Okafor",  rating: 4.2, years_experience:  6 },
-    { name: "Mrs. Davies", rating: 4.6, years_experience:  9 },
+    { name: "Mr. Okafor", rating: 4.2, years_experience: 6 },
+    { name: "Mrs. Davies", rating: 4.6, years_experience: 9 },
   ].freeze
 
   # Distribution: Vasquez=5, Okafor=3, Davies=4. Total: 12 students.
   STUDENT_DISTRIBUTION = {
     "Ms. Vasquez" => %w[Ada Bao Cheng Diego Esi],
-    "Mr. Okafor"  => %w[Fatima Goro Hana],
+    "Mr. Okafor" => %w[Fatima Goro Hana],
     "Mrs. Davies" => %w[Idris Junia Kiri Lukas],
   }.freeze
 
@@ -210,10 +210,10 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
     assignments = subjects.flat_map.with_index do |subject, si|
       [1, 2].map do |n|
         a = MCPSchoolAssignment.new(
-          title:        "#{subject.name} Homework #{n}",
+          title: "#{subject.name} Homework #{n}",
           total_points: n.odd? ? 50 : 100,
-          due_date:     base_date + ((si * 2 + n) * 7),
-          subject:      subject
+          due_date: base_date + ((si * 2 + n) * 7),
+          subject: subject,
         )
         assert a.save, "assignment save failed for #{a.title}: #{a.errors.full_messages.join(", ")}"
         a
@@ -224,10 +224,10 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
     exam_date = base_date + 14
     exams = subjects.map do |subject|
       e = MCPSchoolExam.new(
-        title:     "#{subject.name} Midterm",
+        title: "#{subject.name} Midterm",
         max_score: 100,
         exam_date: exam_date,
-        subject:   subject
+        subject: subject,
       )
       assert e.save, "exam save failed for #{e.title}: #{e.errors.full_messages.join(", ")}"
       e
@@ -249,10 +249,10 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
       (1..4).map do |day|
         status = day <= 3 ? "present" : non_present
         rec = MCPSchoolAttendance.new(
-          status:          status,
+          status: status,
           attendance_date: base_date - (4 - day),
-          student:         student,
-          subject:         subject
+          student: student,
+          subject: subject,
         )
         assert rec.save, "attendance save failed: #{rec.errors.full_messages.join(", ")}"
         rec
@@ -261,12 +261,12 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
 
     yield subjects, teachers, students, assignments, exams, attendance
   ensure
-    (attendance  || []).each { |r| r.destroy rescue nil }
-    (exams       || []).each { |e| e.destroy rescue nil }
+    (attendance || []).each { |r| r.destroy rescue nil }
+    (exams || []).each { |e| e.destroy rescue nil }
     (assignments || []).each { |a| a.destroy rescue nil }
-    (students    || []).each { |s| s.destroy rescue nil }
-    (teachers    || []).each { |t| t.destroy rescue nil }
-    (subjects    || []).each { |s| s.destroy rescue nil }
+    (students || []).each { |s| s.destroy rescue nil }
+    (teachers || []).each { |t| t.destroy rescue nil }
+    (subjects || []).each { |s| s.destroy rescue nil }
   end
 
   # --------------------------------------------------------------------------
@@ -291,11 +291,11 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
         hints: [
           "Call query_class with class_name: 'MCPSchoolTeacher', where: {\"name\": \"Ms. Vasquez\"}, include: [\"subject\"].",
           "The subject name is in the 'name' field of the included MCPSchoolSubject object.",
-        ]
+        ],
       )
 
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 8)
-      flat       = transcript_text(transcript)
+      flat = transcript_text(transcript)
       tool_calls = transcript_tool_names(transcript)
 
       refute_empty tool_calls, "model must invoke at least one MCP tool; got none"
@@ -330,11 +330,11 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
           "Step 1: call query_class with class_name: 'MCPSchoolStudent', where: {\"name\": \"Cheng\"}, include: [\"teacher\"] to get the teacher.",
           "Step 2: from the teacher record you got, call get_object on MCPSchoolTeacher with that teacher's objectId and include: [\"subject\"] to resolve the subject.",
           "The subject name is in the 'name' field of MCPSchoolSubject.",
-        ]
+        ],
       )
 
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 8)
-      flat       = transcript_text(transcript)
+      flat = transcript_text(transcript)
       tool_calls = transcript_tool_names(transcript)
 
       refute_empty tool_calls, "model must invoke at least one MCP tool; got none"
@@ -375,11 +375,11 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
           "Then call count_objects with EXACTLY this shape: " \
           "{\"class_name\": \"MCPSchoolStudent\", \"where\": {\"teacher\": {\"__type\": \"Pointer\", \"className\": \"MCPSchoolTeacher\", \"objectId\": \"<paste_vasquez_objectId_here>\"}}}. " \
           "The 'where' field is REQUIRED — omitting it returns 12 (all students), not 5.",
-        ]
+        ],
       )
 
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 8)
-      flat       = transcript_text(transcript)
+      flat = transcript_text(transcript)
       tool_calls = transcript_tool_names(transcript)
 
       refute_empty tool_calls, "model must invoke at least one MCP tool; got none"
@@ -413,11 +413,11 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
           "Call count_objects with EXACTLY these arguments: " \
           "{\"class_name\": \"MCPSchoolAttendance\", \"where\": {\"status\": \"absent\"}}. " \
           "The 'where' field is REQUIRED — omitting it returns 48 (all records), not the filtered count.",
-        ]
+        ],
       )
 
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 8)
-      flat       = transcript_text(transcript)
+      flat = transcript_text(transcript)
       tool_calls = transcript_tool_names(transcript)
 
       refute_empty tool_calls, "model must invoke at least one MCP tool; got none"
@@ -450,11 +450,11 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
         "Answer in ONE sentence listing all such class names separated by commas.",
         hints: [
           "Call get_all_schemas to retrieve all class names, then filter for names starting with 'MCPSchool'.",
-        ]
+        ],
       )
 
       transcript = llm_round_trip(prompt: prompt, tools: openai_tools, agent: agent, max_iterations: 8)
-      flat       = transcript_text(transcript)
+      flat = transcript_text(transcript)
       tool_calls = transcript_tool_names(transcript)
 
       refute_empty tool_calls, "model must invoke at least one MCP tool; got none"
@@ -540,7 +540,7 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
 
   def fetch_openai_tools(agent)
     envelope = mcp_call({ "jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => {} }, agent)
-    tools    = envelope.dig("result", "tools")
+    tools = envelope.dig("result", "tools")
     refute_nil tools, "tools/list returned no tools"
     mcp_tools_to_openai(tools)
   end
@@ -554,16 +554,16 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
     case @provider
     when "lmstudio"
       @base_url = ENV["LLM_BASE_URL"] || "http://localhost:1234/v1"
-      @model    = ENV["LLM_MODEL"]    || "qwen2.5-7b-instruct"
-      @api_key  = ENV["LLM_API_KEY"]  || "lm-studio"
+      @model = ENV["LLM_MODEL"] || "qwen2.5-7b-instruct"
+      @api_key = ENV["LLM_API_KEY"] || "lm-studio"
     when "openai"
       @base_url = ENV["LLM_BASE_URL"] || "https://api.openai.com/v1"
-      @model    = ENV["LLM_MODEL"]    || "gpt-4o-mini"
-      @api_key  = ENV["LLM_API_KEY"]
+      @model = ENV["LLM_MODEL"] || "gpt-4o-mini"
+      @api_key = ENV["LLM_API_KEY"]
     when "anthropic"
       @base_url = ENV["LLM_BASE_URL"] || "https://api.anthropic.com/v1"
-      @model    = ENV["LLM_MODEL"]    || "claude-haiku-4-5"
-      @api_key  = ENV["LLM_API_KEY"]
+      @model = ENV["LLM_MODEL"] || "claude-haiku-4-5"
+      @api_key = ENV["LLM_API_KEY"]
     else
       skip "Unknown LLM_PROVIDER=#{@provider.inspect}"
     end
@@ -585,9 +585,9 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
       {
         type: "function",
         function: {
-          name:        h["name"],
+          name: h["name"],
           description: h["description"].to_s[0, 1024],
-          parameters:  h["inputSchema"] || { "type" => "object", "properties" => {} },
+          parameters: h["inputSchema"] || { "type" => "object", "properties" => {} },
         },
       }
     end
@@ -598,7 +598,7 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
   # --------------------------------------------------------------------------
 
   def llm_round_trip(prompt:, tools:, agent:, max_iterations: 6)
-    messages   = [{ role: "user", content: prompt }]
+    messages = [{ role: "user", content: prompt }]
     transcript = []
 
     max_iterations.times do
@@ -611,16 +611,16 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
       reply[:tool_calls].each do |tc|
         body = {
           "jsonrpc" => "2.0",
-          "id"      => SecureRandom.hex(4),
-          "method"  => "tools/call",
-          "params"  => { "name" => tc[:name], "arguments" => tc[:arguments] },
+          "id" => SecureRandom.hex(4),
+          "method" => "tools/call",
+          "params" => { "name" => tc[:name], "arguments" => tc[:arguments] },
         }
-        result    = mcp_call(body, agent)
+        result = mcp_call(body, agent)
         tool_text = if result["result"]
-          result.dig("result", "content", 0, "text") || result["result"].to_json
-        else
-          result.dig("error", "message").to_s
-        end
+            result.dig("result", "content", 0, "text") || result["result"].to_json
+          else
+            result.dig("error", "message").to_s
+          end
         messages << { role: "tool", tool_call_id: tc[:id], content: tool_text }
       end
     end
@@ -631,7 +631,7 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
   def call_llm(messages:, tools:)
     case @provider
     when "anthropic" then anthropic_chat(messages: messages, tools: tools)
-    else                  openai_chat(messages: messages, tools: tools)
+    else openai_chat(messages: messages, tools: tools)
     end
   end
 
@@ -655,11 +655,11 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
       end
     end.compact
 
-    uri  = URI("#{@base_url}/chat/completions")
+    uri = URI("#{@base_url}/chat/completions")
     body = JSON.generate({ model: @model, messages: openai_messages, tools: tools, tool_choice: "auto" })
 
     req = Net::HTTP::Post.new(uri)
-    req["Content-Type"]  = "application/json"
+    req["Content-Type"] = "application/json"
     req["Authorization"] = "Bearer #{@api_key}"
     req.body = body
 
@@ -667,8 +667,8 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
     skip "LLM call failed: HTTP #{res.code} #{res.body[0, 300]}" unless res.code.to_i.between?(200, 299)
 
     parsed = JSON.parse(res.body)
-    msg    = parsed.dig("choices", 0, "message") || {}
-    calls  = Array(msg["tool_calls"]).map do |tc|
+    msg = parsed.dig("choices", 0, "message") || {}
+    calls = Array(msg["tool_calls"]).map do |tc|
       args = tc.dig("function", "arguments")
       args = JSON.parse(args) if args.is_a?(String) && !args.empty?
       { id: tc["id"] || SecureRandom.hex(4), name: tc.dig("function", "name"), arguments: args || {} }
@@ -677,20 +677,20 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
   end
 
   def anthropic_chat(messages:, tools:)
-    anth_tools    = tools.map { |t| { name: t[:function][:name], description: t[:function][:description], input_schema: t[:function][:parameters] } }
+    anth_tools = tools.map { |t| { name: t[:function][:name], description: t[:function][:description], input_schema: t[:function][:parameters] } }
     anth_messages = messages.map do |m|
       case m[:role]
       when "user", "assistant" then { role: m[:role], content: m[:content].to_s }
-      when "tool"              then { role: "user",   content: [{ type: "tool_result", tool_use_id: m[:tool_call_id], content: m[:content] }] }
+      when "tool" then { role: "user", content: [{ type: "tool_result", tool_use_id: m[:tool_call_id], content: m[:content] }] }
       end
     end.compact
 
-    uri  = URI("#{@base_url}/messages")
+    uri = URI("#{@base_url}/messages")
     body = JSON.generate({ model: @model, max_tokens: 1024, tools: anth_tools, messages: anth_messages })
 
     req = Net::HTTP::Post.new(uri)
-    req["Content-Type"]      = "application/json"
-    req["x-api-key"]         = @api_key
+    req["Content-Type"] = "application/json"
+    req["x-api-key"] = @api_key
     req["anthropic-version"] = "2023-06-01"
     req.body = body
 
@@ -699,8 +699,8 @@ class MCPLLMxParseIntegrationTest < Minitest::Test
 
     parsed = JSON.parse(res.body)
     blocks = Array(parsed["content"])
-    text   = blocks.select { |b| b["type"] == "text" }.map { |b| b["text"] }.join("\n")
-    calls  = blocks.select { |b| b["type"] == "tool_use" }.map { |b| { id: b["id"], name: b["name"], arguments: b["input"] || {} } }
+    text = blocks.select { |b| b["type"] == "text" }.map { |b| b["text"] }.join("\n")
+    calls = blocks.select { |b| b["type"] == "tool_use" }.map { |b| { id: b["id"], name: b["name"], arguments: b["input"] || {} } }
     { role: "assistant", content: text, tool_calls: calls }
   end
 end

@@ -27,28 +27,26 @@ class ChainedWhereCountEachIntegrationTest < Minitest::Test
     # should be excluded by the base filters regardless of workspace
     5.times do |i|
       create_test_object("CWPost",
-        title: "A#{i}",
-        published: true,
-        approved: false, rejected: false, archived: false, draft: false,
-        author_workspace: @workspace_a,
-      )
+                         title: "A#{i}",
+                         published: true,
+                         approved: false, rejected: false, archived: false, draft: false,
+                         author_workspace: @workspace_a)
     end
 
     3.times do |i|
       create_test_object("CWPost",
-        title: "B#{i}",
-        published: true,
-        approved: false, rejected: false, archived: false, draft: false,
-        author_workspace: @workspace_b,
-      )
+                         title: "B#{i}",
+                         published: true,
+                         approved: false, rejected: false, archived: false, draft: false,
+                         author_workspace: @workspace_b)
     end
 
     create_test_object("CWPost", title: "approved", published: true,
-                                    approved: true, rejected: false, archived: false, draft: false,
-                                    author_workspace: @workspace_a)
+                                 approved: true, rejected: false, archived: false, draft: false,
+                                 author_workspace: @workspace_a)
     create_test_object("CWPost", title: "draft", published: true,
-                                    approved: false, rejected: false, archived: false, draft: true,
-                                    author_workspace: @workspace_b)
+                                 approved: false, rejected: false, archived: false, draft: true,
+                                 author_workspace: @workspace_b)
   end
 
   def base_query

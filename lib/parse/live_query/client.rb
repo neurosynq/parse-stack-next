@@ -364,7 +364,7 @@ module Parse
       #   returned subscription and register callbacks later.
       # @return [Subscription]
       def subscribe(class_name, where: {}, fields: nil, keys: nil, watch: nil, session_token: nil,
-                    use_master_key: false, &block)
+                                use_master_key: false, &block)
         # Handle Parse::Object subclass
         if class_name.is_a?(Class) && class_name < Parse::Object
           class_name = class_name.parse_class

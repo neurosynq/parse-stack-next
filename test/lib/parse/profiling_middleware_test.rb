@@ -196,11 +196,11 @@ class ProfilingMiddlewareTest < Minitest::Test
     middleware = Parse::Middleware::Profiling.new(nil)
     {
       "access_token" => "atk_secret",
-      "token"        => "tok_secret",
+      "token" => "tok_secret",
       "client_secret" => "cs_secret",
-      "password"     => "hunter2",
-      "Signature"    => "s3sig",
-      "Key-Pair-Id"  => "APKAEXAMPLE",
+      "password" => "hunter2",
+      "Signature" => "s3sig",
+      "Key-Pair-Id" => "APKAEXAMPLE",
     }.each do |param, value|
       url = "http://localhost:1337/parse/classes/Test?#{param}=#{value}&limit=10"
       sanitized = middleware.send(:sanitize_url, url)
@@ -218,8 +218,8 @@ class ProfilingMiddlewareTest < Minitest::Test
     middleware = Parse::Middleware::Profiling.new(nil)
     {
       "session%54oken" => "r:abc123",   # sessionToken
-      "master%4Bey"    => "mk_secret",  # masterKey (K)
-      "%61piKey"       => "ak_secret",  # apiKey (a)
+      "master%4Bey" => "mk_secret",  # masterKey (K)
+      "%61piKey" => "ak_secret",  # apiKey (a)
     }.each do |param, value|
       url = "http://localhost:1337/parse/classes/Test?#{param}=#{value}&limit=10"
       sanitized = middleware.send(:sanitize_url, url)

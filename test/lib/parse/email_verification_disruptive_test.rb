@@ -23,7 +23,7 @@ class EmailVerificationDisruptiveTest < Minitest::Test
 
   COMPOSE = "scripts/docker/docker-compose.test.yml"
   OVERRIDE = "scripts/docker/docker-compose.verifyemail.yml"
-  HEALTH_URL = "http://localhost:#{ENV['PARSE_HOST_PORT'] || 29337}/parse/health"
+  HEALTH_URL = "http://localhost:#{ENV["PARSE_HOST_PORT"] || 29337}/parse/health"
 
   class EmailCapture < Parse::Object
     parse_class "EmailCapture"

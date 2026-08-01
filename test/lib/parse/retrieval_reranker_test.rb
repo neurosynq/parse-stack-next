@@ -95,7 +95,7 @@ class RetrievalRerankerTest < Minitest::Test
 
   def test_cohere_parses_results
     body = { "results" => [{ "index" => 2, "relevance_score" => 0.91 },
-                           { "index" => 0, "relevance_score" => 0.42 }] }.to_json
+                          { "index" => 0, "relevance_score" => 0.42 }] }.to_json
     rr = build_cohere_with_response(status: 200, body: body)
     out = rr.rerank(query: "q", documents: %w[a b c])
     assert_equal [2, 0], out.map(&:index)

@@ -718,6 +718,7 @@ module Parse
         @deferred_callbacks << block
         true
       end
+
       alias_method :defer, :after_response
 
       # @!visibility private

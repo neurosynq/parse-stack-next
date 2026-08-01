@@ -14,8 +14,8 @@ class ConsoleHelpersTest < Minitest::Test
     attr_reader :handlers, :unsubscribed, :open_args
 
     def initialize(open_args)
-      @open_args   = open_args
-      @handlers    = Hash.new { |h, k| h[k] = [] }
+      @open_args = open_args
+      @handlers = Hash.new { |h, k| h[k] = [] }
       @unsubscribed = false
     end
 
@@ -73,7 +73,7 @@ class ConsoleHelpersTest < Minitest::Test
 
     sub = FakeKlass.last_subscription
     assert sub.handlers.key?(:create), "default :create handler must be registered"
-    assert sub.handlers.key?(:enter),  "default :enter handler must be registered"
+    assert sub.handlers.key?(:enter), "default :enter handler must be registered"
     refute sub.handlers.key?(:update), ":update must NOT be on the default wait_for set"
 
     obj = Object.new
@@ -93,7 +93,7 @@ class ConsoleHelpersTest < Minitest::Test
 
     sub = FakeKlass.last_subscription
     sub.emit(:create, :skip_me)
-    sub.emit(:enter,  :match)
+    sub.emit(:enter, :match)
     assert_equal :match, waiter.value
   end
 

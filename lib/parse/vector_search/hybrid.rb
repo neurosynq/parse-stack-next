@@ -136,11 +136,11 @@ module Parse
           acc.values
              .sort_by { |e| [-e[:score], row_id(e[:doc]).to_s, e[:seq]] }
              .map do |e|
-               row = e[:doc].dup
-               row["_hybrid_score"] = e[:score]
-               row["_hybrid_ranks"] = e[:ranks]
-               row
-             end
+            row = e[:doc].dup
+            row["_hybrid_score"] = e[:score]
+            row["_hybrid_ranks"] = e[:ranks]
+            row
+          end
         end
 
         # Detect whether the cluster backing `collection` supports the
@@ -235,7 +235,7 @@ module Parse
                   "hybrid search: fusion[:method] must be :rrf, :rrf_client, or :rrf_native (got #{method.inspect})."
           end
           k_constant = fusion[:k_constant] || DEFAULT_K_CONSTANT
-          weights    = fusion[:weights]
+          weights = fusion[:weights]
           # Two distinct numbers, deliberately not one. `fusion_depth` is
           # how many rows each branch RETAINS for RRF (bounded by
           # VectorSearch::MAX_K, since it becomes a branch `k`);
@@ -279,7 +279,7 @@ module Parse
           end
 
           lexical_rows = run_lexical(collection_name, lex, fusion_depth, scope_opts)
-          vector_rows  = run_vector(collection_name, vec, fusion_depth, candidate_window, scope_opts)
+          vector_rows = run_vector(collection_name, vec, fusion_depth, candidate_window, scope_opts)
           fused = rrf({ lexical: lexical_rows, vector: vector_rows },
                       k_constant: k_constant, weights: weights)
           trimmed = fused.first(k_int)
@@ -310,8 +310,7 @@ module Parse
         #
         # @return [Array(Integer, Integer)] `[fusion_depth, candidate_window]`
         def resolve_windows(k_int, candidate_limit)
-          window =
-            if candidate_limit
+          window = if candidate_limit
               limit = Integer(candidate_limit)
               if limit < k_int
                 raise ArgumentError,
@@ -516,11 +515,11 @@ module Parse
           num_candidates = (vec[:num_candidates] || oversample * Parse::VectorSearch::DEFAULT_NUM_CANDIDATES_MULTIPLIER).to_i
           num_candidates = [[num_candidates, oversample].max, 10_000].min
           stage = {
-            "index"         => vec[:index].to_s,
-            "path"          => vec[:field].to_s,
-            "queryVector"   => vec[:query_vector],
+            "index" => vec[:index].to_s,
+            "path" => vec[:field].to_s,
+            "queryVector" => vec[:query_vector],
             "numCandidates" => num_candidates,
-            "limit"         => oversample,
+            "limit" => oversample,
           }
           stage["filter"] = vec[:vector_filter] if vec[:vector_filter] && !vec[:vector_filter].empty?
           inner = [{ "$vectorSearch" => stage }]

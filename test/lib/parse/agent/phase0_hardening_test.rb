@@ -24,8 +24,7 @@ class MCPBindKeyCouplingTest < Minitest::Test
                   application_id: "test", api_key: "test")
     end
     # Load the MCP server class on demand — it's not auto-loaded by stack.rb.
-    require_relative "../../../../lib/parse/agent/mcp_server" \
-      unless defined?(Parse::Agent::MCPServer)
+    require_relative "../../../../lib/parse/agent/mcp_server" unless defined?(Parse::Agent::MCPServer)
   end
 
   def teardown
@@ -94,8 +93,7 @@ class HeaderUnderscoreScrubTest < Minitest::Test
       Parse.setup(server_url: "http://localhost:1337/parse",
                   application_id: "test", api_key: "test")
     end
-    require_relative "../../../../lib/parse/agent/mcp_server" \
-      unless defined?(Parse::Agent::MCPServer)
+    require_relative "../../../../lib/parse/agent/mcp_server" unless defined?(Parse::Agent::MCPServer)
     @server = Parse::Agent::MCPServer.new(host: "127.0.0.1", api_key: "test")
   end
 
@@ -115,10 +113,10 @@ class HeaderUnderscoreScrubTest < Minitest::Test
 
   def test_underscore_form_header_dropped
     headers = {
-      "Content-Type"    => "application/json",
-      "Content-Length"  => "0",
-      "X-MCP-API-Key"   => "real-trusted-key",
-      "X_MCP_API_KEY"   => "attacker-injected-key",
+      "Content-Type" => "application/json",
+      "Content-Length" => "0",
+      "X-MCP-API-Key" => "real-trusted-key",
+      "X_MCP_API_KEY" => "attacker-injected-key",
     }
     env = @server.send(:build_rack_env, fake_req(headers))
     # The dash-form value must win; the underscore-form must not appear.
@@ -128,9 +126,9 @@ class HeaderUnderscoreScrubTest < Minitest::Test
 
   def test_only_dash_form_present_passes_through_normally
     headers = {
-      "Content-Type"   => "application/json",
+      "Content-Type" => "application/json",
       "Content-Length" => "0",
-      "X-MCP-API-Key"  => "the-only-key",
+      "X-MCP-API-Key" => "the-only-key",
     }
     env = @server.send(:build_rack_env, fake_req(headers))
     assert_equal "the-only-key", env["HTTP_X_MCP_API_KEY"]
@@ -138,9 +136,9 @@ class HeaderUnderscoreScrubTest < Minitest::Test
 
   def test_only_underscore_form_is_dropped_entirely
     headers = {
-      "Content-Type"   => "application/json",
+      "Content-Type" => "application/json",
       "Content-Length" => "0",
-      "X_MCP_API_KEY"  => "underscore-attacker",
+      "X_MCP_API_KEY" => "underscore-attacker",
     }
     env = @server.send(:build_rack_env, fake_req(headers))
     refute env.key?("HTTP_X_MCP_API_KEY"),
@@ -162,8 +160,8 @@ class KeysUnderscoreDenylistTest < Minitest::Test
     fake_client.define_singleton_method(:find_objects) do |_c, _q, **_opts|
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:count)    { 0 }
-      r.define_singleton_method(:results)  { [] }
+      r.define_singleton_method(:count) { 0 }
+      r.define_singleton_method(:results) { [] }
       r
     end
     @agent.define_singleton_method(:client) { fake_client }
@@ -262,20 +260,20 @@ class IdentifierFormatValidationTest < Minitest::Test
 
   def test_object_id_with_invalid_characters_is_refused
     result = @agent.execute(:get_object, class_name: "Article",
-                                          object_id: "abc'; DROP TABLE--")
+                                         object_id: "abc'; DROP TABLE--")
     refute result[:success]
     assert_match(/object_id/i, result[:error].to_s)
   end
 
   def test_object_id_too_long_is_refused
     result = @agent.execute(:get_object, class_name: "Article",
-                                          object_id: "a" * 100)
+                                         object_id: "a" * 100)
     refute result[:success]
   end
 
   def test_method_name_with_special_characters_is_refused
     result = @agent.execute(:call_method, class_name: "Article",
-                                           method_name: "send; rm -rf /")
+                                          method_name: "send; rm -rf /")
     refute result[:success]
     assert_match(/method_name|identifier/i, result[:error].to_s)
   end

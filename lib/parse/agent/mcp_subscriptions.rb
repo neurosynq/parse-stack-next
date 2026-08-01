@@ -101,10 +101,10 @@ module Parse
                 "Invalid resource URI: #{uri}. Expected parse://<Class>/{count|samples}."
         end
         class_name = match[1]
-        kind       = match[2]
+        kind = match[2]
         unless SUBSCRIBABLE_KINDS.include?(kind)
           raise Parse::Agent::ValidationError,
-                "Resource kind '#{kind}' is not subscribable — only #{SUBSCRIBABLE_KINDS.join(' and ')} " \
+                "Resource kind '#{kind}' is not subscribable — only #{SUBSCRIBABLE_KINDS.join(" and ")} " \
                 "are backed by LiveQuery. Schema changes are not LiveQuery events."
         end
         [class_name, kind]
@@ -184,7 +184,7 @@ module Parse
       class LocalNotifier
         def initialize
           @listeners = {}
-          @mutex     = Mutex.new
+          @mutex = Mutex.new
         end
 
         # @yieldparam notification_hash [Hash] the JSON-RPC notification.
@@ -234,11 +234,11 @@ module Parse
         #   one-shot emit. Default spawns a thread.
         # @yield the emit action invoked once per coalesced burst.
         def initialize(interval:, timer: nil, &emit)
-          @interval  = interval
-          @emit      = emit
-          @timer     = timer || method(:default_timer)
-          @armed     = false
-          @mutex     = Mutex.new
+          @interval = interval
+          @emit = emit
+          @timer = timer || method(:default_timer)
+          @armed = false
+          @mutex = Mutex.new
         end
 
         # Record an event; arm the timer if not already armed.
@@ -324,20 +324,20 @@ module Parse
                        live_query_admin_client: nil, live_query_scoped_client: nil,
                        max_subscriptions_per_session: DEFAULT_MAX_SUBSCRIPTIONS_PER_SESSION,
                        max_sessions: DEFAULT_MAX_SESSIONS)
-          @logger             = logger
-          @debounce_interval  = debounce_interval
-          @notifier           = notifier || LocalNotifier.new
-          @both_client        = live_query_client
-          @admin_client       = live_query_admin_client
-          @scoped_client      = live_query_scoped_client
+          @logger = logger
+          @debounce_interval = debounce_interval
+          @notifier = notifier || LocalNotifier.new
+          @both_client = live_query_client
+          @admin_client = live_query_admin_client
+          @scoped_client = live_query_scoped_client
           @supported_override = supported
-          @timer              = timer
-          @max_per_session    = max_subscriptions_per_session
-          @max_sessions       = max_sessions
-          @client_mutex       = Mutex.new
+          @timer = timer
+          @max_per_session = max_subscriptions_per_session
+          @max_sessions = max_sessions
+          @client_mutex = Mutex.new
           # session_id => { uri => { sub:, debouncer: } }
-          @sessions           = Hash.new { |h, k| h[k] = {} }
-          @mutex              = Mutex.new
+          @sessions = Hash.new { |h, k| h[k] = {} }
+          @mutex = Mutex.new
         end
 
         attr_reader :notifier
@@ -583,8 +583,8 @@ module Parse
         def publish_update(session_id, uri)
           notification = {
             "jsonrpc" => "2.0",
-            "method"  => "notifications/resources/updated",
-            "params"  => { "uri" => uri },
+            "method" => "notifications/resources/updated",
+            "params" => { "uri" => uri },
           }
           @notifier.publish(session_id, notification)
         rescue StandardError => e

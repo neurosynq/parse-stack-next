@@ -94,7 +94,7 @@ class ElicitationRendezvousTest < Minitest::Test
     gate = build_gate
     t = review_async(gate)
     wait_until { @published.any? }
-    assert_equal true,  @pending.deliver("S1", "elic-1", :accept)
+    assert_equal true, @pending.deliver("S1", "elic-1", :accept)
     assert_equal false, @pending.deliver("S1", "elic-1", :decline), "second reply is a no-op"
     assert t.value.approved?
   end

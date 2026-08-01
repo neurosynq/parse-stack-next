@@ -16,6 +16,7 @@ class CacheInvalidationTest < Minitest::Test
 
   class FakeStore
     attr_reader :data
+
     def initialize = @data = {}
     def [](k) = @data[k]
     def key?(k) = @data.key?(k)

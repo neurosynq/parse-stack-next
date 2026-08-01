@@ -795,10 +795,9 @@ module Parse
     # @param amount [Integer] The number of records to skip.
     # @return [self]
     def skip(amount)
-      coerced =
-        case amount
-        when nil      then 0
-        when Numeric  then amount.to_i
+      coerced = case amount
+        when nil then 0
+        when Numeric then amount.to_i
         when String
           unless amount =~ /\A-?\d+\z/
             raise ArgumentError,
@@ -889,6 +888,7 @@ module Parse
     #   reader and returns the current hint value.
     # @return [String, nil, self]
     HINT_UNSET = :_hint_unset_ # @!visibility private
+
     def hint(index_name = HINT_UNSET)
       return @hint if index_name.equal?(HINT_UNSET)
       @hint = index_name
@@ -1004,8 +1004,7 @@ module Parse
       # `:bodyEmbedding`) depending on whether Query.format_field has
       # already run. Resolve both shapes against the local set.
       operand_sym = constraint.operand.to_sym
-      local_field =
-        if vec_fields.key?(operand_sym)
+      local_field = if vec_fields.key?(operand_sym)
           operand_sym
         elsif klass.respond_to?(:field_map)
           klass.field_map.find { |_local, remote| remote.to_sym == operand_sym }&.first
@@ -1136,7 +1135,7 @@ module Parse
       # Explicit opt-in to direct MongoDB
       if mongo_direct
         return distinct_direct(field, return_pointers: return_pointers, order: order,
-                               **mongo_direct_auth_kwargs)
+                                      **mongo_direct_auth_kwargs)
       end
 
       # Auto-route to mongo-direct when the compiled where contains a
@@ -1144,7 +1143,7 @@ module Parse
       if requires_mongo_direct?
         assert_mongo_direct_routable!
         return distinct_direct(field, return_pointers: return_pointers, order: order,
-                               **mongo_direct_auth_kwargs)
+                                      **mongo_direct_auth_kwargs)
       end
 
       # Auto-route scoped queries (session_token / acl_user / acl_role) to
@@ -1155,7 +1154,7 @@ module Parse
       # `$group`, so distinct values reflect only ACL-readable rows.
       if distinct_query_is_scoped? && defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
         return distinct_direct(field, return_pointers: return_pointers, order: order,
-                               **mongo_direct_auth_kwargs)
+                                      **mongo_direct_auth_kwargs)
       end
 
       if field.nil? || !field.respond_to?(:to_s) || field.is_a?(Hash) || field.is_a?(Array)
@@ -1295,8 +1294,8 @@ module Parse
 
         # Execute aggregation
         aggregation = Aggregation.new(self, pipeline, verbose: @verbose_aggregate,
-                                      mongo_direct: use_mongo_direct,
-                                      allow_internal_fields: uses_internal_fields)
+                                                      mongo_direct: use_mongo_direct,
+                                                      allow_internal_fields: uses_internal_fields)
         response = aggregation.execute!
 
         # Extract count from aggregation result
@@ -1420,8 +1419,7 @@ module Parse
         @results = nil if @limit != fetch_count
         @limit = fetch_count
       else
-        fetch_count =
-          case limit_or_constraints
+        fetch_count = case limit_or_constraints
           when Numeric then limit_or_constraints.to_i
           when String
             unless limit_or_constraints =~ /\A-?\d+\z/
@@ -1910,8 +1908,7 @@ module Parse
     # @param user [Parse::User, Parse::Pointer] the principal to scope by.
     # @return [self]
     def scope_to_user(user)
-      raise ArgumentError, "[Parse::Query] scope_to_user requires a Parse::User or User Pointer." \
-        unless user.respond_to?(:id) && user.id.is_a?(String)
+      raise ArgumentError, "[Parse::Query] scope_to_user requires a Parse::User or User Pointer." unless user.respond_to?(:id) && user.id.is_a?(String)
       @acl_user = user
       self
     end
@@ -2021,11 +2018,11 @@ module Parse
       # path would have sent; the SDK should not force callers to repeat
       # `use_master_key: true` on every direct query.
       client_has_master_key = begin
-        c = client
-        c.respond_to?(:master_key) && !c.master_key.to_s.empty?
-      rescue StandardError
-        false
-      end
+          c = client
+          c.respond_to?(:master_key) && !c.master_key.to_s.empty?
+        rescue StandardError
+          false
+        end
       server_mode_master = (use_master_key != false) && !Parse.client_mode && client_has_master_key
       unless use_master_key || server_mode_master || @acl_user || @acl_role || has_session || has_ambient_session
         raise MongoDirectRequired,
@@ -2146,8 +2143,7 @@ module Parse
       # An explicitly passed client wins, matching how the identity kwargs
       # below behave, and is dropped when it is already the default so the
       # common single-application call carries nothing extra.
-      client_kwarg =
-        if options.key?(:client)
+      client_kwarg = if options.key?(:client)
           { client: options[:client] }
         else
           mongo_direct_client_kwarg
@@ -2281,9 +2277,9 @@ module Parse
       if session_token.nil? && master.nil? && acl_user.nil? && acl_role.nil?
         auth = mongo_direct_auth_kwargs
         session_token = auth[:session_token]
-        master        = auth[:master]
-        acl_user      = auth[:acl_user]
-        acl_role      = auth[:acl_role]
+        master = auth[:master]
+        acl_user = auth[:acl_user]
+        acl_role = auth[:acl_role]
       end
 
       # Execute the aggregation directly on MongoDB. The pipeline was built
@@ -2348,8 +2344,7 @@ module Parse
         limit_or_constraints = 1
       end
 
-      count =
-        case limit_or_constraints
+      count = case limit_or_constraints
         when Numeric then limit_or_constraints.to_i
         when String
           unless limit_or_constraints =~ /\A-?\d+\z/
@@ -2427,9 +2422,9 @@ module Parse
       if session_token.nil? && master.nil? && acl_user.nil? && acl_role.nil?
         auth = mongo_direct_auth_kwargs
         session_token = auth[:session_token]
-        master        = auth[:master]
-        acl_user      = auth[:acl_user]
-        acl_role      = auth[:acl_role]
+        master = auth[:master]
+        acl_user = auth[:acl_user]
+        acl_role = auth[:acl_role]
       end
 
       # SDK-built pipeline only — see results_direct for rationale.
@@ -2469,8 +2464,8 @@ module Parse
     # @note This is a read-only operation. Direct MongoDB queries cannot modify data.
     # @see Parse::MongoDB.configure
     def distinct_direct(field, return_pointers: false, order: nil,
-                        session_token: nil, master: nil, acl_user: nil, acl_role: nil,
-                        client: nil)
+                               session_token: nil, master: nil, acl_user: nil, acl_role: nil,
+                               client: nil)
       require_relative "mongodb"
       Parse::MongoDB.require_gem!
 
@@ -2527,9 +2522,9 @@ module Parse
       if session_token.nil? && master.nil? && acl_user.nil? && acl_role.nil?
         auth = mongo_direct_auth_kwargs
         session_token = auth[:session_token]
-        master        = auth[:master]
-        acl_user      = auth[:acl_user]
-        acl_role      = auth[:acl_role]
+        master = auth[:master]
+        acl_user = auth[:acl_user]
+        acl_role = auth[:acl_role]
       end
       raw_results = Parse::MongoDB.aggregate(@table, pipeline,
                                              allow_internal_fields: true,
@@ -2566,11 +2561,11 @@ module Parse
     # @return [Array] array of distinct values, with pointer fields as Parse::Pointer objects
     # @see #distinct_direct
     def distinct_direct_pointers(field, order: nil,
-                                 session_token: nil, master: nil, acl_user: nil, acl_role: nil,
-                                 client: nil)
+                                        session_token: nil, master: nil, acl_user: nil, acl_role: nil,
+                                        client: nil)
       distinct_direct(field, return_pointers: true, order: order,
-                      session_token: session_token, master: master,
-                      acl_user: acl_user, acl_role: acl_role, client: client)
+                             session_token: session_token, master: master,
+                             acl_user: acl_user, acl_role: acl_role, client: client)
     end
 
     #----------------------------------------------------------------
@@ -3787,8 +3782,8 @@ module Parse
       end
 
       Aggregation.new(self, complete_pipeline, verbose: verbose, mongo_direct: use_mongo_direct || false,
-                      allow_internal_fields: uses_internal_fields,
-                      raw_values: raw_values, raw_field_names: raw_field_names)
+                                               allow_internal_fields: uses_internal_fields,
+                                               raw_values: raw_values, raw_field_names: raw_field_names)
     end
 
     # Apply the direct-MongoDB stage converter to every stage in a pipeline.
@@ -3891,7 +3886,7 @@ module Parse
 
       # Create Aggregation directly to avoid double-applying constraints
       Aggregation.new(self, pipeline, verbose: verbose, mongo_direct: use_mongo_direct || false,
-                      allow_internal_fields: uses_internal_fields)
+                                      allow_internal_fields: uses_internal_fields)
     end
 
     private
@@ -4071,7 +4066,7 @@ module Parse
       # Create Aggregation directly to avoid double-applying constraints
       # The aggregate() method would redundantly add where constraints again
       Aggregation.new(self, pipeline, verbose: @verbose_aggregate, mongo_direct: use_mongo_direct,
-                      allow_internal_fields: uses_internal_fields)
+                                      allow_internal_fields: uses_internal_fields)
     end
 
     # Check if the pipeline references internal Parse fields that require MongoDB direct access
@@ -4425,6 +4420,7 @@ module Parse
       end
       @keys.uniq!
     end
+
     private :merge_includes_into_keys!
 
     # Builds Parse::Pointer objects based on the set of Parse JSON hashes in an array.
@@ -6152,7 +6148,7 @@ module Parse
     #   auth data) is what `allow_internal_fields` relaxes, so it must never be
     #   set on a pipeline that interpolates user input. Defaults to `false`.
     def initialize(query, pipeline, verbose: nil, mongo_direct: false, max_time_ms: nil,
-                   raw_values: false, raw_field_names: false, allow_internal_fields: false)
+                                    raw_values: false, raw_field_names: false, allow_internal_fields: false)
       @query = query
       @pipeline = pipeline
       @cached_response = nil
@@ -6222,7 +6218,7 @@ module Parse
       # count_direct / distinct_direct).
       hint = @query.instance_variable_get(:@hint)
       Parse::MongoDB.aggregate(table, @pipeline, max_time_ms: max_time_ms, hint: hint,
-                               allow_internal_fields: @allow_internal_fields, **auth_kwargs)
+                                                 allow_internal_fields: @allow_internal_fields, **auth_kwargs)
     end
 
     # Returns processed results from the aggregation.
@@ -6434,8 +6430,7 @@ module Parse
     # @example Groups with the most members first
     #   Document.group_by(:category).order(size: :desc).list
     def order(spec)
-      target, direction =
-        case spec
+      target, direction = case spec
         when Symbol
           [:key, spec]
         when Hash
@@ -6837,7 +6832,6 @@ module Parse
           "Call Parse::MongoDB.configure(uri: 'mongodb://...', enabled: true) first."
       end
 
-
       # Convert field name for direct MongoDB access
       mongo_group_field = @query.send(:convert_field_for_direct_mongodb, formatted_group_field)
 
@@ -6937,8 +6931,7 @@ module Parse
     # `count` field (for :value / :size).
     def sort_stage
       return nil unless @sort_target
-      field =
-        case @sort_target
+      field = case @sort_target
         when :key then "_id"
         when :value then "count"
         when :size then "__order_size"
@@ -7108,13 +7101,13 @@ module Parse
     # @return [String] the default second-column header
     def default_value_header
       case @operation&.to_s
-      when "count"    then "Count"
-      when "sum"      then "Sum"
+      when "count" then "Count"
+      when "sum" then "Sum"
       when "average", "avg" then "Average"
-      when "min"      then "Min"
-      when "max"      then "Max"
-      when "list"     then "Items"
-      else                 "Count"
+      when "min" then "Min"
+      when "max" then "Max"
+      when "list" then "Items"
+      else "Count"
       end
     end
 
@@ -7289,8 +7282,7 @@ module Parse
     # @example Busiest day first
     #   Post.group_by_date(:created_at, :day).order(value: :desc).count
     def order(spec)
-      target, direction =
-        case spec
+      target, direction = case spec
         when Symbol
           [:key, spec]
         when Hash
@@ -7570,7 +7562,6 @@ module Parse
           "Call Parse::MongoDB.configure(uri: 'mongodb://...', enabled: true) first."
       end
 
-
       # Convert date field for direct MongoDB (createdAt -> _created_at, etc.)
       mongo_date_field = @query.send(:convert_field_for_direct_mongodb, formatted_date_field)
 
@@ -7723,8 +7714,7 @@ module Parse
     # `.order(...)` has been called.
     def sort_stage
       field = @sort_target == :value ? "count" : "_id"
-      dir =
-        if @sort_target.nil?
+      dir = if @sort_target.nil?
           1
         else
           @sort_direction == :desc ? -1 : 1

@@ -27,6 +27,7 @@ class VectorSearchUnderfillTest < Minitest::Test
   # pre-filter one and hid exactly that distinction.
   class FakeColl
     attr_reader :pipelines
+
     def initialize(rows)
       @rows = rows
       @pipelines = []
@@ -255,8 +256,7 @@ class VectorSearchUnderfillTest < Minitest::Test
     resolution = FakeResolution.new(
       master: master, user_id: "u1", permission_strings: %w[u1 *],
     )
-    acl_stage =
-      if master || acl_mode != :server
+    acl_stage = if master || acl_mode != :server
         nil
       else
         { "$match" => { "_rperm" => { "$in" => %w[u1] } } }
@@ -277,7 +277,7 @@ class VectorSearchUnderfillTest < Minitest::Test
                     Parse::CLPScope.stub(:permits?, ->(*) { true }) do
                       Parse::VectorSearch.search(
                         "Doc", field: "embedding", query_vector: [0.1, 0.2, 0.3],
-                        k: k, index: "vec_idx", **extra
+                               k: k, index: "vec_idx", **extra,
                       )
                     end
                   end

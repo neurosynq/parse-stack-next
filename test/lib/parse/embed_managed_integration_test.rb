@@ -21,7 +21,7 @@ require_relative "../../support/docker_helper"
 class EmbedManagedDoc < Parse::Object
   parse_class "EmbedManagedDocE2E"
   property :title, :string
-  property :body,  :string
+  property :body, :string
   property :unrelated, :string
   # Fixture provider is registered under :fixture in tests; we declare
   # the property to use that name so first save can resolve it.

@@ -104,6 +104,7 @@ module Parse
     class InvalidImageURL < Error
       # @return [Symbol] failure-mode tag.
       attr_reader :reason
+
       def initialize(reason, message)
         @reason = reason
         super(message)
@@ -132,6 +133,7 @@ module Parse
         end
         super(name.to_sym, provider)
       end
+
       alias_method :store, :[]=
     end
 
@@ -447,8 +449,7 @@ module Parse
       # @raise [InvalidImageURL] on any other validation failure.
       def validate_image_url!(url, allow_insecure: false, mode: :forward)
         unless mode == :fetch || trust_provider_url_fetch?
-          hint =
-            if allowed_image_hosts.empty?
+          hint = if allowed_image_hosts.empty?
               " First populate Parse::Embeddings.allowed_image_hosts with the CDN " \
               "hostnames you trust (currently empty — every host would be denied " \
               "even after the sentinel is set)."
@@ -463,30 +464,30 @@ module Parse
 
         unless url.is_a?(String) && !url.empty?
           raise InvalidImageURL.new(:parse,
-            "Parse::Embeddings.validate_image_url!: url must be a non-empty String " \
-            "(got #{url.class}).")
+                                    "Parse::Embeddings.validate_image_url!: url must be a non-empty String " \
+                                    "(got #{url.class}).")
         end
 
         uri = begin
-          URI.parse(url)
-        rescue URI::InvalidURIError => e
-          raise InvalidImageURL.new(:parse,
-            "Parse::Embeddings.validate_image_url!: invalid URL (#{e.message}).")
-        end
+            URI.parse(url)
+          rescue URI::InvalidURIError => e
+            raise InvalidImageURL.new(:parse,
+                                      "Parse::Embeddings.validate_image_url!: invalid URL (#{e.message}).")
+          end
 
         valid_schemes = allow_insecure ? %w[http https] : %w[https]
         unless valid_schemes.include?(uri.scheme)
           raise InvalidImageURL.new(:scheme,
-            "Parse::Embeddings.validate_image_url!: scheme must be #{valid_schemes.join(' or ')} " \
-            "(got #{uri.scheme.inspect}). Forwarding non-HTTPS image URLs to a provider " \
-            "leaks any embedded query-string secrets in cleartext.")
+                                    "Parse::Embeddings.validate_image_url!: scheme must be #{valid_schemes.join(" or ")} " \
+                                    "(got #{uri.scheme.inspect}). Forwarding non-HTTPS image URLs to a provider " \
+                                    "leaks any embedded query-string secrets in cleartext.")
         end
 
         if uri.userinfo
           raise InvalidImageURL.new(:userinfo,
-            "Parse::Embeddings.validate_image_url!: URL must not include userinfo " \
-            "credentials. Embedding providers will forward the full URL in their fetch " \
-            "and may log it.")
+                                    "Parse::Embeddings.validate_image_url!: URL must not include userinfo " \
+                                    "credentials. Embedding providers will forward the full URL in their fetch " \
+                                    "and may log it.")
         end
 
         # `uri.hostname` returns the IDNA-decoded form WITHOUT IPv6
@@ -497,7 +498,7 @@ module Parse
         host = uri.hostname
         if host.nil? || host.empty?
           raise InvalidImageURL.new(:parse,
-            "Parse::Embeddings.validate_image_url!: URL is missing a host.")
+                                    "Parse::Embeddings.validate_image_url!: URL is missing a host.")
         end
 
         # Reject non-canonical IPv4 forms (decimal `2130706433`,
@@ -514,9 +515,9 @@ module Parse
         # character).
         if ip_shaped_but_not_canonical?(host)
           raise InvalidImageURL.new(:host_blocked,
-            "Parse::Embeddings.validate_image_url!: host #{host.inspect} is an obfuscated " \
-            "or non-canonical IP literal. Use dotted-quad IPv4 (a.b.c.d) or canonical IPv6. " \
-            "Decimal/octal/hex IP forms are refused to prevent localhost-bypass attempts.")
+                                    "Parse::Embeddings.validate_image_url!: host #{host.inspect} is an obfuscated " \
+                                    "or non-canonical IP literal. Use dotted-quad IPv4 (a.b.c.d) or canonical IPv6. " \
+                                    "Decimal/octal/hex IP forms are refused to prevent localhost-bypass attempts.")
         end
 
         # **Image-host allowlist runs BEFORE the resolver hop.** Round-2
@@ -528,9 +529,9 @@ module Parse
         allowed = allowed_image_hosts
         if allowed.empty?
           raise InvalidImageURL.new(:host_not_allowlisted,
-            "Parse::Embeddings.validate_image_url!: Parse::Embeddings.allowed_image_hosts " \
-            "is empty — every image URL is denied. Add the CDN hostnames you trust before " \
-            "forwarding image URLs to a provider.")
+                                    "Parse::Embeddings.validate_image_url!: Parse::Embeddings.allowed_image_hosts " \
+                                    "is empty — every image URL is denied. Add the CDN hostnames you trust before " \
+                                    "forwarding image URLs to a provider.")
         end
         permitted = allowed.any? do |entry|
           if entry.start_with?(".")
@@ -542,8 +543,8 @@ module Parse
         end
         unless permitted
           raise InvalidImageURL.new(:host_not_allowlisted,
-            "Parse::Embeddings.validate_image_url!: host #{host.inspect} not in " \
-            "Parse::Embeddings.allowed_image_hosts (#{allowed.inspect}).")
+                                    "Parse::Embeddings.validate_image_url!: host #{host.inspect} not in " \
+                                    "Parse::Embeddings.allowed_image_hosts (#{allowed.inspect}).")
         end
 
         # Port allowlist runs after the host allowlist (cheap string
@@ -553,8 +554,8 @@ module Parse
         require_relative "model/file"
         unless Parse::File.allowed_remote_ports.include?(port)
           raise InvalidImageURL.new(:port,
-            "Parse::Embeddings.validate_image_url!: port #{port} not in " \
-            "Parse::File.allowed_remote_ports.")
+                                    "Parse::Embeddings.validate_image_url!: port #{port} not in " \
+                                    "Parse::File.allowed_remote_ports.")
         end
 
         # CIDR + DNS resolution last — most expensive (syscall). An
@@ -567,7 +568,7 @@ module Parse
         rescue ArgumentError => e
           tag = e.message.include?("private/internal address") ? :host_blocked : :parse
           raise InvalidImageURL.new(tag,
-            "Parse::Embeddings.validate_image_url!: #{e.message}")
+                                    "Parse::Embeddings.validate_image_url!: #{e.message}")
         end
 
         # Return the canonicalized URL so callers store/forward

@@ -286,7 +286,7 @@ class ToolsCollscanTest < Minitest::Test
 
   def test_expose_explain_false_omits_winning_plan_from_collscan_refusal
     Parse::Agent.refuse_collscan = true
-    Parse::Agent.expose_explain  = false  # explicit default
+    Parse::Agent.expose_explain = false  # explicit default
 
     collscan_explain = {
       "queryPlanner" => {
@@ -306,7 +306,7 @@ class ToolsCollscanTest < Minitest::Test
 
   def test_expose_explain_true_includes_winning_plan_in_collscan_refusal
     Parse::Agent.refuse_collscan = true
-    Parse::Agent.expose_explain  = true
+    Parse::Agent.expose_explain = true
 
     collscan_explain = {
       "queryPlanner" => {

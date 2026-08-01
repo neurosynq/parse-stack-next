@@ -64,7 +64,7 @@ class ClientRestBatchIntegrationTest < Minitest::Test
         "className" => BATCH_CLASS,
         "fields" => {
           "title" => { "type" => "String" },
-          "body"  => { "type" => "String" },
+          "body" => { "type" => "String" },
         },
         "classLevelPermissions" => {
           # +create+ is the load-bearing gate: every positive test
@@ -76,9 +76,9 @@ class ClientRestBatchIntegrationTest < Minitest::Test
           # invariant is fully pinned by create-gating: the negative
           # test sends an anonymous multi-insert batch and asserts
           # every sub-request is rejected.
-          "find"   => { "*" => true },
-          "get"    => { "*" => true },
-          "count"  => { "*" => true },
+          "find" => { "*" => true },
+          "get" => { "*" => true },
+          "count" => { "*" => true },
           "create" => { "requiresAuthentication" => true },
           "update" => { "*" => true },
           "delete" => { "*" => true },

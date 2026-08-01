@@ -33,7 +33,7 @@ class AgentMethodSchemaDiscoveryTest < Minitest::Test
     agent_method :list_things, "List recent things"
 
     agent_method :rename, "Rename this thing", permission: :write,
-                 permitted_keys: [:new_title]
+                                               permitted_keys: [:new_title]
   end
 
   def test_format_methods_includes_supports_dry_run_when_declared

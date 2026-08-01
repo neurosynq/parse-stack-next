@@ -34,13 +34,13 @@ class WebhookNonObjectTriggersTest < Minitest::Test
   # ==========================================================================
 
   TRIGGER_PREDICATES = {
-    "beforeLogin"                => :before_login?,
-    "afterLogin"                 => :after_login?,
-    "afterLogout"                => :after_logout?,
+    "beforeLogin" => :before_login?,
+    "afterLogin" => :after_login?,
+    "afterLogout" => :after_logout?,
     "beforePasswordResetRequest" => :before_password_reset_request?,
-    "beforeConnect"              => :before_connect?,
-    "beforeSubscribe"            => :before_subscribe?,
-    "afterEvent"                 => :after_event?,
+    "beforeConnect" => :before_connect?,
+    "beforeSubscribe" => :before_subscribe?,
+    "afterEvent" => :after_event?,
   }.freeze
 
   def test_each_trigger_predicate_is_exclusive
@@ -202,7 +202,7 @@ class WebhookNonObjectTriggersTest < Minitest::Test
     fired = []
     spy = Object.new
     spy.define_singleton_method(:is_a?) { |k| k == Parse::Object }
-    spy.define_singleton_method(:run_before_save_callbacks)  { fired << :before_save; true }
+    spy.define_singleton_method(:run_before_save_callbacks) { fired << :before_save; true }
     spy.define_singleton_method(:run_before_create_callbacks) { fired << :before_create; true }
     spy.define_singleton_method(:changes_payload) { { "x" => 1 } }
 
@@ -221,7 +221,7 @@ class WebhookNonObjectTriggersTest < Minitest::Test
     fired = []
     spy = Object.new
     spy.define_singleton_method(:is_a?) { |k| k == Parse::Object }
-    spy.define_singleton_method(:run_after_save_callbacks)   { fired << :after_save; true }
+    spy.define_singleton_method(:run_after_save_callbacks) { fired << :after_save; true }
     spy.define_singleton_method(:run_after_create_callbacks) { fired << :after_create; true }
 
     Parse::Webhooks.route(:after_login, "_User") { |_p| true }

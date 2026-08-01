@@ -194,7 +194,7 @@ class SubAgentWidenErrorRedactionTest < Minitest::Test
 
   def test_widen_error_message_omits_user_object_ids
     alice = Parse::User.new(objectId: "u_alice_secret_id")
-    bob   = Parse::User.new(objectId: "u_bob_secret_id")
+    bob = Parse::User.new(objectId: "u_bob_secret_id")
     parent = Parse::Agent.new(acl_user: alice)
     err = assert_raises(ArgumentError) do
       Parse::Agent.new(parent: parent, acl_user: bob)
@@ -207,7 +207,7 @@ class SubAgentWidenErrorRedactionTest < Minitest::Test
 
   def test_widen_error_message_carries_cardinalities
     alice = Parse::User.new(objectId: "u_alice")
-    bob   = Parse::User.new(objectId: "u_bob")
+    bob = Parse::User.new(objectId: "u_bob")
     parent = Parse::Agent.new(acl_user: alice)
     err = assert_raises(ArgumentError) do
       Parse::Agent.new(parent: parent, acl_user: bob)
@@ -220,7 +220,7 @@ class SubAgentWidenErrorRedactionTest < Minitest::Test
 
   def test_widen_error_emits_audit_notification_with_full_diff
     alice = Parse::User.new(objectId: "u_alice_secret_id")
-    bob   = Parse::User.new(objectId: "u_bob_secret_id")
+    bob = Parse::User.new(objectId: "u_bob_secret_id")
     parent = Parse::Agent.new(acl_user: alice)
 
     captured_payload = nil

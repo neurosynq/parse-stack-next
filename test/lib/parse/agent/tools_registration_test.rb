@@ -284,7 +284,7 @@ class ToolsRegistrationTest < Minitest::Test
 
   def test_invoke_dispatches_to_registered_handler
     captured_agent = nil
-    captured_args  = nil
+    captured_args = nil
     T.register(
       name: :my_dispatch,
       description: "Dispatch test",
@@ -292,7 +292,7 @@ class ToolsRegistrationTest < Minitest::Test
       permission: :readonly,
       handler: ->(agent, **args) {
         captured_agent = agent
-        captured_args  = args
+        captured_args = args
         { dispatched: true }
       },
     )

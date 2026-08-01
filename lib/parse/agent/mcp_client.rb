@@ -79,19 +79,20 @@ module Parse
           parts << "─── usage ───" << "  #{usage}" if usage && usage.total_tokens.positive?
           parts.join("\n")
         end
+
         alias_method :inspect, :to_s
       end
 
       DEFAULT_MODELS = {
-        openai:    "gpt-4o-mini",
+        openai: "gpt-4o-mini",
         anthropic: "claude-haiku-4-5",
-        lmstudio:  "qwen2.5-7b-instruct",
+        lmstudio: "qwen2.5-7b-instruct",
       }.freeze
 
       DEFAULT_BASE_URLS = {
-        openai:    "https://api.openai.com/v1",
+        openai: "https://api.openai.com/v1",
         anthropic: "https://api.anthropic.com/v1",
-        lmstudio:  "http://localhost:1234/v1",
+        lmstudio: "http://localhost:1234/v1",
       }.freeze
 
       # Per-1M-tokens list-price pricing (USD). Override via constructor's
@@ -99,13 +100,13 @@ module Parse
       # Local-model providers (LM Studio) default to zero. Update these
       # numbers as providers shift their pricing.
       DEFAULT_PRICING = {
-        "gpt-4o-mini"          => { input: 0.15,  output: 0.60  },
-        "gpt-4o"               => { input: 2.50,  output: 10.00 },
-        "gpt-4.1-mini"         => { input: 0.40,  output: 1.60  },
-        "gpt-4.1"              => { input: 2.00,  output: 8.00  },
-        "claude-haiku-4-5"     => { input: 1.00,  output: 5.00  },
-        "claude-sonnet-4-5"    => { input: 3.00,  output: 15.00 },
-        "claude-opus-4-5"      => { input: 15.00, output: 75.00 },
+        "gpt-4o-mini" => { input: 0.15, output: 0.60 },
+        "gpt-4o" => { input: 2.50, output: 10.00 },
+        "gpt-4.1-mini" => { input: 0.40, output: 1.60 },
+        "gpt-4.1" => { input: 2.00, output: 8.00 },
+        "claude-haiku-4-5" => { input: 1.00, output: 5.00 },
+        "claude-sonnet-4-5" => { input: 3.00, output: 15.00 },
+        "claude-opus-4-5" => { input: 15.00, output: 75.00 },
       }.freeze
 
       # Token + cost roll-up. `cost_usd` is computed from the model's pricing
@@ -114,10 +115,10 @@ module Parse
       Usage = Struct.new(:prompt_tokens, :completion_tokens, :total_tokens, :cost_usd, keyword_init: true) do
         def +(other)
           Usage.new(
-            prompt_tokens:     prompt_tokens     + other.prompt_tokens,
+            prompt_tokens: prompt_tokens + other.prompt_tokens,
             completion_tokens: completion_tokens + other.completion_tokens,
-            total_tokens:      total_tokens      + other.total_tokens,
-            cost_usd:          cost_usd          + other.cost_usd,
+            total_tokens: total_tokens + other.total_tokens,
+            cost_usd: cost_usd + other.cost_usd,
           )
         end
 
@@ -125,6 +126,7 @@ module Parse
           format("%d in + %d out = %d tokens   $%.6f",
                  prompt_tokens, completion_tokens, total_tokens, cost_usd)
         end
+
         alias_method :inspect, :to_s
       end
 
@@ -150,8 +152,8 @@ module Parse
       def initialize(agent:, provider: nil, api_key: nil, model: nil, base_url: nil,
                      max_iterations: 8, timeout: 90, system_prompt: nil,
                      pricing: nil, auto_compact_at: nil)
-        @agent          = agent
-        @provider       = (provider || ENV["LLM_PROVIDER"])&.to_sym
+        @agent = agent
+        @provider = (provider || ENV["LLM_PROVIDER"])&.to_sym
         raise ArgumentError, "provider required: pass provider: or set LLM_PROVIDER (one of: #{DEFAULT_MODELS.keys.join(", ")})" unless @provider
         unless DEFAULT_MODELS.key?(@provider)
           raise ArgumentError, "unknown provider #{@provider.inspect}; expected one of #{DEFAULT_MODELS.keys.inspect}"
@@ -163,19 +165,19 @@ module Parse
           raise ArgumentError, "api_key required for #{@provider}: pass api_key: or set LLM_API_KEY"
         end
 
-        @model           = model    || ENV["LLM_MODEL"]    || DEFAULT_MODELS[@provider]
-        @base_url        = base_url || ENV["LLM_BASE_URL"] || DEFAULT_BASE_URLS[@provider]
+        @model = model || ENV["LLM_MODEL"] || DEFAULT_MODELS[@provider]
+        @base_url = base_url || ENV["LLM_BASE_URL"] || DEFAULT_BASE_URLS[@provider]
         Parse::Agent.assert_llm_endpoint_allowed!(@base_url) if Parse::Agent.respond_to?(:assert_llm_endpoint_allowed!)
-        @max_iterations  = max_iterations
-        @timeout         = timeout
-        @system_prompt   = system_prompt
-        @pricing         = pricing || DEFAULT_PRICING
+        @max_iterations = max_iterations
+        @timeout = timeout
+        @system_prompt = system_prompt
+        @pricing = pricing || DEFAULT_PRICING
         # When set, the round-trip will trigger compact! after a successful
         # call if `usage.total_tokens` exceeds this threshold. Useful for
         # long-running chat sessions to avoid blowing past context limits.
         @auto_compact_at = auto_compact_at
-        @history         = []
-        @usage           = ZERO_USAGE.dup
+        @history = []
+        @usage = ZERO_USAGE.dup
         @last_call_usage = nil
       end
 
@@ -225,12 +227,12 @@ module Parse
       # can re-price after the fact with a different rate table.
       def price(prompt_tokens, completion_tokens)
         rates = @pricing[@model] || @pricing[@model.to_s] || { input: 0.0, output: 0.0 }
-        cost  = (prompt_tokens * rates[:input] + completion_tokens * rates[:output]) / 1_000_000.0
+        cost = (prompt_tokens * rates[:input] + completion_tokens * rates[:output]) / 1_000_000.0
         Usage.new(
-          prompt_tokens:     prompt_tokens,
+          prompt_tokens: prompt_tokens,
           completion_tokens: completion_tokens,
-          total_tokens:      prompt_tokens + completion_tokens,
-          cost_usd:          cost,
+          total_tokens: prompt_tokens + completion_tokens,
+          cost_usd: cost,
         )
       end
 
@@ -283,7 +285,7 @@ module Parse
           unless entry.is_a?(Hash)
             raise ArgumentError, "restore_history!: entry #{i} is not a Hash (got #{entry.class})"
           end
-          role    = entry[:role]    || entry["role"]
+          role = entry[:role] || entry["role"]
           content = entry[:content] || entry["content"]
           if role.to_s.empty?
             raise ArgumentError, "restore_history!: entry #{i} is missing :role"
@@ -314,7 +316,7 @@ module Parse
       # if tool lists grow large, but they're usually small).
       def tool_definitions
         envelope = Parse::Agent::MCPDispatcher.call(
-          body:  { "jsonrpc" => "2.0", "id" => SecureRandom.hex(4), "method" => "tools/list", "params" => {} },
+          body: { "jsonrpc" => "2.0", "id" => SecureRandom.hex(4), "method" => "tools/list", "params" => {} },
           agent: @agent,
         )
         tools = envelope.dig(:body, "result", "tools") || []
@@ -323,9 +325,9 @@ module Parse
           {
             type: "function",
             function: {
-              name:        h["name"],
+              name: h["name"],
               description: h["description"].to_s[0, 1024],
-              parameters:  h["inputSchema"] || { "type" => "object", "properties" => {} },
+              parameters: h["inputSchema"] || { "type" => "object", "properties" => {} },
             },
           }
         end
@@ -336,10 +338,10 @@ module Parse
       # a Result with the final-turn text, the ordered tool-call trace, and
       # the full transcript for debugging.
       def round_trip
-        tools      = tool_definitions
-        messages   = build_messages_for_provider
+        tools = tool_definitions
+        messages = build_messages_for_provider
         transcript = []
-        all_calls  = []
+        all_calls = []
         call_usage = ZERO_USAGE.dup
 
         @max_iterations.times do
@@ -354,18 +356,18 @@ module Parse
             dispatch_envelope = Parse::Agent::MCPDispatcher.call(
               body: {
                 "jsonrpc" => "2.0",
-                "id"      => SecureRandom.hex(4),
-                "method"  => "tools/call",
-                "params"  => { "name" => tc[:name], "arguments" => tc[:arguments] },
+                "id" => SecureRandom.hex(4),
+                "method" => "tools/call",
+                "params" => { "name" => tc[:name], "arguments" => tc[:arguments] },
               },
               agent: @agent,
             )
             body = dispatch_envelope[:body] || {}
             tool_text = if body["result"]
-              (body.dig("result", "content", 0, "text") || body["result"].to_json)
-            else
-              body.dig("error", "message").to_s
-            end
+                (body.dig("result", "content", 0, "text") || body["result"].to_json)
+              else
+                body.dig("error", "message").to_s
+              end
             all_calls << { name: tc[:name], arguments: tc[:arguments], result: tool_text }
             messages << { role: "tool", tool_call_id: tc[:id], content: tool_text }
             transcript << { role: "tool", content: tool_text }
@@ -375,7 +377,7 @@ module Parse
         # The assistant's last content message is the answer. Walk the
         # transcript backwards to find it.
         final = transcript.reverse.find { |m| m[:role] == "assistant" && !m[:content].to_s.empty? }
-        text  = final ? final[:content].to_s : ""
+        text = final ? final[:content].to_s : ""
 
         # Append the assistant's final message to history so a follow-up
         # `ask(..., reset: false)` sees the prior context.
@@ -384,7 +386,7 @@ module Parse
         end
 
         @last_call_usage = call_usage
-        @usage           = @usage + call_usage
+        @usage = @usage + call_usage
 
         # Auto-compact when configured and we've crossed the threshold. The
         # compact call itself adds usage; that's reflected in @usage too.
@@ -408,7 +410,7 @@ module Parse
       def call_llm(messages:, tools:)
         case @provider
         when :anthropic then anthropic_chat(messages: messages, tools: tools)
-        else                  openai_chat(messages: messages, tools: tools)
+        else openai_chat(messages: messages, tools: tools)
         end
       end
 
@@ -438,20 +440,20 @@ module Parse
         body = JSON.generate({ model: @model, messages: openai_messages, tools: tools, tool_choice: "auto" })
 
         req = Net::HTTP::Post.new(uri)
-        req["Content-Type"]  = "application/json"
+        req["Content-Type"] = "application/json"
         req["Authorization"] = "Bearer #{@api_key}"
         req.body = body
 
         res = Net::HTTP.start(uri.hostname, uri.port,
-                              use_ssl:      uri.scheme == "https",
+                              use_ssl: uri.scheme == "https",
                               read_timeout: @timeout) { |h| h.request(req) }
         unless res.code.to_i.between?(200, 299)
           raise "LLM call failed: HTTP #{res.code} #{res.body}"
         end
 
         parsed = JSON.parse(res.body)
-        msg    = parsed.dig("choices", 0, "message") || {}
-        calls  = Array(msg["tool_calls"]).map do |tc|
+        msg = parsed.dig("choices", 0, "message") || {}
+        calls = Array(msg["tool_calls"]).map do |tc|
           args = tc.dig("function", "arguments")
           # Defensively normalize to a Hash. OpenAI returns a JSON-encoded
           # String here; some models occasionally emit an empty string when
@@ -466,15 +468,15 @@ module Parse
           { id: tc["id"] || SecureRandom.hex(4), name: tc.dig("function", "name"), arguments: args }
         end
         usage_h = parsed["usage"] || {}
-        usage   = price(usage_h["prompt_tokens"].to_i, usage_h["completion_tokens"].to_i)
+        usage = price(usage_h["prompt_tokens"].to_i, usage_h["completion_tokens"].to_i)
         { role: "assistant", content: msg["content"], tool_calls: calls, usage: usage }
       end
 
       def anthropic_chat(messages:, tools:)
         anth_tools = tools.map do |t|
           {
-            name:         t[:function][:name],
-            description:  t[:function][:description],
+            name: t[:function][:name],
+            description: t[:function][:description],
             input_schema: t[:function][:parameters],
           }
         end
@@ -487,13 +489,13 @@ module Parse
         body = JSON.generate(request_body)
 
         req = Net::HTTP::Post.new(uri)
-        req["Content-Type"]      = "application/json"
-        req["x-api-key"]         = @api_key
+        req["Content-Type"] = "application/json"
+        req["x-api-key"] = @api_key
         req["anthropic-version"] = "2023-06-01"
         req.body = body
 
         res = Net::HTTP.start(uri.hostname, uri.port,
-                              use_ssl:      uri.scheme == "https",
+                              use_ssl: uri.scheme == "https",
                               read_timeout: @timeout) { |h| h.request(req) }
         unless res.code.to_i.between?(200, 299)
           raise "Anthropic call failed: HTTP #{res.code} #{res.body}"
@@ -501,13 +503,13 @@ module Parse
 
         parsed = JSON.parse(res.body)
         blocks = Array(parsed["content"])
-        text   = blocks.select { |b| b["type"] == "text" }.map { |b| b["text"] }.join("\n")
-        calls  = blocks.select { |b| b["type"] == "tool_use" }.map do |b|
+        text = blocks.select { |b| b["type"] == "text" }.map { |b| b["text"] }.join("\n")
+        calls = blocks.select { |b| b["type"] == "tool_use" }.map do |b|
           { id: b["id"], name: b["name"], arguments: b["input"] || {} }
         end
         usage_h = parsed["usage"] || {}
         # Anthropic returns input_tokens / output_tokens (not prompt/completion).
-        usage   = price(usage_h["input_tokens"].to_i, usage_h["output_tokens"].to_i)
+        usage = price(usage_h["input_tokens"].to_i, usage_h["output_tokens"].to_i)
         { role: "assistant", content: text, tool_calls: calls, usage: usage }
       end
 
@@ -555,7 +557,7 @@ module Parse
         messages.map do |m|
           case m[:role]
           when "user", "assistant" then { role: m[:role], content: m[:content].to_s }
-          when "system"            then { role: "user",   content: "[Context] #{m[:content]}" }
+          when "system" then { role: "user", content: "[Context] #{m[:content]}" }
           when "tool"
             { role: "user", content: [{ type: "tool_result", tool_use_id: m[:tool_call_id], content: wrap_tool_content_for_llm(m[:content]) }] }
           end

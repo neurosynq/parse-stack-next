@@ -36,10 +36,10 @@ class ObjectDescribeTest < Minitest::Test
     assert_kind_of Hash, data
     assert_equal "DescribedAlbum", data[:class_name]
     assert data.key?(:model), "default output includes :model section"
-    assert data.key?(:acl),   "default output includes :acl section"
+    assert data.key?(:acl), "default output includes :acl section"
     refute data.key?(:schema), "default output is local-only — no :schema"
-    refute data.key?(:clp),    "default output is local-only — no :clp"
-    refute data.key?(:atlas),  "default output is local-only — no :atlas"
+    refute data.key?(:clp), "default output is local-only — no :clp"
+    refute data.key?(:atlas), "default output is local-only — no :atlas"
   end
 
   def test_describe_pretty_returns_multiline_string
@@ -67,9 +67,9 @@ class ObjectDescribeTest < Minitest::Test
     fields = m[:fields]
     assert fields.key?(:title)
     assert fields.key?(:year)
-    refute fields.key?(:objectId),  "core fields are filtered out"
+    refute fields.key?(:objectId), "core fields are filtered out"
     refute fields.key?(:createdAt), "core fields are filtered out"
-    refute fields.key?(:ACL),       "core fields are filtered out"
+    refute fields.key?(:ACL), "core fields are filtered out"
     assert_equal 3, m[:field_count]
   end
 
@@ -137,9 +137,9 @@ class ObjectDescribeTest < Minitest::Test
       section = DescribedAlbum.describe(:indexes, network: true)[:indexes]
       assert section[:available]
       assert_equal 3, section[:count]
-      id_entry    = section[:indexes].find { |i| i[:name] == "_id_" }
+      id_entry = section[:indexes].find { |i| i[:name] == "_id_" }
       email_entry = section[:indexes].find { |i| i[:name] == "email_1" }
-      geo_entry   = section[:indexes].find { |i| i[:name] == "loc_2dsphere" }
+      geo_entry = section[:indexes].find { |i| i[:name] == "loc_2dsphere" }
       assert id_entry[:implicit_id], "_id_ must be flagged as implicit"
       assert email_entry[:unique]
       assert_equal({ "deleted" => { "$ne" => true } }, email_entry[:partial_filter])
@@ -165,7 +165,7 @@ class ObjectDescribeTest < Minitest::Test
       # never receives stats.
       raise ArgumentError, "index_stats requires master: true" unless master == true
       { "ix1" => { ops: 60_712, since: "T1" },
-        "ix2" => { ops: 421,    since: "T1" } }
+        "ix2" => { ops: 421, since: "T1" } }
     end
     saved = Parse.const_get(:MongoDB)
     Parse.send(:remove_const, :MongoDB)
@@ -176,7 +176,7 @@ class ObjectDescribeTest < Minitest::Test
       assert_equal true, section[:usage_available]
       ops_by_name = section[:indexes].map { |i| [i[:name], i[:usage] && i[:usage][:ops]] }.to_h
       assert_equal 60_712, ops_by_name["ix1"]
-      assert_equal 421,    ops_by_name["ix2"]
+      assert_equal 421, ops_by_name["ix2"]
     ensure
       Parse.send(:remove_const, :MongoDB)
       Parse.const_set(:MongoDB, saved)

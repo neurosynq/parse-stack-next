@@ -460,6 +460,7 @@ module Parse
       raise ArgumentError, "Parse::Client#with_session requires a client with a bound session_token" if @session_token.nil?
       Parse.with_session(@session_token, &block)
     end
+
     # The client can support multiple sessions. The first session created, will be placed
     # under the default session tag. The :default session will be the default client to be used
     # by the other classes including Parse::Query and Parse::Objects
@@ -635,10 +636,10 @@ module Parse
       # explicit-nil case, putting a "non-master" client back into master mode
       # in any deployment that exports PARSE_SERVER_MASTER_KEY / PARSE_MASTER_KEY.
       @master_key = if opts.key?(:master_key)
-                      opts[:master_key]
-                    else
-                      ENV["PARSE_SERVER_MASTER_KEY"] || ENV["PARSE_MASTER_KEY"]
-                    end
+          opts[:master_key]
+        else
+          ENV["PARSE_SERVER_MASTER_KEY"] || ENV["PARSE_MASTER_KEY"]
+        end
       # Optional token bound to this client; applied per request as the
       # lowest-priority auth fallback (see #request). Normalize blank/whitespace
       # to nil so it never trips the "token present" branch at request time
@@ -854,8 +855,7 @@ module Parse
               # SDK's keyspace. A scoped view also cannot honestly stand in
               # for a complete Moneta store: `clear`, `each_key`, and `close`
               # either break scope isolation or quietly change meaning.
-              @sdk_cache =
-                if self.cache.respond_to?(:scoped)
+              @sdk_cache = if self.cache.respond_to?(:scoped)
                   self.cache.scoped(cache_keyspace)
                 else
                   Parse::Cache::KeyspacedStore.new(store: self.cache, keyspace: cache_keyspace)
@@ -969,6 +969,7 @@ module Parse
       # env-proxy autodiscovery.
       faraday_opts[:proxy] = nil unless @allow_faraday_proxy
     end
+
     private :validate_faraday_opts!
 
     # Hosts considered "loopback" for the cleartext-ws:// guard in
@@ -1053,10 +1054,10 @@ module Parse
       return if unknown.empty?
 
       warn "[Parse::Client] Ignoring unknown live_query option(s): " \
-           "#{unknown.inspect}. Valid keys are Parse::LiveQuery::Configuration " \
-           "setters (url, application_id, client_key, master_key, ping_interval, " \
-           "pong_timeout, allow_insecure, ssl_min_version, ssl_max_version, " \
-           "logging_enabled, log_level, ...). Check for typos."
+        "#{unknown.inspect}. Valid keys are Parse::LiveQuery::Configuration " \
+        "setters (url, application_id, client_key, master_key, ping_interval, " \
+        "pong_timeout, allow_insecure, ssl_min_version, ssl_max_version, " \
+        "logging_enabled, log_level, ...). Check for typos."
     end
 
     # If set, returns the current retry count for this instance. Otherwise,
@@ -1186,10 +1187,10 @@ module Parse
       # Pre-declare locals referenced inside rescue blocks so CodeQL's
       # uninitialized-variable analysis is satisfied even if an exception
       # raises before the natural assignment site.
-      response     = nil
+      response = nil
       _retry_count = nil
       _retry_delay = nil
-      _request     = nil
+      _request = nil
       # Kwarg-absorption guard. The `**opts` splat in API helper methods
       # (lib/parse/api/*.rb) absorbs a caller-passed `opts: { ... }`
       # keyword as a key named `:opts` rather than as the request options
@@ -1229,193 +1230,193 @@ module Parse
       _retry_max ||= _retry_count
 
       begin
-      headers ||= {}
-      # if the first argument is a Parse::Request object, then construct it
-      _request = nil
-      if method.is_a?(Request)
-        _request = method
-        method = _request.method
-        uri ||= _request.path
-        query ||= _request.query
-        body ||= _request.body
-        headers.merge! _request.headers
-      else
-        _request = Parse::Request.new(method, uri, body: body, headers: headers, opts: opts)
-      end
-
-      # http method
-      method = method.downcase.to_sym
-      # set the User-Agent
-      headers[USER_AGENT_HEADER] = USER_AGENT_VERSION
-
-      if opts[:cache] == false
-        headers[Parse::Middleware::Caching::CACHE_CONTROL] = "no-cache"
-      elsif opts[:cache] == :write_only
-        # Write-only mode: skip reading from cache, but still write to cache
-        # Useful for fetch!/reload! which want fresh data but should update cache
-        headers[Parse::Middleware::Caching::CACHE_WRITE_ONLY] = "true"
-      elsif opts[:cache].is_a?(Numeric)
-        # specify the cache duration of this request
-        headers[Parse::Middleware::Caching::CACHE_EXPIRES_DURATION] = opts[:cache].to_s
-      end
-
-      # Resolve the auth context in three layers:
-      #   1. explicit per-call `use_master_key:` and `session_token:`
-      #   2. ambient session set by `Parse.with_session { ... }` (fiber-local)
-      #   3. process-wide `Parse.client_mode` flag — when true, master key is
-      #      never sent unless the caller explicitly passed `use_master_key: true`
-      explicit_master = opts.key?(:use_master_key)
-
-      if opts[:use_master_key] == false
-        headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
-      elsif Parse.client_mode && opts[:use_master_key] != true
-        # client mode defaults master key OFF unless explicitly opted in
-        headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
-      end
-
-      raw_token = opts[:session_token]
-      # SEC-02: an EXPLICITLY-supplied session_token that is a blank /
-      # whitespace-only string is an unusable credential — NOT an invitation
-      # to fall back to the master key. Treat it as "no credential"
-      # (anonymous) and fail closed: suppress the master key and send no
-      # session header, so Parse Server applies public ACL/CLP instead of
-      # silently executing with master authority. The caller passed a token
-      # explicitly, so we also do NOT fall through to the ambient / bound
-      # token — that was their stated (empty) scope. `session_token: nil`
-      # (value literally nil) is unchanged: it means "not set", and still
-      # resolves via the ambient / bound fallback below.
-      explicit_blank_token = raw_token.is_a?(String) && raw_token.strip.empty?
-      token = explicit_blank_token ? nil : raw_token
-      # When no explicit token was passed AND the caller didn't ask to send
-      # the master key, fall through to (in order) the fiber-local ambient set
-      # by `Parse.with_session`, then this client's own bound `@session_token`.
-      # Explicit `use_master_key: true` is treated as a deliberate admin call
-      # and skips both — otherwise an `admin.do_thing(use_master_key: true)`
-      # nested inside a `with_session(user)` block (or on a token-bound client)
-      # would silently downgrade. The ambient wins over the bound token so a
-      # `with_session` override inside a user-scoped client still takes effect.
-      if token.nil? && !explicit_blank_token && !(explicit_master && opts[:use_master_key] == true)
-        ambient = Parse.current_session_token
-        # A whitespace-only ambient must not count as present: otherwise it
-        # blocks the bound-token fallback below and then fails the later
-        # `token.present?` check, silently sending the master key instead.
-        token = ambient if ambient.is_a?(String) && !ambient.strip.empty?
-        token = @session_token if (token.nil? || token.to_s.strip.empty?) && @session_token
-      end
-      if explicit_blank_token
-        # Fail closed: never send the master key for an unusable explicit token.
-        headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
-      elsif token.present?
-        token = token.session_token if token.respond_to?(:session_token)
-        headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
-        headers[Parse::Protocol::SESSION_TOKEN] = token
-      end
-
-      #if it is a :get request, then use query params, otherwise body.
-      params = (method == :get ? query : body) || {}
-      # if the path does not start with the '/1/' prefix, then add it to be nice.
-      # actually send the request and return the body
-      response_env = @conn.send(method, uri, params, headers)
-      response = response_env.body
-      response.request = _request
-
-      case response.http_status
-      when 401, 403
-        Parse::Client._safe_warn("AuthenticationError", response)
-        raise Parse::Error::AuthenticationError, response
-      when 400, 408
-        if response.code == Parse::Response::ERROR_TIMEOUT || response.code == 143 #"net/http: timeout awaiting response headers"
-          Parse::Client._safe_warn("TimeoutError", response)
-          raise Parse::Error::TimeoutError, response
+        headers ||= {}
+        # if the first argument is a Parse::Request object, then construct it
+        _request = nil
+        if method.is_a?(Request)
+          _request = method
+          method = _request.method
+          uri ||= _request.path
+          query ||= _request.query
+          body ||= _request.body
+          headers.merge! _request.headers
+        else
+          _request = Parse::Request.new(method, uri, body: body, headers: headers, opts: opts)
         end
-      when 404
-        unless response.object_not_found?
-          Parse::Client._safe_warn("ConnectionError", response)
-          raise Parse::Error::ConnectionError, response
-        end
-      when 405, 406
-        Parse::Client._safe_warn("ProtocolError", response)
-        raise Parse::Error::ProtocolError, response
-      when 429 # Request over the throttle limit
-        Parse::Client._safe_warn("RequestLimitExceededError", response)
-        raise Parse::Error::RequestLimitExceededError, response
-      when 500, 503
-        Parse::Client._safe_warn("ServiceUnavailableError", response)
-        raise Parse::Error::ServiceUnavailableError, response
-      end
 
-      if response.error?
-        if response.code <= Parse::Response::ERROR_SERVICE_UNAVAILABLE
-          Parse::Client._safe_warn("ServiceUnavailableError", response)
-          raise Parse::Error::ServiceUnavailableError, response
-        elsif response.code <= 100
-          Parse::Client._safe_warn("ServerError", response)
-          raise Parse::Error::ServerError, response
-        elsif response.code == Parse::Response::ERROR_EXCEEDED_BURST_LIMIT
+        # http method
+        method = method.downcase.to_sym
+        # set the User-Agent
+        headers[USER_AGENT_HEADER] = USER_AGENT_VERSION
+
+        if opts[:cache] == false
+          headers[Parse::Middleware::Caching::CACHE_CONTROL] = "no-cache"
+        elsif opts[:cache] == :write_only
+          # Write-only mode: skip reading from cache, but still write to cache
+          # Useful for fetch!/reload! which want fresh data but should update cache
+          headers[Parse::Middleware::Caching::CACHE_WRITE_ONLY] = "true"
+        elsif opts[:cache].is_a?(Numeric)
+          # specify the cache duration of this request
+          headers[Parse::Middleware::Caching::CACHE_EXPIRES_DURATION] = opts[:cache].to_s
+        end
+
+        # Resolve the auth context in three layers:
+        #   1. explicit per-call `use_master_key:` and `session_token:`
+        #   2. ambient session set by `Parse.with_session { ... }` (fiber-local)
+        #   3. process-wide `Parse.client_mode` flag — when true, master key is
+        #      never sent unless the caller explicitly passed `use_master_key: true`
+        explicit_master = opts.key?(:use_master_key)
+
+        if opts[:use_master_key] == false
+          headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
+        elsif Parse.client_mode && opts[:use_master_key] != true
+          # client mode defaults master key OFF unless explicitly opted in
+          headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
+        end
+
+        raw_token = opts[:session_token]
+        # SEC-02: an EXPLICITLY-supplied session_token that is a blank /
+        # whitespace-only string is an unusable credential — NOT an invitation
+        # to fall back to the master key. Treat it as "no credential"
+        # (anonymous) and fail closed: suppress the master key and send no
+        # session header, so Parse Server applies public ACL/CLP instead of
+        # silently executing with master authority. The caller passed a token
+        # explicitly, so we also do NOT fall through to the ambient / bound
+        # token — that was their stated (empty) scope. `session_token: nil`
+        # (value literally nil) is unchanged: it means "not set", and still
+        # resolves via the ambient / bound fallback below.
+        explicit_blank_token = raw_token.is_a?(String) && raw_token.strip.empty?
+        token = explicit_blank_token ? nil : raw_token
+        # When no explicit token was passed AND the caller didn't ask to send
+        # the master key, fall through to (in order) the fiber-local ambient set
+        # by `Parse.with_session`, then this client's own bound `@session_token`.
+        # Explicit `use_master_key: true` is treated as a deliberate admin call
+        # and skips both — otherwise an `admin.do_thing(use_master_key: true)`
+        # nested inside a `with_session(user)` block (or on a token-bound client)
+        # would silently downgrade. The ambient wins over the bound token so a
+        # `with_session` override inside a user-scoped client still takes effect.
+        if token.nil? && !explicit_blank_token && !(explicit_master && opts[:use_master_key] == true)
+          ambient = Parse.current_session_token
+          # A whitespace-only ambient must not count as present: otherwise it
+          # blocks the bound-token fallback below and then fails the later
+          # `token.present?` check, silently sending the master key instead.
+          token = ambient if ambient.is_a?(String) && !ambient.strip.empty?
+          token = @session_token if (token.nil? || token.to_s.strip.empty?) && @session_token
+        end
+        if explicit_blank_token
+          # Fail closed: never send the master key for an unusable explicit token.
+          headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
+        elsif token.present?
+          token = token.session_token if token.respond_to?(:session_token)
+          headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
+          headers[Parse::Protocol::SESSION_TOKEN] = token
+        end
+
+        #if it is a :get request, then use query params, otherwise body.
+        params = (method == :get ? query : body) || {}
+        # if the path does not start with the '/1/' prefix, then add it to be nice.
+        # actually send the request and return the body
+        response_env = @conn.send(method, uri, params, headers)
+        response = response_env.body
+        response.request = _request
+
+        case response.http_status
+        when 401, 403
+          Parse::Client._safe_warn("AuthenticationError", response)
+          raise Parse::Error::AuthenticationError, response
+        when 400, 408
+          if response.code == Parse::Response::ERROR_TIMEOUT || response.code == 143 #"net/http: timeout awaiting response headers"
+            Parse::Client._safe_warn("TimeoutError", response)
+            raise Parse::Error::TimeoutError, response
+          end
+        when 404
+          unless response.object_not_found?
+            Parse::Client._safe_warn("ConnectionError", response)
+            raise Parse::Error::ConnectionError, response
+          end
+        when 405, 406
+          Parse::Client._safe_warn("ProtocolError", response)
+          raise Parse::Error::ProtocolError, response
+        when 429 # Request over the throttle limit
           Parse::Client._safe_warn("RequestLimitExceededError", response)
           raise Parse::Error::RequestLimitExceededError, response
-        elsif response.code == 209 # Error 209: invalid session token
-          Parse::Client._safe_warn("InvalidSessionTokenError", response)
-          raise Parse::Error::InvalidSessionTokenError, response
-        elsif response.code == Parse::Response::ERROR_DUPLICATE_REQUEST # 159
-          # Request-id idempotency rejected a duplicate — the original write
-          # already applied (NOT a second time). Surface a typed, catchable
-          # signal rather than a generic error; this is what a transparently-
-          # retried write that landed-but-lost-its-response sees on the replay.
-          Parse::Client._safe_warn("DuplicateRequestError", response)
-          raise Parse::Error::DuplicateRequestError, response
+        when 500, 503
+          Parse::Client._safe_warn("ServiceUnavailableError", response)
+          raise Parse::Error::ServiceUnavailableError, response
         end
-      end
 
-      response
-    rescue Parse::Error::RequestLimitExceededError, Parse::Error::ServiceUnavailableError => e
-      # 429 (RequestLimitExceeded): the server threw the request away, so
-      # re-sending is safe for any method. 500/503 (ServiceUnavailable) is
-      # ambiguous — a write may have applied before the error — so only
-      # re-send when the request is idempotent (see #idempotent_retry?).
-      retryable = e.is_a?(Parse::Error::RequestLimitExceededError) || idempotent_retry?(method, body, headers)
-      if _retry_count > 0 && retryable
-        warn "[Parse:Retry] Retries remaining #{_retry_count} : #{response.request}"
-        _retry_count -= 1
-        # Use Retry-After header if available, otherwise use linear backoff
-        retry_after = response.retry_after if response.respond_to?(:retry_after)
-        if retry_after && retry_after > 0
-          _retry_delay = retry_after
-          warn "[Parse:Retry] Using Retry-After header: #{_retry_delay}s"
-        else
-          # Linear backoff (RETRY_DELAY × attempt number) with +/-25% jitter.
-          # Never zero —
-          # zero-wait retries amplify DoS against upstream and stampede on 429.
+        if response.error?
+          if response.code <= Parse::Response::ERROR_SERVICE_UNAVAILABLE
+            Parse::Client._safe_warn("ServiceUnavailableError", response)
+            raise Parse::Error::ServiceUnavailableError, response
+          elsif response.code <= 100
+            Parse::Client._safe_warn("ServerError", response)
+            raise Parse::Error::ServerError, response
+          elsif response.code == Parse::Response::ERROR_EXCEEDED_BURST_LIMIT
+            Parse::Client._safe_warn("RequestLimitExceededError", response)
+            raise Parse::Error::RequestLimitExceededError, response
+          elsif response.code == 209 # Error 209: invalid session token
+            Parse::Client._safe_warn("InvalidSessionTokenError", response)
+            raise Parse::Error::InvalidSessionTokenError, response
+          elsif response.code == Parse::Response::ERROR_DUPLICATE_REQUEST # 159
+            # Request-id idempotency rejected a duplicate — the original write
+            # already applied (NOT a second time). Surface a typed, catchable
+            # signal rather than a generic error; this is what a transparently-
+            # retried write that landed-but-lost-its-response sees on the replay.
+            Parse::Client._safe_warn("DuplicateRequestError", response)
+            raise Parse::Error::DuplicateRequestError, response
+          end
+        end
+
+        response
+      rescue Parse::Error::RequestLimitExceededError, Parse::Error::ServiceUnavailableError => e
+        # 429 (RequestLimitExceeded): the server threw the request away, so
+        # re-sending is safe for any method. 500/503 (ServiceUnavailable) is
+        # ambiguous — a write may have applied before the error — so only
+        # re-send when the request is idempotent (see #idempotent_retry?).
+        retryable = e.is_a?(Parse::Error::RequestLimitExceededError) || idempotent_retry?(method, body, headers)
+        if _retry_count > 0 && retryable
+          warn "[Parse:Retry] Retries remaining #{_retry_count} : #{response.request}"
+          _retry_count -= 1
+          # Use Retry-After header if available, otherwise use linear backoff
+          retry_after = response.retry_after if response.respond_to?(:retry_after)
+          if retry_after && retry_after > 0
+            _retry_delay = retry_after
+            warn "[Parse:Retry] Using Retry-After header: #{_retry_delay}s"
+          else
+            # Linear backoff (RETRY_DELAY × attempt number) with +/-25% jitter.
+            # Never zero —
+            # zero-wait retries amplify DoS against upstream and stampede on 429.
+            backoff_delay = RETRY_DELAY * (_retry_max - _retry_count)
+            _retry_delay = backoff_delay * (0.75 + rand * 0.5)
+          end
+          sleep _retry_delay if _retry_delay > 0
+          retry
+        end
+        raise
+      rescue Faraday::ClientError, Faraday::TimeoutError, Net::OpenTimeout => e
+        # Request timed out mid-flight: the outcome is unknown (the server may
+        # have received and applied the write but never answered), so only
+        # re-send idempotent requests to avoid double-applying.
+        #
+        # Faraday 2.x raises `Faraday::TimeoutError` for a read timeout
+        # (`Timeout::Error` / `Errno::ETIMEDOUT`); it subclasses `Faraday::Error`,
+        # not `ClientError`, so it must be listed explicitly to be caught. We
+        # deliberately do NOT catch `Faraday::ConnectionFailed` (connection
+        # refused/reset, plus the wrapped connect-timeout): refused is a
+        # non-transient "server down / misconfigured" failure, and auto-retrying
+        # it only adds backoff latency before the inevitable error. Broadening to
+        # reset connections safely (retry reset, fail fast on refused) is tracked
+        # as a follow-up.
+        if _retry_count > 0 && idempotent_retry?(method, body, headers)
+          warn "[Parse:Retry] Retries remaining #{_retry_count} : #{_request}"
+          _retry_count -= 1
           backoff_delay = RETRY_DELAY * (_retry_max - _retry_count)
           _retry_delay = backoff_delay * (0.75 + rand * 0.5)
+          sleep _retry_delay if _retry_delay > 0
+          retry
         end
-        sleep _retry_delay if _retry_delay > 0
-        retry
-      end
-      raise
-    rescue Faraday::ClientError, Faraday::TimeoutError, Net::OpenTimeout => e
-      # Request timed out mid-flight: the outcome is unknown (the server may
-      # have received and applied the write but never answered), so only
-      # re-send idempotent requests to avoid double-applying.
-      #
-      # Faraday 2.x raises `Faraday::TimeoutError` for a read timeout
-      # (`Timeout::Error` / `Errno::ETIMEDOUT`); it subclasses `Faraday::Error`,
-      # not `ClientError`, so it must be listed explicitly to be caught. We
-      # deliberately do NOT catch `Faraday::ConnectionFailed` (connection
-      # refused/reset, plus the wrapped connect-timeout): refused is a
-      # non-transient "server down / misconfigured" failure, and auto-retrying
-      # it only adds backoff latency before the inevitable error. Broadening to
-      # reset connections safely (retry reset, fail fast on refused) is tracked
-      # as a follow-up.
-      if _retry_count > 0 && idempotent_retry?(method, body, headers)
-        warn "[Parse:Retry] Retries remaining #{_retry_count} : #{_request}"
-        _retry_count -= 1
-        backoff_delay = RETRY_DELAY * (_retry_max - _retry_count)
-        _retry_delay = backoff_delay * (0.75 + rand * 0.5)
-        sleep _retry_delay if _retry_delay > 0
-        retry
-      end
-      raise Parse::Error::ConnectionError, "#{_request} : #{e.class} - #{e.message}"
+        raise Parse::Error::ConnectionError, "#{_request} : #{e.class} - #{e.message}"
       end
     end
 
@@ -1625,7 +1626,7 @@ module Parse
     when Hash
       type = value["__type"] || value[:__type]
       class_name = value["className"] || value[:className]
-      object_id  = value["objectId"] || value[:objectId]
+      object_id = value["objectId"] || value[:objectId]
       if type == Parse::Model::TYPE_POINTER && class_name && object_id
         # Pointers carry no attributes, so building one is lossless even for
         # an unregistered class (yields a Parse::Pointer).

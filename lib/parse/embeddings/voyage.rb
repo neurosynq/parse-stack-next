@@ -109,23 +109,23 @@ module Parse
       class RateLimitError < Error; end
       class TransientError < Error; end
 
-      DEFAULT_BASE_URL    = "https://api.voyageai.com/v1"
+      DEFAULT_BASE_URL = "https://api.voyageai.com/v1"
       # MongoDB's Atlas Embedding and Reranking API re-exposes the same
       # Voyage models under a MongoDB-operated host. The wire contract
       # (request envelopes, response envelopes, error shapes) is
       # identical — only the host and the credential differ.
-      ATLAS_BASE_URL      = "https://ai.mongodb.com/v1"
+      ATLAS_BASE_URL = "https://ai.mongodb.com/v1"
       # Bumped from `voyage-3` in 5.6.0: that model is retired from the
       # Atlas endpoint, so an Atlas key used without naming a model
       # failed at construction. `voyage-3.5` is served by both
       # endpoints and shares the 1024 native width.
-      DEFAULT_MODEL       = "voyage-3.5"
-      DEFAULT_TIMEOUT     = 30
+      DEFAULT_MODEL = "voyage-3.5"
+      DEFAULT_TIMEOUT = 30
       DEFAULT_OPEN_TIMEOUT = 5
       DEFAULT_MAX_RETRIES = 3
       # Voyage's documented per-request cap is 128 inputs.
-      DEFAULT_BATCH_SIZE  = 128
-      MAX_RESPONSE_BYTES  = 16 * 1024 * 1024
+      DEFAULT_BATCH_SIZE = 128
+      MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
       # Default (native) vector width per model — the width returned
       # when `output_dimension` is omitted from the request.
@@ -138,20 +138,20 @@ module Parse
       # Verified against the live API for every model reachable
       # through {ATLAS_BASE_URL}; see {MODEL_SUPPORTED_DIMENSIONS}.
       MODEL_DEFAULT_DIMENSIONS = {
-        "voyage-4-large"        => 1024,
-        "voyage-4"              => 1024,
-        "voyage-4-lite"         => 1024,
-        "voyage-4-nano"         => 1024,
-        "voyage-3-large"        => 1024,
-        "voyage-3.5"            => 1024,
-        "voyage-3.5-lite"       => 1024,
-        "voyage-3"              => 1024,
-        "voyage-3-lite"         => 512,
-        "voyage-code-3"         => 1024,
-        "voyage-code-2"         => 1536,
-        "voyage-finance-2"      => 1024,
-        "voyage-law-2"          => 1024,
-        "voyage-multimodal-3"   => 1024,
+        "voyage-4-large" => 1024,
+        "voyage-4" => 1024,
+        "voyage-4-lite" => 1024,
+        "voyage-4-nano" => 1024,
+        "voyage-3-large" => 1024,
+        "voyage-3.5" => 1024,
+        "voyage-3.5-lite" => 1024,
+        "voyage-3" => 1024,
+        "voyage-3-lite" => 512,
+        "voyage-code-3" => 1024,
+        "voyage-code-2" => 1536,
+        "voyage-finance-2" => 1024,
+        "voyage-law-2" => 1024,
+        "voyage-multimodal-3" => 1024,
         "voyage-multimodal-3.5" => 1024,
       }.freeze
 
@@ -165,20 +165,20 @@ module Parse
       # 256/512/1024/2048 ladder, and `voyage-multimodal-3.5` accepts
       # it too while `voyage-multimodal-3` does not.
       MODEL_SUPPORTED_DIMENSIONS = {
-        "voyage-4-large"        => [256, 512, 1024, 2048],
-        "voyage-4"              => [256, 512, 1024, 2048],
-        "voyage-4-lite"         => [256, 512, 1024, 2048],
-        "voyage-4-nano"         => [256, 512, 1024, 2048],
-        "voyage-3-large"        => [256, 512, 1024, 2048],
-        "voyage-3.5"            => [256, 512, 1024, 2048],
-        "voyage-3.5-lite"       => [256, 512, 1024, 2048],
-        "voyage-3"              => [1024],
-        "voyage-3-lite"         => [512],
-        "voyage-code-3"         => [256, 512, 1024, 2048],
-        "voyage-code-2"         => [1536],
-        "voyage-finance-2"      => [1024],
-        "voyage-law-2"          => [1024],
-        "voyage-multimodal-3"   => [1024],
+        "voyage-4-large" => [256, 512, 1024, 2048],
+        "voyage-4" => [256, 512, 1024, 2048],
+        "voyage-4-lite" => [256, 512, 1024, 2048],
+        "voyage-4-nano" => [256, 512, 1024, 2048],
+        "voyage-3-large" => [256, 512, 1024, 2048],
+        "voyage-3.5" => [256, 512, 1024, 2048],
+        "voyage-3.5-lite" => [256, 512, 1024, 2048],
+        "voyage-3" => [1024],
+        "voyage-3-lite" => [512],
+        "voyage-code-3" => [256, 512, 1024, 2048],
+        "voyage-code-2" => [1536],
+        "voyage-finance-2" => [1024],
+        "voyage-law-2" => [1024],
+        "voyage-multimodal-3" => [1024],
         "voyage-multimodal-3.5" => [256, 512, 1024, 2048],
       }.freeze
 
@@ -189,20 +189,20 @@ module Parse
         MODEL_SUPPORTED_DIMENSIONS.select { |_m, dims| dims.length > 1 }.keys.freeze
 
       MODEL_MAX_INPUT_TOKENS = {
-        "voyage-4-large"        => 32_000,
-        "voyage-4"              => 32_000,
-        "voyage-4-lite"         => 32_000,
-        "voyage-4-nano"         => 32_000,
-        "voyage-3-large"        => 32_000,
-        "voyage-3.5"            => 32_000,
-        "voyage-3.5-lite"       => 32_000,
-        "voyage-3"              => 32_000,
-        "voyage-3-lite"         => 32_000,
-        "voyage-code-3"         => 32_000,
-        "voyage-code-2"         => 16_000,
-        "voyage-finance-2"      => 32_000,
-        "voyage-law-2"          => 16_000,
-        "voyage-multimodal-3"   => 32_000,
+        "voyage-4-large" => 32_000,
+        "voyage-4" => 32_000,
+        "voyage-4-lite" => 32_000,
+        "voyage-4-nano" => 32_000,
+        "voyage-3-large" => 32_000,
+        "voyage-3.5" => 32_000,
+        "voyage-3.5-lite" => 32_000,
+        "voyage-3" => 32_000,
+        "voyage-3-lite" => 32_000,
+        "voyage-code-3" => 32_000,
+        "voyage-code-2" => 16_000,
+        "voyage-finance-2" => 32_000,
+        "voyage-law-2" => 16_000,
+        "voyage-multimodal-3" => 32_000,
         "voyage-multimodal-3.5" => 32_000,
       }.freeze
 
@@ -251,10 +251,10 @@ module Parse
       # Voyage only distinguishes retrieval halves — other intents
       # should receive the unconditioned vector.
       INPUT_TYPE_WIRE_VALUES = {
-        search_query:    "query",
+        search_query: "query",
         search_document: "document",
-        classification:  nil,
-        clustering:      nil,
+        classification: nil,
+        clustering: nil,
       }.freeze
 
       # @param api_key [String] required. Sent as `Authorization: Bearer …`.
@@ -400,8 +400,7 @@ module Parse
         # different request envelope. The response envelope shape is
         # the same (`{ data: [{ embedding, index }], usage: {...} }`)
         # so `extract_vectors!` is reused as-is.
-        body =
-          if MULTIMODAL_MODELS.include?(@model)
+        body = if MULTIMODAL_MODELS.include?(@model)
             build_multimodal_body(strings, wire_input_type)
           else
             build_text_body(strings, wire_input_type)
@@ -630,7 +629,7 @@ module Parse
         end
 
         rows = build_media_rows(
-          sources, kind: kind, allow_insecure: allow_insecure, caller_name: caller_name
+          sources, kind: kind, allow_insecure: allow_insecure, caller_name: caller_name,
         )
         wire_input_type = INPUT_TYPE_WIRE_VALUES[input_type]
 
@@ -907,7 +906,7 @@ module Parse
       end
 
       def backoff_seconds(attempt)
-        [0.5 * (2**(attempt - 1)), 30.0].min
+        [0.5 * (2 ** (attempt - 1)), 30.0].min
       end
 
       def retry_after_seconds(response)
@@ -966,12 +965,11 @@ module Parse
 
         if base_url
           host = begin
-            URI.parse(base_url).host
-          rescue URI::InvalidURIError
-            nil
-          end
-          inferred =
-            case host
+              URI.parse(base_url).host
+            rescue URI::InvalidURIError
+              nil
+            end
+          inferred = case host
             when URI.parse(ATLAS_BASE_URL).host then :atlas
             when URI.parse(DEFAULT_BASE_URL).host then :voyage
             else :custom

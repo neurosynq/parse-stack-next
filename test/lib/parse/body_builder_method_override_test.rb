@@ -53,7 +53,7 @@ class BodyBuilderMethodOverrideTest < Minitest::Test
 
   # A pipeline whose JSON is long enough to push the encoded URL past MAX.
   def long_pipeline
-    big_in = (0...400).map { |i| "Project$#{format('%010d', i)}" }
+    big_in = (0...400).map { |i| "Project$#{format("%010d", i)}" }
     [
       { "$match" => { "_p_project" => { "$in" => big_in } } },
       { "$group" => { "_id" => { "year" => { "$year" => "$createdAt" } }, "count" => { "$sum" => 1 } } },

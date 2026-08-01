@@ -31,7 +31,7 @@ class ClientRestPointerPermissionsIntegrationTest < Minitest::Test
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
     super
     @alice, @alice_pwd = seed_client_user("ppp_alice")
-    @bob,   @bob_pwd   = seed_client_user("ppp_bob")
+    @bob, @bob_pwd = seed_client_user("ppp_bob")
     install_class_with_pointer_clp!
   end
 
@@ -51,14 +51,14 @@ class ClientRestPointerPermissionsIntegrationTest < Minitest::Test
         "classLevelPermissions" => {
           # Authenticated users can attempt all operations; per-row
           # filtering happens via readUserFields / writeUserFields.
-          "find"   => { "requiresAuthentication" => true },
-          "get"    => { "requiresAuthentication" => true },
-          "count"  => { "requiresAuthentication" => true },
+          "find" => { "requiresAuthentication" => true },
+          "get" => { "requiresAuthentication" => true },
+          "count" => { "requiresAuthentication" => true },
           "create" => { "requiresAuthentication" => true },
           "update" => { "requiresAuthentication" => true },
           "delete" => { "requiresAuthentication" => true },
           "addField" => {},
-          "readUserFields"  => ["owner"],
+          "readUserFields" => ["owner"],
           "writeUserFields" => ["owner"],
         },
       }

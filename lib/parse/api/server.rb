@@ -192,10 +192,10 @@ module Parse
       # unparseable input so a wire-format surprise never raises.
       def server_version_below?(actual, floor)
         actual_parts = actual.scan(/\d+/).first(2).map(&:to_i)
-        floor_parts  = floor.scan(/\d+/).first(2).map(&:to_i)
+        floor_parts = floor.scan(/\d+/).first(2).map(&:to_i)
         return false if actual_parts.empty? || floor_parts.empty?
         actual_parts << 0 while actual_parts.length < 2
-        floor_parts  << 0 while floor_parts.length  < 2
+        floor_parts << 0 while floor_parts.length < 2
         (actual_parts <=> floor_parts) < 0
       end
     end

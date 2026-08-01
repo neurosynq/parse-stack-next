@@ -132,7 +132,7 @@ module Parse
           raise ArgumentError,
                 "MCPServer refuses to bind non-loopback host #{host.inspect} without an api_key. " \
                 "Set MCP_API_KEY in the environment, pass api_key: explicitly, or use a loopback " \
-                "host (one of: #{LOOPBACK_HOSTS.join(', ')})."
+                "host (one of: #{LOOPBACK_HOSTS.join(", ")})."
         end
 
         @port = port

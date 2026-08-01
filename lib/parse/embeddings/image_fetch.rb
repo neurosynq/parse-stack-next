@@ -56,6 +56,7 @@ module Parse
       class InvalidImageType < Parse::Embeddings::Error
         # @return [Symbol] failure-mode tag.
         attr_reader :reason
+
         def initialize(reason, message)
           @reason = reason
           super(message)
@@ -76,6 +77,7 @@ module Parse
           "#<Parse::Embeddings::ImageFetch::FetchedImage mime_type=#{mime_type.inspect} " \
           "bytes=#{bytes.respond_to?(:bytesize) ? bytes.bytesize : 0} url=#{url.inspect}>"
         end
+
         alias_method :to_s, :inspect
       end
 
@@ -88,11 +90,11 @@ module Parse
       # against the sniffed type. Extensions not listed here are ignored
       # (the magic bytes alone govern).
       EXTENSION_MIME = {
-        ".jpg"  => "image/jpeg",
+        ".jpg" => "image/jpeg",
         ".jpeg" => "image/jpeg",
-        ".jpe"  => "image/jpeg",
-        ".png"  => "image/png",
-        ".gif"  => "image/gif",
+        ".jpe" => "image/jpeg",
+        ".png" => "image/png",
+        ".gif" => "image/gif",
         ".webp" => "image/webp",
       }.freeze
 
@@ -109,8 +111,8 @@ module Parse
         return nil unless bytes.is_a?(String) && bytes.bytesize >= 12
         b = bytes.byteslice(0, 16).force_encoding(Encoding::BINARY)
         return "image/jpeg" if b.start_with?("\xFF\xD8\xFF".b)
-        return "image/png"  if b.start_with?("\x89PNG\r\n\x1A\n".b)
-        return "image/gif"  if b.start_with?("GIF87a".b) || b.start_with?("GIF89a".b)
+        return "image/png" if b.start_with?("\x89PNG\r\n\x1A\n".b)
+        return "image/gif" if b.start_with?("GIF87a".b) || b.start_with?("GIF89a".b)
         if b.start_with?("RIFF".b) && b.byteslice(8, 4) == "WEBP".b
           return "image/webp"
         end
@@ -177,26 +179,26 @@ module Parse
       def verify!(bytes, url: nil)
         if bytes.nil? || bytes.empty?
           raise InvalidImageType.new(:empty,
-            "Parse::Embeddings::ImageFetch: downloaded body is empty.")
+                                     "Parse::Embeddings::ImageFetch: downloaded body is empty.")
         end
         mime = sniff_mime(bytes)
         if mime.nil?
           raise InvalidImageType.new(:unknown_magic,
-            "Parse::Embeddings::ImageFetch: leading bytes match no supported image " \
-            "format (JPEG/PNG/GIF/WebP). The Content-Type header is not consulted — " \
-            "unrecognized content is refused outright.")
+                                     "Parse::Embeddings::ImageFetch: leading bytes match no supported image " \
+                                     "format (JPEG/PNG/GIF/WebP). The Content-Type header is not consulted — " \
+                                     "unrecognized content is refused outright.")
         end
         allowed = Parse::Embeddings.allowed_image_types
         unless allowed.include?(mime)
           raise InvalidImageType.new(:type_not_allowed,
-            "Parse::Embeddings::ImageFetch: sniffed type #{mime.inspect} is not in " \
-            "Parse::Embeddings.allowed_image_types (#{allowed.inspect}).")
+                                     "Parse::Embeddings::ImageFetch: sniffed type #{mime.inspect} is not in " \
+                                     "Parse::Embeddings.allowed_image_types (#{allowed.inspect}).")
         end
         ext_mime = extension_mime(url)
         if ext_mime && ext_mime != mime
           raise InvalidImageType.new(:extension_mismatch,
-            "Parse::Embeddings::ImageFetch: URL extension implies #{ext_mime.inspect} " \
-            "but the magic bytes are #{mime.inspect} — refusing MIME-laundered content.")
+                                     "Parse::Embeddings::ImageFetch: URL extension implies #{ext_mime.inspect} " \
+                                     "but the magic bytes are #{mime.inspect} — refusing MIME-laundered content.")
         end
         mime
       end
@@ -210,10 +212,10 @@ module Parse
       def extension_mime(url)
         return nil unless url.is_a?(String)
         path = begin
-          URI.parse(url).path.to_s
-        rescue URI::InvalidURIError
-          return nil
-        end
+            URI.parse(url).path.to_s
+          rescue URI::InvalidURIError
+            return nil
+          end
         dot = path.rindex(".")
         return nil if dot.nil?
         EXTENSION_MIME[path[dot..].to_s.downcase]
@@ -231,10 +233,9 @@ module Parse
       # @param mime [String] sniffed MIME type.
       # @return [String] bytes with metadata removed.
       def strip_metadata(bytes, mime)
-        stripped =
-          case mime
+        stripped = case mime
           when "image/jpeg" then strip_jpeg_app1(bytes)
-          when "image/png"  then strip_png_exif(bytes)
+          when "image/png" then strip_png_exif(bytes)
           when "image/webp" then strip_webp_metadata(bytes)
           else return bytes
           end

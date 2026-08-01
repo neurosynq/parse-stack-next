@@ -42,7 +42,7 @@ class PaginationNextCallTest < Minitest::Test
     fake_client.define_singleton_method(:find_objects) do |_class, _query, **_opts|
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:results)  { rows }
+      r.define_singleton_method(:results) { rows }
       r
     end
     agent.define_singleton_method(:client) { fake_client }
@@ -60,7 +60,7 @@ class PaginationNextCallTest < Minitest::Test
 
   def test_has_more_true_produces_next_call
     # limit:10 rows returned → has_more (10 >= 10) → next_call present
-    rows  = make_rows(10)
+    rows = make_rows(10)
     agent = agent_with_rows(rows)
     result = agent.execute(:query_class, class_name: "PaginationStudent", limit: 10)
     assert result[:success], result[:error].to_s
@@ -72,7 +72,7 @@ class PaginationNextCallTest < Minitest::Test
   end
 
   def test_next_call_skip_incremented_by_limit
-    rows  = make_rows(10)
+    rows = make_rows(10)
     agent = agent_with_rows(rows)
     result = agent.execute(:query_class, class_name: "PaginationStudent", limit: 10, skip: 20)
     data = result[:data]
@@ -81,7 +81,7 @@ class PaginationNextCallTest < Minitest::Test
   end
 
   def test_next_call_tool_is_literal_string
-    rows  = make_rows(10)
+    rows = make_rows(10)
     agent = agent_with_rows(rows)
     result = agent.execute(:query_class, class_name: "PaginationStudent", limit: 10)
     nc = result[:data][:next_call]
@@ -90,14 +90,14 @@ class PaginationNextCallTest < Minitest::Test
   end
 
   def test_next_call_class_name_preserved
-    rows  = make_rows(10)
+    rows = make_rows(10)
     agent = agent_with_rows(rows)
     result = agent.execute(:query_class, class_name: "PaginationStudent", limit: 10)
     assert_equal "PaginationStudent", result[:data][:next_call][:arguments][:class_name]
   end
 
   def test_next_call_limit_preserved
-    rows  = make_rows(10)
+    rows = make_rows(10)
     agent = agent_with_rows(rows)
     result = agent.execute(:query_class, class_name: "PaginationStudent", limit: 10)
     assert_equal 10, result[:data][:next_call][:arguments][:limit]
@@ -108,38 +108,38 @@ class PaginationNextCallTest < Minitest::Test
   # -----------------------------------------------------------------------
 
   def test_next_call_preserves_where
-    rows  = make_rows(10)
+    rows = make_rows(10)
     agent = agent_with_rows(rows)
     where = { "grade" => 12 }
     result = agent.execute(:query_class, class_name: "PaginationStudent",
-                           limit: 10, where: where)
+                                         limit: 10, where: where)
     nc = result[:data][:next_call]
     assert nc, "next_call: must be present"
     assert_equal where, nc[:arguments][:where]
   end
 
   def test_next_call_preserves_order
-    rows  = make_rows(10)
+    rows = make_rows(10)
     agent = agent_with_rows(rows)
     result = agent.execute(:query_class, class_name: "PaginationStudent",
-                           limit: 10, order: "-grade")
+                                         limit: 10, order: "-grade")
     nc = result[:data][:next_call]
     assert nc, "next_call: must be present"
     assert_equal "-grade", nc[:arguments][:order]
   end
 
   def test_next_call_preserves_keys
-    rows  = make_rows(10)
+    rows = make_rows(10)
     agent = agent_with_rows(rows)
     result = agent.execute(:query_class, class_name: "PaginationStudent",
-                           limit: 10, keys: ["name", "grade"])
+                                         limit: 10, keys: ["name", "grade"])
     nc = result[:data][:next_call]
     assert nc, "next_call: must be present"
     assert_equal ["name", "grade"], nc[:arguments][:keys]
   end
 
   def test_next_call_preserves_include
-    rows  = make_rows(10)
+    rows = make_rows(10)
     agent = agent_with_rows(rows)
     # PaginationStudent has no pointer fields declared so assert_include_paths_accessible!
     # short-circuits on `return unless klass.respond_to?(:references)`. Any
@@ -147,7 +147,7 @@ class PaginationNextCallTest < Minitest::Test
     # the caller-supplied value appears verbatim in next_call.arguments.
     include_val = ["someRelated"]
     result = agent.execute(:query_class, class_name: "PaginationStudent",
-                           limit: 10, include: include_val)
+                                         limit: 10, include: include_val)
     nc = result[:data][:next_call]
     assert nc, "next_call: must be present when has_more is true"
     assert nc[:arguments].key?(:include),
@@ -160,15 +160,15 @@ class PaginationNextCallTest < Minitest::Test
   # -----------------------------------------------------------------------
 
   def test_next_call_arguments_compact_omits_nil_optional_args
-    rows  = make_rows(10)
+    rows = make_rows(10)
     agent = agent_with_rows(rows)
     # No where, keys, order, include supplied — they should all be absent from
     # next_call.arguments (compacted away, not present as nil).
     result = agent.execute(:query_class, class_name: "PaginationStudent", limit: 10)
     args = result[:data][:next_call][:arguments]
-    refute args.key?(:where),   "where: must be absent when not supplied"
-    refute args.key?(:keys),    "keys: must be absent when not supplied"
-    refute args.key?(:order),   "order: must be absent when not supplied"
+    refute args.key?(:where), "where: must be absent when not supplied"
+    refute args.key?(:keys), "keys: must be absent when not supplied"
+    refute args.key?(:order), "order: must be absent when not supplied"
     refute args.key?(:include), "include: must be absent when not supplied"
     # But required keys ARE present:
     assert args.key?(:class_name)
@@ -182,7 +182,7 @@ class PaginationNextCallTest < Minitest::Test
 
   def test_has_more_false_omits_next_call
     # 5 rows with limit:10 → has_more (5 < 10) is false → no next_call
-    rows  = make_rows(5)
+    rows = make_rows(5)
     agent = agent_with_rows(rows)
     result = agent.execute(:query_class, class_name: "PaginationStudent", limit: 10)
     data = result[:data]
@@ -202,14 +202,14 @@ class PaginationNextCallTest < Minitest::Test
   # -----------------------------------------------------------------------
 
   def test_result_envelope_keys_intact
-    rows  = make_rows(10)
+    rows = make_rows(10)
     agent = agent_with_rows(rows)
     result = agent.execute(:query_class, class_name: "PaginationStudent", limit: 10)
     data = result[:data]
-    assert data.key?(:class_name),   "class_name must still be present"
+    assert data.key?(:class_name), "class_name must still be present"
     assert data.key?(:result_count), "result_count must still be present"
-    assert data.key?(:pagination),   "pagination block must still be present"
-    assert data.key?(:results),      "results array must still be present"
+    assert data.key?(:pagination), "pagination block must still be present"
+    assert data.key?(:results), "results array must still be present"
     assert_equal 10, data[:results].size
   end
 
@@ -217,7 +217,7 @@ class PaginationNextCallTest < Minitest::Test
     # MAX_RESULTS_DISPLAY is 50. Return 60 rows (limit:100) so:
     #   - has_more is false (60 < 100) → no next_call
     #   - truncated is true → truncated_note present
-    rows  = make_rows(60)
+    rows = make_rows(60)
     agent = agent_with_rows(rows)
     result = agent.execute(:query_class, class_name: "PaginationStudent", limit: 100)
     data = result[:data]
@@ -230,13 +230,13 @@ class PaginationNextCallTest < Minitest::Test
   def test_next_call_and_truncated_can_coexist
     # 100 rows with limit:100 → has_more true AND truncated (100 > 50).
     # Both next_call: and truncated:/truncated_note: should be present.
-    rows  = make_rows(100)
+    rows = make_rows(100)
     agent = agent_with_rows(rows)
     result = agent.execute(:query_class, class_name: "PaginationStudent", limit: 100)
     data = result[:data]
     assert data[:pagination][:has_more]
-    assert data.key?(:next_call),       "next_call: present when has_more"
-    assert data[:truncated],            "truncated: present when result count exceeds display cap"
+    assert data.key?(:next_call), "next_call: present when has_more"
+    assert data[:truncated], "truncated: present when result count exceeds display cap"
     assert data[:truncated_note]
   end
 
@@ -251,11 +251,11 @@ class PaginationNextCallTest < Minitest::Test
       { "objectId" => "id_#{i}", "a" => "x" * 5_000, "b" => "y" * 5_000 }
     end
     data = {
-      class_name:   "PaginationStudent",
+      class_name: "PaginationStudent",
       result_count: 20,
-      pagination:   { limit: 100, skip: 0, has_more: true },
-      next_call:    { tool: "query_class", arguments: { class_name: "PaginationStudent", limit: 100, skip: 100 } },
-      results:      rows,
+      pagination: { limit: 100, skip: 0, has_more: true },
+      next_call: { tool: "query_class", arguments: { class_name: "PaginationStudent", limit: 100, skip: 100 } },
+      results: rows,
     }
     d = Parse::Agent::MCPDispatcher
     text = d.send(:attempt_truncate_response, data, 50_000, "query_class")
@@ -275,12 +275,12 @@ class PaginationNextCallTest < Minitest::Test
       { "objectId" => "id_#{i}", "a" => "x" * 5_000, "b" => "y" * 5_000 }
     end
     data = {
-      result_count:   20,
-      truncated:      true,
+      result_count: 20,
+      truncated: true,
       truncated_note: "Showing first 50 of 20 results",
-      next_call:      { tool: "query_class", arguments: { class_name: "PaginationStudent", limit: 100, skip: 100 } },
-      pagination:     { limit: 100, skip: 0, has_more: true },
-      results:        rows,
+      next_call: { tool: "query_class", arguments: { class_name: "PaginationStudent", limit: 100, skip: 100 } },
+      pagination: { limit: 100, skip: 0, has_more: true },
+      results: rows,
     }
     d = Parse::Agent::MCPDispatcher
     text = d.send(:attempt_truncate_response, data, 50_000, "query_class")

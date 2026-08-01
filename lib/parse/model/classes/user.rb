@@ -450,7 +450,7 @@ module Parse
 
       # @!visibility private
       def _rebuild_user_protected_fields!
-        @master_only_fields  ||= []
+        @master_only_fields ||= []
         @self_visible_fields ||= []
         pointer = @self_pointer_field || :self
         all_hidden = (@master_only_fields + @self_visible_fields).uniq
@@ -1437,6 +1437,38 @@ module Parse
       end
     end
 
+    # Return whether this user can read `object` under its effective `get`
+    # CLP and object-level ACL. Public access, a missing ACL (which Parse
+    # Server treats as public), a direct user grant, and grants inherited
+    # through the user's role graph are all honored. Pointer-field CLPs are
+    # evaluated against this particular object.
+    #
+    # @param object [Parse::Object] the Parse object to check.
+    # @return [Boolean] whether both CLP and ACL grant this user read access.
+    def can_read?(object)
+      effective_access?(object, :read)
+    end
+
+    # Return whether this user can write `object` under its effective `update`
+    # CLP and object-level ACL. See {#can_read?} for the ACL and role-resolution
+    # semantics.
+    #
+    # @param object [Parse::Object] the Parse object to check.
+    # @return [Boolean] whether both CLP and ACL grant this user write access.
+    def can_write?(object)
+      effective_access?(object, :write)
+    end
+
+    # Return whether this user can delete `object` under its effective `delete`
+    # CLP and object-level ACL write permission. See {#can_read?} for the ACL
+    # and role-resolution semantics.
+    #
+    # @param object [Parse::Object] the Parse object to check.
+    # @return [Boolean] whether both CLP and ACL grant this user delete access.
+    def can_delete?(object)
+      effective_access?(object, :delete)
+    end
+
     # Return the transitive upward closure of role names this user
     # inherits permissions from.
     #
@@ -1502,6 +1534,64 @@ module Parse
     end
 
     private
+
+    # Evaluate one operation for this user. Public and direct grants are
+    # answered before consulting the role graph; inherited roles are resolved
+    # only when either ACL or CLP still needs them. Every layer fails closed.
+    def effective_access?(object, operation)
+      return false unless object.is_a?(Parse::Object)
+
+      object_acl = object.acl
+      permission_keys = if operation == :read
+          object_acl&.readable_by
+        else
+          object_acl&.writable_by
+        end
+      permission_keys = Array(permission_keys).map(&:to_s)
+      clp_operation = case operation
+        when :read then :get
+        when :write then :update
+        when :delete then :delete
+        end
+      permission_strings = [Parse::ACL::PUBLIC]
+      permission_strings << id.to_s if id.present?
+
+      acl_permits = object_acl.nil? || permission_keys.any? { |key| permission_strings.include?(key) }
+      clp_permits = Parse::CLPScope.permits?(object.parse_class, clp_operation, permission_strings)
+      if acl_permits && clp_permits
+        return clp_row_allows_access?(object, clp_operation)
+      end
+
+      role_permission_keys = permission_keys.select { |key| key.start_with?("role:") }
+      return false if (!acl_permits && role_permission_keys.empty?) || !id.present?
+
+      role_names = begin
+          Parse::Role.all_for_user(self, client: client)
+        rescue StandardError
+          Set.new
+        end
+      role_names.each do |role_name|
+        permission_strings << "role:#{role_name}" if role_name.present?
+      end
+      permission_strings.uniq!
+
+      acl_permits = object_acl.nil? || permission_keys.any? { |key| permission_strings.include?(key) }
+      clp_permits = Parse::CLPScope.permits?(object.parse_class, clp_operation, permission_strings)
+      acl_permits && clp_permits && clp_row_allows_access?(object, clp_operation)
+    end
+
+    # Apply row-level CLP pointer constraints to this object. Both modern
+    # per-operation `pointerFields` and Parse Server's top-level
+    # `readUserFields` / `writeUserFields` forms are supported.
+    def clp_row_allows_access?(object, clp_operation)
+      fields = Array(Parse::CLPScope.pointer_fields_for(object.parse_class, clp_operation))
+      fields.concat(Array(Parse::CLPScope.user_fields_for(object.parse_class, clp_operation)))
+      fields.uniq!
+      return true if fields.empty?
+      return false unless id.present?
+
+      Parse::CLPScope.filter_by_pointer_fields([object.as_json], fields, id.to_s).any?
+    end
 
     # Self-guard for session-scoped instance methods. Fails closed when
     # the user instance carries no `@session_token`, preventing the

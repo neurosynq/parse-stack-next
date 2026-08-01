@@ -82,8 +82,8 @@ class ClientRestForbiddenPathsIntegrationTest < Minitest::Test
     other_user, other_password = seed_client_user("forbidden_session_other")
 
     as_client do
-      me      = Parse::User.login(@user.username, @password)
-      _other  = Parse::User.login(other_user.username, other_password)
+      me = Parse::User.login(@user.username, @password)
+      _other = Parse::User.login(other_user.username, other_password)
 
       response = Parse.client.find_objects(
         "_Session", {},
@@ -97,7 +97,7 @@ class ClientRestForbiddenPathsIntegrationTest < Minitest::Test
         # sessions on a non-master enumeration, this would catch it.
         rows.each do |row|
           user_ptr = row["user"] || row[:user] || {}
-          user_id  = user_ptr.is_a?(Hash) ? (user_ptr["objectId"] || user_ptr[:objectId]) : nil
+          user_id = user_ptr.is_a?(Hash) ? (user_ptr["objectId"] || user_ptr[:objectId]) : nil
           assert_equal me.id, user_id,
                        "non-master /sessions enumeration must NOT return another user's session row: #{row.inspect}"
         end

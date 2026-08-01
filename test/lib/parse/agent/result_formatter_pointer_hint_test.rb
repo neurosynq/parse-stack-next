@@ -16,11 +16,11 @@ class ResultFormatterPointerHintTest < Minitest::Test
   def test_format_schema_emits_query_hint_for_pointer_fields
     schema = {
       "className" => "Subscription",
-      "fields"    => {
+      "fields" => {
         "objectId" => { "type" => "String" },
-        "team"     => { "type" => "Pointer", "targetClass" => "Team" },
-        "user"     => { "type" => "Pointer", "targetClass" => "_User" },
-        "name"     => { "type" => "String" },
+        "team" => { "type" => "Pointer", "targetClass" => "Team" },
+        "user" => { "type" => "Pointer", "targetClass" => "_User" },
+        "name" => { "type" => "String" },
       },
     }
 
@@ -48,7 +48,7 @@ class ResultFormatterPointerHintTest < Minitest::Test
     # `target_class` field either.
     schema = {
       "className" => "ManifestParent",
-      "fields"    => {
+      "fields" => {
         "items" => { "type" => "Relation", "targetClass" => "RFPHiddenSecret" },
       },
     }
@@ -63,7 +63,7 @@ class ResultFormatterPointerHintTest < Minitest::Test
     # the column directly) — leave them out of the v1 hint surface.
     schema = {
       "className" => "Project",
-      "fields"    => {
+      "fields" => {
         "members" => { "type" => "Relation", "targetClass" => "_User" },
       },
     }
@@ -86,7 +86,7 @@ class ResultFormatterPointerHintTest < Minitest::Test
     # the *shapes* it must use.
     schema = {
       "className" => "Order",
-      "fields"    => {
+      "fields" => {
         "audit" => { "type" => "Pointer", "targetClass" => "RFPHiddenSecret" },
       },
     }
@@ -101,7 +101,7 @@ class ResultFormatterPointerHintTest < Minitest::Test
   def test_query_hint_uses_target_placeholder_when_target_class_missing
     schema = {
       "className" => "Weird",
-      "fields"    => {
+      "fields" => {
         "ptr" => { "type" => "Pointer" }, # no targetClass — degenerate but possible
       },
     }

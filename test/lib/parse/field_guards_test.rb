@@ -51,6 +51,7 @@ class GuardedFieldOverride < Parse::Object
   property :external_ref, :string, field: "externalRef"
   property :title, :string
   guard :external_ref, :immutable
+
   def autofetch!(*); nil; end
 end
 
@@ -61,6 +62,7 @@ class GuardedTypes < Parse::Object
   guard :occurred_at, :immutable
   guard :tags, :master_only
   guard :metadata, :master_only
+
   def autofetch!(*); nil; end
 end
 
@@ -233,7 +235,7 @@ class FieldGuardsTest < Minitest::Test
 
   def test_belongs_to_pointer_reverted_on_update
     orig_author = Parse::Pointer.new("GuardedAuthor", "author_orig")
-    new_author  = Parse::Pointer.new("GuardedAuthor", "author_new")
+    new_author = Parse::Pointer.new("GuardedAuthor", "author_new")
 
     payload = Parse::Webhooks::Payload.new(
       "triggerName" => "beforeSave",
@@ -436,6 +438,7 @@ class FieldGuardsTest < Minitest::Test
       property :name, :string
       property :owner, :string
       guard :owner, :master_only
+
       def autofetch!(*); nil; end
     end
 
@@ -466,6 +469,7 @@ class FieldGuardsTest < Minitest::Test
       property :note, :string
       property :owner, :string
       guard :owner, :master_only
+
       def autofetch!(*); nil; end
     end
 
@@ -504,6 +508,7 @@ class FieldGuardsTest < Minitest::Test
       def self.parse_class; "KeywordGuardClass"; end
       property :x, :string
       guard :x, mode: :master_only
+
       def autofetch!(*); nil; end
     end
     assert_equal :master_only, klass.field_guards[:x]
@@ -602,6 +607,7 @@ class FieldGuardsTest < Minitest::Test
       def self.parse_class; "GuardedMissingField"; end
       property :real_field, :string
       guard :imaginary_field, :master_only   # not declared as a property
+
       def autofetch!(*); nil; end
     end
 
@@ -619,7 +625,7 @@ class FieldGuardsTest < Minitest::Test
 
   def test_date_property_reverts_correctly
     orig_iso = "2020-01-01T12:00:00.000Z"
-    new_iso  = "2025-06-15T09:30:00.000Z"
+    new_iso = "2025-06-15T09:30:00.000Z"
     payload = Parse::Webhooks::Payload.new(
       "triggerName" => "beforeSave",
       "master" => false,

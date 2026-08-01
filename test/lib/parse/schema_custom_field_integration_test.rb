@@ -49,7 +49,7 @@ class SchemaCustomFieldIntegrationTest < Minitest::Test
     fetched = SchemaCustomFieldInv.query(:objectId => obj.id).first
     refute_nil fetched, "saved object must be retrievable"
     assert_equal "Widget", fetched.display_name,
-           "value written via display_name must round-trip through the display_label column"
+                 "value written via display_name must round-trip through the display_label column"
     assert_equal 1299, fetched.unit_price
   ensure
     obj&.destroy

@@ -44,11 +44,11 @@ class ToolsGetObjectsTest < Minitest::Test
 
   def test_empty_ids_returns_empty_result_without_querying
     result = T.get_objects(@agent, class_name: "Song", ids: [])
-    assert_equal "Song",  result[:class_name]
-    assert_equal({},       result[:objects])
-    assert_equal([],       result[:missing])
-    assert_equal 0,        result[:requested]
-    assert_equal 0,        result[:found]
+    assert_equal "Song", result[:class_name]
+    assert_equal({}, result[:objects])
+    assert_equal([], result[:missing])
+    assert_equal 0, result[:requested]
+    assert_equal 0, result[:found]
   end
 
   # ---------------------------------------------------------------------------
@@ -71,7 +71,7 @@ class ToolsGetObjectsTest < Minitest::Test
       result = T.get_objects(@agent, class_name: "Song", ids: ids)
       assert_equal 50, result[:requested]
       assert_equal 50, result[:found]
-      assert_equal 0,  result[:missing].size
+      assert_equal 0, result[:missing].size
     end
   end
 

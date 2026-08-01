@@ -403,11 +403,11 @@ module Parse
       # @return [Parse::ACL] the current default ACLs for this class.
       def default_acls
         @default_acls ||= case acl_policy_setting
-                          when :public, :owner_else_public then Parse::ACL.everyone
-                          when :public_read, :owner_but_public_read then Parse::ACL.everyone(true, false)
-                          when :private, :owner_else_private then Parse::ACL.private
-                          else Parse::ACL.everyone
-                          end
+          when :public, :owner_else_public then Parse::ACL.everyone
+          when :public_read, :owner_but_public_read then Parse::ACL.everyone(true, false)
+          when :private, :owner_else_private then Parse::ACL.private
+          else Parse::ACL.everyone
+          end
       end
 
       # A method to set default ACLs to be applied for newly created
@@ -541,10 +541,10 @@ module Parse
         end
         if owner.nil? && policy.to_s.start_with?("owner_")
           fallback = case policy
-                     when :owner_else_public then "public R/W"
-                     when :owner_but_public_read then "public read only"
-                     else "master-key-only"
-                     end
+            when :owner_else_public then "public R/W"
+            when :owner_but_public_read then "public read only"
+            else "master-key-only"
+            end
           warn "[#{self}] acl_policy #{policy.inspect} declared without `owner:` field; ACL resolution will always use the fallback (#{fallback}). Pass `as:` at construction to override."
         end
         @acl_policy_setting = policy
@@ -698,7 +698,7 @@ module Parse
         class_permissions.set_default_permission(
           public_access: public,
           roles: Array(roles),
-          requires_authentication: requires_authentication
+          requires_authentication: requires_authentication,
         )
 
         # Also explicitly set all operations to ensure they're included
@@ -789,7 +789,7 @@ module Parse
           roles: Array(roles),
           users: Array(users),
           pointer_fields: converted_pointer_fields,
-          requires_authentication: requires_authentication
+          requires_authentication: requires_authentication,
         )
       end
 
@@ -1043,8 +1043,8 @@ module Parse
 
           per_field[local_sym] = {
             write: guards_map[local_sym] || :open,
-            read:  hidden_from.empty? ? :open : { hidden_from: hidden_from },
-            type:  data_type,
+            read: hidden_from.empty? ? :open : { hidden_from: hidden_from },
+            type: data_type,
           }
         end
 
@@ -1057,10 +1057,10 @@ module Parse
           end
 
         {
-          operations:        operations,
-          read_user_fields:  perms.respond_to?(:read_user_fields)  ? perms.read_user_fields  : [],
+          operations: operations,
+          read_user_fields: perms.respond_to?(:read_user_fields) ? perms.read_user_fields : [],
           write_user_fields: perms.respond_to?(:write_user_fields) ? perms.write_user_fields : [],
-          fields:            per_field,
+          fields: per_field,
         }
       end
 
@@ -1241,8 +1241,7 @@ module Parse
       # for tests or internal mongo-direct bulk writes). A class may flip
       # the per-class default with `vector_visibility :public`; an explicit
       # `include_vectors:` in the call always wins over the class default.
-      include_vectors =
-        if opts.key?(:include_vectors)
+      include_vectors = if opts.key?(:include_vectors)
           opts[:include_vectors] == true
         else
           self.class.respond_to?(:vectors_public_by_default?) && self.class.vectors_public_by_default?
@@ -1884,48 +1883,48 @@ module Parse
       owner = @_acl_owner_override if defined?(@_acl_owner_override)
       if owner.nil? && (field = self.class.acl_owner_field)
         owner = if field == :self
-          # Self-referential ownership (Parse::User only — enforced at
-          # declaration time). Pre-generate a Parse-compatible objectId
-          # client-side so the ACL grant can reference the record's own
-          # id in the same POST body that creates it. Skipped when the id
-          # is already set (e.g. when re-saving an existing user, or when
-          # parse_reference precompute already ran).
-          @id = Parse::Core::ParseReference.generate_object_id if @id.blank?
-          @id
-        elsif respond_to?(field)
-          send(field)
-        end
+            # Self-referential ownership (Parse::User only — enforced at
+            # declaration time). Pre-generate a Parse-compatible objectId
+            # client-side so the ACL grant can reference the record's own
+            # id in the same POST body that creates it. Skipped when the id
+            # is already set (e.g. when re-saving an existing user, or when
+            # parse_reference precompute already ran).
+            @id = Parse::Core::ParseReference.generate_object_id if @id.blank?
+            @id
+          elsif respond_to?(field)
+            send(field)
+          end
       end
       owner_id = _resolve_acl_owner_id(owner)
 
       target_acl = case policy
-                   when :public
-                     Parse::ACL.everyone(true, true)
-                   when :public_read
-                     Parse::ACL.everyone(true, false)
-                   when :private
-                     Parse::ACL.private
-                   when :owner_else_public
-                     if owner_id
-                       acl = Parse::ACL.new
-                       acl.apply(owner_id, true, true)
-                       acl
-                     else
-                       Parse::ACL.everyone(true, true)
-                     end
-                   when :owner_else_private
-                     if owner_id
-                       acl = Parse::ACL.new
-                       acl.apply(owner_id, true, true)
-                       acl
-                     else
-                       Parse::ACL.private
-                     end
-                   when :owner_but_public_read
-                     acl = Parse::ACL.everyone(true, false)
-                     acl.apply(owner_id, true, true) if owner_id
-                     acl
-                   end
+        when :public
+          Parse::ACL.everyone(true, true)
+        when :public_read
+          Parse::ACL.everyone(true, false)
+        when :private
+          Parse::ACL.private
+        when :owner_else_public
+          if owner_id
+            acl = Parse::ACL.new
+            acl.apply(owner_id, true, true)
+            acl
+          else
+            Parse::ACL.everyone(true, true)
+          end
+        when :owner_else_private
+          if owner_id
+            acl = Parse::ACL.new
+            acl.apply(owner_id, true, true)
+            acl
+          else
+            Parse::ACL.private
+          end
+        when :owner_but_public_read
+          acl = Parse::ACL.everyone(true, false)
+          acl.apply(owner_id, true, true) if owner_id
+          acl
+        end
 
       # Only re-stamp if the resolved ACL differs from the init-time stamp;
       # this avoids an unnecessary dirty mark on the acl field for `:public`
@@ -2156,16 +2155,16 @@ class Array
       next m if m.is_a?(Parse::Pointer)
       if m.is_a?(Hash)
         resolved = if className
-                     # Caller knows the type; warn on mismatch but always
-                     # use the declared className.
-                     incoming = m[f] || m[:className]
-                     if incoming && !Parse::Model.same_parse_class?(incoming, className)
-                       warn "[Parse::Array#parse_objects] expected className=#{className.inspect}, ignoring incoming className=#{incoming.inspect}"
-                     end
-                     className
-                   else
-                     m[f] || m[:className]
-                   end
+            # Caller knows the type; warn on mismatch but always
+            # use the declared className.
+            incoming = m[f] || m[:className]
+            if incoming && !Parse::Model.same_parse_class?(incoming, className)
+              warn "[Parse::Array#parse_objects] expected className=#{className.inspect}, ignoring incoming className=#{incoming.inspect}"
+            end
+            className
+          else
+            m[f] || m[:className]
+          end
         next Parse::Object.build(m, resolved) if resolved
       end
       nil

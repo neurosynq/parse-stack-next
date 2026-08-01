@@ -508,5 +508,4 @@ class AggregationAutoPromotionTest < Minitest::Test
       define_method(:result) { rows }
     end.new
   end
-
 end

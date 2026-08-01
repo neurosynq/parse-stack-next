@@ -135,7 +135,7 @@ class TestCLP < Minitest::Test
     @clp.set_protected_fields("*", ["email"])
     data = [
       { "name" => "User1", "email" => "user1@test.com" },
-      { "name" => "User2", "email" => "user2@test.com" }
+      { "name" => "User2", "email" => "user2@test.com" },
     ]
 
     result = @clp.filter_fields(data, user: nil)
@@ -236,7 +236,7 @@ class TestCLP < Minitest::Test
     data = {
       "name" => "Test",
       "owner" => { "objectId" => "user1", "__type" => "Pointer" },
-      "test" => "value"
+      "test" => "value",
     }
 
     # Owner can see owner field
@@ -256,8 +256,8 @@ class TestCLP < Minitest::Test
       "name" => "Test",
       "owners" => [
         { "objectId" => "user1", "__type" => "Pointer" },
-        { "objectId" => "user2", "__type" => "Pointer" }
-      ]
+        { "objectId" => "user2", "__type" => "Pointer" },
+      ],
     }
 
     # User in array can see field
@@ -281,7 +281,7 @@ class TestCLP < Minitest::Test
     data = {
       "owners" => [{ "objectId" => "user1" }],
       "owner" => { "objectId" => "user1" },
-      "test" => "value"
+      "test" => "value",
     }
 
     # User1 matches both userField patterns
@@ -302,7 +302,7 @@ class TestCLP < Minitest::Test
 
     data = {
       "owner" => { "objectId" => "user1" },
-      "test" => "value"
+      "test" => "value",
     }
 
     # userField:nonexistent pattern should be ignored since field doesn't exist
@@ -319,7 +319,7 @@ class TestCLP < Minitest::Test
     data = [
       { "name" => "Obj1", "owner" => { "objectId" => "user1" } },
       { "name" => "Obj2", "owner" => { "objectId" => "user2" } },
-      { "name" => "Obj3", "owner" => { "objectId" => "user2" } }
+      { "name" => "Obj3", "owner" => { "objectId" => "user2" } },
     ]
 
     result = @clp.filter_fields(data, user: "user1")
@@ -373,8 +373,8 @@ class TestCLP < Minitest::Test
       "create" => { "role:Admin" => true },
       "protectedFields" => {
         "*" => ["email", "phone"],
-        "role:Admin" => []
-      }
+        "role:Admin" => [],
+      },
     }
 
     clp = Parse::CLP.new(server_data)
@@ -551,7 +551,7 @@ class TestCLPModelDSL < Minitest::Test
   def test_filter_results_for_user
     docs = [
       SecureDocument.new,
-      SecureDocument.new
+      SecureDocument.new,
     ]
     docs[0].title = "Doc1"
     docs[0].internal_notes = "Note1"
@@ -578,7 +578,7 @@ class TestCLPModelDSL < Minitest::Test
     data = {
       "title" => "My Doc",
       "secret" => "shhh",
-      "owner" => { "objectId" => "user1", "__type" => "Pointer" }
+      "owner" => { "objectId" => "user1", "__type" => "Pointer" },
     }
 
     # Owner sees everything
@@ -680,8 +680,7 @@ class TestCLPDefaultPermissions < Minitest::Test
     # All operations should be included with public access (the fallback default)
     %w[find get count create update delete addField].each do |op|
       assert json.key?(op), "Should include #{op} operation"
-      assert_equal({ "*" => true }, json[op], "#{op} should default to public access"
-      )
+      assert_equal({ "*" => true }, json[op], "#{op} should default to public access")
     end
 
     # Protected fields should also be included
@@ -719,7 +718,7 @@ class TestCLPPointerPermissions < Minitest::Test
     data = {
       "find" => { "*" => true },
       "readUserFields" => ["owner", "coauthors"],
-      "writeUserFields" => ["owner"]
+      "writeUserFields" => ["owner"],
     }
 
     @clp.parse_data(data)
@@ -786,7 +785,7 @@ class TestCLPSnakeCaseConversion < Minitest::Test
 
     # Pointer fields are stored as symbols internally
     assert perm["pointerFields"].include?(:ownerUser) || perm["pointerFields"].include?("ownerUser"),
-      "Expected pointerFields to include ownerUser, got: #{perm['pointerFields'].inspect}"
+      "Expected pointerFields to include ownerUser, got: #{perm["pointerFields"].inspect}"
   end
 
   def test_set_read_user_fields_converts_snake_case

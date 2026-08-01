@@ -60,27 +60,27 @@ module Parse
       # Default to the international compatible-mode host. Operators
       # in mainland China should override to
       # `https://dashscope.aliyuncs.com/compatible-mode/v1`.
-      DEFAULT_BASE_URL    = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-      DEFAULT_MODEL       = "qwen3-embedding-8b"
-      DEFAULT_TIMEOUT     = 30
+      DEFAULT_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+      DEFAULT_MODEL = "qwen3-embedding-8b"
+      DEFAULT_TIMEOUT = 30
       DEFAULT_OPEN_TIMEOUT = 5
       DEFAULT_MAX_RETRIES = 3
       # DashScope's compatible endpoint caps embedding requests at 25
       # inputs per call (smaller than OpenAI's 2048). Default below
       # the cap so callers don't have to tune.
-      DEFAULT_BATCH_SIZE  = 10
-      MAX_RESPONSE_BYTES  = 16 * 1024 * 1024
+      DEFAULT_BATCH_SIZE = 10
+      MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
       MODEL_DEFAULT_DIMENSIONS = {
         "qwen3-embedding-0.6b" => 1024,
-        "qwen3-embedding-4b"   => 2560,
-        "qwen3-embedding-8b"   => 4096,
+        "qwen3-embedding-4b" => 2560,
+        "qwen3-embedding-8b" => 4096,
       }.freeze
 
       MODEL_MAX_INPUT_TOKENS = {
         "qwen3-embedding-0.6b" => 32_000,
-        "qwen3-embedding-4b"   => 32_000,
-        "qwen3-embedding-8b"   => 32_000,
+        "qwen3-embedding-4b" => 32_000,
+        "qwen3-embedding-8b" => 32_000,
       }.freeze
 
       # Every Qwen3-Embedding row is Matryoshka-capable. Kept as an
@@ -329,7 +329,7 @@ module Parse
       end
 
       def backoff_seconds(attempt)
-        [0.5 * (2**(attempt - 1)), 30.0].min
+        [0.5 * (2 ** (attempt - 1)), 30.0].min
       end
 
       def retry_after_seconds(response)

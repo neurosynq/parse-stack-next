@@ -47,7 +47,7 @@ class TestClientLiveQuerySetup < Minitest::Test
 
   def test_live_query_opts_hash_is_applied_via_setters
     Parse::Client.new(@base_options.merge(
-      live_query: { url: "wss://opts.example.com", ping_interval: 12.5 }
+      live_query: { url: "wss://opts.example.com", ping_interval: 12.5 },
     ))
 
     config = Parse::LiveQuery.config
@@ -77,7 +77,7 @@ class TestClientLiveQuerySetup < Minitest::Test
     # default.
     _out, err = capture_io do
       Parse::Client.new(@base_options.merge(
-        live_query: { url: "wss://x.example.com", nonsense_option: true, ssl_min_versoin: :TLSv1_3 }
+        live_query: { url: "wss://x.example.com", nonsense_option: true, ssl_min_versoin: :TLSv1_3 },
       ))
     end
 
@@ -122,7 +122,7 @@ class TestClientLiveQuerySetup < Minitest::Test
 
   def test_explicit_ws_url_with_allow_insecure_is_allowed
     Parse::Client.new(@base_options.merge(
-      live_query: { url: "ws://routable.example.com:1337", allow_insecure: true }
+      live_query: { url: "ws://routable.example.com:1337", allow_insecure: true },
     ))
 
     assert_equal "ws://routable.example.com:1337", Parse::LiveQuery.config.url

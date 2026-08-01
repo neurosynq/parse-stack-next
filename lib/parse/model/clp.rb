@@ -324,10 +324,10 @@ module Parse
       # Determine if we should include defaults
       # Auto-enable if any CLP settings exist and no explicit choice made
       should_include_defaults = if include_defaults.nil?
-        present? && @default_permission
-      else
-        include_defaults
-      end
+          present? && @default_permission
+        else
+          include_defaults
+        end
 
       # Determine the default permission to use
       # Use explicit default_permission if set, otherwise fall back to public

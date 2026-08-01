@@ -22,8 +22,8 @@ require "parse-stack-next"
 # ---------------------------------------------------------------------------
 Parse.setup(
   server_url: ENV.fetch("PARSE_SERVER_URL", "http://localhost:1337/parse"),
-  app_id:     ENV.fetch("PARSE_APP_ID"),
-  api_key:    ENV.fetch("PARSE_REST_KEY"),
+  app_id: ENV.fetch("PARSE_APP_ID"),
+  api_key: ENV.fetch("PARSE_REST_KEY"),
   master_key: ENV.fetch("PARSE_MASTER_KEY"),
 )
 
@@ -98,7 +98,7 @@ popular = Song.query(:plays.gt => 1_500)
               .order(:plays.desc)
               .limit(10)
               .results
-puts "Popular songs: #{popular.map(&:title).join(', ')}"
+puts "Popular songs: #{popular.map(&:title).join(", ")}"
 
 puts "Total songs by #{artist.name}: #{Song.count(artist: artist)}"
 

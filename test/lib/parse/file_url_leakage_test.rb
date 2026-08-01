@@ -29,8 +29,8 @@ require_relative "../../test_helper"
 class TestFileUrlLeakage < Minitest::Test
   def setup
     @original_trusted_hosts = Parse::File.instance_variable_get(:@trusted_url_hosts)
-    @original_policy        = Parse::File.instance_variable_get(:@untrusted_url_policy)
-    @original_warned        = Parse::File.instance_variable_get(:@warned_untrusted_hosts)
+    @original_policy = Parse::File.instance_variable_get(:@untrusted_url_policy)
+    @original_warned = Parse::File.instance_variable_get(:@warned_untrusted_hosts)
     Parse::File.trusted_url_hosts = ["bucket.s3.amazonaws.com", "files.parsetfss.com"]
     Parse::File.untrusted_url_policy = :raise
   end
@@ -49,7 +49,7 @@ class TestFileUrlLeakage < Minitest::Test
     file = Parse::File.new(name: "img.png", contents: nil)
     file.attributes = {
       "name" => "img.png",
-      "url"  => "https://files.parsetfss.com/abc/img.png",
+      "url" => "https://files.parsetfss.com/abc/img.png",
     }
     out = file.inspect
     refute_includes out, "https://files.parsetfss.com",
@@ -73,7 +73,7 @@ class TestFileUrlLeakage < Minitest::Test
     set_file = Parse::File.new(name: "img.png", contents: nil)
     set_file.attributes = {
       "name" => "img.png",
-      "url"  => "https://files.parsetfss.com/abc/img.png",
+      "url" => "https://files.parsetfss.com/abc/img.png",
     }
     assert_match(/@url=set/, set_file.inspect)
 
@@ -103,7 +103,7 @@ class TestFileUrlLeakage < Minitest::Test
     file = Parse::File.new(name: "img.png", contents: nil)
     file.attributes = {
       "name" => "img.png",
-      "url"  => "https://files.parsetfss.com/abc/img.png",
+      "url" => "https://files.parsetfss.com/abc/img.png",
     }
     assert_equal "https://files.parsetfss.com/abc/img.png", file.to_s
   end
@@ -149,9 +149,9 @@ class TestFileUrlLeakage < Minitest::Test
     # NOT be scrubbed — that would over-redact every file URL in
     # every log message.
     refute_match Parse::File.log_filter,
-                    "https://bucket.s3.amazonaws.com/tenants/abc/uuid-doc.pdf"
+                 "https://bucket.s3.amazonaws.com/tenants/abc/uuid-doc.pdf"
     refute_match Parse::File.log_filter,
-                    "https://files.parsetfss.com/abc/img.png"
+                 "https://files.parsetfss.com/abc/img.png"
   end
 
   def test_log_filter_does_not_match_unrelated_query_params
@@ -159,7 +159,7 @@ class TestFileUrlLeakage < Minitest::Test
     # must not match — `?foo=bar&page=2` style URLs are common and
     # should not be redacted.
     refute_match Parse::File.log_filter,
-                    "https://example.com/api/files?foo=bar&page=2"
+                 "https://example.com/api/files?foo=bar&page=2"
   end
 
   def test_log_filter_scrubbing_round_trip

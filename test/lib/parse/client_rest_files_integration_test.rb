@@ -41,7 +41,7 @@ class ClientRestFilesIntegrationTest < Minitest::Test
       )
       assert response.success?, "authed file upload must succeed (#{response.error&.inspect})"
       file_name = response.result["name"]
-      file_url  = response.result["url"]
+      file_url = response.result["url"]
       refute_nil file_name
       refute_nil file_url
       assert file_name.end_with?(".txt"), "server-assigned name should preserve extension"

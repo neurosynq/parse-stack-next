@@ -113,12 +113,12 @@ class IncludeProjectionTest < Minitest::Test
   def test_agent_join_fields_subset_invariant_violation_raises
     err = assert_raises(ArgumentError) do
       eval <<~RUBY, binding, __FILE__, __LINE__ + 1
-        class FixtureSubsetViolation < Parse::Object
-          parse_class "FixtureSubsetViolation"
-          agent_fields :a, :b, :c
-          agent_join_fields :a, :b, :d
-        end
-      RUBY
+             class FixtureSubsetViolation < Parse::Object
+               parse_class "FixtureSubsetViolation"
+               agent_fields :a, :b, :c
+               agent_join_fields :a, :b, :d
+             end
+           RUBY
     end
     assert_match(/agent_join_fields must be a subset of agent_fields/, err.message)
     assert_match(/:d\b/, err.message)
@@ -129,12 +129,12 @@ class IncludeProjectionTest < Minitest::Test
     # agent_fields must still trip the invariant if it omits an entry.
     err = assert_raises(ArgumentError) do
       eval <<~RUBY, binding, __FILE__, __LINE__ + 1
-        class FixtureReverseOrderViolation < Parse::Object
-          parse_class "FixtureReverseOrderViolation"
-          agent_join_fields :a, :b, :z
-          agent_fields :a, :b
-        end
-      RUBY
+             class FixtureReverseOrderViolation < Parse::Object
+               parse_class "FixtureReverseOrderViolation"
+               agent_join_fields :a, :b, :z
+               agent_fields :a, :b
+             end
+           RUBY
     end
     assert_match(/agent_join_fields must be a subset of agent_fields/, err.message)
   end

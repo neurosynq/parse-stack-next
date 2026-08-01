@@ -11,14 +11,14 @@ require "parse/mongodb"
 class MongoDBSearchIndexesTest < Minitest::Test
   def setup
     @stash_analytics = ENV.delete("ANALYTICS_DATABASE_URI")
-    @stash_database  = ENV.delete("DATABASE_URI")
+    @stash_database = ENV.delete("DATABASE_URI")
     @stash_mutations = ENV.delete(Parse::MongoDB::MUTATION_ENV_KEY)
     Parse::MongoDB.reset!
   end
 
   def teardown
     ENV["ANALYTICS_DATABASE_URI"] = @stash_analytics if @stash_analytics
-    ENV["DATABASE_URI"]           = @stash_database  if @stash_database
+    ENV["DATABASE_URI"] = @stash_database if @stash_database
     if @stash_mutations
       ENV[Parse::MongoDB::MUTATION_ENV_KEY] = @stash_mutations
     else
@@ -145,8 +145,8 @@ class MongoDBSearchIndexesTest < Minitest::Test
     captured = configure_writer_with_capture
     result = silence_warnings do
       Parse::MongoDB.create_search_index("_User", "u_search",
-                                          { mappings: { dynamic: true } },
-                                          allow_system_classes: true)
+                                         { mappings: { dynamic: true } },
+                                         allow_system_classes: true)
     end
     assert_equal :created, result
     assert_equal 1, captured.size

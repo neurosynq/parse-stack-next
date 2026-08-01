@@ -66,7 +66,7 @@ class GroupByOrderIntegrationTest < Minitest::Test
     with_parse_server do
       4.times { |i| create_test_object("GroupByOrderSong", title: "R#{i}", genre: "rock", plays: i) }
       2.times { |i| create_test_object("GroupByOrderSong", title: "J#{i}", genre: "jazz", plays: i) }
-      1.times { |i| create_test_object("GroupByOrderSong", title: "P#{i}", genre: "pop",  plays: i) }
+      1.times { |i| create_test_object("GroupByOrderSong", title: "P#{i}", genre: "pop", plays: i) }
 
       ordered = GroupByOrderSong.query.group_by(:genre).order(size: :desc).list
 
@@ -75,7 +75,7 @@ class GroupByOrderIntegrationTest < Minitest::Test
       keys = ordered.keys
       assert_equal "rock", keys[0]
       assert_equal "jazz", keys[1]
-      assert_equal "pop",  keys[2]
+      assert_equal "pop", keys[2]
       assert_equal 4, ordered["rock"].size
       assert_equal 2, ordered["jazz"].size
       assert_equal 1, ordered["pop"].size

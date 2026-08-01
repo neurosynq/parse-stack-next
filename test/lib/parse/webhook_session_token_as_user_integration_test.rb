@@ -106,7 +106,7 @@ class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
     agent = payload.user_agent
     cap[:client_mode] = agent && agent.instance_variable_get(:@client_mode)
     scoped = agent.execute(:query_class, class_name: class_name, limit: 100)
-    cap[:scoped_ok]  = scoped[:success]
+    cap[:scoped_ok] = scoped[:success]
     cap[:scoped_err] = scoped[:error]
     cap[:scoped_ids] = scoped[:success] ? scoped[:data][:results].map { |r| r["objectId"] } : []
     # Prove the token is BOUND to user_client: a raw REST GET with NO
@@ -146,7 +146,7 @@ class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
   def seed_private_post(class_name, owner_id, title)
     master_create(class_name, {
       "title" => title,
-      "ACL"   => { owner_id => { "read" => true, "write" => true } },
+      "ACL" => { owner_id => { "read" => true, "write" => true } },
     })
   end
 
@@ -230,7 +230,7 @@ class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
   # ==================================================================
   def test_route_webhook_reads_as_caller_via_user_agent
     user_a, token_a = seed_and_login("route_a")
-    user_b, _tok_b  = seed_and_login("route_b")
+    user_b, _tok_b = seed_and_login("route_b")
 
     a_post = seed_private_post("WebhookRoutePost", user_a.id, "A private")
     b_post = seed_private_post("WebhookRoutePost", user_b.id, "B private")
@@ -252,9 +252,9 @@ class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
     wait_until("route afterSave captured a scoped read") { captured.any? }
 
     assert_nil captured[:error], "handler raised: #{captured[:error]}"
-    assert captured[:has_token],   "payload carried user A's session token"
+    assert captured[:has_token], "payload carried user A's session token"
     assert captured[:client_mode], "payload.user_agent runs in CLIENT MODE (non-master + token)"
-    assert captured[:scoped_ok],   "scoped query_class failed: #{captured[:scoped_err]}"
+    assert captured[:scoped_ok], "scoped query_class failed: #{captured[:scoped_err]}"
     assert_includes captured[:scoped_ids], a_post,
                     "A can read her own private row through the scoped agent"
     refute_includes captured[:scoped_ids], b_post,
@@ -276,7 +276,7 @@ class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
   # ==================================================================
   def test_model_dsl_webhook_reads_as_caller_via_user_agent
     user_a, token_a = seed_and_login("cb_a")
-    user_b, _tok_b  = seed_and_login("cb_b")
+    user_b, _tok_b = seed_and_login("cb_b")
 
     a_post = seed_private_post("WebhookCallbackPost", user_a.id, "A private")
     b_post = seed_private_post("WebhookCallbackPost", user_b.id, "B private")
@@ -296,9 +296,9 @@ class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
 
     cap = WebhookCallbackPost.captured
     assert_nil cap[:error], "handler raised: #{cap[:error]}"
-    assert cap[:has_token],   "payload carried the caller's session token"
+    assert cap[:has_token], "payload carried the caller's session token"
     assert cap[:client_mode], "user_agent runs in CLIENT MODE"
-    assert cap[:scoped_ok],   "scoped query failed: #{cap[:scoped_err]}"
+    assert cap[:scoped_ok], "scoped query failed: #{cap[:scoped_err]}"
     assert_includes cap[:scoped_ids], a_post, "A reads her own private row"
     refute_includes cap[:scoped_ids], b_post,
                     "[ACL] scoped agent must NOT see B's private row"
@@ -317,7 +317,7 @@ class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
   # ==================================================================
   def test_mcp_agent_session_token_scope_enforces_acl
     user_a, token_a = seed_and_login("mcp_a")
-    user_b, _tok_b  = seed_and_login("mcp_b")
+    user_b, _tok_b = seed_and_login("mcp_b")
 
     a_post = seed_private_post("McpScopedPost", user_a.id, "A private")
     b_post = seed_private_post("McpScopedPost", user_b.id, "B private")
@@ -350,7 +350,7 @@ class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
   # ==================================================================
   def test_client_with_session_block_scopes_model_queries_to_user
     user_a, token_a = seed_and_login("scope_a")
-    user_b, _tok_b  = seed_and_login("scope_b")
+    user_b, _tok_b = seed_and_login("scope_b")
 
     a_post = seed_private_post("McpScopedPost", user_a.id, "A private")
     b_post = seed_private_post("McpScopedPost", user_b.id, "B private")
@@ -386,7 +386,7 @@ class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
   # ==================================================================
   def test_function_webhook_carries_token_and_scopes_via_user_agent
     user_a, token_a = seed_and_login("fn_a")
-    user_b, _tok_b  = seed_and_login("fn_b")
+    user_b, _tok_b = seed_and_login("fn_b")
     a_post = seed_private_post("McpScopedPost", user_a.id, "A private")
     b_post = seed_private_post("McpScopedPost", user_b.id, "B private")
 
@@ -413,8 +413,8 @@ class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
     )
     wait_until("function webhook captured a scoped read") { captured.any? }
 
-    assert captured[:function],   "payload.function? is true in a function webhook"
-    assert captured[:has_token],  "function webhook carries the caller's session token"
+    assert captured[:function], "payload.function? is true in a function webhook"
+    assert captured[:has_token], "function webhook carries the caller's session token"
     assert captured[:client_mode], "user_agent runs in client mode from a function webhook"
     assert_includes captured[:scoped_ids], a_post, "A reads her own row from the function handler"
     refute_includes captured[:scoped_ids], b_post,
@@ -431,10 +431,10 @@ class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
 
     forged = bound_client("r:totally-bogus-session-token-xyz")
     saw_row = begin
-      forged.request(:get, "classes/McpScopedPost").result.any? { |r| r["objectId"] == a_post }
-    rescue Parse::Error, StandardError
-      false # 401 invalid-session is the expected fail-closed outcome
-    end
+        forged.request(:get, "classes/McpScopedPost").result.any? { |r| r["objectId"] == a_post }
+      rescue Parse::Error, StandardError
+        false # 401 invalid-session is the expected fail-closed outcome
+      end
     refute saw_row,
            "[security] a forged session token must never read a row via a master fallback"
 
@@ -452,12 +452,12 @@ class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
   def test_clp_requires_auth_session_allowed_anonymous_denied
     _user_a, token_a = seed_and_login("clp_a")
     install_schema!("SessionClpPost", {
-      "find"     => { "requiresAuthentication" => true },
-      "get"      => { "requiresAuthentication" => true },
-      "count"    => { "requiresAuthentication" => true },
-      "create"   => { "*" => true },
-      "update"   => { "*" => true },
-      "delete"   => { "*" => true },
+      "find" => { "requiresAuthentication" => true },
+      "get" => { "requiresAuthentication" => true },
+      "count" => { "requiresAuthentication" => true },
+      "create" => { "*" => true },
+      "update" => { "*" => true },
+      "delete" => { "*" => true },
       "addField" => { "*" => true },
     })
     # Public-read ACL so the gate under test is CLP, not row ACL.
@@ -485,11 +485,11 @@ class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
   def test_protected_fields_stripped_for_session_and_anonymous_present_for_master
     _user_a, token_a = seed_and_login("pf_a")
     install_schema!("SessionProtectedPost", {
-      "find"           => { "*" => true },
-      "get"            => { "*" => true },
-      "create"         => { "*" => true },
-      "update"         => { "*" => true },
-      "addField"       => { "*" => true },
+      "find" => { "*" => true },
+      "get" => { "*" => true },
+      "create" => { "*" => true },
+      "update" => { "*" => true },
+      "addField" => { "*" => true },
       "protectedFields" => { "*" => ["secret"] }, # hidden from every non-master client
     }, { "secret" => { "type" => "String" } })
 
@@ -498,7 +498,7 @@ class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
       "ACL" => { "*" => { "read" => true } },
     })
 
-    sc   = bound_client(token_a)
+    sc = bound_client(token_a)
     anon = sc.anonymous
 
     sc_row = sc.request(:get, "classes/SessionProtectedPost/#{row}").result

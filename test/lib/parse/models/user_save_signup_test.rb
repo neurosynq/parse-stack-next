@@ -70,10 +70,10 @@ class TestUserSaveSignup < Minitest::Test
 
     def default_user_response
       StubResponse.new(result: {
-        "objectId" => "abc123",
-        "createdAt" => "2026-05-15T00:00:00Z",
-        "sessionToken" => "r:stub-session-token",
-      })
+                         "objectId" => "abc123",
+                         "createdAt" => "2026-05-15T00:00:00Z",
+                         "sessionToken" => "r:stub-session-token",
+                       })
     end
   end
 
@@ -83,7 +83,7 @@ class TestUserSaveSignup < Minitest::Test
     cattr_accessor :callback_log
     self.callback_log = []
     before_create { self.class.callback_log << :before_create }
-    after_create  { self.class.callback_log << :after_create }
+    after_create { self.class.callback_log << :after_create }
   end
 
   def setup
@@ -157,13 +157,12 @@ class TestUserSaveSignup < Minitest::Test
     # the in-memory object. OAuth signup is the responsibility of the
     # explicit `signup!` method.
     client = StubClient.new({ create_object: StubResponse.new(result: {
-      "objectId" => "raw-id",
-      "createdAt" => "2026-05-15T00:00:00Z",
-    }) })
+                                                               "objectId" => "raw-id",
+                                                               "createdAt" => "2026-05-15T00:00:00Z",
+                                                             }) })
     user = new_user_with_client(client,
-      username: "bob",
-      auth_data: { facebook: { id: "1", access_token: "tok" } },
-    )
+                                username: "bob",
+                                auth_data: { facebook: { id: "1", access_token: "tok" } })
 
     assert user.save
     assert_empty client.calls_to(:create_user),
@@ -174,9 +173,9 @@ class TestUserSaveSignup < Minitest::Test
 
   def test_new_user_without_credentials_falls_through_to_class_endpoint
     client = StubClient.new({ create_object: StubResponse.new(result: {
-      "objectId" => "raw-id",
-      "createdAt" => "2026-05-15T00:00:00Z",
-    }) })
+                                                               "objectId" => "raw-id",
+                                                               "createdAt" => "2026-05-15T00:00:00Z",
+                                                             }) })
     user = new_user_with_client(client, username: "carol")
 
     assert user.save
@@ -191,9 +190,9 @@ class TestUserSaveSignup < Minitest::Test
   def test_signup_on_save_false_forces_class_endpoint_even_with_password
     Parse::User.signup_on_save = false
     client = StubClient.new({ create_object: StubResponse.new(result: {
-      "objectId" => "raw-id",
-      "createdAt" => "2026-05-15T00:00:00Z",
-    }) })
+                                                               "objectId" => "raw-id",
+                                                               "createdAt" => "2026-05-15T00:00:00Z",
+                                                             }) })
     user = new_user_with_client(client, username: "dave", password: "s3cret")
 
     assert user.save
@@ -235,10 +234,10 @@ class TestUserSaveSignup < Minitest::Test
 
   def test_save_applies_session_token_from_signup_response
     client = StubClient.new({ create_user: StubResponse.new(result: {
-      "objectId" => "u1",
-      "createdAt" => "2026-05-15T00:00:00Z",
-      "sessionToken" => "r:abc",
-    }) })
+                                                             "objectId" => "u1",
+                                                             "createdAt" => "2026-05-15T00:00:00Z",
+                                                             "sessionToken" => "r:abc",
+                                                           }) })
     user = new_user_with_client(client, username: "frank", password: "s3cret")
 
     assert user.save
@@ -325,10 +324,9 @@ class TestUserSaveSignup < Minitest::Test
   def test_signup_request_body_includes_user_supplied_fields
     client = StubClient.new
     user = new_user_with_client(client,
-      username: "iris",
-      password: "p4ss",
-      email: "iris@example.com",
-    )
+                                username: "iris",
+                                password: "p4ss",
+                                email: "iris@example.com")
 
     assert user.save
     body = client.calls_to(:create_user).first[1]
@@ -362,7 +360,7 @@ class TestUserSaveSignup < Minitest::Test
 
     assert user.save
     body = client.calls_to(:create_user).first[1]
-    refute body.key?(:ACL),  "ACL must not be sent to /parse/users (parity with signup!)"
+    refute body.key?(:ACL), "ACL must not be sent to /parse/users (parity with signup!)"
     refute body.key?("ACL"), "ACL (string key) must not be sent to /parse/users"
   end
 
@@ -376,11 +374,11 @@ class TestUserSaveSignup < Minitest::Test
     # the signup-via-save path. Only sessionToken and emailVerified are
     # accepted from the response body.
     client = StubClient.new({ create_user: StubResponse.new(result: {
-      "objectId" => "u9",
-      "createdAt" => "2026-05-15T00:00:00Z",
-      "sessionToken" => "r:legit",
-      "authData" => { "facebook" => { "id" => "attacker-fb-id", "access_token" => "stolen" } },
-    }) })
+                                                             "objectId" => "u9",
+                                                             "createdAt" => "2026-05-15T00:00:00Z",
+                                                             "sessionToken" => "r:legit",
+                                                             "authData" => { "facebook" => { "id" => "attacker-fb-id", "access_token" => "stolen" } },
+                                                           }) })
     user = new_user_with_client(client, username: "kim", password: "p4ss")
 
     assert user.save
@@ -393,12 +391,12 @@ class TestUserSaveSignup < Minitest::Test
     # different username (account-takeover surface). Reject anything
     # outside the allow-list.
     client = StubClient.new({ create_user: StubResponse.new(result: {
-      "objectId" => "u10",
-      "createdAt" => "2026-05-15T00:00:00Z",
-      "sessionToken" => "r:legit",
-      "username" => "attacker",
-      "password" => "rewritten",
-    }) })
+                                                             "objectId" => "u10",
+                                                             "createdAt" => "2026-05-15T00:00:00Z",
+                                                             "sessionToken" => "r:legit",
+                                                             "username" => "attacker",
+                                                             "password" => "rewritten",
+                                                           }) })
     user = new_user_with_client(client, username: "leo", password: "p4ss")
 
     assert user.save
@@ -462,12 +460,12 @@ class TestUserSaveSignup < Minitest::Test
     # SIGNUP_RESPONSE_APPLY_KEYS filter so that authData, _rperm,
     # _wperm, roles, etc. never reach the in-memory user.
     client = StubClient.new({ create_user: StubResponse.new(result: {
-      "objectId" => "u-su1",
-      "createdAt" => "2026-05-15T00:00:00Z",
-      "sessionToken" => "r:legit",
-      "authData" => { "facebook" => { "id" => "attacker", "access_token" => "stolen" } },
-      "username" => "attacker",
-    }) })
+                                                             "objectId" => "u-su1",
+                                                             "createdAt" => "2026-05-15T00:00:00Z",
+                                                             "sessionToken" => "r:legit",
+                                                             "authData" => { "facebook" => { "id" => "attacker", "access_token" => "stolen" } },
+                                                             "username" => "attacker",
+                                                           }) })
     user = new_user_with_client(client, username: "ursula", password: "p4ss")
 
     assert user.signup!
@@ -490,11 +488,11 @@ class TestUserSaveSignup < Minitest::Test
 
   def test_login_bang_clears_plaintext_password_on_success
     client = StubClient.new({ login: StubResponse.new(result: {
-      "objectId" => "u-li1",
-      "createdAt" => "2026-05-15T00:00:00Z",
-      "sessionToken" => "r:login-tok",
-      "username" => "wanda",
-    }) })
+                                                       "objectId" => "u-li1",
+                                                       "createdAt" => "2026-05-15T00:00:00Z",
+                                                       "sessionToken" => "r:login-tok",
+                                                       "username" => "wanda",
+                                                     }) })
     # The stub client doesn't define `login`; add a stub method on the
     # client instance so login! can complete.
     def client.login(_user, _pass)
@@ -532,11 +530,11 @@ class TestUserSaveSignup < Minitest::Test
     # or a pre-trusted email domain).
     skip "_User has no emailVerified property declared by default" unless Parse::User.fields.key?(:email_verified)
     client = StubClient.new({ create_user: StubResponse.new(result: {
-      "objectId" => "u11",
-      "createdAt" => "2026-05-15T00:00:00Z",
-      "sessionToken" => "r:legit",
-      "emailVerified" => true,
-    }) })
+                                                             "objectId" => "u11",
+                                                             "createdAt" => "2026-05-15T00:00:00Z",
+                                                             "sessionToken" => "r:legit",
+                                                             "emailVerified" => true,
+                                                           }) })
     user = new_user_with_client(client, username: "mia", password: "p4ss")
 
     assert user.save
@@ -648,7 +646,7 @@ class TestUserSaveSignup < Minitest::Test
     assert user.save
 
     assert_equal 1, client.calls_to(:update_object).size, "should hit update path"
-    assert_empty client.calls_to(:create_user),  "must not route through signup endpoint"
+    assert_empty client.calls_to(:create_user), "must not route through signup endpoint"
     assert_empty client.calls_to(:create_object), "must not route through raw class endpoint"
     assert_equal "r:original-token", user.session_token,
                  "save! on a random field must not clear/replace the in-memory session token"
@@ -666,9 +664,9 @@ class TestUserSaveSignup < Minitest::Test
     assert user.save
 
     body = client.calls_to(:update_object).first[3]
-    refute body.key?(:password),  "password must not appear in update body"
+    refute body.key?(:password), "password must not appear in update body"
     refute body.key?("password"), "password must not appear in update body"
-    refute body.key?(:username),  "username must not appear in update body for unrelated field change"
+    refute body.key?(:username), "username must not appear in update body for unrelated field change"
     refute body.key?("username"), "username must not appear in update body for unrelated field change"
   end
 

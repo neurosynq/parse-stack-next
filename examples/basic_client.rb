@@ -31,10 +31,10 @@ require "parse-stack-next"
 # ---------------------------------------------------------------------------
 Parse.setup(
   server_url: ENV.fetch("PARSE_SERVER_URL", "http://localhost:1337/parse"),
-  app_id:     ENV.fetch("PARSE_APP_ID"),
-  api_key:    ENV.fetch("PARSE_REST_KEY"),
+  app_id: ENV.fetch("PARSE_APP_ID"),
+  api_key: ENV.fetch("PARSE_REST_KEY"),
   master_key: nil,           # explicit: never set this from env in client builds
-  logging:    false,
+  logging: false,
 )
 
 # Belt-and-suspenders: prove the master key really is absent.

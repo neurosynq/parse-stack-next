@@ -44,12 +44,12 @@ class ToolsCompactPointersTest < Minitest::Test
     # classes (anomalous), leaving it uncompressed avoids data loss.
     rows = [
       { "_p_subject" => "_User$x", "n" => 1 },
-      { "_p_subject" => "Team$y",  "n" => 2 },
+      { "_p_subject" => "Team$y", "n" => 2 },
     ]
     map = T.compact_pointers!(rows)
     assert_empty map, "mixed-class column must not be added to the pointer map"
     assert_equal "_User$x", rows[0]["_p_subject"]
-    assert_equal "Team$y",  rows[1]["_p_subject"]
+    assert_equal "Team$y", rows[1]["_p_subject"]
   end
 
   def test_skips_column_with_bare_collision
@@ -61,7 +61,7 @@ class ToolsCompactPointersTest < Minitest::Test
     map = T.compact_pointers!(rows)
     assert_empty map
     assert_equal "_User$x", rows[0]["_p_author"]
-    assert_equal "preset",  rows[0]["author"]
+    assert_equal "preset", rows[0]["author"]
   end
 
   def test_walks_into_nested_arrays_and_hashes
@@ -69,8 +69,8 @@ class ToolsCompactPointersTest < Minitest::Test
     # observe and compress those too.
     rows = [
       {
-        "_id"     => "groupA",
-        "joined"  => [
+        "_id" => "groupA",
+        "joined" => [
           { "_p_author" => "_User$abc", "n" => 1 },
           { "_p_author" => "_User$def", "n" => 2 },
         ],
@@ -130,8 +130,8 @@ class ToolsCompactPointersTest < Minitest::Test
       response = Object.new
       rows = @rows
       response.define_singleton_method(:success?) { true }
-      response.define_singleton_method(:results)  { rows }
-      response.define_singleton_method(:error)    { nil }
+      response.define_singleton_method(:results) { rows }
+      response.define_singleton_method(:error) { nil }
       response
     end
   end

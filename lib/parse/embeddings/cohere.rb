@@ -68,29 +68,29 @@ module Parse
       class RateLimitError < Error; end
       class TransientError < Error; end
 
-      DEFAULT_BASE_URL    = "https://api.cohere.com/v1"
-      DEFAULT_MODEL       = "embed-english-v3.0"
-      DEFAULT_TIMEOUT     = 30
+      DEFAULT_BASE_URL = "https://api.cohere.com/v1"
+      DEFAULT_MODEL = "embed-english-v3.0"
+      DEFAULT_TIMEOUT = 30
       DEFAULT_OPEN_TIMEOUT = 5
       DEFAULT_MAX_RETRIES = 3
       # Cohere documents a hard cap of 96 inputs per `/embed` call.
-      DEFAULT_BATCH_SIZE  = 96
-      MAX_RESPONSE_BYTES  = 16 * 1024 * 1024
+      DEFAULT_BATCH_SIZE = 96
+      MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
       MODEL_DEFAULT_DIMENSIONS = {
-        "embed-v4.0"                     => 1536,
-        "embed-english-v3.0"             => 1024,
-        "embed-multilingual-v3.0"        => 1024,
-        "embed-english-light-v3.0"       => 384,
-        "embed-multilingual-light-v3.0"  => 384,
+        "embed-v4.0" => 1536,
+        "embed-english-v3.0" => 1024,
+        "embed-multilingual-v3.0" => 1024,
+        "embed-english-light-v3.0" => 384,
+        "embed-multilingual-light-v3.0" => 384,
       }.freeze
 
       MODEL_MAX_INPUT_TOKENS = {
-        "embed-v4.0"                     => 128_000,
-        "embed-english-v3.0"             => 512,
-        "embed-multilingual-v3.0"        => 512,
-        "embed-english-light-v3.0"       => 512,
-        "embed-multilingual-light-v3.0"  => 512,
+        "embed-v4.0" => 128_000,
+        "embed-english-v3.0" => 512,
+        "embed-multilingual-v3.0" => 512,
+        "embed-english-light-v3.0" => 512,
+        "embed-multilingual-light-v3.0" => 512,
       }.freeze
 
       # Models that accept Cohere's `output_dimension` Matryoshka
@@ -115,10 +115,10 @@ module Parse
       # `:unknown_type` to `"search_document"` would mask cache-key
       # bugs in higher layers (the value participates in cache keys).
       INPUT_TYPE_WIRE_VALUES = {
-        search_query:    "search_query",
+        search_query: "search_query",
         search_document: "search_document",
-        classification:  "classification",
-        clustering:      "clustering",
+        classification: "classification",
+        clustering: "clustering",
       }.freeze
 
       # @param api_key [String] required. Sent as `Authorization: Bearer …`.
@@ -462,7 +462,7 @@ module Parse
             next
           end
           raise BadRequestError,
-                "Parse::Embeddings::Cohere: #{status} from POST #{path.start_with?('/') ? path : "/#{path}"}."
+                "Parse::Embeddings::Cohere: #{status} from POST #{path.start_with?("/") ? path : "/#{path}"}."
         end
       end
 
@@ -498,8 +498,7 @@ module Parse
                 "Parse::Embeddings::Cohere: response body is not a JSON object."
         end
         embeddings = payload["embeddings"]
-        vectors =
-          case embeddings
+        vectors = case embeddings
           when Hash
             f = embeddings["float"]
             unless f.is_a?(Array)
@@ -521,7 +520,7 @@ module Parse
       end
 
       def backoff_seconds(attempt)
-        [0.5 * (2**(attempt - 1)), 30.0].min
+        [0.5 * (2 ** (attempt - 1)), 30.0].min
       end
 
       def retry_after_seconds(response)

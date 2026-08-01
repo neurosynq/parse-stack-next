@@ -14,18 +14,18 @@ require "rake/testtask"
 # @return [Array(String, String, String, String)]
 #   server_url, application_id, api_key, master_key
 def mcp_credentials_or_abort!
-  server_url   = ENV["PARSE_SERVER_URL"] || "http://localhost:29337/parse"
-  app_id       = ENV["PARSE_APP_ID"]
+  server_url = ENV["PARSE_SERVER_URL"] || "http://localhost:29337/parse"
+  app_id = ENV["PARSE_APP_ID"]
   rest_api_key = ENV["PARSE_API_KEY"]
-  master_key   = ENV["PARSE_MASTER_KEY"]
+  master_key = ENV["PARSE_MASTER_KEY"]
 
   is_local = server_url =~ %r{\Ahttps?://(?:localhost|127\.0\.0\.1|::1|\[::1\])(?::|/|\z)}
 
   if app_id.to_s.empty? || master_key.to_s.empty?
     if is_local
-      app_id       = (app_id.to_s.empty? ? "psnextItAppId" : app_id)
+      app_id = (app_id.to_s.empty? ? "psnextItAppId" : app_id)
       rest_api_key = (rest_api_key.to_s.empty? ? "myApiKey" : rest_api_key)
-      master_key   = (master_key.to_s.empty? ? "psnextItMasterKey" : master_key)
+      master_key = (master_key.to_s.empty? ? "psnextItMasterKey" : master_key)
     else
       abort "[Rakefile] PARSE_SERVER_URL=#{server_url} is not local; refusing to fall back to " \
             "placeholder credentials. Set PARSE_APP_ID and PARSE_MASTER_KEY explicitly."
@@ -118,8 +118,7 @@ def console_login_with_optional_mfa(user, pwd)
   # ServiceUnavailableError for the OTHER_CAUSE code) or a nil return. Since a
   # token was supplied here, treat any failure as an MFA verification failure
   # and abort cleanly rather than letting an unhandled exception escape.
-  result =
-    begin
+  result = begin
       Parse::User.login_with_mfa(user, pwd, token)
     rescue Parse::MFA::VerificationError, Parse::Error => e
       abort "[client:console] MFA verification failed for #{user.inspect}: #{e.message}"
@@ -139,11 +138,11 @@ end
 # environment. A default `rake test` must never become live and billable
 # as a side effect of an exported key. Run them via `rake test:contract`.
 Rake::TestTask.new do |t|
-  ENV['PARSE_TEST_USE_DOCKER'] = 'true'
+  ENV["PARSE_TEST_USE_DOCKER"] = "true"
   t.libs << "lib/parse/stack"
   t.test_files = FileList["test/lib/**/*_test.rb"]
-                   .exclude("test/lib/**/*disruptive*")
-                   .exclude("test/lib/**/*contract_test.rb")
+    .exclude("test/lib/**/*disruptive*")
+    .exclude("test/lib/**/*contract_test.rb")
   t.warning = false
   t.verbose = true
 end
@@ -227,7 +226,7 @@ namespace :test do
     # `test:integration:disruptive` so they never interleave with — and
     # flake — the rest of the integration suite against the shared server.
     files = FileList["test/lib/**/*integration_test.rb"]
-              .exclude("test/lib/**/*disruptive*")
+      .exclude("test/lib/**/*disruptive*")
     run_test_files!("Integration tests", files, log: "tmp/integration-progress.log")
   end
 
@@ -235,9 +234,9 @@ namespace :test do
        "Knobs: TEST_PATTERN=<substr>, CONTINUE_ON_FAILURE=false."
   task :unit do
     files = FileList["test/lib/**/*_test.rb"]
-              .exclude("test/lib/**/*integration_test.rb")
-              .exclude("test/lib/**/*disruptive*")
-              .exclude("test/lib/**/*contract_test.rb")
+      .exclude("test/lib/**/*integration_test.rb")
+      .exclude("test/lib/**/*disruptive*")
+      .exclude("test/lib/**/*contract_test.rb")
     run_test_files!("Unit tests", files, log: "tmp/unit-progress.log")
   end
 
@@ -325,9 +324,9 @@ namespace :test do
       abort "[mcp_inspector] npx not found on PATH. Install Node.js 18+ or use `nvm use 18`."
     end
 
-    port    = ENV["MCP_INSPECTOR_PORT"] || "3099"
-    api_key = ENV["MCP_INSPECTOR_KEY"]  || "rake-inspector-key"
-    method  = ENV["METHOD"]             || "tools/list"
+    port = ENV["MCP_INSPECTOR_PORT"] || "3099"
+    api_key = ENV["MCP_INSPECTOR_KEY"] || "rake-inspector-key"
+    method = ENV["METHOD"] || "tools/list"
 
     server_url, app_id, rest_api_key, master_key = mcp_credentials_or_abort!
 
@@ -388,7 +387,7 @@ namespace :test do
     ensure
       if pid
         Process.kill("TERM", pid) rescue nil
-        Process.wait(pid)         rescue nil
+        Process.wait(pid) rescue nil
       end
     end
   end
@@ -457,13 +456,13 @@ namespace :mcp do
     require "parse/agent/mcp_client"
 
     server_url, app_id, rest_api_key, master_key = mcp_credentials_or_abort!
-    permissions  = (ENV["MCP_AGENT_PERMISSIONS"] || "readonly").to_sym
+    permissions = (ENV["MCP_AGENT_PERMISSIONS"] || "readonly").to_sym
 
     Parse.setup(
-      server_url:     server_url,
+      server_url: server_url,
       application_id: app_id,
-      api_key:        rest_api_key,
-      master_key:     master_key,
+      api_key: rest_api_key,
+      master_key: master_key,
     )
 
     agent = Parse::Agent.new(permissions: permissions)
@@ -485,7 +484,7 @@ namespace :mcp do
         puts "get_all_schemas failed: #{result[:error]}"
         next nil
       end
-      custom   = (result[:data][:custom]   || []).map { |c| c[:name] }
+      custom = (result[:data][:custom] || []).map { |c| c[:name] }
       built_in = (result[:data][:built_in] || []).map { |c| c[:name] }
       puts "Custom:   #{custom.sort.join(", ")}"
       puts "Built-in: #{built_in.sort.join(", ")}"
@@ -607,10 +606,10 @@ namespace :mcp do
 
     server_url, app_id, rest_api_key, master_key = mcp_credentials_or_abort!
     Parse.setup(
-      server_url:     server_url,
+      server_url: server_url,
       application_id: app_id,
-      api_key:        rest_api_key,
-      master_key:     master_key,
+      api_key: rest_api_key,
+      master_key: master_key,
     )
 
     permissions = (ENV["MCP_AGENT_PERMISSIONS"] || "readonly").to_sym
@@ -733,16 +732,16 @@ namespace :mcp do
     require "parse/agent"
 
     tool_name = (args[:name] || abort("usage: rake 'mcp:tool[name,jsonArgs]'")).to_sym
-    raw       = args[:args_json] || "{}"
-    parsed    = JSON.parse(raw)
-    kwargs    = parsed.transform_keys(&:to_sym)
+    raw = args[:args_json] || "{}"
+    parsed = JSON.parse(raw)
+    kwargs = parsed.transform_keys(&:to_sym)
 
     server_url, app_id, rest_api_key, master_key = mcp_credentials_or_abort!
     Parse.setup(
-      server_url:     server_url,
+      server_url: server_url,
       application_id: app_id,
-      api_key:        rest_api_key,
-      master_key:     master_key,
+      api_key: rest_api_key,
+      master_key: master_key,
     )
 
     agent = Parse::Agent.new(permissions: (ENV["MCP_AGENT_PERMISSIONS"] || "readonly").to_sym)
@@ -761,7 +760,7 @@ namespace :client do
   desc "Interactive console authenticated as a Parse user (session token or login), not master"
   task :console do
     require "irb"
-    begin; require "dotenv/load"; rescue LoadError; end
+    begin; require "dotenv/load";     rescue LoadError; end
     $LOAD_PATH.unshift(File.expand_path("lib", __dir__))
     require "parse-stack"
 

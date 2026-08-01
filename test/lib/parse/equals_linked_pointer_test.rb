@@ -327,7 +327,7 @@ class TestEqualsLinkedPointer < Minitest::Test
     # Status constraint can be at top level or inside $and (if merged)
     match_content = match_stage["$match"]
     has_status = match_content["status"] == "active" ||
-      (match_content["$and"].is_a?(Array) && match_content["$and"].any? { |c| c["status"] == "active" })
+                 (match_content["$and"].is_a?(Array) && match_content["$and"].any? { |c| c["status"] == "active" })
     assert has_status, "Should have $match for status constraint"
   end
 end

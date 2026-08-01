@@ -209,7 +209,7 @@ class AgentACLScopeTest < Minitest::Test
 
   def test_sub_agent_refuses_widening_via_different_user
     alice = Parse::User.new(objectId: "u_alice")
-    bob   = Parse::User.new(objectId: "u_bob")
+    bob = Parse::User.new(objectId: "u_bob")
     parent = Parse::Agent.new(acl_user: alice)
     err = assert_raises(ArgumentError) do
       Parse::Agent.new(parent: parent, acl_user: bob)
@@ -258,7 +258,7 @@ class AgentACLScopeTest < Minitest::Test
     user = Parse::User.new(objectId: "u_alice")
     agent = Parse::Agent.new(acl_user: user)
     Parse::Agent::Tools.send(:call_with_args, target, :archive,
-                              { reason: "obsolete" }, agent: agent)
+                             { reason: "obsolete" }, agent: agent)
     assert_equal "obsolete", captured[:reason]
     assert_equal Parse::Agent, captured[:agent_class]
   end
@@ -274,7 +274,7 @@ class AgentACLScopeTest < Minitest::Test
     agent = Parse::Agent.new
     # Should not raise — agent: is not in the signature, so it's omitted.
     Parse::Agent::Tools.send(:call_with_args, target, :archive,
-                              { reason: "obsolete" }, agent: agent)
+                             { reason: "obsolete" }, agent: agent)
     assert_equal "obsolete", captured[:reason]
   end
 

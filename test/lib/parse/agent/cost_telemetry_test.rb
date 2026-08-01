@@ -43,8 +43,8 @@ class CostTelemetryTest < Minitest::Test
     fake_client.define_singleton_method(:find_objects) do |_c, _q, **_opts|
       r = Object.new
       r.define_singleton_method(:success?) { true }
-      r.define_singleton_method(:count)    { count }
-      r.define_singleton_method(:results)  { results }
+      r.define_singleton_method(:count) { count }
+      r.define_singleton_method(:results) { results }
       r
     end
     @agent.define_singleton_method(:client) { fake_client }
@@ -59,7 +59,7 @@ class CostTelemetryTest < Minitest::Test
 
     assert_equal 1, @events.size
     payload = @events.first
-    assert payload.key?(:result_size),      "expected :result_size in payload"
+    assert payload.key?(:result_size), "expected :result_size in payload"
     assert payload.key?(:est_input_tokens), "expected :est_input_tokens in payload"
     assert_equal true, payload[:success]
   end
@@ -89,8 +89,8 @@ class CostTelemetryTest < Minitest::Test
     end
 
     payload = @events.first
-    assert_equal known_json_size,          payload[:result_size]
-    assert_equal known_json_size / 4,      payload[:est_input_tokens]
+    assert_equal known_json_size, payload[:result_size]
+    assert_equal known_json_size / 4, payload[:est_input_tokens]
   end
 
   # ---- est_input_tokens absent when result_size is nil --------------------
@@ -152,7 +152,7 @@ class CostTelemetryTest < Minitest::Test
     end
 
     payload = @events.first
-    est_tokens  = known_json_size / 4
+    est_tokens = known_json_size / 4
     expected_cost = (est_tokens / 1_000_000.0 * rate).round(6)
 
     assert_equal expected_cost, payload[:est_cost_usd]
@@ -171,7 +171,7 @@ class CostTelemetryTest < Minitest::Test
     end
 
     payload = @events.first
-    est_tokens    = known_json_size / 4
+    est_tokens = known_json_size / 4
     expected_cost = (est_tokens / 1_000_000.0 * 3).round(6)
 
     assert_equal expected_cost, payload[:est_cost_usd]
@@ -193,9 +193,9 @@ class CostTelemetryTest < Minitest::Test
 
     payload = @events.first
     assert_equal false, payload[:success]
-    refute payload.key?(:result_size),      "result_size must not appear on failure"
+    refute payload.key?(:result_size), "result_size must not appear on failure"
     refute payload.key?(:est_input_tokens), "est_input_tokens must not appear on failure"
-    refute payload.key?(:est_cost_usd),     "est_cost_usd must not appear on failure"
+    refute payload.key?(:est_cost_usd), "est_cost_usd must not appear on failure"
   end
 
   # ---- est_cost_usd absent when result_size nil even if rate set ----------
