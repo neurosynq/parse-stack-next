@@ -179,10 +179,11 @@ class MongoDBRoleGraphTest < Minitest::Test
     end
   end
 
-  # TRACK-MONGO-7: ROLE_GRAPH_MAX_DEPTH lowered from 20 to 6.
+  # TRACK-MONGO-7: ROLE_GRAPH_MAX_DEPTH lowered from 20 to 6, then raised
+  # to 10 to match the Parse::Role.all_for_user default.
   def test_role_names_for_user_rejects_depth_above_max
     assert_raises(ArgumentError) do
-      Parse::MongoDB.role_names_for_user(VALID_ID, max_depth: 7, master: true)
+      Parse::MongoDB.role_names_for_user(VALID_ID, max_depth: 11, master: true)
     end
   end
 
@@ -190,19 +191,22 @@ class MongoDBRoleGraphTest < Minitest::Test
     configure_with_pipeline_capture(
       "_Join:users:_Role" => [{ "names" => ["Admin"] }],
     )
-    Parse::MongoDB.role_names_for_user(VALID_ID, max_depth: 6, master: true)
+    Parse::MongoDB.role_names_for_user(VALID_ID, max_depth: 10, master: true)
     pipeline = @captured_pipelines["_Join:users:_Role"]
     graph_stage = pipeline.find { |s| s.key?("$graphLookup") }
-    # max_depth (Ruby) = 6 → graph_depth = 5
-    assert_equal 5, graph_stage["$graphLookup"]["maxDepth"]
+    # max_depth (Ruby) = 10 → graph_depth = 9
+    assert_equal 9, graph_stage["$graphLookup"]["maxDepth"]
   end
 
-  def test_role_graph_max_depth_constant_is_6
+  def test_role_graph_max_depth_constant_is_10
     # MONGO-7 cap lowered from 20 → 6 to neutralize the $graphLookup
-    # DoS amplifier. Hardcoded here so a future bump regresses loudly.
-    # The constant lives on the singleton_class because the role-graph
-    # helpers are defined inside `class << self`.
-    assert_equal 6, Parse::MongoDB.singleton_class::ROLE_GRAPH_MAX_DEPTH
+    # DoS amplifier, then raised to 10 so the ceiling matches the
+    # Parse::Role.all_for_user max_depth default (a lower ceiling made
+    # the opt-in fast path raise ArgumentError). Runaway traversal stays
+    # bounded by ROLE_GRAPH_MAX_TIME_MS. Hardcoded here so a future bump
+    # regresses loudly. The constant lives on the singleton_class because
+    # the role-graph helpers are defined inside `class << self`.
+    assert_equal 10, Parse::MongoDB.singleton_class::ROLE_GRAPH_MAX_DEPTH
   end
 
   def test_role_names_for_user_returns_empty_set_for_zero_depth

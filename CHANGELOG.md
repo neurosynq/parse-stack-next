@@ -1,5 +1,15 @@
 ## parse-stack-next Changelog
 
+### 5.7.0
+
+#### Role graph queries now accept the public API's default depth
+
+- **FIXED**: Raised the MongoDB role-graph query default and hard cap from 6
+  to 10, matching the existing `Parse::Role.all_for_user` default. Enabling
+  the MongoDB fast path no longer makes a call without an explicit
+  `max_depth:` raise `ArgumentError`; the existing query-time budget continues
+  to bound traversal work.
+
 ### 5.6.0
 
 #### Voyage embeddings reach the Atlas endpoint, video, and streamed media

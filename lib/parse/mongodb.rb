@@ -945,20 +945,27 @@ module Parse
 
       # @!visibility private
       # Default BFS depth for role-graph expansion. Real-world role graphs
-      # are 2-4 deep; 6 leaves headroom for unusual hierarchies without
+      # are 2-4 deep; 10 leaves headroom for unusual hierarchies without
       # encouraging runaway $graphLookup fan-out on pathological inputs.
-      ROLE_GRAPH_DEFAULT_DEPTH = 6
+      # Matches the `max_depth:` default on {Parse::Role.all_for_user}, so
+      # the opt-in mongo fast path accepts the same depth the slow path
+      # walks instead of raising ArgumentError.
+      ROLE_GRAPH_DEFAULT_DEPTH = 10
 
       # @!visibility private
       # Hard ceiling on accepted `max_depth:` for the role-graph helpers.
       # Anything above raises `ArgumentError` — the helpers do not silently
       # clamp because a caller passing 100 is a bug worth surfacing.
-      # Lowered from 20 to 6 (matches DEFAULT_DEPTH) to prevent the helper
-      # from being used as a `$graphLookup` DoS amplifier on pathological
-      # role hierarchies. Real-world Parse `_Role` graphs are 2-4 deep;
-      # callers needing more should examine why their hierarchy is so
+      # Lowered from 20 to 6 to prevent the helper from being used as a
+      # `$graphLookup` DoS amplifier on pathological role hierarchies, then
+      # raised to 10 to match both DEFAULT_DEPTH and the `max_depth:`
+      # default on {Parse::Role.all_for_user}: a ceiling below that default
+      # made the opt-in fast path raise ArgumentError for any caller who
+      # did not override it. Runaway traversal is separately bounded by
+      # {ROLE_GRAPH_MAX_TIME_MS}. Real-world Parse `_Role` graphs are 2-4
+      # deep; callers needing more should examine why their hierarchy is so
       # deep before raising this ceiling.
-      ROLE_GRAPH_MAX_DEPTH = 6
+      ROLE_GRAPH_MAX_DEPTH = 10
 
       # @!visibility private
       # Hardcoded `maxTimeMS` budget for the role-graph aggregations. Both
