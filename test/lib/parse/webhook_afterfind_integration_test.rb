@@ -13,7 +13,7 @@ require_relative "../../support/webhook_test_server"
 # This guards the v5.4.0 fix that threads the class name from the webhook URL
 # path (`/afterFind/<Class>`) into the Payload. Parse Server's find payload body
 # carries NO className anywhere (the matched objects omit it and there is no
-# top-level className — verified against Parse Server 9.9.0), so without the
+# top-level className — verified against Parse Server 9.10.0), so without the
 # path-derived class, parse_class was nil and the dispatch never invoked the
 # registered find handler, and afterFind `objects` could not have their :vector
 # columns stripped.

@@ -96,7 +96,7 @@ class VectorVisibilityTest < Minitest::Test
   #
   # Parse Server's afterFind payload carries NO className anywhere — the matched
   # objects omit it and there is no top-level className (verified against Parse
-  # Server 9.9.0). The class is known only from the webhook URL path, threaded
+  # Server 9.10.0). The class is known only from the webhook URL path, threaded
   # in as `webhook_class:`. These fixtures therefore use objects WITHOUT
   # className and supply the class via webhook_class (the real shape), NOT via
   # per-element className.

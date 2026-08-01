@@ -24,17 +24,17 @@ class TestServerCapabilities < Minitest::Test
   end
 
   def test_server_features_returns_advertised_block
-    c = client_for(version: "9.9.0", features: { "hooks" => { "create" => true } })
+    c = client_for(version: "9.10.0", features: { "hooks" => { "create" => true } })
     assert_equal({ "hooks" => { "create" => true } }, c.server_features)
   end
 
   def test_server_features_empty_when_absent
-    c = FakeServerClient.new({ "parseServerVersion" => "9.9.0" }.with_indifferent_access)
+    c = FakeServerClient.new({ "parseServerVersion" => "9.10.0" }.with_indifferent_access)
     assert_equal({}, c.server_features)
   end
 
-  def test_capabilities_on_current_server_9_9
-    c = client_for(version: "9.9.0")
+  def test_capabilities_on_current_server_9_10
+    c = client_for(version: "9.10.0")
     assert c.server_supports?(:livequery_keys_option), "keys option since 7.0"
     assert c.server_supports?(:cloud_object_encoding), "object encoding since 8.0"
     assert c.server_supports?(:aggregate_raw_values), "rawValues since 9.9"
@@ -66,7 +66,7 @@ class TestServerCapabilities < Minitest::Test
   end
 
   def test_unknown_capability_raises
-    c = client_for(version: "9.9.0")
+    c = client_for(version: "9.10.0")
     assert_raises(ArgumentError) { c.server_supports?(:no_such_capability) }
   end
 end
