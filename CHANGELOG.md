@@ -205,7 +205,7 @@
   Server's self-access rules, and role-only checks cannot claim a concrete
   member's pointer or `_User` self permission. CLP cache entries are isolated
   by Parse application so identically named classes cannot leak policy across
-  clients. These helpers are advisory—the eventual Parse Server request is
+  clients. These helpers are advisory: the eventual Parse Server request is
   still authoritative.
 
 #### Test infrastructure

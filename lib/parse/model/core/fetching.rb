@@ -512,6 +512,10 @@ module Parse
           @_fetched_keys ||= []
           @_fetched_keys << key unless @_fetched_keys.include?(key)
         end
+
+        # A transaction must capture the value before the setter marks or
+        # replaces it. `batch.add` happens after mutation in the public API.
+        send(:_capture_transaction_state!) if respond_to?(:_capture_transaction_state!, true)
       end
     end
   end

@@ -573,6 +573,10 @@ module Parse
             value = instance_variable_get ivar
           end
 
+          # Capture after any implicit fetch, but before a default value or
+          # mutable collection is materialized by this getter.
+          send(:_capture_transaction_state!) if respond_to?(:_capture_transaction_state!, true)
+
           # if value is nil (even after fetching), then lets see if the developer
           # set a default value for this attribute.
           if value.nil? && respond_to?("#{key}_default")

@@ -243,6 +243,10 @@ module Parse
               instance_variable_set ivar, val
             end
 
+            # Capture after lazy hydration, before a caller can mutate an
+            # object returned by this association getter.
+            send(:_capture_transaction_state!) if respond_to?(:_capture_transaction_state!, true)
+
             # Track association source for N+1 detection when returning an unfetched pointer
             # Uses a registry instead of setting instance variables on the pointer object
             if val.is_a?(Parse::Pointer) && val.pointer? && Parse.warn_on_n_plus_one

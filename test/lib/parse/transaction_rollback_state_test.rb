@@ -1,5 +1,6 @@
 require_relative "../../test_helper"
 require "minitest/autorun"
+require "ostruct"
 
 # Unit coverage for the state a transaction rollback captures and restores.
 #
@@ -21,12 +22,34 @@ class TransactionRollbackStateTest < Minitest::Test
     property :title, :string
     property :quantity, :integer
     property :tags, :array
+    property :metadata, :object
+    property :note, :string
+    has_many :related_widgets, as: :rollback_widget, through: :relation
   end
 
   def build_widget
-    widget = RollbackWidget.new(title: "original", quantity: 1, tags: ["a"])
+    widget = RollbackWidget.new(
+      title: "original",
+      quantity: 1,
+      tags: ["a"],
+      metadata: { nested: { count: 1 } },
+    )
     widget.clear_changes!
     widget
+  end
+
+  def with_failed_batch
+    original_new = Parse::BatchOperation.method(:new)
+    Parse::BatchOperation.define_singleton_method(:new) do |*args, **kwargs|
+      batch = original_new.call(*args, **kwargs)
+      batch.define_singleton_method(:submit) do
+        [OpenStruct.new(success?: false, error: "forced failure")]
+      end
+      batch
+    end
+    yield
+  ensure
+    Parse::BatchOperation.define_singleton_method(:new, &original_new)
   end
 
   def test_snapshot_captures_property_values_not_the_schema
@@ -52,6 +75,31 @@ class TransactionRollbackStateTest < Minitest::Test
 
     assert_equal ["a"], snapshot[:@tags],
                  "in-place mutation after the snapshot must not reach the saved copy"
+  end
+
+  def test_snapshot_deeply_dups_nested_values
+    widget = build_widget
+    snapshot = Parse::Core::Actions.snapshot_property_values(widget)
+
+    widget.metadata[:nested][:count] = 2
+
+    assert_equal 1, snapshot[:@metadata][:nested][:count],
+                 "nested mutation after the snapshot must not reach the saved copy"
+  end
+
+  def test_snapshot_isolates_relation_operation_arrays
+    widget = build_widget
+    relation = widget.related_widgets
+    relation.loaded = true
+    snapshot = Parse::Core::Actions.snapshot_property_values(widget)
+    related = RollbackWidget.new(title: "related")
+
+    relation.add(related)
+
+    saved_relation = snapshot[:@related_widgets]
+    assert_empty saved_relation.additions
+    assert_empty saved_relation.removals
+    assert_empty saved_relation.to_a
   end
 
   def test_rollback_restores_property_values
@@ -127,6 +175,101 @@ class TransactionRollbackStateTest < Minitest::Test
            "@attributes must stay undefined so ActiveModel::Dirty keeps using " \
            "ForcedMutationTracker rather than building an AttributeMutationTracker " \
            "over Parse's schema hash"
+  end
+
+  def test_rollback_removes_a_property_ivar_that_was_originally_undefined
+    widget = build_widget
+    refute widget.instance_variable_defined?(:@note)
+    state = Parse::Core::Actions.snapshot_object_state(widget)
+
+    widget.note = "added"
+    Parse::Core::Actions.rollback_object_state(state)
+
+    refute widget.instance_variable_defined?(:@note)
+  end
+
+  def test_public_transaction_captures_state_before_mutate_then_add
+    widget = build_widget
+
+    with_failed_batch do
+      assert_raises(Parse::Error) do
+        Parse::Object.transaction do |batch|
+          widget.title = "modified"
+          batch.add(widget)
+        end
+      end
+    end
+
+    assert_equal "original", widget.title
+    refute widget.changed?
+    refute widget.instance_variable_defined?(:@attributes)
+  end
+
+  def test_public_transaction_restores_nested_and_undefined_values
+    widget = build_widget
+
+    with_failed_batch do
+      assert_raises(Parse::Error) do
+        Parse::Object.transaction do |batch|
+          metadata = widget.metadata
+          widget.metadata_will_change!
+          metadata[:nested][:count] = 2
+          widget.note = "added"
+          batch.add(widget)
+        end
+      end
+    end
+
+    assert_equal 1, widget.metadata[:nested][:count]
+    refute widget.instance_variable_defined?(:@note)
+    refute widget.changed?
+  end
+
+  def test_public_transaction_preserves_preexisting_dirty_state
+    widget = build_widget
+    widget.title = "pending before transaction"
+    changes_before = widget.changes
+
+    with_failed_batch do
+      assert_raises(Parse::Error) do
+        Parse::Object.transaction do |batch|
+          widget.quantity = 2
+          batch.add(widget)
+        end
+      end
+    end
+
+    assert_equal "pending before transaction", widget.title
+    assert_equal 1, widget.quantity
+    assert_equal changes_before, widget.changes
+  end
+
+  def test_failed_create_keeps_values_but_not_a_server_id
+    widget = nil
+
+    with_failed_batch do
+      assert_raises(Parse::Error) do
+        Parse::Object.transaction do |batch|
+          widget = RollbackWidget.new(title: "new widget", quantity: 3)
+          batch.add(widget)
+        end
+      end
+    end
+
+    assert_equal "new widget", widget.title
+    assert_equal 3, widget.quantity
+    assert_nil widget.id
+    assert widget.changed?
+  end
+
+  def test_transaction_context_is_restored_after_failure
+    with_failed_batch do
+      assert_raises(Parse::Error) do
+        Parse::Object.transaction { [] }
+      end
+    end
+
+    assert_nil Fiber[Parse::Core::Actions::TRANSACTION_CONTEXT_KEY]
   end
 
   # Pins the premise the bug rested on, so a future change to `#attributes`
