@@ -27,6 +27,31 @@
   production. They now dispatch through the real handler invocation and fail
   against the broken code.
 
+#### Whether one failing `after_*` handler stops the rest is now a setting
+
+- **NEW**: `Parse::Webhooks.abort_after_callbacks_on_error` decides whether an
+  exception raised by one `after_*` handler prevents the remaining handlers for
+  that trigger from running. It defaults to `true`, which is the existing
+  behavior, so nothing changes on upgrade. Set it to `false` to isolate
+  handlers from each other: each one runs regardless of what an earlier one
+  raised, and the failure is reported with a warning and a
+  `parse.webhooks.handler_error` notification instead of being swallowed
+  silently. This was previously not a decision at all but a side effect of
+  folding handlers with `Array#map`, which abandons the collection on the
+  first raise. Registration order is not fully under an application's control,
+  since the SDK's own cache-invalidation triggers install during `Parse.setup`
+  and therefore sit ahead of handlers registered by application files loaded
+  later, so a single raising handler could silently prevent an application's
+  own hooks from running with nothing logged to say they had been skipped.
+- **BEHAVIOR**: The setting governs only whether later handlers still run.
+  Neither mode reverts anything: an `after_*` trigger fires once the write has
+  already committed, so there is no version of this setting that can undo a
+  save. `before_*` dispatch is untouched, and only the accumulating,
+  non-rejectable triggers (`after_save`, `after_delete`, `after_logout`) can
+  hold more than one handler in the first place. A rejectable `before_*`
+  trigger must deny if any handler denies, so its raise must continue to
+  abort.
+
 #### Failed transactions restore the object they rolled back
 
 - **FIXED**: A failed `Parse::Object.transaction` left the in-memory object
