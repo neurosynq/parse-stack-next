@@ -359,6 +359,9 @@ module Parse
 
     # Notifies the delegate that the collection changed.
     def notify_will_change!
+      if @delegate && @delegate.respond_to?(:_capture_transaction_state!, true)
+        @delegate.send(:_capture_transaction_state!)
+      end
       collection_will_change!
       forward "#{@key}_will_change!"
     end

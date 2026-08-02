@@ -94,6 +94,28 @@ module Parse
   module Core
     # Defines some of the save, update and destroy operations for Parse objects.
     module Actions
+      # Fiber-local context used to capture an object's state before its first
+      # mutation inside a transaction block. `batch.add` is intentionally too
+      # late for this: the public API documents mutating an object and adding it
+      # afterwards.
+      TRANSACTION_CONTEXT_KEY = :__parse_transaction_context__
+
+      # Distinguishes a property whose ivar did not exist from one explicitly
+      # set to nil. Rollback removes the former instead of defining it as nil.
+      UNDEFINED_PROPERTY = Object.new.freeze
+
+      # Non-property state that can change while building/submitting a batch
+      # and must be restored along with the `@<field>` property ivars.
+      ROLLBACK_STATE_IVARS = %i[
+        @changed_attributes
+        @id
+        @mutations_from_database
+        @mutations_before_last_save
+        @_acl_snapshot_before_change
+        @_acl_pristine
+        @_authorization_acl_state
+      ].freeze
+
       # @!visibility private
       def self.included(base)
         base.extend(ClassMethods)
@@ -133,10 +155,16 @@ module Parse
       #   cannot corrupt the saved copy.
       def self.snapshot_property_values(obj)
         fields = obj.class.respond_to?(:fields) ? obj.class.fields.keys : []
-        fields.each_with_object({}) do |key, snapshot|
+        relations = obj.class.respond_to?(:relations) ? obj.class.relations.keys : []
+        property_keys = (fields + relations).uniq
+        seen = {}
+        property_keys.each_with_object({}) do |key, snapshot|
           ivar = :"@#{key}"
-          next unless obj.instance_variable_defined?(ivar)
-          snapshot[ivar] = dup_for_snapshot(obj.instance_variable_get(ivar))
+          snapshot[ivar] = if obj.instance_variable_defined?(ivar)
+              dup_for_snapshot(obj.instance_variable_get(ivar), seen)
+            else
+              UNDEFINED_PROPERTY
+            end
         end
       end
 
@@ -147,25 +175,144 @@ module Parse
       # `:array` and association properties hold a {Parse::CollectionProxy},
       # and duplicating the proxy still shares the underlying `@collection`
       # array, so `widget.tags << "b"` would mutate the snapshot too. The
-      # proxy's inner array is duplicated as well.
+      # proxy's mutable backing arrays and nested values are duplicated as
+      # well. Parse objects nested inside values remain references: a pointer
+      # property should restore the same object, not manufacture a clone.
       #
       # @param value [Object] the live property value.
       # @return [Object] a copy safe to hold across the transaction.
-      def self.dup_for_snapshot(value)
-        copy = begin
-            value.dup
-          rescue TypeError
-            # Symbols, Integers, true/false/nil and other immediates are not
-            # duplicable on older rubies; they are also immutable, so sharing
-            # the reference is safe.
-            return value
-          end
+      def self.dup_for_snapshot(value, seen = {})
+        return value if value.nil? || value == true || value == false || value.is_a?(Symbol) || value.is_a?(Numeric)
+        return value if defined?(Parse::Pointer) && value.is_a?(Parse::Pointer)
 
-        if copy.instance_variable_defined?(:@collection)
-          inner = copy.instance_variable_get(:@collection)
-          copy.instance_variable_set(:@collection, inner.dup) if inner.is_a?(Array)
+        object_id = value.object_id
+        return seen[object_id] if seen.key?(object_id)
+
+        case value
+        when Array
+          copy = value.dup
+          copy.clear
+          seen[object_id] = copy
+          value.each { |item| copy << dup_for_snapshot(item, seen) }
+          copy
+        when Hash
+          copy = value.dup
+          copy.clear
+          seen[object_id] = copy
+          value.each do |key, item|
+            copy[dup_for_snapshot(key, seen)] = dup_for_snapshot(item, seen)
+          end
+          copy
+        when Parse::CollectionProxy
+          copy = value.dup
+          seen[object_id] = copy
+          %i[@collection @additions @removals @changed_attributes].each do |ivar|
+            next unless value.instance_variable_defined?(ivar)
+            copy.instance_variable_set(ivar, dup_for_snapshot(value.instance_variable_get(ivar), seen))
+          end
+          %i[@mutations_from_database @mutations_before_last_save].each do |ivar|
+            next unless value.instance_variable_defined?(ivar)
+            tracker = value.instance_variable_get(ivar)
+            copy.instance_variable_set(ivar, dup_mutation_tracker(tracker, copy, seen))
+          end
+          copy
+        when Parse::ACL
+          copy = Parse::ACL.new(dup_for_snapshot(value.as_json, seen), owner: value.delegate)
+          seen[object_id] = copy
+          copy
+        else
+          copy = begin
+              value.dup
+            rescue TypeError
+              # Immutable values are safe to share with the snapshot.
+              return value
+            end
+          seen[object_id] = copy
+          copy
+        end
+      end
+
+      # Duplicate ActiveModel's mutation tracker without sharing its mutable
+      # forced/finalized change hashes. Forced trackers retain their owning
+      # Parse object (or copied collection proxy) so dirty reads keep working.
+      #
+      # @param tracker [Object, nil] ActiveModel mutation tracker.
+      # @param owner [Object] object whose attributes the copy should read.
+      # @param seen [Hash] identity map used by {dup_for_snapshot}.
+      # @return [Object, nil] isolated tracker copy.
+      def self.dup_mutation_tracker(tracker, owner, seen = {})
+        return nil if tracker.nil?
+        return tracker if defined?(ActiveModel::NullMutationTracker) && tracker.is_a?(ActiveModel::NullMutationTracker)
+        return seen[tracker.object_id] if seen.key?(tracker.object_id)
+
+        copy = tracker.dup
+        seen[tracker.object_id] = copy
+        if defined?(ActiveModel::ForcedMutationTracker) && tracker.is_a?(ActiveModel::ForcedMutationTracker)
+          copy.instance_variable_set(:@attributes, owner)
+        end
+        %i[@forced_changes @finalized_changes].each do |ivar|
+          next unless tracker.instance_variable_defined?(ivar)
+          copy.instance_variable_set(ivar, dup_for_snapshot(tracker.instance_variable_get(ivar), seen))
         end
         copy
+      rescue TypeError
+        tracker
+      end
+
+      # Capture all local state needed to restore an object after a failed
+      # transaction. This is separate from `#attributes`, which is a schema.
+      #
+      # @param obj [Parse::Object] object being transacted.
+      # @return [Hash] rollback state.
+      def self.snapshot_object_state(obj)
+        seen = {}
+        instance_variables = ROLLBACK_STATE_IVARS.each_with_object({}) do |ivar, snapshot|
+          snapshot[ivar] = if obj.instance_variable_defined?(ivar)
+              value = obj.instance_variable_get(ivar)
+              if %i[@mutations_from_database @mutations_before_last_save].include?(ivar)
+                dup_mutation_tracker(value, obj, seen)
+              else
+                dup_for_snapshot(value, seen)
+              end
+            else
+              UNDEFINED_PROPERTY
+            end
+        end
+
+        {
+          object: obj,
+          property_values: snapshot_property_values(obj),
+          instance_variables: instance_variables,
+        }
+      end
+
+      # Record that an object was initialized inside the active transaction.
+      # Its first rollback snapshot is intentionally taken when it is added to
+      # the batch, after initialization, so a failed create stays usable as an
+      # initialized unsaved object.
+      #
+      # @param obj [Parse::Object] newly initialized object.
+      # @return [void]
+      def self.mark_transaction_object_created(obj)
+        context = Fiber[TRANSACTION_CONTEXT_KEY]
+        return unless context
+        context[:created_objects][obj.object_id] = true
+        context[:snapshots].delete(obj.object_id)
+      end
+
+      # Capture an object's state once, before its first transaction mutation.
+      # Objects created inside the transaction defer capture until `batch.add`.
+      #
+      # @param obj [Parse::Object] object whose state should be captured.
+      # @param context [Hash, nil] transaction context; defaults to the current fiber.
+      # @param include_created [Boolean] capture a newly created object at add time.
+      # @return [Hash, nil] the object's rollback state.
+      def self.capture_transaction_state(obj, context = Fiber[TRANSACTION_CONTEXT_KEY], include_created: false)
+        return unless context && obj
+
+        object_id = obj.object_id
+        return if context[:created_objects].key?(object_id) && !include_created
+        context[:snapshots][object_id] ||= snapshot_object_state(obj)
       end
 
       # Restore the values captured by {snapshot_property_values}.
@@ -180,6 +327,25 @@ module Parse
       def self.restore_property_values(obj, snapshot)
         return unless snapshot.is_a?(Hash)
         snapshot.each do |ivar, value|
+          if value.equal?(UNDEFINED_PROPERTY)
+            obj.remove_instance_variable(ivar) if obj.instance_variable_defined?(ivar)
+          else
+            obj.instance_variable_set(ivar, value)
+          end
+        end
+      end
+
+      # Restore one instance variable while preserving whether it originally
+      # existed. Used for dirty/ACL bookkeeping outside the property schema.
+      #
+      # @param obj [Object] target object.
+      # @param ivar [Symbol] instance variable name.
+      # @param value [Object] snapshotted value or {UNDEFINED_PROPERTY}.
+      # @return [void]
+      def self.restore_instance_variable(obj, ivar, value)
+        if value.equal?(UNDEFINED_PROPERTY)
+          obj.remove_instance_variable(ivar) if obj.instance_variable_defined?(ivar)
+        else
           obj.instance_variable_set(ivar, value)
         end
       end
@@ -193,15 +359,34 @@ module Parse
         obj = state[:object]
         return if obj.nil?
         restore_property_values(obj, state[:property_values])
-        obj.instance_variable_set(:@changed_attributes, state[:changed_attributes])
-        obj.instance_variable_set(:@id, state[:id])
-        # Restore change tracking state. Leaving `@mutations_from_database`
-        # nil is fine: `ActiveModel::Dirty` lazily rebuilds it, and with
-        # `@attributes` no longer defined on the object it correctly rebuilds
-        # a `ForcedMutationTracker`.
-        obj.instance_variable_set(:@mutations_from_database, state[:mutations_from_database])
-        obj.instance_variable_set(:@mutations_before_last_save, state[:mutations_before_last_save])
+        if state[:instance_variables]
+          state[:instance_variables].each do |ivar, value|
+            restore_instance_variable(obj, ivar, value)
+          end
+        else
+          # Compatibility with rollback states produced before the complete
+          # snapshot format was introduced.
+          obj.instance_variable_set(:@changed_attributes, state[:changed_attributes])
+          obj.instance_variable_set(:@id, state[:id])
+          obj.instance_variable_set(:@mutations_from_database, state[:mutations_from_database])
+          obj.instance_variable_set(:@mutations_before_last_save, state[:mutations_before_last_save])
+        end
       end
+
+      # Hook used by generated property accessors and collection proxies.
+      # @api private
+      def _capture_transaction_state!
+        Parse::Core::Actions.capture_transaction_state(self)
+      end
+
+      # ActiveModel calls this immediately after `<field>_will_change!`; the
+      # hook also covers callers that explicitly mark a mutable value dirty.
+      def _read_attribute(attr_name)
+        _capture_transaction_state!
+        super
+      end
+
+      private :_capture_transaction_state!, :_read_attribute
 
       # Class methods applied to Parse::Object subclasses.
       module ClassMethods
@@ -238,123 +423,109 @@ module Parse
         def transaction(retries: 5, &block)
           raise ArgumentError, "Block required for transaction" unless block_given?
 
-          batch = Parse::BatchOperation.new(nil, transaction: true)
-
-          # Store original state of objects for rollback
+          previous_context = Fiber[TRANSACTION_CONTEXT_KEY]
+          transaction_context = { snapshots: {}, created_objects: {} }
+          Fiber[TRANSACTION_CONTEXT_KEY] = transaction_context
           original_states = {}
           tracked_objects = []
 
-          # Wrap the batch to capture objects being added
-          batch_wrapper = Object.new
-          batch_wrapper.define_singleton_method(:is_a?) do |klass|
-            klass == Parse::BatchOperation || super(klass)
-          end
-          batch_wrapper.define_singleton_method(:kind_of?) do |klass|
-            klass == Parse::BatchOperation || super(klass)
-          end
-          batch_wrapper.define_singleton_method(:instance_of?) do |klass|
-            klass == Parse::BatchOperation
-          end
-          batch_wrapper.define_singleton_method(:add) do |obj|
-            # Store original state when object is first added to transaction.
-            # Use obj.object_id (Ruby identity) as the key because Parse::Object#hash
-            # and #eql? treat all unsaved objects (nil id) as equal, which would cause
-            # only the first unsaved object to be tracked.
-            if obj.respond_to?(:attributes) && obj.respond_to?(:id) && !original_states.key?(obj.object_id)
-              original_states[obj.object_id] = {
-                object: obj,
-                property_values: Parse::Core::Actions.snapshot_property_values(obj),
-                changed_attributes: obj.instance_variable_get(:@changed_attributes)&.dup || {},
-                id: obj.id,
-                mutations_from_database: obj.instance_variable_get(:@mutations_from_database),
-                mutations_before_last_save: obj.instance_variable_get(:@mutations_before_last_save),
-              }
-              tracked_objects << obj
-            end
-            batch.add(obj)
-          end
-
-          # Forward other methods to the real batch
-          batch_wrapper.define_singleton_method(:method_missing) do |method, *args, &block|
-            batch.send(method, *args, &block)
-          end
-
-          result = yield(batch_wrapper)
-
-          # If block returns objects, add them to batch
-          if result.respond_to?(:change_requests)
-            batch_wrapper.add(result)
-          elsif result.is_a?(Array)
-            result.each { |obj| batch_wrapper.add(obj) if obj.respond_to?(:change_requests) }
-          end
-
-          # Submit with retry logic for transaction conflicts
-          attempts = 0
           begin
-            attempts += 1
-            responses = batch.submit
+            batch = Parse::BatchOperation.new(nil, transaction: true)
 
-            # Check for success
-            if responses.all?(&:success?)
-              # Update tracked objects with data from successful responses
-              # Match responses to objects using the request tag (Ruby object_id)
-              # Build hash lookup once for O(n) instead of O(n²) linear search
-              objects_by_id = tracked_objects.each_with_object({}) { |o, h| h[o.object_id] = o }
-              requests = batch.requests
-              requests.zip(responses).each do |request, response|
-                next unless request && response && response.success?
-                result = response.result
-                next unless result.is_a?(Hash)
+            # Wrap the batch to associate the pre-mutation snapshot with each
+            # object that actually participates in the transaction.
+            batch_wrapper = Object.new
+            batch_wrapper.define_singleton_method(:is_a?) do |klass|
+              klass == Parse::BatchOperation || super(klass)
+            end
+            batch_wrapper.define_singleton_method(:kind_of?) do |klass|
+              klass == Parse::BatchOperation || super(klass)
+            end
+            batch_wrapper.define_singleton_method(:instance_of?) do |klass|
+              klass == Parse::BatchOperation
+            end
+            batch_wrapper.define_singleton_method(:add) do |obj|
+              # Ruby identity is required because all unsaved Parse objects
+              # compare equal while their ids are nil.
+              if obj.respond_to?(:attributes) && obj.respond_to?(:id) && !original_states.key?(obj.object_id)
+                original_states[obj.object_id] = Parse::Core::Actions.capture_transaction_state(
+                  obj,
+                  transaction_context,
+                  include_created: true,
+                )
+                tracked_objects << obj
+              end
+              batch.add(obj)
+            end
 
-                # Find the object matching this request's tag
-                obj = objects_by_id[request.tag]
-                next unless obj
+            # Forward other methods to the real batch.
+            batch_wrapper.define_singleton_method(:method_missing) do |method, *args, &method_block|
+              batch.send(method, *args, &method_block)
+            end
+            batch_wrapper.define_singleton_method(:respond_to_missing?) do |method, include_private = false|
+              batch.respond_to?(method, include_private)
+            end
 
-                # Update object with response data (objectId, createdAt, updatedAt)
-                if result["objectId"]
-                  obj.instance_variable_set(:@id, result["objectId"])
+            result = yield(batch_wrapper)
+
+            # If block returns objects, add them to batch.
+            if result.respond_to?(:change_requests)
+              batch_wrapper.add(result)
+            elsif result.is_a?(Array)
+              result.each { |obj| batch_wrapper.add(obj) if obj.respond_to?(:change_requests) }
+            end
+
+            # Submit with retry logic for transaction conflicts.
+            attempts = 0
+            begin
+              attempts += 1
+              responses = batch.submit
+
+              if responses.all?(&:success?)
+                # Match responses to objects using the request tag (Ruby object_id).
+                objects_by_id = tracked_objects.each_with_object({}) { |o, h| h[o.object_id] = o }
+                batch.requests.zip(responses).each do |request, response|
+                  next unless request && response && response.success?
+                  result = response.result
+                  next unless result.is_a?(Hash)
+
+                  obj = objects_by_id[request.tag]
+                  next unless obj
+
+                  obj.instance_variable_set(:@id, result["objectId"]) if result["objectId"]
+                  if result["createdAt"]
+                    obj.instance_variable_set(:@created_at, Parse::Date.parse(result["createdAt"]))
+                  end
+                  if result["updatedAt"]
+                    obj.instance_variable_set(:@updated_at, Parse::Date.parse(result["updatedAt"]))
+                  elsif result["createdAt"]
+                    obj.instance_variable_set(:@updated_at, Parse::Date.parse(result["createdAt"]))
+                  end
+
+                  # Apply any additional attributes returned by beforeSave hooks.
+                  obj.set_attributes!(result) if obj.respond_to?(:set_attributes!)
+                  obj.send(:clear_changes!) if obj.respond_to?(:clear_changes!, true)
                 end
-                if result["createdAt"]
-                  obj.instance_variable_set(:@created_at, Parse::Date.parse(result["createdAt"]))
-                end
-                if result["updatedAt"]
-                  obj.instance_variable_set(:@updated_at, Parse::Date.parse(result["updatedAt"]))
-                elsif result["createdAt"]
-                  obj.instance_variable_set(:@updated_at, Parse::Date.parse(result["createdAt"]))
-                end
 
-                # Apply any additional attributes returned by beforeSave hooks
-                obj.set_attributes!(result) if obj.respond_to?(:set_attributes!)
-
-                # Clear change tracking since save was successful
-                obj.send(:clear_changes!) if obj.respond_to?(:clear_changes!, true)
+                return responses
               end
 
-              return responses
-            else
-              # Find first error
-              error_response = responses.find { |r| !r.success? }
-
-              # Rollback local object states
-              original_states.each_value do |state|
-                Parse::Core::Actions.rollback_object_state(state)
-              end
-
+              error_response = responses.find { |response| !response.success? }
               raise Parse::Error, "Transaction failed: #{error_response.error}"
+            rescue Parse::Error => e
+              if e.message.include?("251") && attempts < retries
+                sleep(0.1 * attempts)
+                retry
+              end
+              raise
             end
-          rescue Parse::Error => e
-            # Retry on transaction conflict (error code 251)
-            if e.message.include?("251") && attempts < retries
-              sleep(0.1 * attempts) # Exponential backoff
-              retry
-            end
-
-            # Rollback local object states on final failure
+          rescue StandardError
             original_states.each_value do |state|
               Parse::Core::Actions.rollback_object_state(state)
             end
-
-            raise e
+            raise
+          ensure
+            Fiber[TRANSACTION_CONTEXT_KEY] = previous_context
           end
         end
 

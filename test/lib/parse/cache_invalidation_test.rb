@@ -52,9 +52,21 @@ class CacheInvalidationTest < Minitest::Test
     Parse::Webhooks.instance_variable_set(:@routes, nil)
   end
 
+  # Dispatch the way Parse::Webhooks actually does.
+  #
+  # This used to be `h.call(payload)`. A plain `Proc#call` leaves `self` bound
+  # to whatever the block closed over lexically, which for these handlers is
+  # the `Parse::Cache::Invalidation` module, so a bare `guard` resolved and
+  # every test here passed. The real dispatcher does NOT do that: it binds the
+  # block to the payload via `define_singleton_method`, exactly as the historical
+  # `payload.instance_exec(payload, &block)` did. Under that binding the same
+  # handlers raised `NoMethodError: undefined method 'guard'` on every trigger.
+  #
+  # Calling the real `invoke_handler` is what makes these tests capable of
+  # failing when the handlers are broken in production.
   def fire(type, class_name, payload)
     handlers = Parse::Webhooks.routes[type][class_name]
-    Array(handlers).each { |h| h.call(payload) }
+    Array(handlers).each { |h| Parse::Webhooks.send(:invoke_handler, payload, h) }
   end
 
   # Minimal payload doubles: only what the invalidation handlers read.
@@ -199,5 +211,54 @@ class CacheInvalidationTest < Minitest::Test
   def test_logout_with_neither_token_nor_user_is_inert
     fire(:after_logout, "_Session", FakePayload.new(nil, "_Session", nil))
     assert_empty @store.data
+  end
+
+  # --- dispatch binding ---------------------------------------------------
+
+  # The registered handlers must not depend on `self`.
+  #
+  # `Parse::Webhooks.invoke_handler` binds each block to the payload, so a
+  # handler body calling a bare private method of the module that created it
+  # resolves against `Parse::Webhooks::Payload` and raises `NoMethodError`.
+  # This asserts the property directly rather than through any one trigger.
+  def test_handlers_do_not_resolve_methods_against_the_module
+    handler = Parse::Webhooks.routes[:after_save]["_User"].first
+    receiver = Object.new
+    receiver.define_singleton_method(:parse_object) { FakeUser.new("bound123") }
+    receiver.define_singleton_method(:parse_class) { Parse::Model::CLASS_USER }
+
+    # Bind the block to an object that defines none of Invalidation's helpers,
+    # which is precisely what the real dispatcher does.
+    Parse::Webhooks.send(:invoke_handler, receiver, handler)
+
+    assert_equal 1, @cache.identity.generation("bound123"),
+                 "the handler must work when self is not the Invalidation module"
+  end
+
+  # End-to-end through the real dispatcher, with a real Payload rather than a
+  # double, and an application handler registered after the SDK's.
+  #
+  # `call_route` runs the registry through `Array#map`, which abandons the
+  # whole collection on the first raise. Because these triggers install at
+  # `Parse.setup` they sit AHEAD of every application handler, so one raising
+  # SDK handler silently prevented the application's own `after_save "_User"`
+  # hook from running at all. That is the failure this pins.
+  def test_a_failing_sdk_handler_cannot_starve_an_application_handler
+    Parse::Webhooks.instance_variable_set(:@routes, nil)
+    Parse::Cache::Invalidation.install!(@cache)   # registers first, as at setup
+
+    app_ran = false
+    Parse::Webhooks.route(:after_save, "_User") { |_p| app_ran = true }
+
+    payload = Parse::Webhooks::Payload.new(
+      "triggerName" => "afterSave",
+      "object" => { "className" => "_User", "objectId" => "starve123" },
+    )
+
+    Parse::Webhooks.call_route(:after_save, "_User", payload)
+
+    assert app_ran, "the application's after_save _User handler must still run"
+    assert_equal 1, @cache.identity.generation("starve123"),
+                 "the SDK's own invalidation must also have run"
   end
 end

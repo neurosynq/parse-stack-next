@@ -1,5 +1,85 @@
 ## parse-stack-next Changelog
 
+### 5.7.1
+
+#### Cache-invalidation webhooks no longer break every application hook for the same trigger
+
+- **FIXED**: `Parse::Cache::Invalidation` raised `NoMethodError: undefined
+  method 'guard'` on every `_User`, `_Role`, and `_Session` trigger it
+  registered, and the failure was not contained. A webhook handler block is
+  bound to the payload before it runs, so the bare `guard` / `bump_subject` /
+  `subject_id` calls in the handler bodies resolved against
+  `Parse::Webhooks::Payload`, which defines none of them. `guard`'s own
+  `rescue` never ran, because it lives inside the body that was never entered,
+  so the error escaped into the route dispatcher. The dispatcher folds a
+  trigger's handlers with `Array#map`, which abandons the collection on the
+  first raise, and these triggers install during `Parse.setup` and therefore
+  sit ahead of every application handler for the same trigger. One
+  unresolvable method name silently prevented an application's own
+  `after_save "_User"` hook from running at all, so any work downstream of it
+  stopped without a visible cause. The handlers now call the module on an
+  explicit receiver captured in a local, which is independent of whatever
+  `self` the dispatcher binds. Applications that set
+  `cache_invalidation_hooks: false` to work around this can remove it.
+- **FIXED**: The invalidation tests dispatched handlers with a plain
+  `Proc#call`, which leaves `self` bound to the module the block closed over,
+  so every one of them passed against handlers that could not run in
+  production. They now dispatch through the real handler invocation and fail
+  against the broken code.
+
+#### Whether one failing `after_*` handler stops the rest is now a setting
+
+- **NEW**: `Parse::Webhooks.abort_after_callbacks_on_error` decides whether an
+  exception raised by one `after_*` handler prevents the remaining handlers for
+  that trigger from running. It defaults to `true`, which is the existing
+  behavior, so nothing changes on upgrade. Set it to `false` to isolate
+  handlers from each other: each one runs regardless of what an earlier one
+  raised, and the failure is reported with a warning and a
+  `parse.webhooks.handler_error` notification instead of being swallowed
+  silently. This was previously not a decision at all but a side effect of
+  folding handlers with `Array#map`, which abandons the collection on the
+  first raise. Registration order is not fully under an application's control,
+  since the SDK's own cache-invalidation triggers install during `Parse.setup`
+  and therefore sit ahead of handlers registered by application files loaded
+  later, so a single raising handler could silently prevent an application's
+  own hooks from running with nothing logged to say they had been skipped.
+- **BEHAVIOR**: The setting governs only whether later handlers still run.
+  Neither mode reverts anything: an `after_*` trigger fires once the write has
+  already committed, so there is no version of this setting that can undo a
+  save. `before_*` dispatch is untouched, and only the accumulating,
+  non-rejectable triggers (`after_save`, `after_delete`, `after_logout`) can
+  hold more than one handler in the first place. A rejectable `before_*`
+  trigger must deny if any handler denies, so its raise must continue to
+  abort.
+
+#### Failed transactions restore the object they rolled back
+
+- **FIXED**: A failed `Parse::Object.transaction` left the in-memory object
+  holding its modified values. The rollback snapshotted `Parse::Object#attributes`
+  and restored it, but that method returns a schema map of field name to type
+  symbol rather than values, so nothing was ever restored. Property values
+  live in `@<field>` instance variables; those are now what the rollback
+  captures and restores, including values nested inside arrays and hashes,
+  relation operation queues, and properties whose ivar did not exist before
+  the transaction. State is captured when the object first enters the
+  transaction rather than at `batch.add`, so the documented pattern of
+  mutating an object and adding it afterwards rolls back correctly.
+- **FIXED**: A failed transaction also left the object with broken change
+  tracking. Restoring the schema map defined `@attributes`, which is the
+  instance variable `ActiveModel::Dirty` keys its behavior on: once defined it
+  builds an `AttributeMutationTracker` over that hash instead of the
+  `ForcedMutationTracker` a `Parse::Object` needs, and `clear_changes!` then
+  called `forgetting_assignment` on the `[key, value]` pairs `Hash#map`
+  yields. Both call sites rescue and warn, so every rollback quietly
+  downgraded the object rather than failing. The rollback no longer defines
+  `@attributes`.
+- **FIXED**: The mongo-direct role-graph integration test gated on
+  `ANALYTICS_DATABASE_URI`, a production variable name the test stack never
+  sets, so both of its traversal assertions skipped on every run while the
+  per-file reporter still reported the file as passing. It now reads
+  `PARSE_TEST_MONGO_URI` like every other mongo-direct integration file and
+  still honors `ANALYTICS_DATABASE_URI` as an override.
+
 ### 5.7.0
 
 #### Cache keys move into a reserved, app-scoped keyspace
@@ -205,7 +285,7 @@
   Server's self-access rules, and role-only checks cannot claim a concrete
   member's pointer or `_User` self permission. CLP cache entries are isolated
   by Parse application so identically named classes cannot leak policy across
-  clients. These helpers are advisory—the eventual Parse Server request is
+  clients. These helpers are advisory: the eventual Parse Server request is
   still authoritative.
 
 #### Test infrastructure

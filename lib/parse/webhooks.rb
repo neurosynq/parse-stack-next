@@ -132,6 +132,46 @@ module Parse
 
     class << self
 
+      # Whether an exception raised by one `after_*` handler prevents the
+      # remaining handlers for that same trigger from running.
+      #
+      # Only the accumulating, non-rejectable `after_*` triggers can have more
+      # than one handler (see {Parse::Webhooks::Registration#route}), so this
+      # governs `after_save`, `after_delete`, and `after_logout` and nothing
+      # else. `before_*` dispatch is untouched: a raise there is how a handler
+      # denies an operation, and it must continue to abort.
+      #
+      # Defaults to `true`, which is the historical behavior. Handlers are
+      # folded with `Array#map`, and `map` abandons the collection on the first
+      # raise, so a handler that raises silently prevents every handler
+      # registered after it from running. That ordering is not something an
+      # application fully controls: the SDK's own cache-invalidation triggers
+      # install during `Parse.setup` and therefore sit ahead of handlers
+      # registered by application files loaded later.
+      #
+      # Set to `false` to isolate handlers from each other, so that each one
+      # runs regardless of what an earlier one raised. The error is reported
+      # (a warning plus a `parse.webhooks.handler_error` notification) and
+      # dispatch continues.
+      #
+      # Either way, nothing is reverted. An `after_*` trigger fires once the
+      # write has already committed, so there is no version of this setting
+      # that can undo the save; the only question it answers is whether the
+      # remaining handlers still get to run.
+      #
+      # @example Keep one failing handler from starving the others
+      #   Parse::Webhooks.abort_after_callbacks_on_error = false
+      #
+      # @return [Boolean]
+      attr_writer :abort_after_callbacks_on_error
+
+      # (see #abort_after_callbacks_on_error=)
+      # @return [Boolean]
+      def abort_after_callbacks_on_error
+        return @abort_after_callbacks_on_error unless @abort_after_callbacks_on_error.nil?
+        true
+      end
+
       # Allows support for web frameworks that support auto-reloading of source.
       # @!visibility private
       def reload!(args = {})
@@ -245,6 +285,60 @@ module Parse
       # block that declares a parameter (`do |payload| ... end`) or a splat
       # receives the payload.
       #
+      # Run every handler registered for one accumulating `after_*` trigger.
+      #
+      # `.last` is preserved as the composed result because Parse Server
+      # ignores the response body for these triggers and {#call_route}
+      # normalizes it anyway, so which handler's value survives is not
+      # observable.
+      #
+      # When {abort_after_callbacks_on_error} is false, a handler that raises
+      # is reported and skipped rather than taking the rest of the trigger down
+      # with it. Nothing is reverted in either mode: the write these triggers
+      # fire on has already committed.
+      #
+      # @param payload [Parse::Webhooks::Payload] the request payload.
+      # @param registry [Array<Proc>] the handlers, in registration order.
+      # @param type [Symbol] the trigger being dispatched.
+      # @return [Object] the last handler result.
+      def dispatch_composed(payload, registry, type)
+        return registry.map { |hook| invoke_handler(payload, hook) }.last if
+          abort_after_callbacks_on_error
+
+        last = nil
+        registry.each do |hook|
+          begin
+            last = invoke_handler(payload, hook)
+          rescue StandardError => e
+            report_handler_error(type, e)
+          end
+        end
+        last
+      end
+
+      # Report a handler failure that was isolated rather than propagated.
+      #
+      # The message is included because an application's own handler raised it
+      # and the application needs it to debug; this is not the SDK's internal
+      # `guard`, which deliberately omits messages that can carry a cache key.
+      #
+      # @param type [Symbol] the trigger being dispatched.
+      # @param error [StandardError] the raised error.
+      # @return [void]
+      def report_handler_error(type, error)
+        warn "[Parse::Webhooks] #{type} handler raised #{error.class}: #{error.message}; " \
+             "continuing with the remaining handlers " \
+             "(Parse::Webhooks.abort_after_callbacks_on_error is false)"
+        return unless defined?(ActiveSupport::Notifications)
+        begin
+          ActiveSupport::Notifications.instrument(
+            "parse.webhooks.handler_error", trigger: type, error: error.class.name,
+          )
+        rescue StandardError
+          nil
+        end
+      end
+
       # @param payload [Parse::Webhooks::Payload] the request payload (becomes `self`).
       # @param block [Proc] the registered handler block.
       # @return [Object] the handler's result value.
@@ -378,7 +472,10 @@ module Parse
         end
 
         if registry.is_a?(Array)
-          result = registry.map { |hook| invoke_handler(payload, hook) }.last
+          # An Array registry only ever exists for the accumulating,
+          # non-rejectable `after_*` triggers, so isolating handlers here
+          # cannot affect `before_*` rejection semantics.
+          result = dispatch_composed(payload, registry, type)
         else
           result = invoke_handler(payload, registry)
         end

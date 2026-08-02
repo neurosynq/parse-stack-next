@@ -502,6 +502,10 @@ module Parse
               val = instance_variable_get ivar
             end
 
+            # Capture before this getter materializes or returns a mutable
+            # proxy that can be changed in place.
+            send(:_capture_transaction_state!) if respond_to?(:_capture_transaction_state!, true)
+
             # if the result is not a collection proxy, then create a new one.
             unless val.is_a?(Parse::PointerCollectionProxy)
               results = []

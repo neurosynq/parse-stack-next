@@ -1337,6 +1337,8 @@ module Parse
     #     for trusted hydration from server JSON; it bypasses the filter.
     # @return [Parse::Object] a the corresponding Parse::Object or subclass.
     def initialize(opts = {})
+      Parse::Core::Actions.mark_transaction_object_created(self)
+
       # Trusted hydration is signalled by the `@_trusted_init` instance
       # variable rather than by a `trusted:` keyword argument. Using a
       # keyword would break subclasses that override `initialize(*args)`
@@ -2042,6 +2044,8 @@ module Parse
     # caller intent to override.
     # @api private
     def acl_will_change!
+      _capture_transaction_state!
+
       # Only capture snapshot on the first change (before any modifications)
       unless defined?(@_acl_snapshot_before_change) && @_acl_snapshot_before_change
         # Deep copy the ACL by creating a new one from its JSON representation
