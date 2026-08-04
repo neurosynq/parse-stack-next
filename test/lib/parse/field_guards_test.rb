@@ -433,7 +433,7 @@ class FieldGuardsTest < Minitest::Test
     # picks it up and Parse Server actually invokes our webhook.
     Parse::Webhooks.instance_variable_set(:@routes, nil)
 
-    klass = Class.new(Parse::Object) do
+    klass = Class.new(Parse::Object) do  # codeql[rb/useless-assignment-to-local]
       def self.parse_class; "AutoRegisteredGuardClass"; end
       property :name, :string
       property :owner, :string
@@ -603,7 +603,7 @@ class FieldGuardsTest < Minitest::Test
     # A guard declared for a property name that doesn't exist on the model
     # cannot fire because the field is never in `changed`. This is a silent
     # no-op rather than a class-load-time error.
-    klass = Class.new(Parse::Object) do
+    klass = Class.new(Parse::Object) do  # codeql[rb/useless-assignment-to-local]
       def self.parse_class; "GuardedMissingField"; end
       property :real_field, :string
       guard :imaginary_field, :master_only   # not declared as a property

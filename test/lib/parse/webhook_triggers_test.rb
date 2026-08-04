@@ -78,7 +78,7 @@ class WebhookTriggersTest < Minitest::Test
     }
 
     client_payload = Parse::Webhooks::Payload.new(client_payload_data)
-    result = Parse::Webhooks.call_route(:before_save, "TestObject", client_payload)
+    result = Parse::Webhooks.call_route(:before_save, "TestObject", client_payload)  # codeql[rb/useless-assignment-to-local]
 
     assert hook_called, "before_save hook should be called for client"
     assert hook_payload.before_save?, "Payload should identify as before_save"
@@ -153,7 +153,7 @@ class WebhookTriggersTest < Minitest::Test
     # Add after_create callback for new objects
     test_object.define_singleton_method(:run_after_create_callbacks) { callback_executed = true }
 
-    result = Parse::Webhooks.call_route(:after_save, "TestObject", client_payload)
+    result = Parse::Webhooks.call_route(:after_save, "TestObject", client_payload)  # codeql[rb/useless-assignment-to-local]
     Parse::Webhooks.run_after_save_chain(client_payload)
 
     assert hook_called, "after_save hook should be called for client"
@@ -222,7 +222,7 @@ class WebhookTriggersTest < Minitest::Test
     client_payload = Parse::Webhooks::Payload.new(client_payload_data)
     client_payload.define_singleton_method(:parse_object) { test_object }
 
-    result = Parse::Webhooks.call_route(:before_delete, "TestObject", client_payload)
+    result = Parse::Webhooks.call_route(:before_delete, "TestObject", client_payload)  # codeql[rb/useless-assignment-to-local]
 
     assert hook_called, "before_delete hook should be called for client"
     assert hook_payload.before_delete?, "Payload should identify as before_delete"
@@ -282,7 +282,7 @@ class WebhookTriggersTest < Minitest::Test
     }
 
     client_payload = Parse::Webhooks::Payload.new(client_payload_data)
-    result = Parse::Webhooks.call_route(:after_delete, "TestObject", client_payload)
+    result = Parse::Webhooks.call_route(:after_delete, "TestObject", client_payload)  # codeql[rb/useless-assignment-to-local]
 
     assert hook_called, "after_delete hook should be called for client"
     assert hook_payload.after_delete?, "Payload should identify as after_delete"
@@ -347,7 +347,7 @@ class WebhookTriggersTest < Minitest::Test
     client_payload = Parse::Webhooks::Payload.new(client_payload_data)
     client_payload.instance_variable_set(:@webhook_class, "TestObject")
 
-    result = Parse::Webhooks.call_route(:before_find, "TestObject", client_payload)
+    result = Parse::Webhooks.call_route(:before_find, "TestObject", client_payload)  # codeql[rb/useless-assignment-to-local]
 
     assert hook_called, "before_find hook should be called for client"
     assert hook_payload.before_find?, "Payload should identify as before_find"
@@ -421,7 +421,7 @@ class WebhookTriggersTest < Minitest::Test
     client_payload = Parse::Webhooks::Payload.new(client_payload_data)
     client_payload.instance_variable_set(:@webhook_class, "TestObject")
 
-    result = Parse::Webhooks.call_route(:after_find, "TestObject", client_payload)
+    result = Parse::Webhooks.call_route(:after_find, "TestObject", client_payload)  # codeql[rb/useless-assignment-to-local]
 
     assert hook_called, "after_find hook should be called for client"
     assert hook_payload.after_find?, "Payload should identify as after_find"
@@ -534,7 +534,7 @@ class WebhookTriggersTest < Minitest::Test
     }
 
     before_payload = Parse::Webhooks::Payload.new(before_payload_data)
-    result = Parse::Webhooks.call_route(:before_save, "TestObject", before_payload)
+    result = Parse::Webhooks.call_route(:before_save, "TestObject", before_payload)  # codeql[rb/useless-assignment-to-local]
 
     assert_equal ["before2"], execution_order, "Only the last before_save hook should execute"
     puts "✅ Single before_save hook behavior works correctly"
@@ -580,7 +580,7 @@ class WebhookTriggersTest < Minitest::Test
     # Direct call_route won't raise the error, but the error! method would be called
     # This tests that the conditional logic works correctly
     begin
-      result = Parse::Webhooks.call_route(:before_save, "TestObject", client_payload)
+      result = Parse::Webhooks.call_route(:before_save, "TestObject", client_payload)  # codeql[rb/useless-assignment-to-local]
       flunk "Should have raised ResponseError for client request"
     rescue Parse::Webhooks::ResponseError => e
       assert_equal "Client validation failed", e.message, "Should have correct error message"
@@ -616,7 +616,7 @@ class WebhookTriggersTest < Minitest::Test
     payload = Parse::Webhooks::Payload.new(payload_data)
     payload.define_singleton_method(:parse_object) { nil }
 
-    result = Parse::Webhooks.call_route(:after_save, "TestObject", payload)
+    result = Parse::Webhooks.call_route(:after_save, "TestObject", payload)  # codeql[rb/useless-assignment-to-local]
 
     assert specific_called, "Specific hook should be called"
     refute wildcard_called, "Wildcard hook should not be called when specific exists"
@@ -639,7 +639,7 @@ class WebhookTriggersTest < Minitest::Test
     assert_nil result, "No specific route should exist"
 
     # Then try wildcard route
-    result = Parse::Webhooks.call_route(:after_save, "*", unknown_payload)
+    result = Parse::Webhooks.call_route(:after_save, "*", unknown_payload)  # codeql[rb/useless-assignment-to-local]
 
     refute specific_called, "Specific hook should not be called"
     assert wildcard_called, "Wildcard hook should be called for unknown class"

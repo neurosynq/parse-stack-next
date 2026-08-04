@@ -455,7 +455,7 @@ class ACLConstraintsIntegrationTest < Minitest::Test
         # Create test roles
         admin_role = create_test_role("Admin")
         editor_role = create_test_role("Editor")
-        viewer_role = create_test_role("Viewer")
+        viewer_role = create_test_role("Viewer")  # codeql[rb/useless-assignment-to-local]
 
         # Create documents with role-based access
         doc1 = create_test_document(title: "Admin Doc", content: "Admin content")

@@ -185,7 +185,7 @@ class CacheIntegrationTest < Minitest::Test
 
         # Fetch with custom cache expires header
         # Note: This tests the X-Parse-Stack-Cache-Expires header functionality
-        client = Parse.client
+        client = Parse.client  # codeql[rb/useless-assignment-to-local]
 
         # First fetch should populate cache
         fetched_product1 = CacheTestProduct.find(product_id)

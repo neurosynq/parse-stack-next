@@ -1561,7 +1561,6 @@ module Parse
 
         # if it's a hash, then it should be {:key=>"objectId", :query=>[]}
         remote_field_name = @operation.operand
-        query = nil
         if @value.is_a?(Hash)
           res = @value.symbolize_keys
           remote_field_name = res[:key] || remote_field_name
@@ -1613,7 +1612,6 @@ module Parse
 
         # if it's a hash, then it should be {:key=>"objectId", :query=>[]}
         remote_field_name = @operation.operand
-        query = nil
         if @value.is_a?(Hash)
           res = @value.symbolize_keys
           remote_field_name = res[:key] || remote_field_name
@@ -2263,7 +2261,6 @@ module Parse
       # @return [Hash] the compiled constraint.
       def build
         remote_field_name = @operation.operand
-        query = nil
 
         if @value.is_a?(Hash)
           res = @value.symbolize_keys
@@ -2314,7 +2311,6 @@ module Parse
       # @return [Hash] the compiled constraint.
       def build
         remote_field_name = @operation.operand
-        query = nil
 
         if @value.is_a?(Hash)
           res = @value.symbolize_keys

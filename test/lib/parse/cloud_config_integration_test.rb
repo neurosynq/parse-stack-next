@@ -434,7 +434,7 @@ class CloudConfigTest < Minitest::Test
         Parse.set_config("cacheTest", "updatedValue")
 
         # Read with caching (should still return old cached value)
-        cached_config3 = Parse.config
+        cached_config3 = Parse.config  # codeql[rb/useless-assignment-to-local]
         # Note: This might still return the cached value depending on implementation
 
         # Force refresh cache

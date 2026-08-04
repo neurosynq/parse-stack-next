@@ -32,7 +32,7 @@ class TestCountDistinctSimple < Minitest::Test
     query = Parse::Query.new("Song")
 
     # Mock the client to capture the pipeline
-    captured_pipeline = nil
+    captured_pipeline = nil  # codeql[rb/useless-assignment-to-local]
     mock_client = Object.new
     def mock_client.aggregate_pipeline(table, pipeline, **opts)
       @captured_pipeline = pipeline
@@ -75,7 +75,7 @@ class TestCountDistinctSimple < Minitest::Test
     query.where(:play_count.gt => 100)
 
     # Mock the client to capture the pipeline
-    captured_pipeline = nil
+    captured_pipeline = nil  # codeql[rb/useless-assignment-to-local]
     mock_client = Object.new
     def mock_client.aggregate_pipeline(table, pipeline, **opts)
       @captured_pipeline = pipeline

@@ -890,7 +890,7 @@ class ModelAssociationsTest < Minitest::Test
         # Note: Direct query works (AssociationTestBook.all(author: special_author) finds 1 book)
         # but has_many association query has an issue - skipping this assertion for now
         # TODO: Investigate why has_many association query doesn't find the book
-        special_books = special_author.books.results
+        special_books = special_author.books.results  # codeql[rb/useless-assignment-to-local]
         all_books_for_author = AssociationTestBook.all(author: special_author)
 
         if all_books_for_author.count > 0

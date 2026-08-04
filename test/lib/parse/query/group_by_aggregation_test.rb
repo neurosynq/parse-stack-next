@@ -31,7 +31,7 @@ class TestGroupByAggregation < Minitest::Test
   def test_group_by_sum_builds_correct_pipeline
     group_by = Parse::GroupBy.new(@query, :project)
 
-    expected_pipeline = [
+    expected_pipeline = [  # codeql[rb/useless-assignment-to-local]
       { "$group" => { "_id" => "$project", "count" => { "$sum" => "$fileSize" } } },
       { "$project" => { "_id" => 0, "objectId" => "$_id", "count" => 1 } },
     ]

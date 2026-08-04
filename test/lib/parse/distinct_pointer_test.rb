@@ -21,7 +21,7 @@ class TestDistinctPointer < Minitest::Test
       [:error?, :result].include?(method) || super
     end
 
-    expected_pipeline = [
+    expected_pipeline = [  # codeql[rb/useless-assignment-to-local]
       { "$group" => { "_id" => "$project" } },
       { "$project" => { "_id" => 0, "value" => "$_id" } },
     ]
@@ -57,7 +57,7 @@ class TestDistinctPointer < Minitest::Test
       [:error?, :result].include?(method) || super
     end
 
-    expected_pipeline = [
+    expected_pipeline = [  # codeql[rb/useless-assignment-to-local]
       { "$group" => { "_id" => "$category" } },
       { "$project" => { "_id" => 0, "value" => "$_id" } },
     ]
@@ -89,7 +89,7 @@ class TestDistinctPointer < Minitest::Test
       [:error?, :result].include?(method) || super
     end
 
-    expected_pipeline = [
+    expected_pipeline = [  # codeql[rb/useless-assignment-to-local]
       { "$group" => { "_id" => "$project" } },
       { "$project" => { "_id" => 0, "value" => "$_id" } },
     ]
@@ -160,7 +160,7 @@ class TestDistinctPointer < Minitest::Test
       [:error?, :result].include?(method) || super
     end
 
-    expected_pipeline = [
+    expected_pipeline = [  # codeql[rb/useless-assignment-to-local]
       { "$group" => { "_id" => "$name" } },
       { "$project" => { "_id" => 0, "value" => "$_id" } },
     ]

@@ -64,7 +64,7 @@ class FieldGuardsDeleteOpIntegrationTest < Minitest::Test
     # The realistic scenario: a client sends BOTH a value and our webhook
     # response wants to drop it. Parse Server merges the webhook response with
     # the client payload, so the Delete op in the response must win.
-    body = {
+    body = {  # codeql[rb/useless-assignment-to-local]
       "slug" => "create-override",
       # The client tried to write this value:
       "secret" => "client-tried-to-leak-this",

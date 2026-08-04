@@ -57,7 +57,7 @@ end
 module Minitest
   module Assertions
     def refute_raises(*exp)
-      msg = "#{exp.pop}.\n" if String === exp.last
+      msg = "#{exp.pop}.\n" if String === exp.last  # codeql[rb/useless-assignment-to-local]
 
       begin
         yield
@@ -65,7 +65,7 @@ module Minitest
         return e if exp.include? Minitest::Skip
         raise e
       rescue Exception => e
-        exp = exp.first if exp.size == 1
+        exp = exp.first if exp.size == 1  # codeql[rb/useless-assignment-to-local]
         flunk "unexpected exception raised: #{e}"
       end
     end

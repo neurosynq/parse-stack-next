@@ -52,7 +52,7 @@ class QueryIntegrationFastTest < Minitest::Test
 
       # Test first
       with_timeout(2, "first query") do
-        first_result = GameScore.query.first
+        first_result = GameScore.query.first  # codeql[rb/useless-assignment-to-local]
         # first might be nil if no data, that's ok
         assert true, "First query completed"
       end
@@ -89,7 +89,7 @@ class QueryIntegrationFastTest < Minitest::Test
 
       # Test class-level first
       with_timeout(2, "class first") do
-        first = GameScore.first
+        first = GameScore.first  # codeql[rb/useless-assignment-to-local]
         # might be nil, that's ok
         assert true, "Class first completed"
       end

@@ -1409,7 +1409,6 @@ module Parse
         return first_direct(limit_or_constraints)
       end
 
-      fetch_count = 1
       if limit_or_constraints.is_a?(Hash)
         conditions(limit_or_constraints)
         # Check if limit was set in constraints, otherwise use 1

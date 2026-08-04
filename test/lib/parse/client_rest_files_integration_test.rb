@@ -73,7 +73,7 @@ class ClientRestFilesIntegrationTest < Minitest::Test
       filename = "anon_#{SecureRandom.hex(3)}.txt"
 
       begin
-        response = Parse.client.create_file(filename, contents, "text/plain")
+        response = Parse.client.create_file(filename, contents, "text/plain")  # codeql[rb/useless-assignment-to-local]
         # If it succeeded, that's purely because Parse Server's
         # fileUpload.anonymousUsers was on. We can't disprove that from
         # the SDK side — but we CAN confirm the master key wasn't sent

@@ -90,7 +90,7 @@ class AudienceTest < Minitest::Test
 
   def test_cache_fetch_with_concurrent_writes
     @fetch_return = nil
-    mutex = Mutex.new
+    mutex = Mutex.new  # codeql[rb/useless-assignment-to-local]
 
     threads = 5.times.map do
       Thread.new do

@@ -517,7 +517,7 @@ class TestQueryAggregationFeatures < Minitest::Test
     aggregation_where = query.send(:convert_constraints_for_aggregation, compiled_where)
     puts "After constraint conversion: #{aggregation_where.inspect}"
 
-    stringified_where = query.send(:convert_dates_for_aggregation, aggregation_where)
+    stringified_where = query.send(:convert_dates_for_aggregation, aggregation_where)  # codeql[rb/useless-assignment-to-local]
 
     aggregation_where = query.send(:convert_constraints_for_aggregation, compiled_where)
 

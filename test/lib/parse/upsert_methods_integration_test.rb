@@ -323,7 +323,7 @@ class UpsertMethodsIntegrationTest < Minitest::Test
         # Test create_or_update! performance (with changes)
         start_time = Time.now
         5.times do |i|
-          result = UpsertTestUser.create_or_update!({ email: "perf@example.com" }, { age: 35 + i })
+          result = UpsertTestUser.create_or_update!({ email: "perf@example.com" }, { age: 35 + i })  # codeql[rb/useless-assignment-to-local]
         end
         create_or_update_with_change_time = Time.now - start_time
 

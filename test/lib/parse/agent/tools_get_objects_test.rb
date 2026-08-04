@@ -57,7 +57,7 @@ class ToolsGetObjectsTest < Minitest::Test
 
   def test_50_ids_success
     ids = (1..50).map { |i| "id#{i.to_s.rjust(8, "0")}"[0, 10] }
-    ids = ids.map.with_index { |_, i| "abcde#{i.to_s.rjust(5, "0")}"[0, 10] }
+    ids = ids.map.with_index { |_, i| "abcde#{i.to_s.rjust(5, "0")}"[0, 10] }  # codeql[rb/useless-assignment-to-local]
     # Ensure uniqueness and valid format
     ids = (1..50).map { |i| format("abc%07d", i) }
 

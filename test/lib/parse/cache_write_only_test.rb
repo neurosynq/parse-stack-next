@@ -173,7 +173,7 @@ class CacheWriteOnlyDefaultsTest < Minitest::Test
 
     # Mock the client to capture the request
     captured_opts = nil
-    original_client = song.method(:client)
+    original_client = song.method(:client)  # codeql[rb/useless-assignment-to-local]
     song.define_singleton_method(:client) do
       mock_client = Object.new
       mock_client.define_singleton_method(:fetch_object) do |klass, id, **opts|
@@ -428,7 +428,7 @@ class CacheWriteOnlyFindTest < Minitest::Test
 
     # Create a mock client to capture requests
     captured_cache_value = nil
-    original_client = Parse.client
+    original_client = Parse.client  # codeql[rb/useless-assignment-to-local]
 
     mock_client = Object.new
     mock_client.define_singleton_method(:fetch_object) do |klass, id, **opts|
@@ -517,7 +517,7 @@ class CacheMiddlewareWriteOnlyTest < Minitest::Test
     }
 
     # Call middleware
-    response = middleware.call(env)
+    response = middleware.call(env)  # codeql[rb/useless-assignment-to-local]
 
     # Should have called the app (not used cache)
     assert fresh_response_called, "Should call the app when write_only mode is enabled"

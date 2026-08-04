@@ -34,7 +34,7 @@ class TestWithinPolygonQueryConstraint < Minitest::Test
   end
 
   def test_compiled_query
-    triangle = [@bermuda, @miami, @san_juan]
+    triangle = [@bermuda, @miami, @san_juan]  # codeql[rb/useless-assignment-to-local]
     compiled_query = { "location" => { "$geoWithin" => { "$polygon" => [
       { :__type => "GeoPoint", :latitude => 32.3078, :longitude => -64.7504999 },
       { :__type => "GeoPoint", :latitude => 25.7823198, :longitude => -80.2660226 },

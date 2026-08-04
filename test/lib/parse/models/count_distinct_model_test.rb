@@ -71,7 +71,7 @@ class TestCountDistinctModel < Minitest::Test
       end
 
       # Capture response_data in the closure
-      response_data = @response_data
+      response_data = @response_data  # codeql[rb/useless-assignment-to-local]
       def response.result
         response_data
       end

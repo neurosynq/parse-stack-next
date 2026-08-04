@@ -159,7 +159,7 @@ class TestOrder < Parse::Object
   def should_send_email?
     # Use previous_changes in after_save context
     if previous_changes && previous_changes[:status]
-      old_status, new_status = previous_changes[:status]
+      old_status, new_status = previous_changes[:status]  # codeql[rb/useless-assignment-to-local]
       ["completed", "shipped"].include?(new_status)
     else
       # Fallback for before_save context

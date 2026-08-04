@@ -107,7 +107,7 @@ class TestTransaction < Minitest::Test
     end
 
     begin
-      result = Parse::Object.transaction(retries: 10) do |batch|
+      result = Parse::Object.transaction(retries: 10) do |batch|  # codeql[rb/useless-assignment-to-local]
         # Test that custom retry count is accepted
         assert_instance_of Parse::BatchOperation, batch
       end

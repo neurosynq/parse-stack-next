@@ -218,7 +218,7 @@ class DockerIntegrationTest < Minitest::Test
     ["Post", "Author", "Comment"].each do |class_name|
       begin
         Parse.client.delete_schema(class_name, use_master_key: true)
-      rescue => e
+      rescue => e  # codeql[rb/useless-assignment-to-local]
         # Ignore errors if schema doesn't exist
       end
     end

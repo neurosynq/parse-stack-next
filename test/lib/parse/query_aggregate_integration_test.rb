@@ -1120,7 +1120,7 @@ class QueryAggregateTest < Minitest::Test
 
               # Date fields should be either Date objects or ISO strings
               oldest = result["oldestJoinDate"]
-              newest = result["newestJoinDate"]
+              newest = result["newestJoinDate"]  # codeql[rb/useless-assignment-to-local]
 
               if oldest.is_a?(String)
                 # Verify ISO date format

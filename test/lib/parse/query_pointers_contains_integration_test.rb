@@ -537,7 +537,7 @@ class QueryPointersContainsTest < Minitest::Test
         # Test 6: Contains with non-existent pointer
         puts "--- Test 6: Contains with non-existent pointer ---"
         fake_author_pointer = Parse::Pointer.new("QueryTestAuthor", "fakeid456")
-        fake_book_pointer = Parse::Pointer.new("QueryTestBook", "fakebookid789")
+        fake_book_pointer = Parse::Pointer.new("QueryTestBook", "fakebookid789")  # codeql[rb/useless-assignment-to-local]
 
         library = QueryTestLibrary.new(
           name: "Edge Case Library",

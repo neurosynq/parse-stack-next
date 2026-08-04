@@ -117,7 +117,7 @@ class TestEqualsLinkedPointer < Minitest::Test
     query.where(:author.equals_linked_pointer => { through: :project, field: :owner })
 
     # Debug: check the compiled where clause structure
-    compiled_where = query.compile_where
+    compiled_where = query.compile_where  # codeql[rb/useless-assignment-to-local]
     # puts "Compiled where: #{compiled_where.inspect}"
 
     # Now should require pipeline
