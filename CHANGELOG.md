@@ -1,5 +1,34 @@
 ## parse-stack-next Changelog
 
+### 5.7.2
+
+#### `between` accepts Ruby Range values
+
+- **NEW**: The `between` constraint now accepts a Ruby `Range` in addition to
+  a 2-element array, so `Person.where(:age.between => 5..25)` and
+  `Record.where(:date.between => 2.days.ago...5.days.ago)` work directly. An
+  inclusive range (`..`) maps its upper bound to `$lte`, matching the existing
+  array form, while an exclusive range (`...`) maps it to `$lt` instead.
+  Beginless (`..25`) and endless (`5..`) ranges are also supported and
+  constrain only the side that is present, so `Person.where(:age.between =>
+  18..)` compiles to `{"$gte" => 18}` with no upper bound. The array form is
+  unchanged, and both forms produce identical output for the same bounds.
+
+#### `embed_image` forwards a presigned URL when the source file has one
+
+- **FIXED**: `embed_image` always sent the source file's bare `file.url` to
+  the embedding provider (or to the SDK's own `:bytes`-mode downloader). On a
+  private-bucket file adapter (S3/GCS configured with `presignedUrl: true`),
+  `file.url` is the canonical URL with its signature stripped, so the
+  provider's fetch (or the SDK's download) got a 403 instead of the image.
+  `Parse::File` already captures the signed variant in `file.presigned_url`
+  whenever Parse Server returns one, but `embed_image` never read it.
+  Recompute now forwards `file.presigned_url` when it is present and not yet
+  expired, and falls back to the bare URL otherwise, for both `source: :url`
+  and `source: :bytes`. The stored digest is still keyed on the bare
+  canonical URL, so a save that only rotates the file's signature does not
+  trigger a needless re-embed.
+
 ### 5.7.1
 
 #### Cache-invalidation webhooks no longer break every application hook for the same trigger
