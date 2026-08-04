@@ -29,6 +29,28 @@
   canonical URL, so a save that only rotates the file's signature does not
   trigger a needless re-embed.
 
+#### `Query#get` now resolves aliased `parse_class` names correctly
+
+- **FIXED**: `Query#get` looked up the target class with a raw
+  `Object.const_get(@table)`, which only worked when the Parse class name
+  matched the Ruby constant name exactly. A model that renames its table via
+  `parse_class "SomeOtherName"` was never found by this lookup, so `get`
+  silently fell back to a generic `Parse::Object`/`Parse::Pointer` instead of
+  hydrating the declared model. `Query#get` now passes the table name through
+  to `Parse::Object.build` as a string, letting it run its own
+  `Parse::Model.find_class` resolution, which already understands
+  `parse_class` aliasing.
+
+#### `_safe_warn` now writes through a configured logger
+
+- **FIXED**: Internal warnings for authentication, timeout, and cloud-code
+  errors (`Parse::Client._safe_warn`) always wrote to STDERR, even when an
+  app had configured `Parse.logger = Rails.logger` (or any other logger) for
+  the rest of its Parse request/response logging. These warnings now route
+  through `Parse::Middleware::Logging.logger` when one is configured, so they
+  land in the same place as the app's other logs; STDERR remains the fallback
+  when no logger is configured, matching prior behavior.
+
 ### 5.7.1
 
 #### Cache-invalidation webhooks no longer break every application hook for the same trigger

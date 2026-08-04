@@ -1490,15 +1490,19 @@ module Parse
     # @return [Parse::Object] the object with the given ID.
     # @raise [Parse::Error] if the object is not found.
     def get(object_id)
-      parse_class = Object.const_get(@table) if Object.const_defined?(@table)
-      parse_class ||= Parse::Object
-
       response = client.fetch_object(@table, object_id)
       if response.error?
         raise Parse::Error.new(response.code, response.error)
       end
 
-      Parse::Object.build(response.result, parse_class)
+      # Pass the table name through as-is rather than pre-resolving it to
+      # a Class: `Object.build` does its own `Parse::Model.find_class`
+      # lookup against the String, which correctly honors `parse_class`
+      # aliasing. Resolving to a Class first and handing that back to
+      # `build` broke aliased lookups, since `find_class` would then
+      # stringify the Ruby constant name (e.g. "Musician") instead of
+      # matching the declared alias (e.g. "Artist").
+      Parse::Object.build(response.result, @table)
     end
 
     # max_results is used to iterate through as many API requests as possible using

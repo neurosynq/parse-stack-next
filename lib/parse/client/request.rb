@@ -17,12 +17,24 @@ module Parse
     # @!attribute [rw] body
     #   @return [Hash] the body of this request.
 
-    # TODO: Document opts and cache options.
-
     # @!attribute [rw] opts
-    #   @return [Hash] a set of options for this request.
+    #   @return [Hash] per-request options consumed by {Parse::Client#request}
+    #     when it builds the HTTP headers for this request. Recognized keys:
+    #     * `:cache` — `false` sends `Cache-Control: no-cache`; `:write_only`
+    #       skips the cache read but still writes the response; a `Numeric`
+    #       overrides the cache expiration (seconds) for this request only.
+    #     * `:use_master_key` — `false` forces the master key off for this
+    #       request even if the client has one configured.
+    #     * `:session_token` — a session token to authenticate this request as
+    #       a specific user, bypassing the client's default auth context.
+    #     * `:idempotent` — explicitly enables/disables idempotency-header
+    #       generation for this request, overriding the class-level defaults.
+    #     * `:request_id` — a caller-supplied idempotency key; see
+    #       {.enable_idempotency!}.
     # @!attribute [rw] cache
-    #   @return [Boolean]
+    #   @return [Boolean] unused by {Parse::Request} itself; retained as a
+    #     plain accessor for callers that stash a cache handle or flag
+    #     directly on the request object rather than through `opts[:cache]`.
     attr_accessor :method, :path, :body, :headers, :opts, :cache
 
     # @!visibility private
