@@ -162,6 +162,38 @@ class QueryCompileSnapshotTest < Minitest::Test
     assert_snapshot(compile(q), name: "between_range_exclusive", group: GROUP)
   end
 
+  def test_where_not_between_inclusive_range
+    # A fully-bounded inclusive Range compiles to $or of the two flipped,
+    # strict comparisons.
+    q = SnapPost.query.where_not_between(:likes, 10..100)
+    assert_snapshot(compile(q), name: "where_not_between_inclusive", group: GROUP)
+  end
+
+  def test_where_not_between_exclusive_range
+    # An exclusive Range (`...`) flips its upper side to $gte instead of $gt.
+    q = SnapPost.query.where_not_between(:likes, 10...100)
+    assert_snapshot(compile(q), name: "where_not_between_exclusive", group: GROUP)
+  end
+
+  def test_where_not_between_beginless_range
+    # Beginless range: `between` would only constrain the upper side, so
+    # its negation is a single one-sided $gt with no $or wrapper.
+    q = SnapPost.query.where_not_between(:likes, ..100)
+    assert_snapshot(compile(q), name: "where_not_between_beginless", group: GROUP)
+  end
+
+  def test_where_not_between_endless_range
+    q = SnapPost.query.where_not_between(:likes, 10..)
+    assert_snapshot(compile(q), name: "where_not_between_endless", group: GROUP)
+  end
+
+  def test_where_not_between_nests_inside_existing_and_condition
+    # The $or group must nest alongside an unrelated AND'd condition, not
+    # sweep it into the OR the way #or_where/`|` would.
+    q = SnapPost.where(:published => true).where_not_between(:likes, 10..100)
+    assert_snapshot(compile(q), name: "where_not_between_with_and_condition", group: GROUP)
+  end
+
   def test_tags_all_array_constraint
     # `:tags.all => [...]` compiles to the `$all` REST operator (not a
     # pipeline). Snapshot under normalized array order — $all is set-semantic.

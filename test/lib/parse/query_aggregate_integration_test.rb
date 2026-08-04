@@ -1120,7 +1120,7 @@ class QueryAggregateTest < Minitest::Test
 
               # Date fields should be either Date objects or ISO strings
               oldest = result["oldestJoinDate"]
-              newest = result["newestJoinDate"]  # codeql[rb/useless-assignment-to-local]
+              newest = result["newestJoinDate"]
 
               if oldest.is_a?(String)
                 # Verify ISO date format
@@ -1130,6 +1130,16 @@ class QueryAggregateTest < Minitest::Test
                 # Parse Date object format
                 assert_equal "Date", oldest["__type"], "Date should have __type: Date"
                 assert oldest.key?("iso"), "Date should have iso field"
+              end
+
+              if newest.is_a?(String)
+                # Verify ISO date format
+                assert newest.match?(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/),
+                       "Date should be in ISO format: #{newest}"
+              elsif newest.is_a?(Hash) && newest.key?("__type")
+                # Parse Date object format
+                assert_equal "Date", newest["__type"], "Date should have __type: Date"
+                assert newest.key?("iso"), "Date should have iso field"
               end
             end
           end

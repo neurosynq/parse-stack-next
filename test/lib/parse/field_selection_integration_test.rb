@@ -479,7 +479,6 @@ class FieldSelectionIntegrationTest < Minitest::Test
         # Test select constraint with simplified syntax (when field names match)
         # Create a query that looks for users by author_name field (this won't work since users don't have author_name)
         # Instead, let's test with a working scenario where field names actually match
-        posts_with_specific_names = FieldSelectionPost.query.where(:title.contains => "Famous")  # codeql[rb/useless-assignment-to-local]
 
         # This simplified syntax would look for Users where 'title' field matches, but Users don't have title
         # So let's create a more appropriate test

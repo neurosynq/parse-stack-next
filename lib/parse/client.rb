@@ -516,7 +516,12 @@ module Parse
       # configured one (`Parse.logger = ...`), so these warnings land wherever
       # the rest of the app's Parse request/response logging goes instead of
       # bypassing it. Falls back to plain `warn` (STDERR) when no logger is
-      # configured, matching prior behavior.
+      # configured, matching prior behavior. Every call site immediately
+      # raises the corresponding typed {Parse::Error} right after calling
+      # this method, so a misbehaving app-supplied logger (closed handle,
+      # full disk, a remote-aggregator client that raises on socket error)
+      # must not be allowed to propagate in its place and mask the real
+      # error — falls back to `warn` if the logger itself raises.
       #
       # @param tag [String] the bracketed prefix (e.g. "AuthenticationError").
       # @param response [Parse::Response] the response carrying the error.
@@ -529,8 +534,13 @@ module Parse
           else
             "[Parse:#{tag}] [E-#{response.code}] #{response.request} : #{err} (#{response.http_status})"
           end
-        if Parse::Middleware::Logging.logger
-          Parse::Middleware::Logging.logger.warn(msg)
+        logger = Parse::Middleware::Logging.logger
+        if logger
+          begin
+            logger.warn(msg)
+          rescue StandardError
+            warn msg
+          end
         else
           warn msg
         end

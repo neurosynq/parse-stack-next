@@ -21,11 +21,6 @@ class TestDistinctPointer < Minitest::Test
       [:error?, :result].include?(method) || super
     end
 
-    expected_pipeline = [  # codeql[rb/useless-assignment-to-local]
-      { "$group" => { "_id" => "$project" } },
-      { "$project" => { "_id" => 0, "value" => "$_id" } },
-    ]
-
     @mock_client.expect :aggregate_pipeline, mock_response do |table, pipeline, **kwargs|
       table == "Asset" && pipeline.is_a?(Array)
     end
@@ -57,11 +52,6 @@ class TestDistinctPointer < Minitest::Test
       [:error?, :result].include?(method) || super
     end
 
-    expected_pipeline = [  # codeql[rb/useless-assignment-to-local]
-      { "$group" => { "_id" => "$category" } },
-      { "$project" => { "_id" => 0, "value" => "$_id" } },
-    ]
-
     @mock_client.expect :aggregate_pipeline, mock_response do |table, pipeline, **kwargs|
       table == "Asset" && pipeline.is_a?(Array)
     end
@@ -88,11 +78,6 @@ class TestDistinctPointer < Minitest::Test
     def mock_response.respond_to?(method)
       [:error?, :result].include?(method) || super
     end
-
-    expected_pipeline = [  # codeql[rb/useless-assignment-to-local]
-      { "$group" => { "_id" => "$project" } },
-      { "$project" => { "_id" => 0, "value" => "$_id" } },
-    ]
 
     @mock_client.expect :aggregate_pipeline, mock_response do |table, pipeline, **kwargs|
       table == "Asset" && pipeline.is_a?(Array)
@@ -159,11 +144,6 @@ class TestDistinctPointer < Minitest::Test
     def mock_response.respond_to?(method)
       [:error?, :result].include?(method) || super
     end
-
-    expected_pipeline = [  # codeql[rb/useless-assignment-to-local]
-      { "$group" => { "_id" => "$name" } },
-      { "$project" => { "_id" => 0, "value" => "$_id" } },
-    ]
 
     @mock_client.expect :aggregate_pipeline, mock_response do |table, pipeline, **kwargs|
       table == "Asset" && pipeline.is_a?(Array)

@@ -174,7 +174,7 @@ class ACLDirtyTrackingTest < Minitest::Test
     changes = @obj.changes["acl"]
     refute_nil changes, "changes should include acl"
 
-    was_acl, current_acl = changes  # codeql[rb/useless-assignment-to-local]
+    _, current_acl = changes
 
     # NOTE: ActiveModel's `changes` hash stores references internally, so both
     # was_acl and current_acl point to the same mutated object. This is a known

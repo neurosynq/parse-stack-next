@@ -1,0 +1,17 @@
+{
+  "where": {
+    "$or": [
+      {
+        "likes": {
+          "$lt": 10
+        }
+      },
+      {
+        "likes": {
+          "$gt": 100
+        }
+      }
+    ],
+    "published": true
+  }
+}

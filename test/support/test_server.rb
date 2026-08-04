@@ -37,14 +37,14 @@ module Parse
           uri = URI(Parse::Client.client.server_url + "/health")
           response = Net::HTTP.get_response(uri)
           response.code == "200"
-        rescue StandardError => e  # codeql[rb/useless-assignment-to-local]
+        rescue StandardError
           # Fallback: Try to check if Parse is responding at all
           begin
             uri = URI(Parse::Client.client.server_url)
             response = Net::HTTP.get_response(uri)
             # Parse Server typically returns 404 or 401 for root path but it means server is up
             ["200", "404", "401", "403"].include?(response.code)
-          rescue StandardError => e2  # codeql[rb/useless-assignment-to-local]
+          rescue StandardError
             false
           end
         end
@@ -82,12 +82,12 @@ module Parse
                   begin
                     obj.destroy
                     total_deleted += 1
-                  rescue => e  # codeql[rb/useless-assignment-to-local]
+                  rescue
                     # Silent failure - continue with other objects
                   end
                 end
               end
-            rescue StandardError => e  # codeql[rb/useless-assignment-to-local]
+            rescue StandardError
               # Silent failure - continue with other classes
             end
           end

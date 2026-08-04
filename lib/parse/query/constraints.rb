@@ -2554,6 +2554,29 @@ module Parse
         } }
       end
 
+      # @!visibility private
+      # Extract raw (unformatted) `[min_value, max_value, exclude_max]`
+      # bounds from a `between`-style value: a Range (`exclude_max`
+      # reflects `exclude_end?`) or a 2-element Array (always inclusive
+      # on both ends, matching {#build}'s array branch). Shared with
+      # {Parse::Query#where_not_between}, which needs the same bounds
+      # to build the negated (`$or` of the two flipped comparisons)
+      # form — a shape {BetweenConstraint} itself cannot safely emit
+      # from a single constraint's `#build` (see `where_not_between`'s
+      # docs for why).
+      # @param value [Range, Array] a `between`-style value.
+      # @return [Array(Object, Object, Boolean)]
+      # @raise [ArgumentError] if `value` isn't a Range or 2-element Array.
+      def self.extract_bounds(value)
+        if value.is_a?(Range)
+          [value.begin, value.end, value.exclude_end?]
+        elsif value.is_a?(Array) && value.length == 2
+          [value[0], value[1], false]
+        else
+          raise ArgumentError, "#{name}: Value must be an array with exactly 2 elements [min_value, max_value], or a Range"
+        end
+      end
+
       private
 
       # @return [Hash] the compiled constraint for a Ruby Range value.

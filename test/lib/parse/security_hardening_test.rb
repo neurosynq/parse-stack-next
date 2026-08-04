@@ -508,7 +508,7 @@ class SecurityHardeningTest < Minitest::Test
 
   def test_array_parse_objects_ignores_hash_className_when_caller_specifies
     arr = [{ "__type" => "Pointer", "className" => "_Session", "objectId" => "evil" }]
-    out, _err = capture_io { arr.parse_objects("Author") }  # codeql[rb/useless-assignment-to-local]
+    _, _err = capture_io { arr.parse_objects("Author") }
     objs = arr.parse_objects("Author")
     assert_equal 1, objs.length
     assert_equal "Author", objs.first.parse_class

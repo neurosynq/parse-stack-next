@@ -900,7 +900,6 @@ class PartialFetchIntegrationTest < Minitest::Test
           author: user1,
         )
         assert post.save, "Post should save"
-        post_id = post.id  # codeql[rb/useless-assignment-to-local]
 
         # Fetch with only :title (author is not fetched)
         fetched_post = PartialFetchPost.first(keys: [:id, :title])

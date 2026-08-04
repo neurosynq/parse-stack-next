@@ -283,6 +283,21 @@ class EmbeddingsImageFetchTest < Minitest::Test
     assert_equal 4096, seen[:max_bytes], "fetch! must forward max_bytes: into safe_open_url"
   end
 
+  # FetchedImage#url must never retain a query string: on a
+  # private-bucket adapter, `url` passed into fetch! can be a presigned
+  # URL, and FetchedImage's whole point (see its #inspect) is to be
+  # safe to interpolate into exceptions/logs without leaking bytes —
+  # or a live signature.
+  def test_fetch_strips_query_string_from_stored_url
+    Parse::Embeddings.allowed_image_hosts = ["1.1.1.1"]
+    with_stubbed_download(png_with_exif) do
+      img = IF.fetch!("https://1.1.1.1/photo.png?X-Amz-Signature=super-secret-token")
+      assert_equal "https://1.1.1.1/photo.png", img.url
+      refute_match(/X-Amz-Signature|super-secret-token/, img.inspect)
+      refute_match(/X-Amz-Signature|super-secret-token/, img.to_s)
+    end
+  end
+
   def test_fetch_requires_host_allowlist_but_not_sentinel
     # No trust_provider_url_fetch sentinel set — :fetch mode must work
     # on allowlist alone (the SDK fetches; no provider egress).

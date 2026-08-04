@@ -30,7 +30,6 @@ class TestNullabilityConstraint < Minitest::Test
     ["true", 1, nil].each do |value|
       constraint = @klass.new(:field, value)
       assert_raises(ArgumentError) do
-        expected = build(value).as_json  # codeql[rb/useless-assignment-to-local]
         constraint.build.as_json
       end
     end

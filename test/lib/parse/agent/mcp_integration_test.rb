@@ -295,7 +295,7 @@ class MCPIntegrationTest < Minitest::Test
       "CONTENT_TYPE" => "application/json",
       "rack.input" => StringIO.new(raw),
     }
-    status, _hdrs, chunks = app.call(env)  # codeql[rb/useless-assignment-to-local]
+    status, _hdrs, _chunks = app.call(env)
     assert_equal 200, status
   end
 

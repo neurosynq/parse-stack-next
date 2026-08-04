@@ -189,7 +189,6 @@ class GraphQLTypeGeneratorTest < Minitest::Test
     _stderr_was = $stderr
     captured = StringIO.new
     $stderr = captured
-    type = nil  # codeql[rb/useless-assignment-to-local]
     begin
       type = Parse::GraphQL::TypeGenerator.generate_all(MODELS)["GqlGenArtist"]
     ensure

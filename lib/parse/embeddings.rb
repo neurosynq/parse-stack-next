@@ -382,6 +382,17 @@ module Parse
       # `"true"`, or a non-matching String) raises
       # {ConfirmationRequired}. Reset to `nil` to disable.
       #
+      # For a `:file` source backed by a private-bucket adapter
+      # (S3/GCS with server-side presigning), the URL forwarded under
+      # this sentinel may be the file's presigned URL rather than its
+      # bare canonical one — a time-limited bearer credential for that
+      # object, not just a pointer to it (see {Parse::File#presigned_url}
+      # and `Parse::Core::EmbedManaged.embed_image`). Reviewing the
+      # provider's egress behavior before setting this sentinel should
+      # account for that: the provider (and anyone with access to its
+      # request logs) gains temporary read access to the object for
+      # however long the signature remains valid.
+      #
       # @param value [String, nil] {TRUST_PROVIDER_URL_FETCH_SENTINEL} or nil.
       # @raise [ConfirmationRequired] on any other value.
       def trust_provider_url_fetch=(value)
@@ -395,10 +406,12 @@ module Parse
                 "String #{TRUST_PROVIDER_URL_FETCH_SENTINEL.inspect}. Plain `true` and " \
                 "other values are refused — forwarding image URLs to a third-party " \
                 "provider lets that provider issue an HTTP request from its own network " \
-                "with attacker-controllable host/path. Set the sentinel only after you " \
-                "have configured Parse::Embeddings.allowed_image_hosts AND reviewed the " \
-                "provider's documented egress behavior (DNS rebinding window, redirect " \
-                "policy)."
+                "with attacker-controllable host/path, and for a private-bucket file may " \
+                "hand it a time-limited presigned URL rather than a bare pointer. Set the " \
+                "sentinel only after you have configured " \
+                "Parse::Embeddings.allowed_image_hosts AND reviewed the provider's " \
+                "documented egress behavior (DNS rebinding window, redirect policy, " \
+                "request-log retention)."
         end
         CONFIG_MUTEX.synchronize { @trust_provider_url_fetch = value }
       end

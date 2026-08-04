@@ -703,7 +703,6 @@ class MCPStreamingTest < Minitest::Test
     assert drain_thread.join(3), "drain_thread deadlocked after dispatcher_thread kill"
 
     # Collect the events and verify we got an error response (not a real one).
-    chunks = []  # codeql[rb/useless-assignment-to-local]
     begin
       drain_thread.value  # re-raise any exception from drain_thread
     rescue
@@ -821,8 +820,6 @@ class MCPStreamingTest < Minitest::Test
 
     app = streaming_app(heartbeat_interval: 0.1)
     _status, _headers, body = app.call(rack_env(accept: "text/event-stream"))
-
-    threads_before = Thread.list.size  # codeql[rb/useless-assignment-to-local]
 
     # Partially drain (receive one event) then close — simulates client disconnect.
     received = []
@@ -1182,7 +1179,6 @@ class MCPStreamingTest < Minitest::Test
   def test_progress_callback_exceptions_do_not_break_stream
     # First call raises inside the callback boundary; second is well-formed.
     # The stream should still deliver the second event and the response.
-    raising_call_done = false  # codeql[rb/useless-assignment-to-local]
     StreamingDispatcherStub.progress_calls = [
       { progress: "not-numeric" },  # invalid kwarg — but the callback itself
                                     # accepts anything; the stream encoder
@@ -1207,7 +1203,6 @@ class MCPStreamingTest < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_cancellation_token_is_installed_on_agent_during_dispatch
-    captured = nil  # codeql[rb/useless-assignment-to-local]
     # Capture the token the dispatcher receives so we can verify
     # MCPRackApp constructed and passed one along.
     StreamingDispatcherStub.delay = 0.05

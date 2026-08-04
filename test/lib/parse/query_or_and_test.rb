@@ -236,7 +236,7 @@ class QueryOrAndTest < Minitest::Test
 
     # This should raise an error if we had another model
     begin
-      or_query = Parse::Query.or(product_query)  # codeql[rb/useless-assignment-to-local]
+      Parse::Query.or(product_query)
       puts "Single table OR succeeded"
     rescue ArgumentError => e
       puts "Single table OR failed: #{e.message}"

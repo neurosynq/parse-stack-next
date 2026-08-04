@@ -810,9 +810,20 @@ module Parse
       # it has one, otherwise the bare canonical `fallback` (the same
       # string used for the digest). Never used for text directives, so
       # `directive.sources.first` is always a `:file` property here.
+      #
+      # Checks validity with a zero safety buffer rather than
+      # {Parse::File#presigned_url_valid?}'s default 60-second one. That
+      # default exists so a browser has time to render before a
+      # presigned URL goes stale; here it would instead spend the last
+      # 60 seconds of a perfectly usable presigned URL falling back to
+      # `fallback`, which on a private-bucket adapter is not fetchable
+      # at all. A fetch that starts immediately after this check has no
+      # meaningful use for that margin, and a 403 from a URL that
+      # expired mid-request is strictly better than a guaranteed 403
+      # from a URL known unfetchable in advance.
       def self.presigned_fetch_url(record, directive, fallback)
         file = record.public_send(directive.sources.first)
-        if file.respond_to?(:presigned_url_valid?) && file.presigned_url_valid?
+        if file.respond_to?(:presigned_url_valid?) && file.presigned_url_valid?(buffer: 0)
           file.presigned_url
         else
           fallback

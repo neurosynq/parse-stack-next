@@ -109,7 +109,7 @@ class TestPolygon < Minitest::Test
   end
 
   def test_warns_below_min_vertices
-    out, _err = capture_io do  # codeql[rb/useless-assignment-to-local]
+    _, _err = capture_io do
       Parse::Polygon.new [[0.0, 0.0], [1.0, 1.0]]
     end
     # Warnings go to $stderr via Kernel#warn, captured by capture_io

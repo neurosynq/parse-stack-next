@@ -226,6 +226,23 @@ class EmbedManagedImageTest < Minitest::Test
                  "an expired presigned URL must not be forwarded"
   end
 
+  def test_recompute_forwards_presigned_url_within_default_safety_buffer
+    # presigned_url_valid?'s default 60s buffer exists for browser
+    # rendering; it must NOT apply here. On a private-bucket adapter the
+    # fallback (bare file.url) is unfetchable, so treating a
+    # still-valid presigned URL as "expired soon" would deterministically
+    # 403 for the last 60 seconds of every signature's life.
+    doc = ImageDoc.new
+    doc.cover_art = file_with_url("https://1.1.1.1/cover.jpg")
+    doc.cover_art.instance_variable_set(:@presigned_url, "https://1.1.1.1/cover.jpg?X-Amz-Signature=abc")
+    doc.cover_art.instance_variable_set(:@presigned_url_expires_at, Time.now.utc + 30)
+
+    Parse::Core::EmbedManaged.recompute_embedding!(doc, directive_for(ImageDoc, :cover_embedding))
+
+    assert_equal ["https://1.1.1.1/cover.jpg?X-Amz-Signature=abc"], @stub.calls.first[:sources],
+                 "a presigned URL with 30s left must still be used, not treated as expired"
+  end
+
   def test_recompute_digest_is_stable_across_presigned_url_rotation
     doc = ImageDoc.new
     doc.cover_art = file_with_url("https://1.1.1.1/cover.jpg")
