@@ -1867,7 +1867,6 @@ module Parse
       # we should do a reverse lookup on who is registered for a different class type
       # than their name with parse_class
       klass = Parse::Model.find_class className
-      o = nil
       if klass.present?
         # when creating objects from Parse JSON data, don't use dirty tracking since
         # we are considering these objects as "pristine"

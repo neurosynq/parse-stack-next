@@ -207,7 +207,6 @@ class PushIntegrationTest < Minitest::Test
 
     # Test that subscribe modifies channels locally
     installation.channels = []
-    original_channels = installation.channels.to_a.dup
 
     # Mock save to prevent actual API call in this structure test
     installation.define_singleton_method(:save) { true }

@@ -505,12 +505,23 @@ module Parse
       end
 
       # @!visibility private
-      # Emit a redacted warning about a Parse::Response error to stderr.
+      # Emit a redacted warning about a Parse::Response error.
       #
       # Routes the response error string through
       # {Parse::Middleware::BodyBuilder.redact} to strip credentials (passwords,
       # tokens, sessionTokens, access_tokens, authData) before logging, and
       # truncates to {SAFE_WARN_MAX_ERROR_LENGTH} chars.
+      #
+      # Writes through {Parse::Middleware::Logging.logger} when the app has
+      # configured one (`Parse.logger = ...`), so these warnings land wherever
+      # the rest of the app's Parse request/response logging goes instead of
+      # bypassing it. Falls back to plain `warn` (STDERR) when no logger is
+      # configured, matching prior behavior. Every call site immediately
+      # raises the corresponding typed {Parse::Error} right after calling
+      # this method, so a misbehaving app-supplied logger (closed handle,
+      # full disk, a remote-aggregator client that raises on socket error)
+      # must not be allowed to propagate in its place and mask the real
+      # error — falls back to `warn` if the logger itself raises.
       #
       # @param tag [String] the bracketed prefix (e.g. "AuthenticationError").
       # @param response [Parse::Response] the response carrying the error.
@@ -518,10 +529,20 @@ module Parse
       # @return [nil]
       def _safe_warn(tag, response, name: nil)
         err = Parse::Middleware::BodyBuilder.redact(response.error.to_s)[0, SAFE_WARN_MAX_ERROR_LENGTH]
-        if name
-          warn "[Parse:#{tag}] `#{name}` [#{response.code}] #{err} (HTTP #{response.http_status})"
+        msg = if name
+            "[Parse:#{tag}] `#{name}` [#{response.code}] #{err} (HTTP #{response.http_status})"
+          else
+            "[Parse:#{tag}] [E-#{response.code}] #{response.request} : #{err} (#{response.http_status})"
+          end
+        logger = Parse::Middleware::Logging.logger
+        if logger
+          begin
+            logger.warn(msg)
+          rescue StandardError
+            warn msg
+          end
         else
-          warn "[Parse:#{tag}] [E-#{response.code}] #{response.request} : #{err} (#{response.http_status})"
+          warn msg
         end
         nil
       end

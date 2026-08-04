@@ -98,4 +98,67 @@ class TestSafeWarn < Minitest::Test
       assert_nil Parse::Client._safe_warn("ServerError", r)
     end
   end
+
+  # ---- logger routing (5.7.2) -------------------------------------------
+
+  def teardown
+    Parse::Middleware::Logging.logger = nil
+  end
+
+  def test_routes_through_configured_logger_instead_of_stderr
+    messages = []
+    fake_logger = Object.new
+    fake_logger.define_singleton_method(:warn) { |msg| messages << msg }
+    Parse::Middleware::Logging.logger = fake_logger
+
+    r = make_response(error: "Boom")
+    _out, err = capture_io do
+      Parse::Client._safe_warn("ServerError", r)
+    end
+
+    assert_empty err, "must not also write to STDERR when a logger is configured"
+    assert_equal 1, messages.length
+    assert_match(/\[Parse:ServerError\]/, messages.first)
+    assert_match(/Boom/, messages.first)
+  end
+
+  def test_falls_back_to_stderr_when_no_logger_configured
+    Parse::Middleware::Logging.logger = nil
+    r = make_response(error: "Boom")
+
+    _out, err = capture_io do
+      Parse::Client._safe_warn("ServerError", r)
+    end
+
+    assert_match(/\[Parse:ServerError\]/, err)
+  end
+
+  def test_falls_back_to_stderr_when_configured_logger_raises
+    broken_logger = Object.new
+    broken_logger.define_singleton_method(:warn) { |_msg| raise IOError, "closed stream" }
+    Parse::Middleware::Logging.logger = broken_logger
+
+    r = make_response(error: "Boom")
+    result = nil
+    _out, err = capture_io do
+      result = Parse::Client._safe_warn("ServerError", r)
+    end
+
+    assert_nil result, "_safe_warn must not let a raising logger propagate past it"
+    assert_match(/\[Parse:ServerError\]/, err,
+                 "a raising logger must fall back to STDERR instead of masking the real error")
+  end
+
+  def test_logger_path_still_redacts_credentials
+    messages = []
+    fake_logger = Object.new
+    fake_logger.define_singleton_method(:warn) { |msg| messages << msg }
+    Parse::Middleware::Logging.logger = fake_logger
+
+    r = make_response(error: 'failed: password="hunter2"')
+    capture_io { Parse::Client._safe_warn("ServerError", r) }
+
+    refute_match(/hunter2/, messages.first)
+    assert_match(/\[FILTERED\]/, messages.first)
+  end
 end

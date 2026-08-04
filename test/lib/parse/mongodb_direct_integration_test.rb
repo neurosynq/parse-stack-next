@@ -2086,8 +2086,6 @@ class MongoDBDirectIntegrationTest < Minitest::Test
         puts "  Group IDs: #{group_ids.inspect}"
 
         has_null = group_ids.include?(nil)
-        has_artist1 = group_ids.any? { |id| id.to_s.include?(artist1.id) }
-        has_artist2 = group_ids.any? { |id| id.to_s.include?(artist2.id) }
 
         assert has_null, "Should have null group for albums without artist"
         # Note: The group by pointer returns pointer format, so check for id presence
@@ -2564,7 +2562,6 @@ class MongoDBDirectIntegrationTest < Minitest::Test
         puts "\n=== Testing Aggregate Group by Date Object ==="
 
         # Create test data with dates
-        today = Time.now.utc
         data = [
           { title: "DateGroup1", artist: "DateGroup Artist", genre: "Rock", plays: 100 },
           { title: "DateGroup2", artist: "DateGroup Artist", genre: "Pop", plays: 200 },

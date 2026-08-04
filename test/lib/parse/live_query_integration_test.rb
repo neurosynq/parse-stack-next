@@ -45,7 +45,7 @@ class LiveQueryIntegrationTest < Minitest::Test
     TestLiveQueryModel.all.each do |obj|
       obj.destroy rescue nil
     end
-  rescue => e
+  rescue
     # Ignore errors during cleanup
   end
 

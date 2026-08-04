@@ -374,7 +374,6 @@ class ArrayConstraints210IntegrationTest < Minitest::Test
 
       now = Time.now
       one_day_ago = now - 86400
-      two_days_ago = now - 172800
 
       with_timeout(10, "creating test data") do
         # Items with empty/nil tags at different times

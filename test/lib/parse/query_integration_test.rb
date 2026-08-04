@@ -127,7 +127,7 @@ class QueryIntegrationTest < Minitest::Test
       with_timeout(2, "simple query") do
         # Just try to query existing data without creating new data
         query = GameScore.query.limit(1)
-        results = query.results
+        query.results
         # Don't assert anything about results - just verify query doesn't hang
         assert true, "Query completed without timeout"
       end
@@ -1546,8 +1546,6 @@ class QueryIntegrationTest < Minitest::Test
 
       # Create posts with different timestamps
       now = Time.now
-      yesterday = now - 24 * 60 * 60
-      last_week = now - 7 * 24 * 60 * 60
 
       # Note: Parse Server automatically manages createdAt/updatedAt
       post1 = Post.new(title: "Recent Post", content: "New content")
@@ -1583,9 +1581,6 @@ class QueryIntegrationTest < Minitest::Test
 
       # Create test data with various attributes
       now = Time.now
-      hour_ago = now - 3600
-      day_ago = now - 86400
-      week_ago = now - 604800
 
       # Create players with different attributes and join dates
       players = []

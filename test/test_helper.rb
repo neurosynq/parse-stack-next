@@ -57,7 +57,7 @@ end
 module Minitest
   module Assertions
     def refute_raises(*exp)
-      msg = "#{exp.pop}.\n" if String === exp.last
+      "#{exp.pop}.\n" if String === exp.last
 
       begin
         yield
@@ -65,7 +65,6 @@ module Minitest
         return e if exp.include? Minitest::Skip
         raise e
       rescue Exception => e
-        exp = exp.first if exp.size == 1
         flunk "unexpected exception raised: #{e}"
       end
     end

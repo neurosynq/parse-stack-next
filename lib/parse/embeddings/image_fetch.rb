@@ -164,7 +164,15 @@ module Parse
 
         mime = verify!(bytes, url: canonical)
         bytes = strip_metadata(bytes, mime) if exif_strip
-        FetchedImage.new(bytes: bytes, mime_type: mime, url: canonical)
+        # Store the query-stripped URL, not `canonical` verbatim: when
+        # `url` is a presigned URL (a private-bucket file adapter),
+        # `canonical` carries a live signature, and FetchedImage#url is
+        # purely informational from here on (nothing re-fetches it).
+        # Keeping the signature out of the struct preserves the
+        # log-safety `#inspect` below was written for — third-party
+        # provider adapters and error reporters that capture locals
+        # would otherwise leak a valid bearer credential through it.
+        FetchedImage.new(bytes: bytes, mime_type: mime, url: Parse::File.strip_query(canonical))
       end
 
       # Verify raw bytes: sniff the magic, check the allowlist, and

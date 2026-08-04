@@ -160,7 +160,7 @@ class Features220IntegrationTest < Minitest::Test
         # Delete all objects of this class (limit 1000 should be enough for tests)
         objects = klass.all(limit: 1000)
         objects.each { |obj| obj.destroy rescue nil }
-      rescue => e
+      rescue
         # Ignore cleanup errors - class may not exist yet
       end
     end

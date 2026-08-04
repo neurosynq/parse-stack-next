@@ -319,8 +319,6 @@ class TimeQueryIntegrationTest < Minitest::Test
         # Create times in different timezone formats
         utc_time = Time.now.utc
         local_time = Time.now
-        datetime_utc = DateTime.now.utc
-        datetime_local = DateTime.now
 
         # Create event with UTC time
         utc_event = Event.new({

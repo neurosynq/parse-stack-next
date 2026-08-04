@@ -189,7 +189,6 @@ class GraphQLTypeGeneratorTest < Minitest::Test
     _stderr_was = $stderr
     captured = StringIO.new
     $stderr = captured
-    type = nil
     begin
       type = Parse::GraphQL::TypeGenerator.generate_all(MODELS)["GqlGenArtist"]
     ensure

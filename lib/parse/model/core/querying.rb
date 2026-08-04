@@ -253,7 +253,6 @@ module Parse
           # same created_at date (down to the microsecond). This prevents getting the same
           # record in the next query request.
           exclusion_set = results.select { |r| r.created_at == next_cursor.created_at }.map(&:id)
-          results = nil
           cursor = next_cursor
         end
       end
@@ -356,7 +355,6 @@ module Parse
       #   Object.latest(:user.eq => user, limit: 5) # => 5 most recent for user
       #  @return [Parse::Object] the most recently created object matching constraints.
       def latest(constraints = {})
-        fetch_count = 1
         if constraints.is_a?(Numeric)
           fetch_count = constraints.to_i
           constraints = {}
@@ -385,7 +383,6 @@ module Parse
       #   Object.last_updated(:user.eq => user, limit: 3) # => 3 most recently updated for user
       #  @return [Parse::Object] the most recently updated object matching constraints.
       def last_updated(constraints = {})
-        fetch_count = 1
         if constraints.is_a?(Numeric)
           fetch_count = constraints.to_i
           constraints = {}
@@ -600,7 +597,6 @@ module Parse
         parse_ids.compact!
         # determines if the result back to the call site is an array or a single result
         as_array = parse_ids.count > 1
-        results = []
 
         # Default to write-only cache mode - find always gets fresh data
         # but updates cache for future cached reads. Controlled by feature flag.

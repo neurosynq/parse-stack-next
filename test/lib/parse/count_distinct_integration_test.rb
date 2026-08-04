@@ -110,8 +110,6 @@ class CountDistinctIntegrationTest < Minitest::Test
 
       base_time = Time.now.utc
       yesterday = base_time - 86400
-      week_ago = base_time - 604800
-      month_ago = base_time - 2592000
 
       # Create reviews with different dates and ratings
       reviews = []

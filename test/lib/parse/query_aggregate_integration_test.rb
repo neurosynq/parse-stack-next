@@ -1131,6 +1131,16 @@ class QueryAggregateTest < Minitest::Test
                 assert_equal "Date", oldest["__type"], "Date should have __type: Date"
                 assert oldest.key?("iso"), "Date should have iso field"
               end
+
+              if newest.is_a?(String)
+                # Verify ISO date format
+                assert newest.match?(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/),
+                       "Date should be in ISO format: #{newest}"
+              elsif newest.is_a?(Hash) && newest.key?("__type")
+                # Parse Date object format
+                assert_equal "Date", newest["__type"], "Date should have __type: Date"
+                assert newest.key?("iso"), "Date should have iso field"
+              end
             end
           end
         rescue => e

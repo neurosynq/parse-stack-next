@@ -201,6 +201,66 @@ class EmbedManagedImageTest < Minitest::Test
     assert_equal ["https://1.1.1.1/cover_v2.jpg"], @stub.calls.last[:sources]
   end
 
+  def test_recompute_forwards_presigned_url_when_valid
+    doc = ImageDoc.new
+    doc.cover_art = file_with_url("https://1.1.1.1/cover.jpg")
+    doc.cover_art.instance_variable_set(:@presigned_url, "https://1.1.1.1/cover.jpg?X-Amz-Signature=abc")
+    doc.cover_art.instance_variable_set(:@presigned_url_expires_at, Time.now.utc + 3600)
+
+    Parse::Core::EmbedManaged.recompute_embedding!(doc, directive_for(ImageDoc, :cover_embedding))
+
+    assert_equal 1, @stub.calls.length
+    assert_equal ["https://1.1.1.1/cover.jpg?X-Amz-Signature=abc"], @stub.calls.first[:sources],
+                 "provider should receive the presigned URL, not the bare canonical file.url"
+  end
+
+  def test_recompute_falls_back_to_bare_url_when_presigned_url_expired
+    doc = ImageDoc.new
+    doc.cover_art = file_with_url("https://1.1.1.1/cover.jpg")
+    doc.cover_art.instance_variable_set(:@presigned_url, "https://1.1.1.1/cover.jpg?X-Amz-Signature=abc")
+    doc.cover_art.instance_variable_set(:@presigned_url_expires_at, Time.now.utc - 1)
+
+    Parse::Core::EmbedManaged.recompute_embedding!(doc, directive_for(ImageDoc, :cover_embedding))
+
+    assert_equal ["https://1.1.1.1/cover.jpg"], @stub.calls.first[:sources],
+                 "an expired presigned URL must not be forwarded"
+  end
+
+  def test_recompute_forwards_presigned_url_within_default_safety_buffer
+    # presigned_url_valid?'s default 60s buffer exists for browser
+    # rendering; it must NOT apply here. On a private-bucket adapter the
+    # fallback (bare file.url) is unfetchable, so treating a
+    # still-valid presigned URL as "expired soon" would deterministically
+    # 403 for the last 60 seconds of every signature's life.
+    doc = ImageDoc.new
+    doc.cover_art = file_with_url("https://1.1.1.1/cover.jpg")
+    doc.cover_art.instance_variable_set(:@presigned_url, "https://1.1.1.1/cover.jpg?X-Amz-Signature=abc")
+    doc.cover_art.instance_variable_set(:@presigned_url_expires_at, Time.now.utc + 30)
+
+    Parse::Core::EmbedManaged.recompute_embedding!(doc, directive_for(ImageDoc, :cover_embedding))
+
+    assert_equal ["https://1.1.1.1/cover.jpg?X-Amz-Signature=abc"], @stub.calls.first[:sources],
+                 "a presigned URL with 30s left must still be used, not treated as expired"
+  end
+
+  def test_recompute_digest_is_stable_across_presigned_url_rotation
+    doc = ImageDoc.new
+    doc.cover_art = file_with_url("https://1.1.1.1/cover.jpg")
+    d = directive_for(ImageDoc, :cover_embedding)
+    Parse::Core::EmbedManaged.recompute_embedding!(doc, d)
+    digest_before = doc.cover_embedding_digest
+
+    # Same underlying file location, but Parse Server minted a fresh
+    # signature (as it does on every read). The digest must not change
+    # since it is keyed on the bare canonical URL, not the signature.
+    doc.cover_art.instance_variable_set(:@presigned_url, "https://1.1.1.1/cover.jpg?X-Amz-Signature=rotated")
+    doc.cover_art.instance_variable_set(:@presigned_url_expires_at, Time.now.utc + 3600)
+    Parse::Core::EmbedManaged.recompute_embedding!(doc, d)
+
+    assert_equal digest_before, doc.cover_embedding_digest
+    assert_equal 1, @stub.calls.length, "Provider must not be re-called when only the signature rotated"
+  end
+
   def test_recompute_clears_vector_and_digest_when_file_is_nil
     doc = ImageDoc.new
     doc.cover_art = file_with_url("https://1.1.1.1/cover.jpg")

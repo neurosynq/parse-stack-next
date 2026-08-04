@@ -2475,7 +2475,6 @@ module Parse
       end
 
       ActiveSupport::Notifications.instrument("parse.agent.tool_call", payload) do
-        response = nil
         # Install a fresh embedding accumulator for this tool span. The
         # process-wide "parse.embeddings.embed" subscriber records each
         # embed into it; the ensure below reads + restores it so the

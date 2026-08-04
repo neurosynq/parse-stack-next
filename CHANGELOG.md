@@ -1,5 +1,91 @@
 ## parse-stack-next Changelog
 
+### 5.7.2
+
+#### `between` accepts Ruby Range values
+
+- **NEW**: The `between` constraint now accepts a Ruby `Range` in addition to
+  a 2-element array, so `Person.where(:age.between => 5..25)` and
+  `Record.where(:date.between => 5.days.ago...2.days.ago)` work directly. An
+  inclusive range (`..`) maps its upper bound to `$lte`, matching the existing
+  array form, while an exclusive range (`...`) maps it to `$lt` instead.
+  Beginless (`..25`) and endless (`5..`) ranges are also supported and
+  constrain only the side that is present, so `Person.where(:age.between =>
+  18..)` compiles to `{"$gte" => 18}` with no upper bound. The array form is
+  unchanged, and both forms produce identical output for the same bounds.
+
+#### `Query#where_not_between` for the negated form of a range
+
+- **NEW**: `Query#where_not_between(field, value)` adds the logical negation
+  of `between`: `Person.query.where_not_between(:age, 5..25)` compiles to
+  `age < 5 OR age > 25`, accepting the same Range and 2-element Array forms
+  as `between` (exclusive ranges flip the upper side to `$gte`, and a
+  beginless or endless Range negates to a single one-sided comparison with
+  no `$or` needed). It is not available as a `field.not_between => value`
+  symbol constraint: a range's negation is inherently an `$or` of two
+  comparisons, and only one `$or` group can be safely merged into a
+  compiled query, so a symbol constraint that unilaterally emitted one
+  could silently collide with an existing `$or` from `or_where`/`|`.
+  `where_not_between` instead composes the negation the way
+  `Parse::Query.and` already does, so it correctly nests inside a query's
+  other `.where` conditions instead of replacing them, and raises
+  `ArgumentError` if the query already has an `$or` group rather than
+  silently dropping part of it.
+
+#### `embed_image` forwards a presigned URL when the source file has one
+
+- **FIXED**: `embed_image` always sent the source file's bare `file.url` to
+  the embedding provider (or to the SDK's own `:bytes`-mode downloader). On a
+  private-bucket file adapter (S3/GCS configured with `presignedUrl: true`),
+  `file.url` is the canonical URL with its signature stripped, so the
+  provider's fetch (or the SDK's download) got a 403 instead of the image.
+  `Parse::File` already captures the signed variant in `file.presigned_url`
+  whenever Parse Server returns one, but `embed_image` never read it.
+  Recompute now forwards `file.presigned_url` when it is present and not yet
+  expired, and falls back to the bare URL otherwise, for both `source: :url`
+  and `source: :bytes`. The stored digest is still keyed on the bare
+  canonical URL, so a save that only rotates the file's signature does not
+  trigger a needless re-embed. The validity check ignores
+  `presigned_url_valid?`'s default 60-second safety buffer (meant for a
+  browser render, not an immediate server-side fetch), since on a
+  private-bucket adapter the fallback URL is not fetchable at all and would
+  otherwise 403 for the last minute of every signature's life.
+  `Parse::Embeddings::ImageFetch::FetchedImage#url` now stores the
+  query-stripped URL rather than the presigned one, since a live signature
+  has no reason to survive into that value object's `#inspect` output.
+  `source: :url` mode can now forward a presigned URL to the embedding
+  provider under the same `Parse::Embeddings.trust_provider_url_fetch`
+  consent already required to forward any URL; operators relying on private
+  buckets should confirm the provider's egress handling covers
+  credential-bearing URLs, not just public ones.
+
+#### `Query#get` now resolves aliased `parse_class` names correctly
+
+- **FIXED**: `Query#get` looked up the target class with a raw
+  `Object.const_get(@table)`, which only worked when the Parse class name
+  matched the Ruby constant name exactly. A model that renames its table via
+  `parse_class "SomeOtherName"` was never found by this lookup, so `get`
+  silently fell back to a generic `Parse::Object`/`Parse::Pointer` instead of
+  hydrating the declared model. `Query#get` now passes the table name through
+  to `Parse::Object.build` as a string, letting it run its own
+  `Parse::Model.find_class` resolution, which already understands
+  `parse_class` aliasing.
+
+#### `_safe_warn` now writes through a configured logger
+
+- **FIXED**: Internal warnings for authentication, timeout, and cloud-code
+  errors (`Parse::Client._safe_warn`) always wrote to STDERR, even when an
+  app had configured `Parse.logger = Rails.logger` (or any other logger) for
+  the rest of its Parse request/response logging. These warnings now route
+  through `Parse::Middleware::Logging.logger` when one is configured, so they
+  land in the same place as the app's other logs; STDERR remains the fallback
+  when no logger is configured, matching prior behavior. Every call site
+  raises the corresponding typed `Parse::Error` immediately after this
+  warning, so a configured logger that itself raises (a closed handle, a
+  full disk, a remote-aggregator client erroring on a socket) now falls back
+  to STDERR rather than propagating in place of the real error and masking
+  it.
+
 ### 5.7.1
 
 #### Cache-invalidation webhooks no longer break every application hook for the same trigger

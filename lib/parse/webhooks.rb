@@ -444,7 +444,6 @@ module Parse
           payload.instance_variable_set(:@ruby_initiated, ruby_initiated)
           trusted_ruby_initiated = ruby_initiated && (payload.master? == true)
         else
-          ruby_initiated = false
           trusted_ruby_initiated = false
         end
 

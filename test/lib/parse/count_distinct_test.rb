@@ -19,11 +19,6 @@ class TestCountDistinct < Minitest::Test
       [:error?, :result].include?(method) || super
     end
 
-    expected_pipeline = [
-      { "$group" => { "_id" => "$genre" } },
-      { "$count" => "distinctCount" },
-    ]
-
     @mock_client.expect :aggregate_pipeline, mock_response do |table, pipeline, **kwargs|
       table == "Song" && pipeline.is_a?(Array)
     end
@@ -47,12 +42,6 @@ class TestCountDistinct < Minitest::Test
       [:error?, :result].include?(method) || super
     end
 
-    expected_pipeline = [
-      { "$match" => { "playCount" => { "$gt" => 100 } } },
-      { "$group" => { "_id" => "$artist" } },
-      { "$count" => "distinctCount" },
-    ]
-
     @mock_client.expect :aggregate_pipeline, mock_response do |table, pipeline, **kwargs|
       table == "Song" && pipeline.is_a?(Array)
     end
@@ -73,11 +62,6 @@ class TestCountDistinct < Minitest::Test
       [:error?, :result].include?(method) || super
     end
 
-    expected_pipeline = [
-      { "$group" => { "_id" => "$genre" } },
-      { "$count" => "distinctCount" },
-    ]
-
     @mock_client.expect :aggregate_pipeline, mock_response do |table, pipeline, **kwargs|
       table == "Song" && pipeline.is_a?(Array)
     end
@@ -96,11 +80,6 @@ class TestCountDistinct < Minitest::Test
     def mock_response.respond_to?(method)
       method == :error? || super
     end
-
-    expected_pipeline = [
-      { "$group" => { "_id" => "$genre" } },
-      { "$count" => "distinctCount" },
-    ]
 
     @mock_client.expect :aggregate_pipeline, mock_response do |table, pipeline, **kwargs|
       table == "Song" && pipeline.is_a?(Array)
@@ -141,11 +120,6 @@ class TestCountDistinct < Minitest::Test
     end
 
     # Test that snake_case field gets converted to camelCase
-    expected_pipeline = [
-      { "$group" => { "_id" => "$playCount" } },
-      { "$count" => "distinctCount" },
-    ]
-
     @mock_client.expect :aggregate_pipeline, mock_response do |table, pipeline, **kwargs|
       table == "Song" && pipeline.is_a?(Array)
     end
@@ -179,16 +153,6 @@ class TestCountDistinct < Minitest::Test
     end
 
     # The pipeline should include a $match stage with all conditions
-    expected_match = {
-      "playCount" => { "$gt" => 100 },
-      "genre" => "rock",
-      "releaseDate" => {
-        "$gte" => { "__type" => "Date", "iso" => yesterday.iso8601(3) },
-        "$lte" => { "__type" => "Date", "iso" => now.iso8601(3) },
-      },
-      "featured" => true,
-    }
-
     @mock_client.expect :aggregate_pipeline, mock_response do |table, pipeline, **kwargs|
       table == "Song" &&
       pipeline.is_a?(Array) &&

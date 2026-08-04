@@ -70,8 +70,6 @@ class TestCountDistinctModel < Minitest::Test
         true
       end
 
-      # Capture response_data in the closure
-      response_data = @response_data
       def response.result
         response_data
       end

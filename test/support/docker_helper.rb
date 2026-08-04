@@ -16,7 +16,7 @@ module Parse
 
           puts "Starting Parse Server test container..."
 
-          stdout, stderr, status = Open3.capture3("docker-compose -f #{COMPOSE_FILE} up -d")
+          _stdout, stderr, status = Open3.capture3("docker-compose -f #{COMPOSE_FILE} up -d")
 
           if status.success?
             wait_for_server

@@ -191,7 +191,7 @@ module Parse
 
         result_hash = dispatch(method, params, agent, id, logger, subscription_manager)
         { status: result_hash[:status], body: result_hash[:body] }
-      rescue Parse::Agent::Unauthorized => e
+      rescue Parse::Agent::Unauthorized
         { status: 401, body: jsonrpc_error(body.is_a?(Hash) ? body["id"] : nil, -32001, "Unauthorized") }
       rescue StandardError => e
         # Do not leak the exception class name (gem fingerprinting). Server-
@@ -295,7 +295,7 @@ module Parse
         else
           { status: 200, body: jsonrpc_envelope(id, result: result) }
         end
-      rescue Parse::Agent::Unauthorized => e
+      rescue Parse::Agent::Unauthorized
         { status: 401, body: jsonrpc_error(id, -32001, "Unauthorized") }
       rescue Parse::Agent::AccessDenied
         # Class-authorization denial (agent_hidden / classes: allowlist), e.g.

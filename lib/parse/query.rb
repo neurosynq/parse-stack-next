@@ -1113,6 +1113,77 @@ module Parse
       copy_query
     end
 
+    # Add a "field is NOT between" condition — the logical negation of
+    # `.where(field.between => value)`: `field < min OR field > max` for a
+    # fully-bounded Range/Array, or a single one-sided comparison when the
+    # Range is beginless/endless (mirroring how {Parse::Constraint::BetweenConstraint}
+    # itself only constrains the side that is present).
+    #
+    # Not available as a `field.not_between => value` symbol constraint,
+    # unlike `.between`: a between-style range is inherently an OR of two
+    # comparisons, and a single {Parse::Constraint}'s `#build` can only
+    # safely contribute an AND'd clause to a query. A constraint that
+    # unilaterally emitted a top-level `$or` would collide with (and
+    # silently clobber, or be clobbered by) any other `$or` this query
+    # already produces via {#or_where} / `|` / another `where_not_between`
+    # call, since only one `$or` group merges correctly per query. This
+    # method instead composes the negation the same way {Parse::Query.and}
+    # does — concatenating compiled constraint arrays — which correctly
+    # nests the OR inside the query's existing AND'd conditions instead of
+    # replacing them the way {#or_where} would.
+    #
+    # @example
+    #   Person.query.where_not_between(:age, 5..25)
+    #   # age < 5 OR age > 25
+    #
+    #   Record.query.where(:archived => false).where_not_between(:date, 5.days.ago...2.days.ago)
+    #   # archived == false AND (date < 5.days.ago OR date >= 2.days.ago)
+    #
+    # @param field [Symbol, String] the field to constrain.
+    # @param value [Range, Array] a `between`-style value: a Range (including
+    #   beginless/endless/exclusive-end forms) or a 2-element `[min, max]` Array.
+    # @return [self]
+    # @raise [ArgumentError] if `value` isn't a Range or 2-element Array, or
+    #   is a fully-open (`nil..nil`) Range.
+    def where_not_between(field, value)
+      field = field.to_sym
+      min_value, max_value, exclude_max = Parse::Constraint::BetweenConstraint.extract_bounds(value)
+
+      if min_value.nil? && max_value.nil?
+        raise ArgumentError, "Query#where_not_between: Range must have a begin, an end, or both (ex. 5.., ..25, 5..25)."
+      end
+
+      # A fully-bounded range needs its own `$or` group (`field < min OR
+      # field > max`). Only ONE `$or` group survives the plain-Hash merge
+      # every constraint's compiled output goes through (`constraint_reduce`
+      # deep-merges compiled hashes; a second top-level `$or` key silently
+      # overwrites the first rather than combining with it — the same
+      # constraint that makes `field.not_between => value` unsafe as a
+      # symbol constraint, see above). Fail loudly here instead of quietly
+      # dropping half the query if this query already has one, from
+      # `#or_where`, `|`, or an earlier `where_not_between` call.
+      if min_value && max_value && @where.any? { |c| c.is_a?(Parse::Constraint::CompoundQueryConstraint) }
+        raise ArgumentError,
+              "Query#where_not_between: this query already has an `$or` group (from `or_where`, `|`, " \
+              "or a prior `where_not_between` call). Only one `$or` group can be safely merged per " \
+              "query. Compose the two queries with Parse::Query.and(...) instead."
+      end
+
+      negated = if min_value.nil?
+          Parse::Query.new(@table).where(field.public_send(exclude_max ? :gte : :gt) => max_value)
+        elsif max_value.nil?
+          Parse::Query.new(@table).where(field.lt => min_value)
+        else
+          lower = Parse::Query.new(@table).where(field.lt => min_value)
+          upper = Parse::Query.new(@table).where(field.public_send(exclude_max ? :gte : :gt) => max_value)
+          Parse::Query.or(lower, upper)
+        end
+
+      @where = @where + negated.where
+      @results = nil
+      self
+    end
+
     # Queries can be made using distinct, allowing you find unique values for a specified field.
     # For this to be performant, please remember to index your database.
     # @example
@@ -1409,7 +1480,6 @@ module Parse
         return first_direct(limit_or_constraints)
       end
 
-      fetch_count = 1
       if limit_or_constraints.is_a?(Hash)
         conditions(limit_or_constraints)
         # Check if limit was set in constraints, otherwise use 1
@@ -1490,15 +1560,19 @@ module Parse
     # @return [Parse::Object] the object with the given ID.
     # @raise [Parse::Error] if the object is not found.
     def get(object_id)
-      parse_class = Object.const_get(@table) if Object.const_defined?(@table)
-      parse_class ||= Parse::Object
-
       response = client.fetch_object(@table, object_id)
       if response.error?
         raise Parse::Error.new(response.code, response.error)
       end
 
-      Parse::Object.build(response.result, parse_class)
+      # Pass the table name through as-is rather than pre-resolving it to
+      # a Class: `Object.build` does its own `Parse::Model.find_class`
+      # lookup against the String, which correctly honors `parse_class`
+      # aliasing. Resolving to a Class first and handing that back to
+      # `build` broke aliased lookups, since `find_class` would then
+      # stringify the Ruby constant name (e.g. "Musician") instead of
+      # matching the declared alias (e.g. "Artist").
+      Parse::Object.build(response.result, @table)
     end
 
     # max_results is used to iterate through as many API requests as possible using

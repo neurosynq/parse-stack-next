@@ -31,11 +31,6 @@ class TestGroupByAggregation < Minitest::Test
   def test_group_by_sum_builds_correct_pipeline
     group_by = Parse::GroupBy.new(@query, :project)
 
-    expected_pipeline = [
-      { "$group" => { "_id" => "$project", "count" => { "$sum" => "$fileSize" } } },
-      { "$project" => { "_id" => 0, "objectId" => "$_id", "count" => 1 } },
-    ]
-
     mock_response = Minitest::Mock.new
     mock_response.expect :success?, true
     mock_response.expect :result, []

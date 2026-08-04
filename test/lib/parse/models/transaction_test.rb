@@ -107,7 +107,7 @@ class TestTransaction < Minitest::Test
     end
 
     begin
-      result = Parse::Object.transaction(retries: 10) do |batch|
+      Parse::Object.transaction(retries: 10) do |batch|
         # Test that custom retry count is accepted
         assert_instance_of Parse::BatchOperation, batch
       end
