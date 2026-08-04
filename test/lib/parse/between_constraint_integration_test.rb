@@ -401,6 +401,112 @@ class BetweenConstraintIntegrationTest < Minitest::Test
     end
   end
 
+  def test_between_constraint_with_range
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      with_timeout(15, "between constraint with Range test") do
+        puts "\n=== Testing Between Constraint with Ruby Range ==="
+
+        5.times do |i|
+          user = BetweenTestUser.new(name: "User #{i}", age: 20 + i * 5, score: 70 + i * 5)
+          assert user.save, "User #{i} should save"
+        end
+
+        # Inclusive range (..) should behave like [min, max]
+        inclusive_users = BetweenTestUser.query
+          .where(:age.between => 25..35)
+          .order(:age.asc)
+          .results
+
+        assert_equal 3, inclusive_users.length, "Should find 3 users in inclusive age range"
+        assert_equal [25, 30, 35], inclusive_users.map(&:age), "Should include both boundary ages"
+
+        # Exclusive range (...) should exclude the upper bound
+        exclusive_users = BetweenTestUser.query
+          .where(:age.between => 25...35)
+          .order(:age.asc)
+          .results
+
+        assert_equal 2, exclusive_users.length, "Should find 2 users in exclusive age range"
+        assert_equal [25, 30], exclusive_users.map(&:age), "Should exclude the upper boundary age"
+
+        # Array and Range forms should produce identical results
+        array_users = BetweenTestUser.query
+          .where(:age.between => [25, 35])
+          .order(:age.asc)
+          .results
+
+        assert_equal inclusive_users.map(&:id), array_users.map(&:id), "Array and inclusive Range forms should match"
+
+        puts "✅ Between constraint with Ruby Range works correctly"
+      end
+    end
+  end
+
+  def test_between_constraint_with_endless_and_beginless_range
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      with_timeout(15, "between constraint with endless/beginless Range test") do
+        puts "\n=== Testing Between Constraint with Endless/Beginless Range ==="
+
+        5.times do |i|
+          user = BetweenTestUser.new(name: "User #{i}", age: 20 + i * 5, score: 70 + i * 5)
+          assert user.save, "User #{i} should save"
+        end
+
+        # Endless range (5..) should only apply the lower bound
+        older_users = BetweenTestUser.query
+          .where(:age.between => 30..)
+          .order(:age.asc)
+          .results
+
+        assert_equal 3, older_users.length, "Should find users 30 and older"
+        assert_equal [30, 35, 40], older_users.map(&:age)
+
+        # Beginless range (..25) should only apply the upper bound
+        younger_users = BetweenTestUser.query
+          .where(:age.between => ..25)
+          .order(:age.asc)
+          .results
+
+        assert_equal 2, younger_users.length, "Should find users 25 and younger"
+        assert_equal [20, 25], younger_users.map(&:age)
+
+        puts "✅ Between constraint with endless/beginless Range works correctly"
+      end
+    end
+  end
+
+  def test_between_constraint_with_time_range
+    skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
+
+    with_parse_server do
+      with_timeout(15, "between constraint with Time Range test") do
+        puts "\n=== Testing Between Constraint with Time Range ==="
+
+        old_user = BetweenTestUser.new(name: "Old User", age: 45, join_date: Date.parse("2020-01-15"), score: 100)
+        assert old_user.save, "Old user should save"
+
+        recent_user = BetweenTestUser.new(name: "Recent User", age: 28, join_date: Date.parse("2023-06-10"), score: 85)
+        assert recent_user.save, "Recent user should save"
+
+        new_user = BetweenTestUser.new(name: "New User", age: 26, join_date: Date.parse("2024-08-01"), score: 75)
+        assert new_user.save, "New user should save"
+
+        users_2023 = BetweenTestUser.query
+          .where(:join_date.between => Date.parse("2023-01-01")..Date.parse("2023-12-31"))
+          .results
+
+        assert_equal 1, users_2023.length, "Should find 1 user who joined in 2023"
+        assert_equal "Recent User", users_2023.first.name
+
+        puts "✅ Between constraint with Time Range works correctly"
+      end
+    end
+  end
+
   def test_between_constraint_string_vs_manual_comparison
     skip "Docker integration tests require PARSE_TEST_USE_DOCKER=true" unless ENV["PARSE_TEST_USE_DOCKER"] == "true"
 

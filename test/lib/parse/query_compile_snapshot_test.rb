@@ -149,6 +149,19 @@ class QueryCompileSnapshotTest < Minitest::Test
     assert_snapshot(compile(q), name: "exists_constraint", group: GROUP)
   end
 
+  def test_between_range_constraint
+    # An inclusive Range (`..`) on `.between` compiles identically to the
+    # 2-element Array form: $gte for the start, $lte for the end.
+    q = SnapPost.where(:likes.between => 10..100)
+    assert_snapshot(compile(q), name: "between_range_inclusive", group: GROUP)
+  end
+
+  def test_between_exclusive_range_constraint
+    # An exclusive Range (`...`) maps its end to $lt instead of $lte.
+    q = SnapPost.where(:likes.between => 10...100)
+    assert_snapshot(compile(q), name: "between_range_exclusive", group: GROUP)
+  end
+
   def test_tags_all_array_constraint
     # `:tags.all => [...]` compiles to the `$all` REST operator (not a
     # pipeline). Snapshot under normalized array order — $all is set-semantic.

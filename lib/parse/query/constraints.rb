@@ -2516,6 +2516,19 @@ module Parse
     #  User.where(:name.between => ["Alice", "John"])
     #  # Generates: "name": { "$gte": "Alice", "$lte": "John" }
     #
+    #  # A Ruby Range works the same way as a 2-element array. An inclusive
+    #  # range (`..`) maps its end to $lte, while an exclusive range (`...`)
+    #  # maps its end to $lt.
+    #  User.where(:age.between => 18..65)
+    #  # Generates: "age": { "$gte": 18, "$lte": 65 }
+    #
+    #  Record.where(:date.between => 5.days.ago...2.days.ago)
+    #  # Generates: "date": { "$gte": <5 days ago>, "$lt": <2 days ago> }
+    #
+    #  # Beginless/endless ranges only constrain the side that is present.
+    #  User.where(:age.between => 18..)
+    #  # Generates: "age": { "$gte": 18 }
+    #
     class BetweenConstraint < Constraint
       # @!method between
       # A registered method on a symbol to create the constraint.
@@ -2526,9 +2539,11 @@ module Parse
 
       # @return [Hash] the compiled constraint.
       def build
+        return build_range(@value) if @value.is_a?(Range)
+
         value = formatted_value
         unless value.is_a?(Array) && value.length == 2
-          raise ArgumentError, "#{self.class}: Value must be an array with exactly 2 elements [min_value, max_value]"
+          raise ArgumentError, "#{self.class}: Value must be an array with exactly 2 elements [min_value, max_value], or a Range"
         end
 
         min_value, max_value = value
@@ -2541,6 +2556,28 @@ module Parse
           Parse::Constraint::GreaterThanOrEqualConstraint.key => formatted_min,
           Parse::Constraint::LessThanOrEqualConstraint.key => formatted_max,
         } }
+      end
+
+      private
+
+      # @return [Hash] the compiled constraint for a Ruby Range value.
+      def build_range(range)
+        bounds = {}
+
+        unless range.begin.nil?
+          bounds[Parse::Constraint::GreaterThanOrEqualConstraint.key] = Parse::Constraint.formatted_value(range.begin)
+        end
+
+        unless range.end.nil?
+          upper_key = range.exclude_end? ? Parse::Constraint::LessThanConstraint.key : Parse::Constraint::LessThanOrEqualConstraint.key
+          bounds[upper_key] = Parse::Constraint.formatted_value(range.end)
+        end
+
+        if bounds.empty?
+          raise ArgumentError, "#{self.class}: Range must have a begin, an end, or both (ex. 5.., ..25, 5..25)"
+        end
+
+        { @operation.operand => bounds }
       end
     end
 
