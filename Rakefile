@@ -660,7 +660,10 @@ namespace :mcp do
         else
           delta = client.usage.total_tokens - before
           puts "[compacted; +#{delta} tokens spent on summary]"
-          puts "  summary: #{summary[0, 200]}#{summary.length > 200 ? "…" : ""}"
+          # LLM-authored text conditioned on tenant rows: escape before it
+          # reaches the terminal.
+          truncated = "#{summary[0, 200]}#{summary.length > 200 ? "…" : ""}"
+          puts "  summary: #{Parse::TerminalSafe.sanitize_line(truncated)}"
         end
         next
       when "/tools"
@@ -682,7 +685,10 @@ namespace :mcp do
         next
       when "/history"
         client.history.each_with_index do |m, i|
-          puts "  #{i + 1}. [#{m[:role]}] #{m[:content].to_s[0, 120]}"
+          # Message content is a mix of LLM output and tool results, both of
+          # which carry stored values through verbatim.
+          content = Parse::TerminalSafe.sanitize_line(m[:content].to_s[0, 120])
+          puts "  #{i + 1}. [#{m[:role]}] #{content}"
         end
         next
       end
@@ -693,11 +699,15 @@ namespace :mcp do
           puts "─── tool calls ───"
           result.tool_calls.each_with_index do |tc, i|
             args = tc[:arguments].is_a?(Hash) ? tc[:arguments].inspect : tc[:arguments].to_s
-            puts "  #{i + 1}. #{tc[:name]}(#{args})"
+            puts "  #{i + 1}. #{Parse::TerminalSafe.sanitize_line(tc[:name])}" \
+                 "(#{Parse::TerminalSafe.sanitize_line(args)})"
           end
         end
         puts
-        puts result.text.to_s.empty? ? "[empty response]" : result.text
+        # The answer is untrusted: the model was fed tenant rows and will
+        # repeat what they contain. Newlines are legitimate formatting in an
+        # answer, so only control sequences are escaped here.
+        puts result.text.to_s.empty? ? "[empty response]" : Parse::TerminalSafe.sanitize(result.text)
         if trace && result.usage && result.usage.total_tokens.positive?
           printf "[%d tokens / $%.6f this turn   session: %d / $%.4f]\n",
                  result.usage.total_tokens, result.usage.cost_usd,
@@ -707,7 +717,7 @@ namespace :mcp do
         puts "\n[interrupted]"
         next
       rescue => e
-        puts "[error] #{e.class}: #{e.message}"
+        puts "[error] #{e.class}: #{Parse::TerminalSafe.sanitize_line(e.message)}"
       end
     end
 

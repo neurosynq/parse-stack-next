@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require_relative "client"
+require_relative "terminal_safe"
 require_relative "pipeline_security"
 require_relative "query/operation"
 require_relative "query/constraints"
@@ -1782,7 +1783,7 @@ module Parse
     def fetch!(compiled_query)
       response = client.find_objects(@table, compiled_query.as_json, headers: _headers, **_opts)
       if response.error?
-        puts "[ParseQuery] #{response.error}"
+        puts "[ParseQuery] #{Parse::TerminalSafe.sanitize_line(response.error)}"
       end
       response
     end
@@ -3596,12 +3597,12 @@ module Parse
         # non-master explain that worked on 8.x now returns a permission
         # error. Surface that as actionable guidance instead of a bare 403.
         if response.respond_to?(:permission_denied?) && response.permission_denied?
-          puts "[ParseQuery:Explain] #{response.error} — Parse Server 9.0+ defaults " \
+          puts "[ParseQuery:Explain] #{Parse::TerminalSafe.sanitize_line(response.error)} — Parse Server 9.0+ defaults " \
                "`allowPublicExplain` to false; query explain now requires the master key " \
                "(use_master_key: true) or `allowPublicExplain: true` in the server's " \
                "databaseOptions."
         else
-          puts "[ParseQuery:Explain] #{response.error}"
+          puts "[ParseQuery:Explain] #{Parse::TerminalSafe.sanitize_line(response.error)}"
         end
         return {}
       end
