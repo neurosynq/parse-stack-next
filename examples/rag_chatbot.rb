@@ -208,9 +208,12 @@ def chat_loop(backend: :anthropic)
     chunks = retrieve(agent, question)
     answer = ChatAnswerer.public_send(backend, question, chunks)
 
-    puts "\n#{answer}\n"
+    # The answer is model output grounded in retrieved rows, and the object ids
+    # come from the database. Both are untrusted for terminal purposes: escape
+    # control sequences before writing them to a TTY.
+    puts "\n#{Parse::TerminalSafe.sanitize(answer)}\n"
     sources = chunks.map { |c| c.dig(:metadata, :object_id) }.uniq.join(", ")
-    puts "  (sources: #{sources})\n\n"
+    puts "  (sources: #{Parse::TerminalSafe.sanitize_line(sources)})\n\n"
   end
 end
 

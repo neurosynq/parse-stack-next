@@ -9,6 +9,7 @@ require "active_support/core_ext"
 require "active_model/serializers/json"
 require "json"
 require "set"
+require_relative "../terminal_safe"
 
 module Parse
 
@@ -317,17 +318,23 @@ module Parse
           env[:body] = env[:body].to_json
         end
 
+        # `Parse.logging = true` routes here, so this legacy printer sees the
+        # same tenant-controlled bytes the Faraday logging middleware does and
+        # needs the same terminal-escape handling.
         if self.class.logging
-          puts "[Request #{env.method.upcase}] #{self.class.redact(env[:url].to_s)}"
+          puts "[Request #{env.method.upcase}] " \
+               "#{Parse::TerminalSafe.sanitize_line(self.class.redact(env[:url].to_s))}"
           env[:request_headers].each do |k, v|
             if REDACTED_HEADERS.include?(k.to_s.downcase)
-              puts "[Header] #{k} : [FILTERED]"
+              puts "[Header] #{Parse::TerminalSafe.sanitize_line(k)} : [FILTERED]"
             else
-              puts "[Header] #{k} : #{v}"
+              puts "[Header] #{Parse::TerminalSafe.sanitize_line(k)} : " \
+                   "#{Parse::TerminalSafe.sanitize_line(v)}"
             end
           end
 
-          puts "[Request Body] #{self.class.redact(env[:body].to_s)}"
+          puts "[Request Body] " \
+               "#{Parse::TerminalSafe.sanitize_line(self.class.redact(env[:body].to_s))}"
         end
         @app.call(env).on_complete do |response_env|
           # on a response, create a new Parse::Response and replace the :body
@@ -335,7 +342,7 @@ module Parse
           # @todo CHECK FOR HTTP STATUS CODES
           if self.class.logging
             puts "[[Response #{response_env[:status]}]] ----------------------------------"
-            puts self.class.redact(response_env.body.to_s)
+            puts Parse::TerminalSafe.sanitize(self.class.redact(response_env.body.to_s))
             puts "[[Response]] --------------------------------------\n"
           end
 

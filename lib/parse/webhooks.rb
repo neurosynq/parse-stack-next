@@ -11,6 +11,7 @@ require "active_model/serializers/json"
 require "rack"
 require "ostruct"
 require_relative "client"
+require_relative "terminal_safe"
 # Note: Do not require "stack" here - this file is loaded from stack.rb
 # and adding that require would create a circular dependency.
 require_relative "model/object"
@@ -326,7 +327,10 @@ module Parse
       # @param error [StandardError] the raised error.
       # @return [void]
       def report_handler_error(type, error)
-        warn "[Parse::Webhooks] #{type} handler raised #{error.class}: #{error.message}; " \
+        # The handler's message is application-authored but routinely quotes the
+        # payload that triggered it, which is caller-controlled.
+        warn "[Parse::Webhooks] #{type} handler raised #{error.class}: " \
+             "#{Parse::TerminalSafe.sanitize_line(error.message)}; " \
              "continuing with the remaining handlers " \
              "(Parse::Webhooks.abort_after_callbacks_on_error is false)"
         return unless defined?(ActiveSupport::Notifications)
@@ -671,9 +675,9 @@ module Parse
         # record contents/tokens, and the rest of this file routes log output
         # through the same redactor.
         warn "[Parse::Webhooks] afterSave #{phase} callback raised for " \
-             "#{obj.class}##{obj.id} -- the object is already persisted; " \
-             "logging and continuing: #{e.class}: " \
-             "#{Parse::Middleware::BodyBuilder.redact(e.message)}"
+             "#{obj.class}##{Parse::TerminalSafe.sanitize_line(obj.id)} -- the object is " \
+             "already persisted; logging and continuing: #{e.class}: " \
+             "#{Parse::TerminalSafe.sanitize_line(Parse::Middleware::BodyBuilder.redact(e.message))}"
         nil
       end
 
@@ -853,20 +857,29 @@ module Parse
         begin
           payload = Parse::Webhooks::Payload.new(body_str, webhook_class)
         rescue => e
-          warn "Invalid webhook payload format: #{e}"
+          warn "Invalid webhook payload format: #{Parse::TerminalSafe.sanitize_line(e.to_s)}"
           response.write error("Invalid payload format. Should be valid JSON.")
           return response.finish
         end
 
         if self.logging.present?
+          # Everything interpolated below arrives in the webhook request body:
+          # the trigger/function names, the object id, and the whole payload are
+          # caller-controlled, and these lines go to the app server's console.
+          # Escape control sequences so a stored value cannot drive the terminal
+          # of whoever is tailing the log.
           if payload.trigger?
-            puts "[Webhooks::Request] --> #{payload.trigger_name} #{payload.parse_class}:#{payload.parse_id}"
+            puts "[Webhooks::Request] --> #{Parse::TerminalSafe.sanitize_line(payload.trigger_name)} " \
+                 "#{Parse::TerminalSafe.sanitize_line(payload.parse_class)}:" \
+                 "#{Parse::TerminalSafe.sanitize_line(payload.parse_id)}"
           elsif payload.function?
-            puts "[ParseWebhooks Request] --> Function #{payload.function_name}"
+            puts "[ParseWebhooks Request] --> Function #{Parse::TerminalSafe.sanitize_line(payload.function_name)}"
           end
           if self.logging == :debug
             puts "[Webhooks::Payload] ----------------------------"
-            puts Parse::Middleware::BodyBuilder.redact(payload.as_json.to_json)
+            puts Parse::TerminalSafe.sanitize(
+              Parse::Middleware::BodyBuilder.redact(payload.as_json.to_json)
+            )
             puts "----------------------------------------------------\n"
           end
         end
@@ -891,14 +904,14 @@ module Parse
           else
             if self.logging.present?
               puts "[Webhooks] --> Could not find mapping route for " \
-                "#{Parse::Middleware::BodyBuilder.redact(payload.to_json)}"
+                "#{Parse::TerminalSafe.sanitize_line(Parse::Middleware::BodyBuilder.redact(payload.to_json))}"
             end
           end
 
           result = true if result.nil?
           if self.logging.present?
             puts "[Webhooks::Response] ----------------------------"
-            puts success(result)
+            puts Parse::TerminalSafe.sanitize(success(result))
             puts "----------------------------------------------------\n"
           end
           response.write success(result)
@@ -909,9 +922,13 @@ module Parse
           return response.finish
         rescue Parse::Webhooks::ResponseError, ActiveModel::ValidationError => e
           if payload.trigger?
-            puts "[Webhooks::ResponseError] >> #{payload.trigger_name} #{payload.parse_class}:#{payload.parse_id}: #{e}"
+            puts "[Webhooks::ResponseError] >> #{Parse::TerminalSafe.sanitize_line(payload.trigger_name)} " \
+                 "#{Parse::TerminalSafe.sanitize_line(payload.parse_class)}:" \
+                 "#{Parse::TerminalSafe.sanitize_line(payload.parse_id)}: " \
+                 "#{Parse::TerminalSafe.sanitize_line(e.to_s)}"
           elsif payload.function?
-            puts "[Webhooks::ResponseError] >> #{payload.function_name}: #{e}"
+            puts "[Webhooks::ResponseError] >> #{Parse::TerminalSafe.sanitize_line(payload.function_name)}: " \
+                 "#{Parse::TerminalSafe.sanitize_line(e.to_s)}"
           end
           response.write error(e.to_s)
           return response.finish

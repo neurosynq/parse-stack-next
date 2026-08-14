@@ -1,5 +1,82 @@
 ## parse-stack-next Changelog
 
+### 5.7.3
+
+#### Stored values can no longer drive the operator's terminal
+
+- **NEW**: `Parse::TerminalSafe` is a canonical sanitizer for untrusted text
+  that is about to be written to a terminal, a log record, or an IRB `inspect`
+  line. `Parse::TerminalSafe.sanitize(str)` escapes ESC, BEL, backspace,
+  carriage return, the remaining C0 controls, DEL, the C1 controls (the 8-bit
+  CSI/OSC/DCS introducers, which a sanitizer that only looks for `0x1B`
+  misses), the zero-width characters, and the Unicode bidirectional overrides
+  and isolates. Tabs and newlines are preserved.
+  `Parse::TerminalSafe.sanitize_line(str)` escapes newlines and the Unicode
+  line and paragraph separators as well, for text interpolated into a single
+  log record. Control characters are escaped rather than deleted, so an
+  operator can still see that something tried. Non-UTF-8 and invalid-encoding
+  input is coerced first, so the sanitizer never raises on a binary response
+  body.
+- **FIXED**: Values read back from Parse Server reached the terminal with their
+  control bytes intact. A row whose field contained an OSC 52 sequence could
+  write an attacker-chosen payload into the operator's system clipboard, and
+  CSI and carriage-return sequences could clear the screen or overwrite lines
+  the operator had already read, so what was displayed was not what was stored.
+  Every such path now renders through `Parse::TerminalSafe`: the conversational
+  agent's answer and tool trace (`Parse::Agent::MCPClient::Result#to_s` and
+  `#inspect`, which run merely by evaluating `mcp.ask(...)` in IRB), the
+  request/response bodies and header values written by
+  `Parse::Middleware::Logging` and by the separate `Parse.logging = true`
+  printer in `Parse::Middleware::BodyBuilder`, the REST error text in logged
+  error summaries and in `Parse::Client`'s warning path, `Parse::Query`'s error
+  and explain warnings, the webhook request, payload, response, handler-error,
+  and afterSave-callback lines, and the event and handler-error lines emitted
+  by `Parse.watch`. Sanitization applies to rendering only: `result.text`,
+  `object.title`, and the parsed response body keep their exact bytes, so a
+  caller writing to a non-terminal surface is unaffected.
+- **FIXED**: The LLM provider failure paths in `Parse::Agent::MCPClient`
+  interpolated the raw provider response body into the exception message, and a
+  malformed success body raised a `JSON::ParserError` quoting the offending
+  bytes verbatim. IRB prints both raw, so a hostile or compromised LLM endpoint
+  could still land control sequences on the terminal through the failure path.
+  Both are escaped now, and the quoted body is capped.
+- **FIXED**: Untrusted text interpolated into a log record could contain a raw
+  newline and forge a second, attacker-authored log entry. Log records now use
+  the newline-escaping form, and the escape is applied before the body-length
+  cap so a truncated record stays on one line too.
+- **CHANGED**: `rake mcp:chat` escapes the answer, the tool-call trace, the
+  `/history` and `/compact` output, and error messages before printing them.
+
+#### `parse-console --url` no longer trusts the document it fetches
+
+- **BREAKING**: `parse-console --url` copied every key in the fetched JSON
+  document into the process environment, letting whoever served or tampered
+  with that document set arbitrary environment variables for the console
+  process, including ones the console never reads but Ruby, OpenSSL, or a
+  later `require` does. Only `PARSE_SERVER_URL`,
+  `PARSE_SERVER_APPLICATION_ID`, `PARSE_APP_ID`, `PARSE_SERVER_REST_API_KEY`,
+  `PARSE_API_KEY`, `PARSE_SERVER_MASTER_KEY`, and `PARSE_MASTER_KEY` are
+  copied now, and each value must be a string. **Migration:** a remote config
+  that carried additional variables must set them in the shell instead.
+- **FIXED**: `parse-console --url` parsed the fetched document with
+  `JSON.load`, which honors `json_class` additions and will instantiate
+  arbitrary already-loaded classes from the document. It uses `JSON.parse` now.
+- **CHANGED**: `parse-console --url` refuses plaintext HTTP unless the host is
+  loopback. The document carries the master key, so over plaintext anyone on
+  the path reads it and can substitute a server URL of their choosing. The
+  check runs against `URI#hostname`, so an IPv6 loopback literal and an
+  uppercase host both resolve correctly.
+- **FIXED**: `parse-console --url` fetches the document with a streaming
+  request under a 1 MiB cap, and revalidates the scheme and host on every
+  redirect hop (bounded at five). The previous open-uri call buffered the
+  entire response before any read limit applied, and followed redirects itself,
+  so a permitted loopback URL could bounce to arbitrary plaintext HTTP on the
+  public internet without the scheme check running again.
+- **FIXED**: `parse-console` echoed the supplied URL before validating it, and
+  printed the (possibly remotely supplied) server URL and application ID
+  verbatim after connecting. All three are escaped now, as is the error output
+  from the fetch path, which can quote the fetched bytes.
+
 ### 5.7.2
 
 #### `between` accepts Ruby Range values

@@ -6,6 +6,7 @@ require "uri"
 require "json"
 require "securerandom"
 require_relative "mcp_dispatcher"
+require_relative "../terminal_safe"
 
 module Parse
   class Agent
@@ -65,17 +66,25 @@ module Parse
         end
 
         # Pretty-print for IRB: tool trace, answer, then per-call usage line.
+        #
+        # Every interpolated part is attacker-influenced. The answer is LLM
+        # output that was itself conditioned on tenant rows, and tool arguments
+        # can echo stored values. Merely evaluating `mcp.ask(...)` in IRB writes
+        # this string to the terminal, so control sequences are escaped here.
+        # `text` itself is untouched: callers that render into a non-terminal
+        # surface still get the exact bytes.
         def to_s
           parts = []
           if tool_calls.any?
             parts << "─── tool calls (#{tool_calls.size}) ───"
             tool_calls.each_with_index do |tc, i|
               args_str = tc[:arguments].is_a?(Hash) ? tc[:arguments].inspect : tc[:arguments].to_s
-              parts << "  #{i + 1}. #{tc[:name]}(#{args_str})"
+              parts << "  #{i + 1}. #{Parse::TerminalSafe.sanitize_line(tc[:name])}" \
+                       "(#{Parse::TerminalSafe.sanitize_line(args_str)})"
             end
           end
           parts << "─── answer ───"
-          parts << text.to_s
+          parts << Parse::TerminalSafe.sanitize(text)
           parts << "─── usage ───" << "  #{usage}" if usage && usage.total_tokens.positive?
           parts.join("\n")
         end
@@ -311,6 +320,39 @@ module Parse
 
       private
 
+      # Maximum bytes of a provider response body quoted back in an exception.
+      LLM_ERROR_BODY_CAP = 2_000
+
+      # Check the HTTP status and parse the body, raising with a terminal-safe
+      # message on either failure.
+      #
+      # The provider's response body is untrusted output on both paths. An
+      # error body is echoed into the exception message, and a malformed
+      # success body produces a `JSON::ParserError` whose message quotes the
+      # offending bytes verbatim. Either exception is printed raw by IRB and by
+      # most logging setups, so an LLM endpoint (or a model repeating what a
+      # tenant row told it to say) could otherwise still land control sequences
+      # on the operator's terminal through the failure path.
+      #
+      # @param res [Net::HTTPResponse]
+      # @param label [String] provider name used in the message.
+      # @return [Hash] the parsed body.
+      def parse_llm_response!(res, label)
+        body = res.body.to_s
+        unless res.code.to_i.between?(200, 299)
+          quoted = Parse::TerminalSafe.sanitize_line(body[0, LLM_ERROR_BODY_CAP])
+          raise "#{label} failed: HTTP #{res.code} #{quoted}"
+        end
+
+        begin
+          JSON.parse(body)
+        rescue JSON::ParserError => e
+          raise JSON::ParserError,
+                "#{label} returned an unparseable body: " \
+                "#{Parse::TerminalSafe.sanitize_line(e.message)[0, LLM_ERROR_BODY_CAP]}"
+        end
+      end
+
       # Fetch the agent's MCP tool catalog and translate it into the LLM's
       # native function-calling schema. Cached per call (could be memoized
       # if tool lists grow large, but they're usually small).
@@ -447,11 +489,7 @@ module Parse
         res = Net::HTTP.start(uri.hostname, uri.port,
                               use_ssl: uri.scheme == "https",
                               read_timeout: @timeout) { |h| h.request(req) }
-        unless res.code.to_i.between?(200, 299)
-          raise "LLM call failed: HTTP #{res.code} #{res.body}"
-        end
-
-        parsed = JSON.parse(res.body)
+        parsed = parse_llm_response!(res, "LLM call")
         msg = parsed.dig("choices", 0, "message") || {}
         calls = Array(msg["tool_calls"]).map do |tc|
           args = tc.dig("function", "arguments")
@@ -497,11 +535,7 @@ module Parse
         res = Net::HTTP.start(uri.hostname, uri.port,
                               use_ssl: uri.scheme == "https",
                               read_timeout: @timeout) { |h| h.request(req) }
-        unless res.code.to_i.between?(200, 299)
-          raise "Anthropic call failed: HTTP #{res.code} #{res.body}"
-        end
-
-        parsed = JSON.parse(res.body)
+        parsed = parse_llm_response!(res, "Anthropic call")
         blocks = Array(parsed["content"])
         text = blocks.select { |b| b["type"] == "text" }.map { |b| b["text"] }.join("\n")
         calls = blocks.select { |b| b["type"] == "tool_use" }.map do |b|

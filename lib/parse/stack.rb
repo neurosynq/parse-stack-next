@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require_relative "stack/version"
+require_relative "terminal_safe"
 require_relative "client"
 require_relative "query"
 require_relative "model/object"

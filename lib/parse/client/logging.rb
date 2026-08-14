@@ -4,6 +4,7 @@
 require "faraday"
 require "logger"
 require_relative "url_redaction"
+require_relative "../terminal_safe"
 
 module Parse
   module Middleware
@@ -167,7 +168,8 @@ module Parse
           if Parse::Middleware::BodyBuilder::REDACTED_HEADERS.include?(key.to_s.downcase)
             logger.debug "  [#{prefix} Header] #{key}: [FILTERED]"
           else
-            logger.debug "  [#{prefix} Header] #{key}: #{value}"
+            logger.debug "  [#{prefix} Header] #{Parse::TerminalSafe.sanitize_line(key)}: " \
+                         "#{Parse::TerminalSafe.sanitize_line(value)}"
           end
         end
       end
@@ -196,6 +198,13 @@ module Parse
         # so truncation can't split a token across the boundary and slip past.
         content = Parse::Middleware::BodyBuilder.redact(content)
 
+        # Request and response bodies carry tenant-stored values verbatim. A
+        # stored ESC sequence would execute against the operator's terminal the
+        # moment they tail the log, so escape control characters and newlines
+        # here. Done BEFORE the length cap so the record is one line whether or
+        # not it was truncated.
+        content = Parse::TerminalSafe.sanitize_line(content)
+
         if content.length > max_length
           logger.debug "  [#{prefix} Body] #{content[0...max_length]}... (truncated, #{content.length} total)"
         elsif content.length > 0
@@ -216,15 +225,21 @@ module Parse
         end
       end
 
+      # The error text is whatever the server (or a stored value echoed back by
+      # the server) says, so it is untrusted. Escape terminal control sequences
+      # AND newlines: this is interpolated into a one-line log record, and a
+      # raw LF would let the text forge a second, attacker-authored entry.
       def error_summary(response_env)
         body = response_env[:body]
-        if body.is_a?(Parse::Response) && body.error?
-          "#{body.code}: #{body.error}"
-        elsif body.is_a?(Hash)
-          body["error"] || body[:error] || "Unknown error"
-        else
-          "HTTP #{response_env[:status]}"
-        end
+        summary =
+          if body.is_a?(Parse::Response) && body.error?
+            "#{body.code}: #{body.error}"
+          elsif body.is_a?(Hash)
+            body["error"] || body[:error] || "Unknown error"
+          else
+            "HTTP #{response_env[:status]}"
+          end
+        Parse::TerminalSafe.sanitize_line(summary)
       end
 
       def sanitize_url(url)

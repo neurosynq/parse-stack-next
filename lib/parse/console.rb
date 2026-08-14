@@ -23,6 +23,7 @@
 # tests / fixtures.
 
 require "timeout"
+require_relative "terminal_safe"
 
 module Parse
   module Console
@@ -65,7 +66,10 @@ module Parse
       events = Array(on || DEFAULT_WATCH_EVENTS).map(&:to_sym)
       printer = block_given? ? block : ->(ev, obj) {
         title = obj.respond_to?(:id) ? obj.id : obj.inspect
-        puts "[#{Time.now.iso8601}] #{klass.parse_class}.#{ev} #{title}"
+        # The row is tenant data arriving over a live-query socket and this
+        # line goes straight to the operator's terminal, so escape it.
+        puts "[#{Time.now.iso8601}] #{klass.parse_class}.#{ev} " \
+             "#{Parse::TerminalSafe.sanitize_line(title)}"
       }
 
       delivered = 0
@@ -78,11 +82,13 @@ module Parse
           begin
             printer.call(ev, obj)
           rescue StandardError => e
-            warn "[Parse.watch] handler raised #{e.class}: #{e.message}"
+            # The message can quote the row that triggered it.
+            warn "[Parse.watch] handler raised #{e.class}: " \
+                 "#{Parse::TerminalSafe.sanitize_line(e.message)}"
           end
         end
       end
-      sub.on(:error) { |err| warn "[Parse.watch] error: #{err}" }
+      sub.on(:error) { |err| warn "[Parse.watch] error: #{Parse::TerminalSafe.sanitize_line(err)}" }
 
       _block_until_interrupt
       delivered

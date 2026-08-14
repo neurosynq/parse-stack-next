@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "faraday"
+require_relative "terminal_safe"
 
 # Attempt to load the persistent connection adapter for better performance.
 # Falls back gracefully to the default adapter if not available.
@@ -528,11 +529,19 @@ module Parse
       # @param name [String, nil] optional cloud-function or job name for context.
       # @return [nil]
       def _safe_warn(tag, response, name: nil)
+        # The server's error text and the request description both carry stored
+        # values through verbatim, and this lands in a log file or on a
+        # terminal. Escape control characters and newlines so a stored value
+        # can neither drive the terminal nor forge a second log record.
         err = Parse::Middleware::BodyBuilder.redact(response.error.to_s)[0, SAFE_WARN_MAX_ERROR_LENGTH]
+        err = Parse::TerminalSafe.sanitize_line(err)
         msg = if name
-            "[Parse:#{tag}] `#{name}` [#{response.code}] #{err} (HTTP #{response.http_status})"
+            "[Parse:#{tag}] `#{Parse::TerminalSafe.sanitize_line(name)}` " \
+            "[#{response.code}] #{err} (HTTP #{response.http_status})"
           else
-            "[Parse:#{tag}] [E-#{response.code}] #{response.request} : #{err} (#{response.http_status})"
+            "[Parse:#{tag}] [E-#{response.code}] " \
+            "#{Parse::TerminalSafe.sanitize_line(response.request)} : #{err} " \
+            "(#{response.http_status})"
           end
         logger = Parse::Middleware::Logging.logger
         if logger
