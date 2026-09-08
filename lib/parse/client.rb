@@ -1520,6 +1520,9 @@ module Parse
       CONNECTION_RESET_MESSAGE.match?(error.message.to_s)
     end
 
+    private :consume_retry_with_backoff, :connection_reset_error?
+    private_constant :CONNECTION_RESET_CAUSES, :CONNECTION_RESET_MESSAGE
+
     # Whether a request whose outcome is UNKNOWN (a 500/503 or a dropped
     # connection) is safe to transparently re-send.
     #
