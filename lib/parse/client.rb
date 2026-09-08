@@ -1430,24 +1430,21 @@ module Parse
         # #connection_reset_error?):
         #
         #   - RESET mid-flight (`Errno::ECONNRESET` / `Errno::EPIPE` /
-        #     `EOFError`): the classic stale keep-alive failure — a pooled
-        #     persistent connection idled past the server's (or an LB's)
-        #     keep-alive window and was closed remotely, and the next request
-        #     on it dies at the socket. Transient by nature (a fresh
-        #     connection succeeds immediately), so it retries under the same
-        #     idempotency rules as a read timeout: the outcome is unknown, so
-        #     only idempotent requests are re-sent.
+        #     `Errno::ECONNABORTED` / `EOFError`): the classic stale
+        #     keep-alive failure. A pooled persistent connection idled past
+        #     the server's (or an LB's) keep-alive window and was closed
+        #     remotely, and the next request on it dies at the socket.
+        #     Transient by nature (a fresh connection succeeds immediately),
+        #     so it retries under the same idempotency rules as a read
+        #     timeout: the outcome is unknown, so only idempotent requests
+        #     are re-sent.
         #
         #   - REFUSED (and DNS failure): the server is down or misconfigured.
         #     Retrying only adds backoff latency and `[Parse:Retry]` noise
         #     before the inevitable error, so it propagates raw and fast.
         raise unless connection_reset_error?(e)
         if _retry_count > 0 && idempotent_retry?(method, body, headers)
-          warn "[Parse:Retry] Retries remaining #{_retry_count} : #{_request}"
-          _retry_count -= 1
-          backoff_delay = RETRY_DELAY * (_retry_max - _retry_count)
-          _retry_delay = backoff_delay * (0.75 + rand * 0.5)
-          sleep _retry_delay if _retry_delay > 0
+          _retry_count = consume_retry_with_backoff(_retry_count, _retry_max, _request)
           retry
         end
         raise Parse::Error::ConnectionError, "#{_request} : #{e.class} - #{e.message}"
@@ -1462,15 +1459,32 @@ module Parse
         # `Faraday::ConnectionFailed` is handled in its own rescue above,
         # split into retry-reset / fail-fast-refused.
         if _retry_count > 0 && idempotent_retry?(method, body, headers)
-          warn "[Parse:Retry] Retries remaining #{_retry_count} : #{_request}"
-          _retry_count -= 1
-          backoff_delay = RETRY_DELAY * (_retry_max - _retry_count)
-          _retry_delay = backoff_delay * (0.75 + rand * 0.5)
-          sleep _retry_delay if _retry_delay > 0
+          _retry_count = consume_retry_with_backoff(_retry_count, _retry_max, _request)
           retry
         end
         raise Parse::Error::ConnectionError, "#{_request} : #{e.class} - #{e.message}"
       end
+    end
+
+    # Consumes one attempt from the retry budget: logs the remaining count,
+    # sleeps the linear backoff (RETRY_DELAY x attempt number, +/-25% jitter,
+    # never zero), and returns the decremented budget. Shared by the
+    # connection-reset and timeout rescue branches in {#request} so their
+    # backoff behavior cannot drift apart; the `retry` keyword itself must
+    # stay lexically inside each rescue clause, so it remains at the call
+    # sites. The 429/503 branch keeps its own inline version because it also
+    # honors a server-supplied Retry-After header.
+    # @param retry_count [Integer] the remaining retry budget (must be > 0).
+    # @param retry_max [Integer] the effective starting budget.
+    # @param request [Parse::Request] the request being retried (for logging).
+    # @return [Integer] the decremented retry budget.
+    def consume_retry_with_backoff(retry_count, retry_max, request)
+      warn "[Parse:Retry] Retries remaining #{retry_count} : #{request}"
+      retry_count -= 1
+      backoff_delay = RETRY_DELAY * (retry_max - retry_count)
+      retry_delay = backoff_delay * (0.75 + rand * 0.5)
+      sleep retry_delay if retry_delay > 0
+      retry_count
     end
 
     # The wrapped causes that mark a `Faraday::ConnectionFailed` as a RESET

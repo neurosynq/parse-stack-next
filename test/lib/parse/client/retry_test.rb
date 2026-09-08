@@ -336,8 +336,8 @@ class ClientRetryTest < Minitest::Test
   end
 
   def test_connection_reset_post_is_not_retried_without_server_dedup
-    # The outcome of a reset mid-write is unknown — the server may have
-    # applied it — so a POST must not be replayed without server dedup.
+    # The outcome of a reset mid-write is unknown (the server may have
+    # applied it), so a POST must not be replayed without server dedup.
     client = stub_client_raising(reset_error, retry_limit: 3)
     assert_raises(Parse::Error::ConnectionError) do
       client.request(:post, "classes/Post", body: { title: "hi" })
