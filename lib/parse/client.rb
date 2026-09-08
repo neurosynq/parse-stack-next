@@ -1424,6 +1424,33 @@ module Parse
           retry
         end
         raise
+      rescue Faraday::ConnectionFailed => e
+        # `Faraday::ConnectionFailed` covers two very different failures under
+        # one class, so it is split on the wrapped cause (see
+        # #connection_reset_error?):
+        #
+        #   - RESET mid-flight (`Errno::ECONNRESET` / `Errno::EPIPE` /
+        #     `EOFError`): the classic stale keep-alive failure — a pooled
+        #     persistent connection idled past the server's (or an LB's)
+        #     keep-alive window and was closed remotely, and the next request
+        #     on it dies at the socket. Transient by nature (a fresh
+        #     connection succeeds immediately), so it retries under the same
+        #     idempotency rules as a read timeout: the outcome is unknown, so
+        #     only idempotent requests are re-sent.
+        #
+        #   - REFUSED (and DNS failure): the server is down or misconfigured.
+        #     Retrying only adds backoff latency and `[Parse:Retry]` noise
+        #     before the inevitable error, so it propagates raw and fast.
+        raise unless connection_reset_error?(e)
+        if _retry_count > 0 && idempotent_retry?(method, body, headers)
+          warn "[Parse:Retry] Retries remaining #{_retry_count} : #{_request}"
+          _retry_count -= 1
+          backoff_delay = RETRY_DELAY * (_retry_max - _retry_count)
+          _retry_delay = backoff_delay * (0.75 + rand * 0.5)
+          sleep _retry_delay if _retry_delay > 0
+          retry
+        end
+        raise Parse::Error::ConnectionError, "#{_request} : #{e.class} - #{e.message}"
       rescue Faraday::ClientError, Faraday::TimeoutError, Net::OpenTimeout => e
         # Request timed out mid-flight: the outcome is unknown (the server may
         # have received and applied the write but never answered), so only
@@ -1431,13 +1458,9 @@ module Parse
         #
         # Faraday 2.x raises `Faraday::TimeoutError` for a read timeout
         # (`Timeout::Error` / `Errno::ETIMEDOUT`); it subclasses `Faraday::Error`,
-        # not `ClientError`, so it must be listed explicitly to be caught. We
-        # deliberately do NOT catch `Faraday::ConnectionFailed` (connection
-        # refused/reset, plus the wrapped connect-timeout): refused is a
-        # non-transient "server down / misconfigured" failure, and auto-retrying
-        # it only adds backoff latency before the inevitable error. Broadening to
-        # reset connections safely (retry reset, fail fast on refused) is tracked
-        # as a follow-up.
+        # not `ClientError`, so it must be listed explicitly to be caught.
+        # `Faraday::ConnectionFailed` is handled in its own rescue above,
+        # split into retry-reset / fail-fast-refused.
         if _retry_count > 0 && idempotent_retry?(method, body, headers)
           warn "[Parse:Retry] Retries remaining #{_retry_count} : #{_request}"
           _retry_count -= 1
@@ -1448,6 +1471,39 @@ module Parse
         end
         raise Parse::Error::ConnectionError, "#{_request} : #{e.class} - #{e.message}"
       end
+    end
+
+    # The wrapped causes that mark a `Faraday::ConnectionFailed` as a RESET
+    # connection (transient, retry-safe for idempotent requests) rather than a
+    # REFUSED one (server down, fail fast). `EOFError` is what net/http raises
+    # when the remote end closes a keep-alive socket cleanly between requests;
+    # ECONNRESET/EPIPE/ECONNABORTED are the unclean variants.
+    # @!visibility private
+    CONNECTION_RESET_CAUSES = [
+      Errno::ECONNRESET, Errno::EPIPE, Errno::ECONNABORTED, EOFError,
+    ].freeze
+
+    # Message fallback for adapters that raise `Faraday::ConnectionFailed`
+    # with the cause flattened into the message instead of wrapped.
+    # @!visibility private
+    CONNECTION_RESET_MESSAGE = /connection reset|broken pipe|end of file reached/i
+
+    # Whether a `Faraday::ConnectionFailed` was caused by a reset/dropped
+    # connection (retryable) as opposed to connection-refused or a DNS
+    # failure (fail fast). Walks the wrapped exception and the `#cause`
+    # chain looking for a reset-class error.
+    # @param error [Exception] the rescued `Faraday::ConnectionFailed`.
+    # @return [Boolean]
+    def connection_reset_error?(error)
+      inner = error.respond_to?(:wrapped_exception) ? error.wrapped_exception : nil
+      inner ||= error.cause
+      seen = 0
+      while inner && seen < 8
+        return true if CONNECTION_RESET_CAUSES.any? { |klass| inner.is_a?(klass) }
+        inner = inner.cause
+        seen += 1
+      end
+      CONNECTION_RESET_MESSAGE.match?(error.message.to_s)
     end
 
     # Whether a request whose outcome is UNKNOWN (a 500/503 or a dropped

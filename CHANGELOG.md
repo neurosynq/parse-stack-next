@@ -1,5 +1,31 @@
 ## parse-stack-next Changelog
 
+### 5.7.4
+
+#### Reset connections are retried instead of surfacing a raw Faraday error
+
+A focused fix release for the request retry mechanism. A stale keep-alive
+connection (a pooled persistent connection closed by the server or a load
+balancer after idling) failed the next request with a raw
+`Faraday::ConnectionFailed` / `Errno::ECONNRESET` instead of retrying, even
+though an immediate re-send on a fresh connection succeeds. Reset connections
+now retry under the same idempotency rules as read timeouts.
+
+- **FIXED**: `Parse::Client#request` now rescues `Faraday::ConnectionFailed`
+  and inspects the wrapped cause. Reset-class causes (`Errno::ECONNRESET`,
+  `Errno::EPIPE`, `Errno::ECONNABORTED`, and the `EOFError` raised when the
+  remote end closes a keep-alive socket cleanly) are transient, so idempotent
+  requests (GET, DELETE, op-free PUT, and any write covered by asserted
+  server-side request-id dedup) retry with the standard backoff. Connection
+  refused and DNS failures keep the previous fail-fast behavior and propagate
+  the raw `Faraday::ConnectionFailed` with no retry latency.
+- **CHANGED**: A reset connection that persists through the whole retry budget
+  now raises `Parse::Error::ConnectionError` (consistent with the read-timeout
+  path) instead of the raw `Faraday::ConnectionFailed`. Code that rescued
+  `Faraday::ConnectionFailed` to catch resets should rescue
+  `Parse::Error::ConnectionError` instead; refused and DNS failures still
+  raise `Faraday::ConnectionFailed`.
+
 ### 5.7.3
 
 #### Stored values can no longer drive the operator's terminal
