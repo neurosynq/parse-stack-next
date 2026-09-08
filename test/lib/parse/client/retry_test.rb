@@ -274,16 +274,85 @@ class ClientRetryTest < Minitest::Test
     assert_equal 1, @attempts, "default: a POST is not retried on a read timeout"
   end
 
-  def test_connection_refused_is_not_caught_and_fails_fast
-    # Connection refused (Faraday::ConnectionFailed) is intentionally NOT in the
-    # rescue list — it is a non-transient failure that must propagate raw and
-    # fast (no retry latency, no [Parse:Retry] noise on a down/misconfigured
-    # server). Guards the deliberate scope of the timeout-only retry fix.
-    client = stub_client_raising(Faraday::ConnectionFailed.new("refused"), retry_limit: 3)
+  def test_connection_refused_is_not_retried_and_fails_fast
+    # Connection refused (Faraday::ConnectionFailed wrapping ECONNREFUSED) is a
+    # non-transient failure that must propagate raw and fast (no retry latency,
+    # no [Parse:Retry] noise on a down/misconfigured server).
+    error = Faraday::ConnectionFailed.new(Errno::ECONNREFUSED.new("Connection refused"))
+    client = stub_client_raising(error, retry_limit: 3)
     assert_raises(Faraday::ConnectionFailed) do
       client.request(:get, "classes/Post", query: { limit: 0 })
     end
     assert_equal 1, @attempts, "connection-refused must not be retried"
+  end
+
+  def test_connection_failed_without_reset_cause_fails_fast
+    # A bare ConnectionFailed with no wrapped cause and no reset-like message
+    # (e.g. a DNS failure) must keep the old fail-fast behavior.
+    client = stub_client_raising(Faraday::ConnectionFailed.new("refused"), retry_limit: 3)
+    assert_raises(Faraday::ConnectionFailed) do
+      client.request(:get, "classes/Post", query: { limit: 0 })
+    end
+    assert_equal 1, @attempts, "an unrecognized connection failure must not be retried"
+  end
+
+  # ---------------------------------------------------------------------------
+  # Connection reset (stale keep-alive): retried for idempotent requests,
+  # wrapped as Parse::Error::ConnectionError when the budget runs out.
+  # ---------------------------------------------------------------------------
+
+  def reset_error(message = "Connection reset by peer @ io_fillbuf - fd:10")
+    Faraday::ConnectionFailed.new(Errno::ECONNRESET.new(message))
+  end
+
+  def test_connection_reset_get_is_retried_and_bounded
+    client = stub_client_raising(reset_error, retry_limit: 2)
+    assert_raises(Parse::Error::ConnectionError) do
+      client.request(:get, "classes/Post", query: { limit: 0 })
+    end
+    assert_equal 3, @attempts,
+      "a reset connection on an idempotent GET must retry (retry_limit + 1 attempts) then wrap as ConnectionError"
+  end
+
+  def test_connection_reset_eof_is_retried
+    # net/http raises EOFError when the remote closes a keep-alive socket
+    # cleanly; Faraday wraps it in ConnectionFailed. Same stale-socket story.
+    error = Faraday::ConnectionFailed.new(EOFError.new("end of file reached"))
+    client = stub_client_raising(error, retry_limit: 1)
+    assert_raises(Parse::Error::ConnectionError) do
+      client.request(:get, "classes/Post", query: { limit: 0 })
+    end
+    assert_equal 2, @attempts, "EOF on a keep-alive socket must retry like a reset"
+  end
+
+  def test_connection_reset_message_only_is_retried
+    # Fallback: some adapter paths flatten the cause into the message instead
+    # of wrapping the Errno.
+    client = stub_client_raising(Faraday::ConnectionFailed.new("Connection reset by peer"), retry_limit: 1)
+    assert_raises(Parse::Error::ConnectionError) do
+      client.request(:get, "classes/Post", query: { limit: 0 })
+    end
+    assert_equal 2, @attempts, "a reset identified by message alone must still retry"
+  end
+
+  def test_connection_reset_post_is_not_retried_without_server_dedup
+    # The outcome of a reset mid-write is unknown (the server may have
+    # applied it), so a POST must not be replayed without server dedup.
+    client = stub_client_raising(reset_error, retry_limit: 3)
+    assert_raises(Parse::Error::ConnectionError) do
+      client.request(:post, "classes/Post", body: { title: "hi" })
+    end
+    assert_equal 1, @attempts, "default: a POST is not retried on a reset connection"
+  end
+
+  def test_connection_reset_post_retried_when_server_dedup_asserted
+    Parse::Request.assume_server_idempotency = true
+    client = stub_client_raising(reset_error, retry_limit: 2)
+    assert_raises(Parse::Error::ConnectionError) do
+      client.request(:post, "classes/Post", body: { title: "hi" })
+    end
+    assert_equal 3, @attempts, "a POST retries on a reset under asserted server dedup"
+    assert_equal 1, @req_ids.compact.uniq.size, "stable request id across reset retries"
   end
 
   # ---------------------------------------------------------------------------
