@@ -387,6 +387,15 @@ class MCPDispatcherTest < Minitest::Test
     assert_includes err["message"], "no_such_method/v99"
   end
 
+  def test_server_discover_returns_32601_so_clients_fall_back_to_initialize
+    body = { "jsonrpc" => "2.0", "id" => 1, "method" => "server/discover" }
+    result = D.call(body: body, agent: @agent)
+
+    assert_equal 200, result[:status]
+    assert_equal(-32601, result[:body]["error"]["code"])
+    assert_equal 1, result[:body]["id"]
+  end
+
   # ---------- malformed body → -32700 ---------------------------------------
 
   def test_missing_method_key_returns_32700

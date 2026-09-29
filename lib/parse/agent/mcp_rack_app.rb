@@ -733,7 +733,13 @@ module Parse
         #     may be sent by a client that has not (yet) completed
         #     initialize against this transport instance (e.g. a
         #     reconnecting client cancelling a pre-disconnect request).
+        #     `server/discover` is exempt too. Newer clients send it before
+        #     initialize, stamped with their own (newer) protocol version.
+        #     A 400 here makes the client treat the server as broken. Letting
+        #     it through yields -32601 from the dispatcher, and the client
+        #     falls back to initialize, which negotiates a supported version.
         unless body["method"] == "initialize" ||
+               body["method"] == "server/discover" ||
                body["method"] == "notifications/cancelled" ||
                elicitation_reply?(body)
           requested = env["HTTP_MCP_PROTOCOL_VERSION"]

@@ -635,6 +635,18 @@ class MCPRackAppTest < Minitest::Test
     assert_equal 202, status
   end
 
+  def test_protocol_version_check_skipped_for_server_discover
+    # Newer clients probe with server/discover before initialize, carrying a
+    # version this server does not support. It must reach the dispatcher
+    # (which answers -32601, covered in mcp_dispatcher_test) rather than
+    # being rejected with a 400 here.
+    app = build_app
+    env = rack_env(body: JSON.generate({ "jsonrpc" => "2.0", "id" => 1, "method" => "server/discover" }))
+    env["HTTP_MCP_PROTOCOL_VERSION"] = "2099-01-01"
+    status, _headers, _body = app.call(env)
+    assert_equal 200, status
+  end
+
   def test_empty_protocol_version_header_is_treated_as_missing
     # Some proxies forward empty header values rather than dropping them.
     # An empty string should not be parsed as an unsupported version.
