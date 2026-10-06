@@ -24,6 +24,7 @@ require_relative "agent/cancellation_token"
 require_relative "agent/log_levels"
 require_relative "agent/approval_gate"
 require_relative "agent/field_policy"
+require_relative "agent/field_names"
 require_relative "agent/prompt_hardening"
 require_relative "agent/describe"
 
@@ -1560,7 +1561,7 @@ module Parse
                    max_log_size: DEFAULT_MAX_LOG_SIZE,
                    system_prompt: nil, system_prompt_suffix: nil, pricing: nil,
                    tools: nil, methods: nil, classes: nil, filters: nil,
-                   fields: nil,
+                   fields: nil, field_names: nil,
                    parent: nil, recursion_depth: nil,
                    strict_tool_filter: nil, strict_class_filter: nil,
                    master_atlas: nil,
@@ -2042,6 +2043,14 @@ module Parse
       @field_policy_layers = (parent ? parent.field_policy_layers : []) +
                              (own_field_policy ? [own_field_policy] : [])
       @field_policy_layers.freeze
+      # Data-field naming mode (see Parse::Agent::FieldNames). A sub-agent
+      # inherits its parent's mode unless it sets one; naming never affects
+      # the access restrictions inherited above.
+      @field_names_mode = if field_names.nil?
+          parent ? parent.field_names_mode : :default
+        else
+          Parse::AggregationResult.normalize_field_names!(field_names)
+        end
 
       # Sub-agent class-filter inheritance. Unlike `tools:` (which overrides
       # outright), `classes:` clamps to the parent's effective set so a
@@ -3603,6 +3612,9 @@ module Parse
     #   policy last; a sub-agent carries its parent's layers first. Each
     #   layer maps a canonical class name (or :default) to raw field names.
     attr_reader :field_policy_layers
+
+    # @return [Symbol] `:default` or `:server`; see {Parse::Agent::FieldNames}.
+    attr_reader :field_names_mode
 
     # Wire-format field names this agent narrows `class_name` to, or nil when
     # no `fields:` layer names the class (or a :default). Every layer that

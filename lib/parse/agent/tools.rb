@@ -1246,7 +1246,11 @@ module Parse
           # Every tool runs with the agent's per-agent `fields:` narrowing in
           # scope, so each allowlist check (MetadataRegistry.field_allowlist)
           # resolves to the effective set for THIS agent.
-          Parse::Agent::FieldPolicy.with(agent) { invoke_unscoped(agent, name, **kwargs) }
+          # The agent's data-field naming mode (Parse::Agent::FieldNames) is
+          # scoped the same way; it changes presentation only.
+          Parse::Agent::FieldPolicy.with(agent) do
+            Parse::Agent::FieldNames.with(agent) { invoke_unscoped(agent, name, **kwargs) }
+          end
         end
 
         # @!visibility private
@@ -5728,10 +5732,23 @@ module Parse
       # also packs a reference to the assignee `_User`) would otherwise
       # leak fields the conversational `query_class` tool would refuse
       # to return.
+      #
+      # A returned Parse::Object is serialized from `as_json`, which carries
+      # its values under the Parse (wire) field names, including explicit
+      # `field_map` aliases and nested JSON verbatim. Before 5.8 this read
+      # `result.attributes`, which is the model's field TYPE map, so a
+      # method returning an object emitted `{ "title" => :string }` instead
+      # of its data. An AggregationResult (e.g. a method returning
+      # `query.aggregate(...).results`) is emitted as a Hash: snake_case keys
+      # by default, the aggregation's own keys under `field_names: :server`.
+      # Before 5.8 it was emitted as its `inspect` String.
       def serialize_result(result, agent: nil)
         formatted = case result
           when Parse::Object
-            project_object_to_allowlist(result.parse_class, ResultFormatter.format_object(result.parse_class, result.attributes)[:object])
+            project_object_to_allowlist(result.parse_class, ResultFormatter.simplify_object(result.as_json))
+          when Parse::AggregationResult
+            source = Parse::Agent::FieldNames.server? ? result.raw : result.to_h
+            source.each_with_object({}) { |(k, v), h| h[k.to_s] = serialize_result(v, agent: agent) }
           when Array
             result.map { |item| serialize_result(item, agent: agent) }
           when Hash

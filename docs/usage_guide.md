@@ -118,6 +118,40 @@ Song.query.aggregate([
 ])
 ```
 
+### Field names in aggregation results
+
+Custom aggregation rows (`$group`, `$project`, ...) come back as
+`Parse::AggregationResult`. By default `#to_h` converts field names to
+snake_case symbols. Pass `field_names: :server` to `#results` to keep the
+names exactly as the aggregation returned them (5.8):
+
+```ruby
+agg = Song.query.aggregate([
+  { "$group" => { "_id" => "$genre", "totalPlays" => { "$sum" => "$plays" } } },
+])
+
+row = agg.results.first
+row.to_h          # => { _id: "Rock", total_plays: 500 }   (default)
+
+row = agg.results(field_names: :server).first
+row.to_h          # => { "_id" => "Rock", "totalPlays" => 500 }
+row["totalPlays"] # => 500
+row.total_plays   # => 500 (a snake_case name still resolves when it matches one key)
+```
+
+In `:server` mode keys are Strings, nested values are untouched, and two keys
+whose snake_case forms collide (`"totalPlays"` and `"total_plays"`) both
+survive; a snake_case method name that matches more than one key raises
+instead of guessing. Parse::Object rows are unaffected; `#as_json` already
+returns their server field names. This is a presentation option only, and it
+is separate from:
+
+* `#raw`, which returns the unwrapped Hash exactly as received;
+* `Parse::Query.field_formatter`, which controls how field names in OUTGOING
+  queries are compiled, not response keys;
+* the REST aggregate `raw_field_names:` / `raw_values:` flags, which change
+  what Parse Server itself returns (and are never enabled by `field_names:`).
+
 ## Transactions
 
 ```ruby
