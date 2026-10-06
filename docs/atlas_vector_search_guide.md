@@ -478,7 +478,16 @@ vectors = voyage.embed_chunks(documents, input_type: :search_document)
 # => [[vec_a1, vec_a2], [vec_b1, vec_b2]]  one Array per document, aligned with its chunks
 # vec_a2 != vec_b2: the same sentence, embedded with different documents.
 
-# Write each chunk vector onto its own chunk record (pattern 2 above).
+# Store each chunk vector on its own record. The chunk class declares the
+# vector property but NOT the `embed` macro: `embed :content` would
+# recompute the vector from `content` alone on save, silently replacing the
+# contextual vector with an ordinary one.
+class PostChunk < Parse::Object
+  belongs_to :post
+  property :content, :string
+  property :embedding, :vector, dimensions: 1024
+end
+
 documents.zip(vectors).each do |chunks, chunk_vectors|
   chunks.zip(chunk_vectors).each { |text, vec| PostChunk.create!(content: text, embedding: vec) }
 end
@@ -593,10 +602,18 @@ when the cluster does not support it; the default `:rrf` always fuses
 client-side, which is the fully-enforced, deterministic path. `$rankFusion`
 is admitted to `PipelineSecurity::ALLOWED_STAGES` for the native path.
 
-*Status:* the native path is shipped and its pipeline shape, including the
-ACL and CLP enforcement inside each branch, is pinned by unit and snapshot
-tests. It has not yet been validated end to end against a live Atlas
-cluster, which is why it stays opt-in rather than the default.
+*Status:* the native path is shipped and its pipeline shape is pinned by
+unit and snapshot tests. Unlike the client-side path, where each branch
+enforces ACL and CLP before fusion, the native path applies the ACL
+`$match` **after** `$rankFusion`: the stage fuses the unfiltered candidate
+sets, then rows the caller cannot read are dropped. To keep a scoped caller
+from being underfilled by those drops, the branches request a wider
+candidate window and the final `$limit` runs after the ACL match; a caller
+who can read only a small fraction of the collection can still receive
+fewer than `k` results. Fused scores are recomputed from surviving rows so
+an unreadable row's rank does not leak through. It has not yet been
+validated end to end against a live Atlas cluster, which is why it stays
+opt-in rather than the default.
 
 `Parse::Retrieval.retrieve(hybrid: true, ...)` routes through
 `hybrid_search` and chunks the fused results; pass `hybrid: { lexical:,

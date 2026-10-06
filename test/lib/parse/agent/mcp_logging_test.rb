@@ -134,6 +134,16 @@ class MCPLoggingTest < Minitest::Test
     assert_equal "error", level(app, "s1")
   end
 
+  def test_reinitializing_another_sessions_id_cannot_change_its_level
+    app = build_app(streaming: true)
+    post(app, "initialize", session_id: "s1", principal: "alice")
+    post(app, "logging/setLevel", params: { "level" => "error" }, session_id: "s1", principal: "alice")
+    status, = post(app, "initialize", session_id: "s1", principal: "mallory")
+    assert_equal 403, status
+    post(app, "logging/setLevel", params: { "level" => "debug" }, session_id: "s1", principal: "mallory")
+    assert_equal "error", level(app, "s1")
+  end
+
   def test_uninitialized_session_ids_are_not_recorded
     app = build_app(streaming: true)
     post(app, "logging/setLevel", params: { "level" => "debug" }, session_id: "invented", principal: "alice")

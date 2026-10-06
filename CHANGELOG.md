@@ -92,6 +92,12 @@ callers.
   without elicitation, so the destructive call is refused up front with
   that reason. An empty `elicitation: {}` (the earlier shape) still means
   form support.
+- **CHANGED**: `initialize` with an `Mcp-Session-Id` already bound to a
+  different principal is refused with 403 instead of rebinding the session
+  to the new caller. Previously, knowing another session's id was enough to
+  take over its owner binding, and with it the listening stream, the
+  recorded elicitation capability, and the log level. The owning principal
+  can still re-initialize its own session.
 - **CHANGED**: A `tools/call` whose `arguments` is not a JSON object now
   returns a tool result with `isError: true` instead of an internal error,
   as `2025-11-25` requires for input validation failures.

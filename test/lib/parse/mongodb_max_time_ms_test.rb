@@ -245,11 +245,11 @@ class MongoDBMaxTimeMsTest < Minitest::Test
 
     events = []
     sub = ActiveSupport::Notifications.subscribe("parse.mongodb.query_killed_retry") { |*a| events << a.last }
-    begin
-      results = Parse::MongoDB.aggregate("Song", [{ "$match" => {} }], master: true)
-    ensure
-      ActiveSupport::Notifications.unsubscribe(sub)
-    end
+    results = begin
+        Parse::MongoDB.aggregate("Song", [{ "$match" => {} }], master: true)
+      ensure
+        ActiveSupport::Notifications.unsubscribe(sub)
+      end
 
     assert_equal 2, calls
     assert_equal 1, results.size

@@ -819,12 +819,18 @@ module Parse
         #     per session before attempting a server→client prompt.
         if body.is_a?(Hash) && body["method"] == "initialize" &&
            agent.respond_to?(:correlation_id) && agent.correlation_id
+          # Bind this session to the initializing principal FIRST, so only the
+          # same principal can later attach a listening stream, set its log
+          # level, or have its elicitation capability recorded (owner-binding;
+          # see SessionOwnerRegistry). A session id already owned by another
+          # principal is refused outright rather than rebound.
+          unless @session_owners.bind(agent.correlation_id, principal_fingerprint(agent, env))
+            @logger&.warn("[Parse::Agent::MCPRackApp] initialize refused: session owned by another principal")
+            return [403, json_headers,
+                    [json_rpc_error(-32_600, "Mcp-Session-Id is owned by another principal", id: body["id"])]]
+          end
           supported = elicitation_form_supported?(body.dig("params", "capabilities", "elicitation"))
           @elicitation_capabilities.set(agent.correlation_id, supported)
-          # Authoritatively bind this session to the initializing principal so
-          # only the same principal can later attach a listening stream for it
-          # (owner-binding; see SessionOwnerRegistry).
-          @session_owners.bind(agent.correlation_id, principal_fingerprint(agent, env))
         end
 
         # 5b-iii. Elicitation reply ingress. A method-less JSON-RPC
@@ -1931,14 +1937,24 @@ module Parse
           @mutex = Mutex.new
         end
 
-        # Authoritatively bind a session to a principal (initialize). A
-        # re-initialize by the same caller refreshes the binding.
+        # Bind a session to a principal at initialize. An unclaimed session
+        # is claimed; a re-initialize by the owning principal refreshes the
+        # binding. A session already owned by a different principal is NOT
+        # rebound, so knowing another caller's session id is not enough to
+        # take it over (and with it, its log level, elicitation capability,
+        # and listening stream).
+        #
+        # @return [Boolean] true when bound to `fingerprint`; false on a
+        #   principal mismatch or blank input.
         def bind(session_id, fingerprint)
-          return if blank?(session_id) || blank?(fingerprint)
+          return false if blank?(session_id) || blank?(fingerprint)
           @mutex.synchronize do
+            owner = @owners[session_id]
+            return false if owner && owner != fingerprint
             @owners.delete(session_id)
             @owners[session_id] = fingerprint
             evict_lru!
+            true
           end
         end
 
