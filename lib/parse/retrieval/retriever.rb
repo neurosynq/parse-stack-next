@@ -342,7 +342,11 @@ module Parse
       sym = field.to_sym
       fmap = klass.respond_to?(:field_map) ? klass.field_map : {}
       mapped = fmap[sym]
-      (mapped || sym.to_s.columnize).to_s
+      return mapped.to_s if mapped
+      # An exact declared server name (`title_exact`, `PublicText`) is kept
+      # as written, matching Parse::Agent::MetadataRegistry.wire_field_names.
+      return field.to_s if fmap.values.any? { |v| v.to_s == field.to_s }
+      sym.to_s.columnize
     end
 
     # @!visibility private

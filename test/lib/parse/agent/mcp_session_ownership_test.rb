@@ -115,7 +115,7 @@ class MCPSessionOwnershipTest < Minitest::Test
 
     status, = post(app, "resources/subscribe", params: { "uri" => "parse://Post/count" },
                                               session_id: "invented", principal: "mallory")
-    assert_equal 403, status
+    assert_equal 404, status, "an unknown session is answered 404 so the client re-initializes"
     assert_empty manager.subscribed
 
     post(app, "initialize", params: { "protocolVersion" => "2025-11-25" }, session_id: "s1", principal: "alice")
@@ -163,4 +163,49 @@ class MCPSessionOwnershipTest < Minitest::Test
     registry.forget("s1")
     assert_equal true, registry.bind("s2", "alice")
   end
+
+  def test_shared_master_key_principal_is_not_capped_per_principal
+    registry = Parse::Agent::MCPRackApp::SessionOwnerRegistry.new(max_entries: 50, max_per_principal: 2)
+    5.times { |i| assert_equal true, registry.bind("s#{i}", "mk") }
+    assert_equal 5, registry.size
+  end
+
+  def test_an_owners_requests_keep_its_session_from_eviction
+    registry = Parse::Agent::MCPRackApp::SessionOwnerRegistry.new(max_entries: 50, max_per_principal: 2)
+    registry.bind("old", "alice")
+    registry.bind("mid", "alice")
+    registry.owned_by?("old", "alice") # an ordinary request on "old"
+    registry.bind("new", "alice")
+    assert registry.owned_by?("old", "alice"), "the recently used session survives"
+    refute registry.owned_by?("mid", "alice"), "the idle one is evicted"
+  end
+
+  # A stream body closed before Rack iterates it never attached, so it must
+  # not detach the session's active stream.
+  def test_unattached_stream_close_leaves_the_active_listener
+    manager = Parse::Agent::MCPSubscriptions::Manager.new(live_query_client: Object.new)
+    active = Parse::Agent::MCPRackApp::ListeningStreamBody.new(manager, "S", 0, nil)
+    reader = Thread.new { active.each { |_c| } }
+    deadline = Time.now + 1
+    sleep 0.01 until manager.listener?("S") || Time.now > deadline
+    assert manager.listener?("S")
+
+    aborted = Parse::Agent::MCPRackApp::ListeningStreamBody.new(manager, "S", 0, nil)
+    aborted.close
+    assert manager.listener?("S"), "the aborted replacement did not detach the active stream"
+
+    active.close
+    reader.join(1)
+    refute manager.listener?("S")
+  end
+
+  # A close that wins the race with the attach leaves nothing registered.
+  def test_close_before_attach_registers_no_listener
+    manager = Parse::Agent::MCPSubscriptions::Manager.new(live_query_client: Object.new)
+    body = Parse::Agent::MCPRackApp::ListeningStreamBody.new(manager, "S2", 0, nil)
+    body.close
+    body.each { |_c| }
+    refute manager.listener?("S2")
+  end
+
 end

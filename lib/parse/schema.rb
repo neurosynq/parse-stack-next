@@ -53,7 +53,9 @@ module Parse
     # Parse field type mappings to Ruby types
     TYPE_MAP = {
       "String" => :string,
-      "Number" => :float,
+      # A Number column holds integral and fractional values; :number keeps
+      # integers as Integer and fractional values as Float.
+      "Number" => :number,
       "Boolean" => :boolean,
       "Date" => :date,
       "File" => :file,
@@ -71,6 +73,7 @@ module Parse
       string: "String",
       integer: "Number",
       float: "Number",
+      number: "Number",
       boolean: "Boolean",
       date: "Date",
       file: "File",

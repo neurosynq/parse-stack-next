@@ -16,14 +16,15 @@ class MCPDeploymentsTest < Minitest::Test
 
   # ---- doubles ------------------------------------------------------------
 
-  Resp = Struct.new(:result, :failed) do
+  Resp = Struct.new(:result, :failed, :code, :http_status) do
     def error? = failed
+    def permission_denied? = code == 209
   end
 
   # A Parse::Client double: `/users/me` answers from a mutable token table, and
   # every call is counted so tests can tell a cached validation from a live one.
   class FakeClient
-    attr_accessor :master_key
+    attr_accessor :master_key, :outage
     attr_reader :tokens, :me_calls, :authorization
 
     # Tokens may be passed as a positional Hash or brace-less (`"tok" => "uid"`),
@@ -37,8 +38,10 @@ class MCPDeploymentsTest < Minitest::Test
 
     def current_user(token, cache: nil)
       @me_calls += 1
+      raise IOError, "connection refused" if @outage == :raise
+      return Resp.new(nil, true, nil, 503) if @outage == :status
       user_id = @tokens[token]
-      user_id ? Resp.new({ "objectId" => user_id }, false) : Resp.new(nil, true)
+      user_id ? Resp.new({ "objectId" => user_id }, false) : Resp.new(nil, true, 209, 400)
     end
 
     def authorization=(ctx)
@@ -635,6 +638,47 @@ class MCPDeploymentsTest < Minitest::Test
     client = FakeClient.new({ "tok-a" => "u_a" }, master_key: "mk")
     err = assert_raises(ArgumentError) { user_app(client, permissions: :admin) }
     assert_match(/admin/, err.message)
+  end
+
+
+  # ---- principal and transient checks ----------------------------------------
+
+  def test_a_refreshed_token_keeps_its_session
+    client = FakeClient.new({ "tok-a" => "u_a", "tok-a2" => "u_a", "tok-b" => "u_b" }, master_key: "mk")
+    app = user_app(client)
+    with_agent_double do
+      sid = { "HTTP_MCP_SESSION_ID" => "sess-1" }
+      assert_equal 200, post(app, "initialize", headers: bearer("tok-a").merge(sid)).first
+      assert_equal 200, post(app, "ping", headers: bearer("tok-a2").merge(sid)).first,
+                   "the same user with a new token owns the session"
+      assert_equal 403, post(app, "ping", headers: bearer("tok-b").merge(sid)).first
+    end
+  end
+
+  def test_an_unreachable_server_fails_the_request_without_evicting_the_token
+    client = FakeClient.new({ "tok-a" => "u_a" }, master_key: "mk")
+    app = user_app(client)
+    with_agent_double do
+      %i[raise status].each do |mode|
+        client.outage = mode
+        assert_equal 401, post(app, "ping", headers: bearer("tok-a")).first
+      end
+      assert_empty client.authorization.invalidated, "a failed check does not evict the session"
+      client.outage = nil
+      assert_equal 200, post(app, "ping", headers: bearer("tok-a")).first
+    end
+  end
+
+  def test_revalidator_reports_an_outage_as_a_transient_error
+    client = FakeClient.new({ "tok-a" => "u_a" }, master_key: "mk")
+    app = user_app(client)
+    revalidator = app.instance_variable_get(:@listening_stream_revalidator)
+    agent = Struct.new(:session_token).new("tok-a")
+    client.outage = :raise
+    assert_raises(App::SessionCheckUnavailable) { revalidator.call(agent) }
+    client.outage = nil
+    client.tokens.delete("tok-a")
+    assert_equal false, revalidator.call(agent), "a rejected session closes the stream"
   end
 
 end

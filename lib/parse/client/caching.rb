@@ -318,14 +318,22 @@ module Parse
       #
       # @return [Array<Class>]
       def cache_store_errors
-        errors = [::TypeError, Errno::EINVAL]
+        errors = [::TypeError, Errno::EINVAL, Errno::ECONNREFUSED]
         if defined?(::Redis)
-          %w[CannotConnectError TimeoutError CommandError].each do |name|
+          # In redis-rb 5, CannotConnectError, TimeoutError and
+          # ConnectionError are siblings under BaseConnectionError, and
+          # ReadOnlyError (a replica after failover) sits under CommandError.
+          # Each name is checked on its own because older releases lack some.
+          %w[BaseConnectionError CannotConnectError TimeoutError ConnectionError
+             CommandError ReadOnlyError].each do |name|
             errors << ::Redis.const_get(name) if ::Redis.const_defined?(name, false)
           end
         end
+        # redis-rb 5 is built on redis-client, whose errors can surface
+        # unwrapped from some code paths.
+        errors << ::RedisClient::Error if defined?(::RedisClient::Error)
         errors << ::ConnectionPool::TimeoutError if defined?(::ConnectionPool::TimeoutError)
-        errors
+        errors.uniq
       end
 
       # Emit an ActiveSupport::Notifications event under the `parse.cache.*`

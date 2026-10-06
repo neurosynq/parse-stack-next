@@ -30,6 +30,15 @@ module Parse
       # notifications on an already-open stream.
       DEFAULT_SESSION_REVALIDATE_INTERVAL = 60
 
+      # Rack env key where `user_scoped` records the verified user id for the
+      # request, read back by its principal resolver.
+      USER_PRINCIPAL_ENV_KEY = "parse.agent.user_scoped.user_id"
+
+      # Raised by {validate_session!} when Parse Server could not be asked
+      # (unreachable, 5xx, an unexpected error). Distinct from
+      # {Parse::Agent::Unauthorized}, which means the session was rejected.
+      class SessionCheckUnavailable < StandardError; end
+
       # Accepted values for `session_validation:`.
       SESSION_VALIDATION_MODES = %i[per_request cached].freeze
 
@@ -186,7 +195,18 @@ module Parse
             raise Parse::Agent::Unauthorized.new("Missing session token", reason: :missing_session) if token.empty?
 
             parse_client = client || Parse.client
-            user_id = validate_session!(parse_client, token, mode: session_validation)
+            user_id = begin
+                validate_session!(parse_client, token, mode: session_validation)
+              rescue SessionCheckUnavailable
+                # Fail closed for the request, but keep the token cached: the
+                # session may well be valid once Parse Server answers again.
+                raise Parse::Agent::Unauthorized.new("Session could not be verified",
+                                                     reason: :session_check_unavailable)
+              end
+            # The verified user id is the session's principal, so a refreshed
+            # token (or a second login) for the same user keeps its sessions,
+            # and per-principal bounds apply per user rather than per token.
+            env[USER_PRINCIPAL_ENV_KEY] = user_id
             kwargs = options.merge(session_token: token, permissions: permissions)
             kwargs[:client] = client if client
             kwargs[:rate_limiter] = limiters.fetch("user:#{user_id}") if limiters
@@ -200,6 +220,10 @@ module Parse
             Parse::Agent.new(**kwargs)
           end
 
+          # A session Parse Server reports invalid closes the stream at once.
+          # SessionCheckUnavailable (Parse Server unreachable, a 5xx) is left
+          # to propagate, so the stream's revalidation loop counts it as a
+          # transient error and only closes after repeated failures.
           revalidator = lambda do |agent|
             token = agent.respond_to?(:session_token) ? agent.session_token.to_s : ""
             return false if token.empty?
@@ -209,7 +233,10 @@ module Parse
             false
           end
 
+          resolver = ->(_agent, env) { (uid = env[USER_PRINCIPAL_ENV_KEY]) ? "user:#{uid}" : nil }
+
           new(agent_factory: factory,
+              principal_resolver: resolver,
               listening_stream_revalidator: revalidator,
               listening_stream_revalidate_interval: session_revalidate_interval,
               **rack_options)
@@ -318,10 +345,19 @@ module Parse
 
           response = begin
               parse_client.current_user(token, cache: false)
-            rescue StandardError
-              nil
+            rescue StandardError => e
+              raise SessionCheckUnavailable, "session check failed: #{e.class}"
             end
-          result = response && !response.error? ? response.result : nil
+          if response.nil?
+            raise SessionCheckUnavailable, "session check returned no response"
+          end
+          if response.error? && !session_rejected?(response)
+            # Parse Server could not answer (5xx, timeout, an unexpected
+            # error code). That says nothing about the session, so it is
+            # neither accepted nor evicted from the identity cache.
+            raise SessionCheckUnavailable, "session check failed (#{response.http_status || response.code})"
+          end
+          result = response.error? ? nil : response.result
           user_id = result.is_a?(Hash) ? (result["objectId"] || result[:objectId]) : nil
           if user_id.to_s.empty?
             if parse_client.respond_to?(:authorization) && parse_client.authorization.respond_to?(:invalidate)
@@ -333,6 +369,14 @@ module Parse
         end
 
         private
+
+        # True when Parse Server rejected the session itself (invalid or
+        # expired token, or an auth failure), as opposed to failing to answer.
+        def session_rejected?(response)
+          return true if response.respond_to?(:permission_denied?) && response.permission_denied?
+          code = response.respond_to?(:code) ? response.code : nil
+          code == Parse::Response::ERROR_INVALID_SESSION_TOKEN || code == 101
+        end
 
         def assert_factory_options!(factory_name, agent_options, rack_options)
           unless agent_options.is_a?(Hash)

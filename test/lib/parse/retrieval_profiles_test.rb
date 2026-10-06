@@ -158,6 +158,39 @@ class RetrievalProfilesTest < Minitest::Test
     agent_fields :title, :body
   end
 
+  class AliasedHybridDoc < Parse::Object
+    parse_class "RetrievalProfileAliasedDoc"
+    property :title_exact, :string, field: "title_exact"
+    property :body, :string
+    property :secret, :string
+    property :embedding, :vector, dimensions: 8, provider: :fixture
+    embed :body, into: :embedding
+    agent_searchable field: :embedding, filter_fields: %i[title_exact secret]
+    agent_fields :title_exact, :body
+  end
+
+  def test_configured_lexical_field_keeps_an_exact_server_name
+    P.register(:exact, k: 5, hybrid: { lexical: { fields: %w[title_exact] } })
+    captured = {}
+    Parse::Retrieval.stub(:retrieve, ->(**kw) { captured.replace(kw); [] }) do
+      Parse::Retrieval::AgentTool.semantic_search(fake_agent, class_name: "RetrievalProfileAliasedDoc",
+                                                              query: "q", profile: "exact")
+    end
+    assert_equal ["title_exact"], captured[:hybrid][:lexical][:fields]
+  end
+
+  def test_filter_fields_outside_agent_fields_are_not_usable
+    Parse::Retrieval.stub(:retrieve, ->(**_kw) { [] }) do
+      err = assert_raises(Parse::Agent::ValidationError, Parse::Agent::AccessDenied) do
+        Parse::Retrieval::AgentTool.semantic_search(fake_agent, class_name: "RetrievalProfileAliasedDoc",
+                                                                query: "q", filter: { "secret" => "x" })
+      end
+      assert_match(/secret|filter/, err.message)
+      Parse::Retrieval::AgentTool.semantic_search(fake_agent, class_name: "RetrievalProfileAliasedDoc",
+                                                              query: "q", filter: { "title_exact" => "x" })
+    end
+  end
+
   def test_hybrid_profile_lexical_branch_searches_only_readable_text
     P.register(:balanced, k: 5, hybrid: true)
     captured = {}
@@ -351,6 +384,22 @@ class RetrievalProfilesTest < Minitest::Test
     reranker = Parse::Retrieval::BudgetedReranker.new(inner, P.fetch!(:capped))
     reranker.rerank(query: "q" * 10_000, documents: %w[a b])
     assert_equal Parse::Retrieval::BudgetedReranker::MAX_QUERY_CHARS, seen.length
+  end
+
+
+  # Many tiny chunks are mostly metadata and per-chunk keys; the strict
+  # budget counts that overhead, so the serialized result stays near it.
+  def test_strict_budget_counts_chunk_metadata
+    fake = Struct.new(:content, :metadata, :source)
+    chunks = Array.new(200) do |i|
+      fake.new("x", { object_id: "d1", chunk_index: i, start: i, end: i + 1, text_field: "body" },
+               { "objectId" => "d1", "body" => "x" * 200 })
+    end
+    kept, dropped = Parse::Retrieval::AgentTool.send(:apply_token_budget, chunks, 1_000, strict: true)
+    serialized = JSON.generate(kept.map { |c| { content: c.content, metadata: c.metadata } }).length +
+                 JSON.generate(chunks.first.source).length
+    assert_operator dropped, :>, 0
+    assert_operator (serialized / 4.0).ceil, :<=, 1_000
   end
 
 end

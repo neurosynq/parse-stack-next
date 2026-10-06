@@ -142,11 +142,13 @@ module Parse
         Parse::Retrieval.assert_no_underscore_keys!(filter) unless filter.nil?
         Parse::Retrieval.assert_no_underscore_keys!(vector_filter) unless vector_filter.nil?
         allowed = Parse::Agent::MetadataRegistry.searchable_filter_fields(cname).map(&:to_s)
-        # A per-agent `fields:` narrowing also narrows the filterable fields:
-        # filtering on a field the agent cannot read would reveal its value
-        # through which rows match.
-        if Parse::Agent::FieldPolicy.narrowing_for(cname)
-          readable = Parse::Agent::MetadataRegistry.field_allowlist(cname).map(&:to_s)
+        # Filterable fields are also bounded by what the agent may read (the
+        # class `agent_fields` ceiling, narrowed by any per-agent `fields:`
+        # policy): filtering on a field the agent cannot read would reveal
+        # its value through which rows match. A `filter_fields` entry outside
+        # `agent_fields` is therefore never usable.
+        readable = Parse::Agent::MetadataRegistry.field_allowlist(cname)&.map(&:to_s)
+        if readable && !readable.empty?
           allowed = allowed.select do |f|
             readable.include?(Parse::Agent::MetadataRegistry.wire_field_names(cname, [f]).first)
           end
@@ -426,13 +428,24 @@ module Parse
       # `strict:` (a profile's mandatory budget) drops even the first chunk
       # when it alone exceeds the budget; otherwise the first chunk is always
       # kept so an oversized single result still returns something.
+      # Characters each returned chunk adds beyond its content and metadata:
+      # its key names, score, and `_source` provenance stamp.
+      CHUNK_OVERHEAD_CHARS = 160
+      # Characters the response envelope adds once (counts, profile,
+      # truncation flags, the `documents` map wrapper).
+      ENVELOPE_OVERHEAD_CHARS = 400
+
       def apply_token_budget(chunks, budget, strict: false)
         return [chunks, 0] if budget.nil? || chunks.empty?
-        total = 0
+        # Every chunk carries metadata and per-chunk keys alongside its text,
+        # so a response of many tiny chunks is mostly overhead; count it.
+        total = (ENVELOPE_OVERHEAD_CHARS / 4.0).ceil
         kept = []
         seen_docs = {}
         chunks.each do |chunk|
-          est = (chunk.content.to_s.length / 4.0).ceil
+          meta = chunk.respond_to?(:metadata) ? chunk.metadata : nil
+          meta_chars = meta.is_a?(Hash) ? (JSON.generate(meta).length rescue 0) : 0
+          est = ((chunk.content.to_s.length + meta_chars + CHUNK_OVERHEAD_CHARS) / 4.0).ceil
           oid = chunk.respond_to?(:metadata) && chunk.metadata.is_a?(Hash) ? chunk.metadata[:object_id] : nil
           if oid && !seen_docs.key?(oid) && chunk.respond_to?(:source) && chunk.source
             doc_est = (JSON.generate(chunk.source).length / 4.0).ceil rescue 0

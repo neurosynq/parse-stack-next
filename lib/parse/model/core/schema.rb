@@ -21,7 +21,7 @@ module Parse
           result = { type: v.to_s.camelize }
           # if it is a basic column property, find the right datatype
           case v
-          when :integer, :float
+          when :integer, :float, :number
             result[:type] = Parse::Model::TYPE_NUMBER
           when :geopoint, :geo_point
             result[:type] = Parse::Model::TYPE_GEOPOINT

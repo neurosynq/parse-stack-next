@@ -29,6 +29,9 @@ module Parse
         string: ::GraphQL::Types::String,
         integer: ::GraphQL::Types::Int,
         float: ::GraphQL::Types::Float,
+        # A :number property may hold fractional values, which GraphQL's
+        # 32-bit Int cannot represent, so it is exposed as Float.
+        number: ::GraphQL::Types::Float,
         boolean: ::GraphQL::Types::Boolean,
         date: ::GraphQL::Types::ISO8601DateTime,
         timezone: ::GraphQL::Types::String,

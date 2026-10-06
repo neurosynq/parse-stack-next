@@ -25,6 +25,15 @@ class AgentFieldPolicyTest < Minitest::Test
     property :email, :string
   end
 
+  # A declared server name whose lowerCamel form is a different, hidden
+  # column: the checked column must be the queried column.
+  class FPAlias < Parse::Object
+    parse_class "FieldPolicyAlias"
+    property :public_text, :string, field: "PublicText"
+    property :hidden_text, :string, field: "publicText"
+    agent_fields :public_text
+  end
+
   def setup
     unless Parse::Client.client?
       Parse.setup(server_url: "http://localhost:1337/parse", application_id: "test",
@@ -393,6 +402,48 @@ class AgentFieldPolicyTest < Minitest::Test
         assert_includes allowed.map(&:to_s), "title"
         refute_includes allowed.map(&:to_s), "body"
       end
+    end
+  end
+
+
+  def test_declared_server_name_is_queried_exactly_as_checked
+    a = agent
+    sent = []
+    fake = Struct.new(:success?, :count).new(true, 0)
+    Parse::Agent::Tools.stub(:assert_class_accessible!, nil) do
+      a.client.stub(:find_objects, ->(_cls, q, **_o) { sent << JSON.parse(q[:where]); fake }) do
+        %w[PublicText public_text].each do |key|
+          r = a.execute(:count_objects, class_name: "FieldPolicyAlias", where: { key => "x" })
+          assert r[:success], r.inspect
+        end
+        r = a.execute(:count_objects, class_name: "FieldPolicyAlias", where: { "publicText" => "x" })
+        assert_equal :field_denied, r.dig(:details, :kind), "the hidden lowerCamel column is refused"
+      end
+    end
+    assert_equal [{ "PublicText" => "x" }, { "PublicText" => "x" }], sent
+  end
+
+
+  def test_order_is_sent_under_the_checked_name
+    a = agent
+    sent = []
+    fake = Struct.new(:success?, :results, :count, :error).new(true, [], 0, nil)
+    Parse::Agent::Tools.stub(:assert_class_accessible!, nil) do
+      a.client.stub(:find_objects, ->(_cls, q, **_o) { sent << q[:order]; fake }) do
+        r = a.execute(:query_class, class_name: "FieldPolicyAlias", order: "-public_text")
+        assert r[:success], r.inspect
+      end
+    end
+    assert_equal ["-PublicText"], sent
+  end
+
+  def test_related_to_owner_in_storage_string_form_is_checked
+    a = agent(fields: { FPDoc => %i[title] })
+    Parse::Agent::Tools.stub(:assert_class_accessible!, nil) do
+      where = { "$relatedTo" => { "object" => "FieldPolicyDoc$x1", "key" => "internal_note" } }
+      r = a.execute(:count_objects, class_name: "_User", where: where)
+      refute r[:success], r.inspect
+      assert_equal :field_denied, r.dig(:details, :kind)
     end
   end
 

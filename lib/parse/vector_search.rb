@@ -5,6 +5,7 @@ require_relative "pipeline_security"
 require_relative "acl_scope"
 require_relative "clp_scope"
 require_relative "mongodb"
+require_relative "atlas_search/protected_paths"
 
 module Parse
   # Atlas Vector Search entry point. Routes through `Parse::MongoDB`
@@ -306,6 +307,8 @@ module Parse
         protected_fields = Parse::CLPScope.protected_fields_for(
           collection_name, resolution.permission_strings,
         )
+        assert_protected_fields_untouched!(collection_name, path, filter, vector_filter,
+                                           protected_fields, resolution)
 
         vs_stage = {
           "index" => index_name.to_s,
@@ -463,6 +466,35 @@ module Parse
       end
 
       # Resolve and return pointerFields for `find` on the collection.
+      # Refuse a scoped vector search that lets a protected field decide
+      # which rows match or how they rank: a protected vector `field:`, a
+      # `filter:` / `vector_filter:` predicate keyed on a protected field
+      # (top level or under $and/$or/$nor/$not, dotted or `_p_` form), or
+      # an `$expr` reference to one. The output strip alone does not close
+      # that oracle. Master scopes and classes with nothing protected are
+      # unaffected.
+      #
+      # @raise [Parse::CLPScope::Denied]
+      def assert_protected_fields_untouched!(collection_name, path, filter, vector_filter,
+                                             protected_fields, resolution)
+        paths = Parse::AtlasSearch::ProtectedPaths
+        return unless paths.enforce?(resolution, protected_fields)
+        paths.assert_paths_allowed!(path, protected_fields, resolution,
+                                    collection_name: collection_name,
+                                    method_name: "Parse::VectorSearch.search",
+                                    what: "vector field")
+        [filter, vector_filter].each do |f|
+          next if f.nil? || f.empty?
+          Parse::PipelineSecurity.refuse_protected_field_references!(
+            [{ "$match" => f }], collection_name, resolution,
+          )
+          paths.assert_filter_allowed!(f, protected_fields, resolution,
+                                       collection_name: collection_name,
+                                       method_name: "Parse::VectorSearch.search")
+        end
+        nil
+      end
+
       # Raises CLPScope::Denied when pointerFields is set but the
       # current scope has no user_id (acl_role-only / public agents).
       # Returns nil when master-mode or no pointerFields entry exists.

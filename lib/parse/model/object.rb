@@ -1363,13 +1363,13 @@ module Parse
       # the trust signal here.
       trusted = @_trusted_init == true
       @_trusted_init = nil
-      # Accept hash-like input such as Rails `ActionController::Parameters`,
-      # which is not a Hash. Its `to_h` raises for unpermitted parameters, so
-      # strong-parameter filtering still applies.
-      if !opts.is_a?(Hash) && !opts.is_a?(String) && !opts.is_a?(Array) && !opts.nil? &&
-         opts.respond_to?(:to_h)
-        opts = opts.to_h
-      end
+      # Accept hash-like input that is not a Hash: Rails strong parameters
+      # (`ActionController::Parameters`) and Struct / OpenStruct values.
+      # Strong parameters raise from `to_h` when unpermitted, so
+      # strong-parameter filtering still applies. Other objects that merely
+      # respond to `to_h` (Set, Range, Array) are ignored as before rather
+      # than converted.
+      opts = opts.to_h if self.class.hash_like_init_input?(opts)
       input_hash = opts.is_a?(Hash) ? opts : nil
       input_had_acl = input_hash && %w[ACL acl].any? do |key|
         input_hash.key?(key) || input_hash.key?(key.to_sym)
@@ -1380,10 +1380,21 @@ module Parse
       if opts.is_a?(String) #then it's the objectId
         @id = opts.to_s
       elsif opts.is_a?(Hash)
-        # Pop the `:as` option (also accepts string key) before applying
-        # attributes so it is not mistaken for a model property. This holds
-        # the caller-supplied owner user for save-time ACL resolution.
-        acl_owner_override = opts.delete(:as) || opts.delete("as")
+        # Pop the `as:` option before applying attributes so it is not
+        # mistaken for a model property. It holds the caller-supplied owner
+        # user for save-time ACL resolution, so only a Symbol key written
+        # in code is honored. A String "as" key (form or JSON params, or any
+        # key of a HashWithIndifferentAccess) is removed and ignored: a
+        # request body must not be able to pick the ACL owner, e.g.
+        # `{"as" => "*"}` to make the record public.
+        if opts.key?(:as) || opts.key?("as")
+          symbol_key = !opts.is_a?(ActiveSupport::HashWithIndifferentAccess) && opts.key?(:as)
+          acl_owner_override = symbol_key ? opts[:as] : nil
+          opts = opts.dup
+          opts.delete(:as)
+          opts.delete("as")
+          self.class.validate_acl_owner_option!(acl_owner_override) unless acl_owner_override.nil?
+        end
         #if the objectId is provided we will consider the object pristine
         #and not track dirty items
         dirty_track = opts[Parse::Model::OBJECT_ID] || opts[:objectId] || opts[:id]
@@ -1485,11 +1496,20 @@ module Parse
       Parse::Pointer.new self.parse_class, id
     end
 
-    # Determines if this object has been saved to the Parse database. If an object has
-    # pending changes, then it is considered to not yet be persisted.
-    # @return [Boolean] true if this object has not been saved.
+    # Whether this object exists on the server, in the ActiveModel sense
+    # (`form_with` uses it to choose between create and update). An object
+    # with an objectId is persisted even when it has unsaved changes or was
+    # built without timestamps (a pointer or an id-only instance). Use
+    # {#changed?} to ask whether there are unsaved changes.
+    #
+    # The one exception is an objectId assigned client-side during a create
+    # (`parse_reference precompute: true`, `acl_owner :self`): the object
+    # is not persisted until the create succeeds and returns `createdAt`.
+    # @return [Boolean] true if this object exists on the server.
     def persisted?
-      changed? == false && !(@id.nil? || @created_at.nil? || @updated_at.nil? || @acl.nil?)
+      return false if @id.blank?
+      return @created_at.present? if defined?(@_creating_record) && @_creating_record
+      true
     end
 
     # Force reload from the database and replace any local fields with data from
@@ -2047,8 +2067,49 @@ module Parse
         return owner.id if owner.id.present?
         return nil
       end
-      return owner if owner.is_a?(String) && owner.present?
+      return owner if self.class.acl_owner_id_string?(owner)
       nil
+    end
+
+    class << self
+      # @!visibility private
+      # Whether `opts` is hash-like input that {#initialize} converts with
+      # `to_h`: Rails strong parameters (`permitted?` / `to_unsafe_h`) or a
+      # Struct / OpenStruct. Hash, String, Array and nil are handled by
+      # {#initialize} directly; other objects are not converted.
+      def hash_like_init_input?(opts)
+        return false if opts.nil? || opts.is_a?(Hash) || opts.is_a?(String) || opts.is_a?(Array)
+        return false unless opts.respond_to?(:to_h)
+        return true if opts.respond_to?(:permitted?) || opts.respond_to?(:to_unsafe_h)
+        return true if opts.is_a?(Struct)
+        defined?(::OpenStruct) && opts.is_a?(::OpenStruct) ? true : false
+      end
+
+      # @!visibility private
+      # Whether `value` is usable as a raw user objectId for an ACL owner.
+      # Refuses the public key "*" and role keys ("role:Name"), which would
+      # grant the record to everyone or to a role instead of to one user.
+      def acl_owner_id_string?(value)
+        value.is_a?(String) && value.present? && value != "*" && !value.start_with?("role:")
+      end
+
+      # @!visibility private
+      # Validates the `as:` owner option given to {#initialize}. Accepts a
+      # Parse::User, a Parse::Pointer to `_User` with an objectId, or a raw
+      # user objectId String.
+      # @raise [ArgumentError] for any other value.
+      def validate_acl_owner_option!(owner)
+        if owner.is_a?(Parse::Pointer)
+          return if owner.parse_class == Parse::Model::CLASS_USER && owner.id.present?
+          raise ArgumentError,
+                "as: must be a Parse::User or a pointer to _User with an objectId " \
+                "(got a #{owner.parse_class} #{owner.class})."
+        end
+        return if acl_owner_id_string?(owner)
+        raise ArgumentError,
+              "as: must be a Parse::User, a pointer to _User, or a user objectId String; " \
+              "the public key \"*\" and role keys are not accepted."
+      end
     end
 
     set_callback :save, :before, :_resolve_default_acl

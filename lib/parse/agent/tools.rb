@@ -823,8 +823,10 @@ module Parse
               fields: {
                 type: "array",
                 items: { type: "string" },
-                description: "Optional. Restrict search to these fields. When omitted, all indexed fields are " \
-                             "searched. Subject to the class's agent_fields allowlist when one is declared.",
+                description: "Optional. Restrict search to these fields. When omitted, the fields this agent " \
+                             "may read are searched (every indexed field only when the class declares no " \
+                             "agent_fields). A session-scoped search on a class with protected fields must name " \
+                             "fields, and may not name a protected one.",
               },
               limit: {
                 type: "integer",
@@ -2043,16 +2045,24 @@ module Parse
       #
       # Raises `Parse::Agent::AccessDenied` on any breach. The `Agent#execute`
       # rescue chain translates that to `error_code: :access_denied`.
+      #
+      # @return [Array<String>, nil] the fields a result row may carry when
+      #   the source document reaches the output (no stage replaced the
+      #   schema), for {project_aggregate_rows}; nil when no projection is
+      #   needed (no `agent_fields`, or every output field was computed by a
+      #   validated stage).
       def enforce_pipeline_access_policy!(class_name, pipeline, agent: nil)
-        return unless pipeline.is_a?(Array)
+        return nil unless pipeline.is_a?(Array)
         source_permitted = compute_source_allowlist_for(class_name)
-        walk_pipeline_with_state!(
+        available, source_addressable = walk_pipeline_with_state!(
           pipeline,
           source_permitted: source_permitted,
           available: [],
           source_addressable: true,
           agent: agent,
         )
+        return nil if source_permitted.nil? || !source_addressable
+        source_permitted | available
       end
 
       module_function :enforce_pipeline_access_policy!
@@ -2069,6 +2079,26 @@ module Parse
       end
 
       module_function :compute_source_allowlist_for
+
+      # @api private
+      # Drop top-level keys outside `permitted` from aggregation rows whose
+      # source document passed through unreplaced. Checking the fields a
+      # pipeline REFERENCES is not enough: `[{ "$limit" => 1 }]` references
+      # nothing and returns every column. A `_p_<field>` storage key is kept
+      # when `<field>` is permitted, and `_id` / `objectId` always are.
+      def project_aggregate_rows(rows, permitted)
+        return rows if permitted.nil?
+        keep = permitted.map(&:to_s) | %w[_id objectId]
+        Array(rows).map do |row|
+          next row unless row.is_a?(Hash)
+          row.select do |key, _|
+            k = key.to_s
+            keep.include?(k) || (k.start_with?("_p_") && keep.include?(k.delete_prefix("_p_")))
+          end
+        end
+      end
+
+      module_function :project_aggregate_rows
 
       # @api private
       # Forward-pass walker. Maintains two pieces of state across stages:
@@ -2100,6 +2130,7 @@ module Parse
             available = (available | introduced)
           end
         end
+        [available, source_addressable]
       end
 
       module_function :walk_pipeline_with_state!
@@ -2376,6 +2407,38 @@ module Parse
             # MetadataRegistry.field_allowlist already merges in
             # ALWAYS_KEEP_FIELDS (objectId / createdAt / updatedAt), so a
             # join can carry the standard envelope without further work.
+            # Join keys are reads too: joining on a hidden field and counting
+            # the matches reveals its values even when the output is
+            # projected away afterward. Source-side keys and `let`/
+            # `startWith` expressions use the source allowlist; foreign-side
+            # keys (and `restrictSearchWithMatch`) use the joined class's.
+            if value.is_a?(Hash)
+              opts = value.transform_keys(&:to_s)
+              foreign_permitted = target_str ? compute_source_allowlist_for(target_str) : nil
+              if permitted_fields
+                %w[localField].each do |key|
+                  next unless opts[key]
+                  root = join_key_root(opts[key])
+                  unless permitted_fields.include?(root)
+                    raise_allowlist_refusal!("join field", opts[key].to_s, root, permitted_fields)
+                  end
+                end
+                opts["let"].each_value { |e| check_expression_for_restricted_fields!(e, permitted_fields) } if opts["let"].is_a?(Hash)
+                check_expression_for_restricted_fields!(opts["startWith"], permitted_fields) if opts.key?("startWith")
+              end
+              if foreign_permitted
+                %w[foreignField connectFromField connectToField].each do |key|
+                  next unless opts[key]
+                  root = join_key_root(opts[key])
+                  unless foreign_permitted.include?(root)
+                    raise_allowlist_refusal!("join field", opts[key].to_s, root, foreign_permitted)
+                  end
+                end
+                if opts["restrictSearchWithMatch"].is_a?(Hash)
+                  check_match_keys_for_restricted_fields!(opts["restrictSearchWithMatch"], foreign_permitted)
+                end
+              end
+            end
             sub = value.is_a?(Hash) ? (value["pipeline"] || value[:pipeline]) : nil
             if sub
               # The lookup sub-pipeline runs against the FOREIGN class's
@@ -2516,6 +2579,20 @@ module Parse
       module_function :walk_pipeline_stage!
 
       # @api private
+      # Root field of a join key in Parse terms. Joins are written against
+      # stored documents, so `_id`, `_created_at`, `_updated_at`, and a
+      # `_p_<pointer>` column name the objectId, timestamps, and pointer.
+      JOIN_STORAGE_NAMES = { "_id" => "objectId", "_created_at" => "createdAt",
+                             "_updated_at" => "updatedAt" }.freeze
+
+      def join_key_root(key)
+        root = key.to_s.split(".").first.to_s
+        JOIN_STORAGE_NAMES.fetch(root) { root.delete_prefix("_p_") }
+      end
+
+      module_function :join_key_root
+
+      # @api private
       # Walk a $match hash refusing field keys outside the allowlist.
       # Logical operators ($and/$or/$nor/$not) recurse. $expr expressions
       # use the field-reference walker (which understands `$fieldName`
@@ -2553,7 +2630,22 @@ module Parse
       def check_expression_for_restricted_fields!(expr, permitted_fields)
         case expr
         when String
-          if expr.start_with?("$") && !expr.start_with?("$$")
+          if expr.start_with?("$$")
+            # `$$ROOT` and `$$CURRENT` are the whole document: `$$ROOT.secret`
+            # is `$secret`, and a bare `$$ROOT` copies every field. Other
+            # system and user variables (`$$NOW`, `$$this`, `let` names) do
+            # not address the source document.
+            var, path = expr.delete_prefix("$$").split(".", 2)
+            if %w[ROOT CURRENT].include?(var)
+              ref = path.to_s.split(".").first
+              if ref.nil? || ref.empty?
+                raise_allowlist_refusal!("field reference", expr, "$$#{var}", permitted_fields)
+              end
+              unless permitted_fields.include?(ref)
+                raise_allowlist_refusal!("field reference", expr, ref, permitted_fields)
+              end
+            end
+          elsif expr.start_with?("$")
             ref = expr.sub(/\A\$/, "").split(".").first
             return if ref.empty? || ref.start_with?("$")
             unless permitted_fields.include?(ref)
@@ -3205,6 +3297,9 @@ module Parse
         # canonical constraints are merged in.
         assert_where_fields_in_allowlist!(class_name, where)
         assert_fields_in_allowlist!(class_name, order_field_names(order).map { |f| wire_field_path(class_name, f) })
+        # Send the names that were checked: `email` resolves to the declared
+        # column it was validated as, never to a same-named hidden column.
+        order = wire_order(class_name, order)
         limit = [limit || Agent::DEFAULT_LIMIT, Agent::MAX_LIMIT].min
 
         # Tenant scope enforcement: resolve before any query building so that
@@ -3275,7 +3370,7 @@ module Parse
         # This blocks dangerous operators like $where, $function
         translated_where = nil
         if effective_where && !effective_where.empty?
-          translated_where = ConstraintTranslator.translate(effective_where, agent)
+          translated_where = ConstraintTranslator.translate(effective_where, agent, class_name)
           query[:where] = translated_where.to_json
         end
 
@@ -3377,7 +3472,7 @@ module Parse
 
         translated_where = nil
         if effective_where && !effective_where.empty?
-          translated_where = ConstraintTranslator.translate(effective_where, agent)
+          translated_where = ConstraintTranslator.translate(effective_where, agent, class_name)
           query[:where] = translated_where.to_json
         end
 
@@ -3463,7 +3558,7 @@ module Parse
             else
               { "$and" => [composed_filter, { "objectId" => object_id }] }
             end
-          translated_combined = ConstraintTranslator.translate(combined_where, agent)
+          translated_combined = ConstraintTranslator.translate(combined_where, agent, class_name)
           rows = if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
               execute_find_via_direct(
                 agent, class_name,
@@ -3488,7 +3583,7 @@ module Parse
           # The three-layer ACL simulation in Parse::MongoDB.aggregate
           # ensures the row is only returned when the agent's scope
           # permits it.
-          where_id = ConstraintTranslator.translate({ "objectId" => object_id }, agent)
+          where_id = ConstraintTranslator.translate({ "objectId" => object_id }, agent, class_name)
           rows = execute_find_via_direct(
             agent, class_name,
             where: where_id, limit: 1,
@@ -3597,7 +3692,7 @@ module Parse
         base_in_where = { "objectId" => { "$in" => unique_ids } }
         composed = apply_per_agent_filter_to_where(base_in_where, class_name, agent: agent)
         composed = apply_canonical_filter_to_where(composed, class_name, agent: agent) if apply_canonical_filter
-        translated_where = ConstraintTranslator.translate(composed, agent)
+        translated_where = ConstraintTranslator.translate(composed, agent, class_name)
 
         # Build query
         query = {
@@ -3709,7 +3804,7 @@ module Parse
         effective_where = apply_canonical_filter_to_where(effective_where, class_name, agent: agent)
         translated_where = nil
         if effective_where && !effective_where.empty?
-          translated_where = ConstraintTranslator.translate(effective_where, agent)
+          translated_where = ConstraintTranslator.translate(effective_where, agent, class_name)
           query[:where] = translated_where.to_json
         end
 
@@ -3783,7 +3878,7 @@ module Parse
         # class's agent_fields allowlist on projection-style stages
         # ($project, $addFields, $set, $unset, $replaceRoot). Without this
         # the top-level assert_class_accessible! check is bypassable.
-        enforce_pipeline_access_policy!(class_name, pipeline, agent: agent)
+        output_fields = enforce_pipeline_access_policy!(class_name, pipeline, agent: agent)
 
         # Auto-rewrite LLM-style $lookup stages into Parse-on-Mongo column
         # form AFTER access policy has run on the LLM's original (logical)
@@ -3900,6 +3995,7 @@ module Parse
           # placeholder) and not silently surfaced into the pointer_classes
           # envelope map.
           results = redact_hidden_classes!(results, agent: agent)
+          results = project_aggregate_rows(results, output_fields)
 
           # Pointer-column compaction. Default-on: a typical aggregate over
           # a class with a high-cardinality pointer (e.g. author per row)
@@ -4009,6 +4105,7 @@ module Parse
         formatted_value = value_field ? resolve_aggregation_field(class_name, validate_group_field!(value_field, name: :value_field)) : nil
 
         pipeline = build_group_pipeline(
+          class_name: class_name,
           where: where,
           group_field: formatted_group,
           flatten_arrays: flatten_arrays,
@@ -4105,6 +4202,7 @@ module Parse
 
         date_expr = build_date_group_expression(formatted_field, interval_sym, tz)
         pipeline = build_group_pipeline(
+          class_name: class_name,
           where: where,
           group_field: nil,
           group_expression: date_expr,
@@ -4173,6 +4271,7 @@ module Parse
 
         formatted_field = resolve_aggregation_field(class_name, validated_field)
         pipeline = build_group_pipeline(
+          class_name: class_name,
           where: where,
           group_field: formatted_field,
           flatten_arrays: false,
@@ -4420,10 +4519,16 @@ module Parse
               # "flaggedBy"})` would reveal a relation hidden from Post's
               # allowlist unless the key is checked against that class.
               next unless value.is_a?(Hash)
-              owner = value["object"] || value[:object]
-              owner_class = owner.is_a?(Hash) ? (owner["className"] || owner[:className]) : nil
+              # Resolve the owner the way the translator does (a pointer Hash,
+              # a Parse::Pointer, or a "Class$id" string).
+              owner_class = ConstraintTranslator.send(:related_to_owning_class, value)
               relation_key = value["key"] || value[:key]
-              assert_fields_in_allowlist!(owner_class.to_s, [relation_key]) if owner_class && relation_key
+              if relation_key && (owner_class.nil? || owner_class.to_s.empty?)
+                raise Parse::Agent::AccessDenied.new(
+                  nil, "$relatedTo requires a resolvable owning-object class.", kind: :field_denied,
+                )
+              end
+              assert_fields_in_allowlist!(owner_class.to_s, [relation_key]) if relation_key
             else
               assert_subquery_fields_in_allowlist!(value)
             end
@@ -4470,6 +4575,19 @@ module Parse
       module_function :order_field_names
 
       # @api private
+      # `order` rewritten to wire names, keeping each key's `-`/`+` prefix:
+      # `"-play_count,title"` becomes `"-playCount,title"`.
+      def wire_order(class_name, order)
+        return order if order.nil?
+        Array(order).flat_map { |entry| entry.to_s.split(",") }.map(&:strip).reject(&:empty?).map do |key|
+          sign = key[/\A[-+]/].to_s
+          "#{sign == "-" ? "-" : ""}#{wire_field_path(class_name, key.delete_prefix(sign))}"
+        end.join(",")
+      end
+
+      module_function :wire_order
+
+      # @api private
       # Resolve a wire-format field name to its MongoDB aggregation form.
       # Pointer fields are auto-prefixed with `_p_` when the local Parse
       # model class declares the field as a :pointer. createdAt/updatedAt
@@ -4501,10 +4619,10 @@ module Parse
       # nil we emit a bare $group with only _id (distinct).
       def build_group_pipeline(where:, group_field:, flatten_arrays:,
                                accumulator_op:, value_field:, operation:,
-                               group_expression: nil, agent: nil)
+                               group_expression: nil, agent: nil, class_name: nil)
         pipeline = []
         if where.is_a?(Hash) && !where.empty?
-          pipeline << { "$match" => ConstraintTranslator.translate(where, agent) }
+          pipeline << { "$match" => ConstraintTranslator.translate(where, agent, class_name) }
         end
         if flatten_arrays && group_field
           pipeline << { "$unwind" => "$#{group_field}" }
@@ -4911,6 +5029,9 @@ module Parse
         # canonical constraints are merged in.
         assert_where_fields_in_allowlist!(class_name, where)
         assert_fields_in_allowlist!(class_name, order_field_names(order).map { |f| wire_field_path(class_name, f) })
+        # Send the names that were checked: `email` resolves to the declared
+        # column it was validated as, never to a same-named hidden column.
+        order = wire_order(class_name, order)
         # Reuse query_class's gates by routing through it directly.
         # query_class returns a ResultFormatter-wrapped hash; we want the raw rows.
         query = {}
@@ -4956,7 +5077,7 @@ module Parse
         effective_where = apply_canonical_filter_to_where(effective_where, class_name, agent: agent)
         translated_where = nil
         if effective_where && !effective_where.empty?
-          translated_where = ConstraintTranslator.translate(effective_where, agent)
+          translated_where = ConstraintTranslator.translate(effective_where, agent, class_name)
           query[:where] = translated_where.to_json
         end
 
@@ -4983,7 +5104,7 @@ module Parse
       # @api private
       def export_via_aggregate(agent, class_name:, pipeline:, scope: nil)
         PipelineValidator.validate!(pipeline)
-        enforce_pipeline_access_policy!(class_name, pipeline, agent: agent)
+        output_fields = enforce_pipeline_access_policy!(class_name, pipeline, agent: agent)
         assert_joins_tenant_safe!(pipeline, scope)
         # Prepend tenant scope $match before per-agent + canonical filter and auto-limit.
         scoped_pipeline = apply_tenant_scope_to_pipeline(pipeline, scope)
@@ -5022,7 +5143,7 @@ module Parse
           end
         end
 
-        redact_hidden_classes!(rows, agent: agent)
+        project_aggregate_rows(redact_hidden_classes!(rows, agent: agent), output_fields)
       end
 
       module_function :export_via_aggregate
@@ -5242,7 +5363,7 @@ module Parse
         effective_where = apply_canonical_filter_to_where(effective_where, class_name, agent: agent)
 
         if effective_where && !effective_where.empty?
-          query[:where] = ConstraintTranslator.translate(effective_where, agent).to_json
+          query[:where] = ConstraintTranslator.translate(effective_where, agent, class_name).to_json
         end
 
         response = agent.client.find_objects(class_name, query, **agent.request_opts)
@@ -5617,7 +5738,7 @@ module Parse
       # @return [Hash, nil]
       def run_explain(agent, class_name, where)
         query = { explain: true, limit: 1 }
-        query[:where] = ConstraintTranslator.translate(where, agent).to_json
+        query[:where] = ConstraintTranslator.translate(where, agent, class_name).to_json
         response = agent.client.find_objects(class_name, query, **agent.request_opts)
         return nil unless response.success?
         response.result
@@ -6264,7 +6385,7 @@ module Parse
       def fetch_call_method_receiver(agent, klass, class_name, object_id)
         scope = resolve_tenant_scope!(agent, class_name)
         result = if agent.respond_to?(:acl_scope_requires_direct?) && agent.acl_scope_requires_direct?
-            where_id = ConstraintTranslator.translate({ "objectId" => object_id }, agent)
+            where_id = ConstraintTranslator.translate({ "objectId" => object_id }, agent, class_name)
             rows = execute_find_via_direct(agent, class_name, where: where_id, limit: 1)
             rows && rows.first
           else

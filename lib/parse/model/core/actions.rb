@@ -1150,20 +1150,27 @@ module Parse
         operate_field! field, relation_action
       end
 
-      # Atomically increment or decrement a specific field.
+      # Atomically increment or decrement a specific field. This is the one
+      # place the local value is updated after the server applies the
+      # increment; the `<field>_increment!` helpers delegate here.
       # @param field [String] the name of the field in the Parse collection.
-      # @param amount [Integer] the amoun to increment. Use negative values to decrement.
+      # @param amount [Numeric] the amount to increment. Use negative values to decrement.
+      #  Integer amounts are sent as integers; any other Numeric is sent as a Float
+      #  so fractional increments on Number columns are not truncated.
       # @see #operate_field!
       def op_increment!(field, amount = 1)
         unless amount.is_a?(Numeric)
           raise ArgumentError, "Amount should be numeric"
         end
-        result = operate_field! field, { __op: :Increment, amount: amount.to_i }.freeze
+        amount = amount.is_a?(Integer) ? amount : amount.to_f
+        result = operate_field! field, { __op: :Increment, amount: amount }.freeze
         if result
-          # Also update the local state to reflect the increment
+          # Also update the local state to reflect the increment.
+          # operate_field! does not touch local state.
           field_sym = field.to_sym
           current_value = self[field_sym] || 0
-          new_value = current_value + amount.to_i
+          current_value = 0 unless current_value.is_a?(Numeric)
+          new_value = current_value + amount
           set_attribute_method = "#{field}_set_attribute!"
           if respond_to?(set_attribute_method)
             send(set_attribute_method, new_value, true) # Set new value with dirty tracking
@@ -1354,6 +1361,18 @@ module Parse
         @_session_token = _validate_session_token! session, :save
         return true unless changed? || force
 
+        # A create may assign the objectId client-side from a callback
+        # (parse_reference precompute, acl_owner :self). Until the create
+        # returns createdAt, persisted? must stay false for such an object.
+        @_creating_record = true if @id.blank?
+        _save_with_callbacks(autoraise: autoraise, force: force, validate: validate)
+      ensure
+        remove_instance_variable(:@_creating_record) if defined?(@_creating_record)
+      end
+
+      # @!visibility private
+      # Body of {#save} after the deleted-object, session and no-change checks.
+      def _save_with_callbacks(autoraise:, force:, validate:)
         # Run validations (validation callbacks are now triggered by valid? method)
         # Pass context so `on: :create` and `on: :update` options work with callbacks
         if validate

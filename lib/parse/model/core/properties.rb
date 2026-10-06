@@ -19,7 +19,55 @@ module Parse
   # supported in Parse and mapping them between their remote names with their local ruby named attributes.
   module Properties
     # These are the base types supported by Parse.
-    TYPES = [:string, :relation, :integer, :float, :boolean, :date, :array, :file, :geopoint, :polygon, :bytes, :object, :acl, :timezone, :phone, :email, :vector].freeze
+    TYPES = [:string, :relation, :integer, :float, :number, :boolean, :date, :array, :file, :geopoint, :polygon, :bytes, :object, :acl, :timezone, :phone, :email, :vector].freeze
+    # Local data types stored in a Parse Number column.
+    NUMERIC_TYPES = [:integer, :float, :number].freeze
+
+    # Cast a value for a `:number` property. Parse's Number column holds
+    # both integral and fractional values, so the cast keeps whichever the
+    # value is: an Integer when it has no fractional part (`5`, `5.0`,
+    # `"5.0"`, `BigDecimal("5")`) and a Float otherwise (`4.75`, `"4.5"`).
+    # Blank values and values that are not numeric become nil. Non-finite
+    # floats (NaN, Infinity) are kept as Floats.
+    #
+    # @param val [Object] the value to cast.
+    # @return [Integer, Float, nil]
+    def self.typecast_number(val)
+      case val
+      when nil, true, false
+        nil
+      when Integer
+        val
+      when Float
+        integral_or_float(val)
+      when String
+        str = val.strip
+        return nil unless NUMBER_STRING_FORMAT.match?(str)
+        str.match?(/[.eE]/) ? integral_or_float(Float(str)) : Integer(str, 10)
+      when Numeric
+        # BigDecimal, Rational and other Numeric types: compare against the
+        # truncated value so an integral BigDecimal stays exact.
+        begin
+          float = val.to_f
+          return float unless float.finite?
+          val == val.truncate ? val.truncate.to_i : float
+        rescue StandardError
+          nil
+        end
+      else
+        val.respond_to?(:to_str) ? typecast_number(val.to_str) : nil
+      end
+    end
+
+    # Decimal number literal accepted by {typecast_number} for String input.
+    NUMBER_STRING_FORMAT = /\A[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\z/.freeze
+
+    # @!visibility private
+    def self.integral_or_float(num)
+      return num unless num.finite?
+      num == num.floor ? num.to_i : num
+    end
+
     # These are the base mappings of the remote field name types.
     BASE = { objectId: :string, createdAt: :date, updatedAt: :date, ACL: :acl }.freeze
     # The list of properties that are part of all objects
@@ -265,9 +313,6 @@ module Parse
         data_type = :geopoint if data_type == :geo_point
         data_type = :polygon if data_type == :geo_polygon
         data_type = :integer if data_type == :int
-        # Parse's Number type holds floating-point values; mapping :number to
-        # :integer silently truncated 4.75 to 4.
-        data_type = :float if data_type == :number
         data_type = :phone if data_type == :phone_number || data_type == :mobile || data_type == :e164
         data_type = :email if data_type == :email_address
 
@@ -325,7 +370,9 @@ module Parse
                   "(remote field :#{parse_field}). Set Parse.strict_property_redefinition = false " \
                   "to fall back to warn-and-ignore behavior."
           end
-          warn "Property #{self}##{key} already defined with data type :#{data_type}. Will be ignored."
+          warn "Property #{self}##{key} already defined with data type :#{existing_type} " \
+               "(remote field :#{existing_parse_field}); redeclaration as :#{data_type} " \
+               "(remote field :#{parse_field}) will be ignored."
           return false
         end
         # We keep the list of fields that are on the remote Parse store
@@ -367,8 +414,8 @@ module Parse
 
         # if the field is marked as required, then add validations
         if opts[:required]
-          # if integer or float, validate that it's a number
-          if data_type == :integer || data_type == :float
+          # if integer, float or number, validate that it's a number
+          if NUMERIC_TYPES.include?(data_type)
             validates_numericality_of key
           end
           # validate that it is not empty
@@ -646,23 +693,18 @@ module Parse
           unless opts[:scopes] == false
             scope key, ->(opts = {}) { query(opts.merge(key => true)) }
           end
-        elsif data_type == :integer || data_type == :float
+        elsif NUMERIC_TYPES.include?(data_type)
           if self.method_defined?("#{key}_increment!")
             warn "Creating increment helper :#{key}_increment!. Will overwrite existing method #{self}##{key}_increment!."
           end
 
+          # op_increment! sends the atomic operation and updates the local
+          # value itself, so this helper must not add the amount again.
           define_method("#{key}_increment!") do |amount = 1|
             unless amount.is_a?(Numeric)
-              raise ArgumentError, "Amount needs to be an integer"
+              raise ArgumentError, "Amount needs to be numeric"
             end
-            result = self.op_increment!(key, amount)
-            if result
-              current = send(key)
-              new_value = (data_type == :float ? current.to_f : current.to_i) + amount
-              # set the updated value, with no dirty tracking
-              self.send set_attribute_method, new_value, false
-            end
-            result
+            self.op_increment!(key, amount)
           end
 
           if self.method_defined?("#{key}_decrement!")
@@ -671,7 +713,7 @@ module Parse
 
           define_method("#{key}_decrement!") do |amount = -1|
             unless amount.is_a?(Numeric)
-              raise ArgumentError, "Amount needs to be an integer"
+              raise ArgumentError, "Amount needs to be numeric"
             end
             amount = -amount if amount > 0
             send("#{key}_increment!", amount)
@@ -882,11 +924,14 @@ module Parse
         original_items = (instance_variable_get(ivar) || []).to_a
         objects.reject! { |r| original_items.include?(r) }
         val = original_items + objects
-      elsif "Increment" == op && data_type == :integer || data_type == :integer
-        # for operations that increment by a certain amount, they come as a hash
-        val = (instance_variable_get(ivar) || 0) + (val["amount"] || 0).to_i
-      elsif "Increment" == op && data_type == :float
-        val = (instance_variable_get(ivar) || 0).to_f + (val["amount"] || 0).to_f
+      elsif "Increment" == op && NUMERIC_TYPES.include?(data_type)
+        # for operations that increment by a certain amount, they come as a hash.
+        # The sum is cast to the property type by format_value afterwards.
+        current = instance_variable_get(ivar)
+        current = 0 unless current.is_a?(Numeric)
+        amount = val["amount"]
+        amount = 0 unless amount.is_a?(Numeric)
+        val = current + amount
       end
       val
     end
@@ -949,6 +994,8 @@ module Parse
         val = val.to_s unless val.blank?
       when :float
         val = val.to_f unless val.blank?
+      when :number
+        val = Parse::Properties.typecast_number(val)
       when :acl
         # ACL types go through a special conversion
         val = ACL.typecast(val, self)

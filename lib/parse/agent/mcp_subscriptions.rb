@@ -647,6 +647,12 @@ module Parse
           true
         end
 
+        # Whether the session holds at least one resource subscription.
+        # @return [Boolean]
+        def subscriptions?(session_id)
+          @mutex.synchronize { @sessions.key?(session_id) && !@sessions[session_id].empty? }
+        end
+
         # @return [Integer] number of active (session, uri) subscriptions.
         def subscription_count
           @mutex.synchronize { @sessions.values.sum(&:size) }

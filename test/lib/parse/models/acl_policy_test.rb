@@ -196,8 +196,14 @@ class TestAclPolicy < Minitest::Test
     # as if it were a user; that would silently grant a non-user objectId
     # write access if the User collection happens to contain a record with
     # the same id.
+    # The `as:` option refuses it at construction; the save-time resolver
+    # also ignores it (an owner field could hold such a pointer).
     team_ptr = Parse::Pointer.new("Team", "team-id")
-    obj = AclPolicyOwnerElsePrivateModel.new(title: "x", as: team_ptr)
+    assert_raises(ArgumentError) do
+      AclPolicyOwnerElsePrivateModel.new(title: "x", as: team_ptr)
+    end
+    obj = AclPolicyOwnerElsePrivateModel.new(title: "x")
+    assert_nil obj.send(:_resolve_acl_owner_id, team_ptr)
     assert_equal({}, resolve(obj).acl.as_json, "non-User pointer should be rejected, falling through to private")
   end
 
@@ -205,7 +211,11 @@ class TestAclPolicy < Minitest::Test
     # Previously any object responding to #id was accepted. After tightening,
     # only Parse::User, Parse::Pointer to _User, or raw String ids work.
     fake = Struct.new(:id).new("fake-id")
-    obj = AclPolicyOwnerElsePrivateModel.new(title: "x", as: fake)
+    assert_raises(ArgumentError) do
+      AclPolicyOwnerElsePrivateModel.new(title: "x", as: fake)
+    end
+    obj = AclPolicyOwnerElsePrivateModel.new(title: "x")
+    assert_nil obj.send(:_resolve_acl_owner_id, fake)
     assert_equal({}, resolve(obj).acl.as_json, "arbitrary object with .id should be rejected")
   end
 
