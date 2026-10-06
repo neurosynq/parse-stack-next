@@ -160,38 +160,100 @@ end
 #   CONTINUE_ON_FAILURE=false   stop at the first failing file
 #                               (default: run them all, then list every failure)
 #
+# Integration runs (`integration: true`) also enforce a release gate
+# (test/support/integration_gate.rb):
+#   * Parse Server must answer /health before each file. If it is down, the
+#     run FAILS, names the file it went down before (or during), and does not
+#     run the remaining files, instead of letting them skip or error one by one.
+#   * A skip whose reason says a required service was unreachable (Parse
+#     Server, MongoDB, Redis) fails its file. Legitimate skips (Atlas-only,
+#     missing API keys, ffmpeg) stay skips.
+#   PSNEXT_FAIL_ON_INFRA_SKIP=false   report infrastructure skips without
+#                                     failing on them
+#
 # Exits non-zero if any file failed.
-def run_test_files!(label, files, log:)
+def run_test_files!(label, files, log:, integration: false)
   $stdout.sync = true
   require "fileutils"
+  require_relative "test/support/integration_gate"
+  gate = Parse::Test::IntegrationGate
   if (pattern = ENV["TEST_PATTERN"].to_s).length.positive?
     files = files.select { |f| f.include?(pattern) }
     puts "TEST_PATTERN=#{pattern} -> #{files.length} matching file(s)"
   end
   continue = ENV.fetch("CONTINUE_ON_FAILURE", "true") != "false"
+  fail_on_infra_skip = integration && ENV.fetch("PSNEXT_FAIL_ON_INFRA_SKIP", "true") != "false"
   FileUtils.mkdir_p(File.dirname(log))
+  skip_log = log.sub(/\.log\z/, "") + "-skips.log"
+  File.write(skip_log, "") if integration
   total = files.length
   started = Time.now
-  results = []
+  results = []   # [file, ok, seconds, reason]
+  not_run = []
+  server_down = nil
   File.write(log, "#{label}: #{total} files, started #{started}\n")
   puts "\n>> #{label}: #{total} files (progress log: #{log})"
+  record = lambda do |line|
+    puts line
+    File.open(log, "a") { |f| f.puts line }
+  end
 
   files.each_with_index do |file, i|
     n = i + 1
+    if integration && !gate.server_healthy?
+      previous = results.last&.first
+      server_down = "Parse Server is not answering /health before #{file}" \
+                    "#{previous ? " (last file run: #{previous})" : ""}"
+      not_run = files[i..]
+      record.call("!! #{server_down}; #{not_run.length} file(s) not run")
+      break
+    end
+
     puts "\n" + "=" * 80
     puts "[#{n}/#{total}] #{file}"
     puts "=" * 80
     t0 = Time.now
+    skip_offset = integration ? File.size(skip_log) : 0
+    env = { "PARSE_TEST_USE_DOCKER" => "true" }
+    env["PSNEXT_SKIP_LOG"] = File.expand_path(skip_log) if integration
     # Always go through `bundle exec` so the locked gem versions win. With a
     # bare `ruby`, RubyGems activates the newest installed minitest (6.0.x),
     # which dropped the bundled `minitest/mock`; the standalone `minitest-mock`
     # gem then can't co-activate and `test_helper.rb` fails to load every file.
-    ok = system("PARSE_TEST_USE_DOCKER=true bundle exec ruby -Ilib:test #{file}")
+    ok = system(env, "bundle exec ruby -Ilib:test #{file}")
     dt = Time.now - t0
-    results << [file, ok, dt]
-    summary = format("[%d/%d] %-4s %7.1fs  %s", n, total, ok ? "PASS" : "FAIL", dt, file)
-    puts summary
-    File.open(log, "a") { |f| f.puts summary }
+    reason = nil
+
+    if integration
+      new_skips = if File.exist?(skip_log)
+          File.binread(skip_log).byteslice(skip_offset..).to_s.force_encoding("UTF-8").scrub.lines
+        else
+          []
+        end
+      infra = gate.infra_skips(new_skips)
+      unless infra.empty?
+        record.call("!! #{infra.length} skip(s) in #{file} because a required service was unreachable:")
+        infra.first(5).each { |test, why| record.call("     #{test}: #{why}") }
+        if fail_on_infra_skip
+          ok = false
+          reason = "infrastructure skips"
+        end
+      end
+      if !ok && !gate.server_healthy?
+        server_down = "Parse Server stopped answering /health during #{file}"
+        reason = "Parse Server down"
+      end
+    end
+
+    results << [file, ok, dt, reason]
+    summary = format("[%d/%d] %-4s %7.1fs  %s%s", n, total, ok ? "PASS" : "FAIL", dt, file,
+                     reason ? "  (#{reason})" : "")
+    record.call(summary)
+    if server_down
+      not_run = files[(i + 1)..]
+      record.call("!! #{server_down}; #{not_run.length} file(s) not run")
+      break
+    end
     if !ok && !continue
       File.open(log, "a") { |f| f.puts "STOPPED at first failure (CONTINUE_ON_FAILURE=false)" }
       break
@@ -199,22 +261,27 @@ def run_test_files!(label, files, log:)
   end
 
   elapsed = Time.now - started
-  passed = results.count { |_, ok, _| ok }
-  failed = results.reject { |_, ok, _| ok }
+  passed = results.count { |r| r[1] }
+  failed = results.reject { |r| r[1] }
   footer = format("%s: %d/%d passed in %.1fs (%.1f min)",
                   label, passed, results.length, elapsed, elapsed / 60.0)
+  footer += format("; %d not run", not_run.length) unless not_run.empty?
   puts "\n" + "=" * 80
-  puts footer
+  lines = [footer]
+  lines << "Run FAILED: #{server_down}" if server_down
   unless failed.empty?
-    puts "Failed (#{failed.length}):"
-    failed.each { |f, _, d| puts format("  FAIL %7.1fs  %s", d, f) }
+    lines << "Failed (#{failed.length}):"
+    failed.each { |f, _, d, why| lines << format("  FAIL %7.1fs  %s%s", d, f, why ? "  (#{why})" : "") }
   end
+  unless not_run.empty?
+    lines << "Not run (#{not_run.length}):"
+    not_run.first(20).each { |f| lines << "  NOT RUN  #{f}" }
+    lines << "  ... #{not_run.length - 20} more" if not_run.length > 20
+  end
+  lines.each { |l| puts l }
   puts "=" * 80
-  File.open(log, "a") do |f|
-    f.puts footer
-    failed.each { |ff, _, d| f.puts format("  FAIL %7.1fs  %s", d, ff) }
-  end
-  exit(1) unless failed.empty?
+  File.open(log, "a") { |f| lines.each { |l| f.puts l } }
+  exit(1) unless failed.empty? && server_down.nil?
 end
 
 # Integration tests require Docker
@@ -227,7 +294,7 @@ namespace :test do
     # flake — the rest of the integration suite against the shared server.
     files = FileList["test/lib/**/*integration_test.rb"]
       .exclude("test/lib/**/*disruptive*")
-    run_test_files!("Integration tests", files, log: "tmp/integration-progress.log")
+    run_test_files!("Integration tests", files, log: "tmp/integration-progress.log", integration: true)
   end
 
   desc "Run unit tests only (no Docker required). " \
