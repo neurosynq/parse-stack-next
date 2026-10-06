@@ -505,18 +505,27 @@ Two things to know:
   one-chunk document. Registering a context model as an `embed` provider
   works, but the stored vectors carry no surrounding-document context.
   Use `embed_chunks` when chunk-level context is the point.
-* **Request sizing is partly handled for you.** Voyage caps one request
-  at 1,000 documents, 16,000 chunks, and 120k tokens. `embed_chunks`
-  checks the document and chunk caps before sending, and splits large
-  inputs across several requests by whole document (a document's chunks
-  always travel together) so that each **response** stays under the
-  SDK's response-size cap. That split is sized by the vectors coming
-  back, not by tokens going out, so it does **not** guarantee a request
-  stays under the 120k input-token cap. The SDK has no tokenizer to
-  check that; keep long documents to a few per call, and expect a
-  `BadRequestError` from Voyage if a request exceeds it. Context models
-  default to `embed_batch_size: 32` to keep `embed_text` batches clear of
-  the token cap for typical inputs, which is a heuristic, not a check.
+* **Request sizing adapts; it is not exact token counting.** Voyage caps
+  one request at 1,000 documents, 16,000 chunks, and 120k input tokens.
+  `embed_chunks` (and `embed_text` on a context model) packs whole
+  documents into requests that stay within the document cap, a chunk
+  count whose **response** fits the SDK's response-size cap, and an
+  **estimated** 120k-token budget. The SDK has no tokenizer, so the
+  estimate assumes three bytes per token, which over-counts typical
+  English text and packs conservatively. A document's chunks always
+  travel together.
+  When Voyage still rejects a request as too large (its "batch size" or
+  "max allowed tokens per submitted batch" errors, or an HTTP 413), the
+  SDK halves that request by document and resends each half, keeping
+  the returned vectors aligned with your input. Only those positively
+  identified size errors trigger a split; any other 400 is raised as is,
+  with the provider's message on `BadRequestError#detail`. A document
+  that is rejected as too large even on its own raises a
+  `BadRequestError` naming its index, since no split can fix it: break
+  it into fewer or shorter chunks. A single chunk longer than the
+  model's context window ("tokens in an example exceeds the context
+  length") is also raised directly. Context models default to
+  `embed_batch_size: 32` for `embed_text` batches.
 
 ---
 
