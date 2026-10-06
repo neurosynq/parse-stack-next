@@ -267,7 +267,12 @@ module Parse
         return cached unless cached.nil?
 
         response = begin
-            @client.current_user(session_token)
+            # cache: false: a revoked or expired token must not re-resolve
+            # from a cached /users/me response after its identity entry is
+            # evicted or invalidated. The identity plane above is the only
+            # cache on this path, so its TTL and invalidation hooks bound
+            # revocation.
+            @client.current_user(session_token, cache: false)
           rescue => e
             raise InvalidSession, "session token lookup failed: #{e.class}: #{e.message}"
           end
