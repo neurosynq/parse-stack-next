@@ -54,6 +54,40 @@ class VectorIndexDriftTest < Minitest::Test
     assert_includes findings.first, "dotProduct"
   end
 
+  class QuantDriftItem < Parse::Object
+    parse_class "QuantDriftItem"
+    property :embedding, :vector, dimensions: 4, provider: :fx_drift, similarity: :cosine,
+                                  quantization: :scalar
+  end
+
+  def test_index_quantized_without_declaration_is_drift
+    idx = index_fixture
+    idx["latestDefinition"]["fields"].first["quantization"] = "binary"
+    findings = findings_for(idx)
+    assert_equal 1, findings.length
+    assert_includes findings.first, "quantization=\"binary\""
+    assert_includes findings.first, "quantization: none"
+  end
+
+  def test_declared_quantization_missing_from_index_is_drift
+    findings = QuantDriftItem.send(:vector_index_drift_findings, :embedding, index_fixture)
+    assert_equal 1, findings.length
+    assert_includes findings.first, "quantization=\"none\""
+    assert_includes findings.first, "quantization: \"scalar\""
+  end
+
+  def test_matching_quantization_is_not_drift
+    idx = index_fixture
+    idx["latestDefinition"]["fields"].first["quantization"] = "scalar"
+    assert_empty QuantDriftItem.send(:vector_index_drift_findings, :embedding, idx)
+  end
+
+  def test_explicit_none_quantization_matches_undeclared
+    idx = index_fixture
+    idx["latestDefinition"]["fields"].first["quantization"] = "none"
+    assert_empty findings_for(idx)
+  end
+
   def test_missing_index_similarity_is_not_drift
     idx = index_fixture
     idx["latestDefinition"]["fields"].first.delete("similarity")

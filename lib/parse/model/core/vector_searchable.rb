@@ -497,7 +497,9 @@ module Parse
       #    property's declared `dimensions:`.
       # 2. `similarity` vs the property's declared `similarity:` (only
       #    when both sides declare one).
-      # 3. When the class registers an `agent_tenant_scope`, the scope
+      # 3. `quantization` vs the property's declared `quantization:`
+      #    (absent on either side means none).
+      # 4. When the class registers an `agent_tenant_scope`, the scope
       #    field must appear among the index's `type: "filter"` paths —
       #    otherwise the tenant pre-filter that
       #    {Parse::Retrieval.retrieve} folds into `$vectorSearch.filter`
@@ -550,6 +552,17 @@ module Parse
         if declared_sim && index_sim && index_sim.to_s != declared_sim.to_s
           findings << "index similarity=#{index_sim.inspect} but property declares " \
                       "similarity: #{declared_sim.inspect}"
+        end
+
+        # Quantization is compared both ways: an index quantized without a
+        # declaration, or a declaration the index does not carry, is drift.
+        # An absent value means none on either side.
+        declared_q = vector_properties.dig(field.to_sym, :quantization)&.to_s || "none"
+        index_q = (vector_entry["quantization"] || vector_entry[:quantization]).to_s
+        index_q = "none" if index_q.empty?
+        if declared_q != index_q
+          findings << "index quantization=#{index_q.inspect} but property declares " \
+                      "quantization: #{declared_q == "none" ? "none" : declared_q.inspect}"
         end
 
         scope_field = registered_tenant_scope_field

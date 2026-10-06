@@ -1,0 +1,26 @@
+{
+  "fields": [
+    {
+      "numDimensions": 768,
+      "path": "embedding",
+      "similarity": "dotProduct",
+      "type": "vector"
+    },
+    {
+      "path": "_p_author",
+      "type": "filter"
+    },
+    {
+      "path": "category",
+      "type": "filter"
+    },
+    {
+      "path": "published",
+      "type": "filter"
+    },
+    {
+      "path": "tenantKey",
+      "type": "filter"
+    }
+  ]
+}

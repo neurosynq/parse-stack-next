@@ -241,6 +241,91 @@ indexes for one whose definition covers the requested `path`. The
 first match wins; pass `index:` explicitly when you have more than
 one covering index and want a specific one.
 
+### Generating the definition from the model
+
+Writing the definition by hand lets it drift from the model: a changed
+`dimensions:`, a new `agent_searchable` filter field, or a tenant scope
+the index does not cover. `Parse::VectorSearch::IndexDefinition` derives
+the definition from the model's own declarations instead:
+
+* the `:vector` property's path, `dimensions:`, `similarity:` (`cosine`
+  when undeclared), and optional `quantization:`;
+* every `agent_searchable filter_fields:` entry as a `type: "filter"` path
+  (pointer fields use their `_p_<column>` storage path);
+* the `agent_tenant_scope` field, which retrieval folds into
+  `$vectorSearch.filter` on every scoped query.
+
+Output is deterministic (vector entry first, filters sorted by path), so
+it diffs cleanly in review.
+
+```ruby
+class Document < Parse::Object
+  property :category, :string
+  property :embedding, :vector, dimensions: 1024, similarity: :dotProduct
+  agent_searchable field: :embedding, filter_fields: %i[category]
+
+  # Declare the index; its definition is generated, not written by hand.
+  vector_search_index "document_vec"
+end
+
+# Preview without touching Atlas.
+Parse::VectorSearch::IndexDefinition.build(Document)
+Parse::Schema.vector_index_definition(Document)          # same thing
+Parse::VectorSearch::IndexDefinition.preview(Document, name: "document_vec")
+
+# Compare against what is deployed (a definition or a $listSearchIndexes entry).
+live = Parse::AtlasSearch::IndexCatalog.find_vector_index("Document", field: :embedding)
+Parse::VectorSearch::IndexDefinition.diff(Parse::Schema.vector_index_definition(Document), live)
+# => { in_sync: false,
+#      vector: { "numDimensions" => { declared: 1024, live: 1536 } },
+#      filters_missing: ["category"], filters_extra: [] }
+```
+
+Applying stays explicit. `vector_search_index` declarations join the
+model's `mongo_search_index` declarations in
+`Parse::Schema::SearchIndexMigrator`, which plans first and only mutates
+Atlas when asked; a drifted index is reported, not rebuilt, unless you
+pass `update: true`. The definition is generated when the migrator plans,
+so `agent_searchable` and `agent_tenant_scope` can be declared in any
+order.
+
+```ruby
+Document.search_indexes_plan          # :to_create / :in_sync / :drifted / :orphans
+Document.apply_search_indexes!        # creates missing indexes only
+Document.apply_search_indexes!(update: true)   # also rebuilds drifted ones
+```
+
+### Index-side quantization
+
+Atlas can quantize a float vector field when it builds the index, which
+shrinks the index Atlas keeps in memory. Declare it per property; it is
+off by default:
+
+```ruby
+property :embedding, :vector, dimensions: 1024, quantization: :scalar   # or :binary
+```
+
+The generated definition then carries `"quantization": "scalar"` (or
+`"binary"`) on the vector field. Only the index changes: stored vectors and
+the SDK write path stay full precision, so turning it on or off is an index
+rebuild, not a re-embed.
+
+| Setting | Index memory | Recall |
+|---------|--------------|--------|
+| none (default) | full float vectors | baseline |
+| `:scalar` | roughly 4x smaller | small loss for most embedding models |
+| `:binary` | roughly 32x smaller | larger loss; Atlas rescoring recovers part of it |
+
+Measure recall on your own queries before adopting `:binary`; the right
+choice depends on the embedding model and the collection. For small
+collections the memory saving rarely matters.
+
+First-query drift verification also checks quantization: an index whose
+`quantization` differs from the property's declaration (an absent value
+counts as none on either side) is reported under
+`Parse::VectorSearch.index_drift_policy` like a dimension or similarity
+mismatch.
+
 ---
 
 ## Running similarity queries: `find_similar`
@@ -302,6 +387,9 @@ index's `latestDefinition` against the model declaration:
   (usually an index that predates a model change).
 * `similarity` vs the property's declared `similarity:` (checked only
   when both sides declare one).
+* `quantization` vs the property's declared `quantization:` (absent on
+  either side means none, so an index quantized without a declaration
+  is drift too).
 * When the class registers an `agent_tenant_scope`, the scope field
   must appear among the index's `type: "filter"` paths — without it,
   every tenant-scoped `$vectorSearch.filter` fails Atlas-side at
