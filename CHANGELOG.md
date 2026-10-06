@@ -639,7 +639,8 @@
 - **FIXED**: Logout, `logout_all!`, session destroy, password change, user
   deletion, and `Role` saves invalidate the cached identity and role
   closures, so revocations and role changes reach mongo-direct and Atlas
-  paths immediately instead of after the identity or role TTL. The MCP
+  paths immediately instead of after the identity or role TTL; atomic
+  `role.users` and `role.roles` operations invalidate the same caches. The MCP
   session check treats Parse Server's answer for a revoked token (HTTP 400,
   code 209) as a rejection.
 - **FIXED**: The response cache never stores `users/me`, `sessions/me`,
@@ -648,7 +649,10 @@
   other keys sharing the store cannot read another's entries. A write
   retires every cached variant of the resource and every cached query over
   its class (including batch sub-requests), so a revoked row is not served
-  from a cached query until it expires.
+  from a cached query until it expires. Reads establish their cache versions
+  before the request and skip storing a response when a version changed in
+  flight, so a read that overlaps an ACL write cannot restore the revoked
+  row.
 - **FIXED**: `Parse::Client#send_request` honors the request's own
   `session_token:`, `use_master_key:`, `cache:`, and `retry:` options; a
   request opting out of the master key still sent it.
@@ -679,6 +683,21 @@
   its whole column.
 - **CHANGED**: protectedFields stripping removes top-level columns only,
   matching Parse Server.
+- **FIXED**: Scoped mongo-direct pipelines on classes with protected fields
+  accept a `$getField`, `$setField`, or `$unsetField` name only as a plain
+  string or a `$literal` string, so a name read from the document cannot
+  alias a protected field.
+- **FIXED**: `results_direct`, `count_direct`, `distinct_direct`, the
+  mongo-direct auto-route, and the Atlas Search bridge respect
+  `Parse.without_master_key`, resolving to the session or public scope as
+  REST does instead of reading as master.
+- **FIXED**: Subqueries (`in_query`, `not_in_query`, `select`,
+  `dont_select`) combined with `or_where` or nested in `$and`, `$or`, or
+  `$nor` compile to their own joins on the direct path, with the joined
+  class's ACL, CLP, and protected-field checks. A subquery in a position that
+  cannot be translated, or nested in a query-derived aggregation, raises
+  `ArgumentError` instead of reaching MongoDB raw (one under `$not` used to
+  invert the filter).
 
 #### Webhooks follow Parse Server's contract
 
@@ -690,7 +709,9 @@
   class than its URL is refused.
 - **FIXED**: A signed webhook delivery is deduplicated on its signature, so a
   captured request cannot be replayed within the timestamp window by
-  altering or dropping the unsigned nonce.
+  altering or dropping the unsigned nonce. A signature may cover the
+  delivery nonce (`"#{timestamp}.#{nonce}.#{body}"`), so identical bodies
+  sent in the same second each get their own signature.
 - **NEW**: `error!(message, code:)` and `Parse::Webhooks::ResponseError#code`
   carry a Parse error code (Parse Server's HTTP adapter still reports 141).
 
@@ -712,8 +733,9 @@
 - **FIXED**: Reading `acl` on an object fetched with `keys:` that left the
   ACL out fetches the stored ACL instead of returning nil, so code that
   edits it cannot replace the record's real ACL. Saving other fields never
-  sends the ACL. Reassigning a property to itself after an in-place edit
-  keeps the edit.
+  sends the ACL, and the partial-fetch tracking survives an update, so the
+  ACL is still fetched on read after a save. Reassigning a property to itself
+  after an in-place edit keeps the edit.
 
 #### `protectedFields` resolution matches Parse Server
 
