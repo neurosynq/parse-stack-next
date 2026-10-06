@@ -1260,7 +1260,7 @@ module Parse
       values = raw_results.map { |item| item["value"] }.compact
 
       # Use schema-based approach to handle pointer field results
-      parse_class = Parse::Model.const_get(@table) rescue nil
+      parse_class = table_model_class
       is_pointer = parse_class && is_pointer_field?(parse_class, field, formatted_field)
 
       if is_pointer && values.any?
@@ -5360,7 +5360,7 @@ module Parse
           formatted = Query.format_field(field)
           # For pointer fields, MongoDB stores them with _p_ prefix
           # Check if this field is defined as a pointer in the Parse class
-          parse_class = Parse::Model.const_get(@table) rescue nil
+          parse_class = table_model_class
           if parse_class && is_pointer_field?(parse_class, field, formatted)
             "_p_#{formatted}"
           else
@@ -5444,10 +5444,27 @@ module Parse
 
     # Check if a field is a pointer field using schema information
     # @param field [Symbol, String] the field name to check
+    # @api private
+    # The model class registered for this query's table. Resolves through
+    # each model's `parse_class` (Parse::Model.find_class), so it works for
+    # Parse class names that are not valid Ruby constants (`"contacts"`,
+    # `"_User"`) and for models whose `parse_class` differs from the Ruby
+    # class name. Falls back to a constant lookup for a table named after a
+    # Ruby class that has not been registered under that name. Before 5.8
+    # the query layer used `Parse::Model.const_get(@table)` alone, which
+    # raised (and was rescued to nil) for such names, so pointer fields were
+    # silently treated as plain fields: mongo-direct pipelines addressed
+    # `owner` instead of `_p_owner` and matched nothing.
+    #
+    # @return [Class, nil]
+    def table_model_class
+      Parse::Model.find_class(@table) || (Parse::Model.const_get(@table) rescue nil)
+    end
+
     # @return [Boolean] true if the field is a pointer field
     def field_is_pointer?(field)
       begin
-        parse_class = Parse::Model.const_get(@table)
+        parse_class = table_model_class
         return false unless parse_class.respond_to?(:fields)
 
         # If the field already has _p_ prefix, strip it to get the original field name
@@ -5500,7 +5517,7 @@ module Parse
     # @api private
     def field_is_known_to_schema?(field)
       begin
-        parse_class = Parse::Model.const_get(@table)
+        parse_class = table_model_class
         return false unless parse_class.respond_to?(:fields)
 
         fields_to_check = [field.to_s, field.to_sym]
@@ -5555,7 +5572,7 @@ module Parse
     def convert_pointer_value_with_schema(value, field_name, **options)
       return value unless value # nil/empty values pass through
 
-      parse_class = Parse::Model.const_get(@table) rescue nil
+      parse_class = table_model_class
       is_pointer = parse_class && is_pointer_field?(parse_class, field_name, Query.format_field(field_name))
       target_class = parse_class ? get_pointer_target_class_for(parse_class, field_name) : nil
 
@@ -5696,7 +5713,7 @@ module Parse
                   class_name = nil
 
                   # First try to get it from the schema
-                  parse_class = Parse::Model.const_get(@table) rescue nil
+                  parse_class = table_model_class
                   if parse_class
                     class_name = get_pointer_target_class_for(parse_class, field)
                   end
