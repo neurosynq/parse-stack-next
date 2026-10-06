@@ -6128,19 +6128,61 @@ module Parse
 
   # Wrapper class for custom aggregation results (from $group, $project, etc.)
   # Provides both hash-style access and method-style access to fields.
-  # Field names are automatically converted from camelCase to snake_case.
+  #
+  # Two naming modes:
+  #
+  # * `:default` (the default): field names are converted from camelCase to
+  #   snake_case symbols. `#to_h` returns those symbol keys, and the original
+  #   string keys stay readable through `#[]` and `#raw`.
+  # * `:server`: field names are kept exactly as the aggregation returned
+  #   them. `#to_h` and `#keys` use the original String keys (`"totalPlays"`,
+  #   `"ExternalID"`), nested values are untouched, and distinct keys whose
+  #   snake_case forms collide (`"totalPlays"` and `"total_plays"`) both
+  #   survive. Method-style access still accepts a snake_case name when it
+  #   identifies exactly one key, and raises when it is ambiguous.
   #
   # @example
   #   result = AggregationResult.new({ "_id" => "Rock", "totalPlays" => 500 })
   #   result["_id"]        # => "Rock"
   #   result[:total_plays] # => 500
   #   result.total_plays   # => 500
+  #   result.to_h          # => { _id: "Rock", total_plays: 500 }
+  #
+  #   server = AggregationResult.new({ "_id" => "Rock", "totalPlays" => 500 }, field_names: :server)
+  #   server.to_h          # => { "_id" => "Rock", "totalPlays" => 500 }
   #
   class AggregationResult
+    # Naming modes accepted by `field_names:` across the SDK's result APIs.
+    FIELD_NAME_MODES = %i[default server].freeze
+
+    # Normalize a `field_names:` option. nil means `:default`.
+    #
+    # @param value [Symbol, String, nil]
+    # @return [Symbol] `:default` or `:server`
+    # @raise [ArgumentError] for any other value.
+    def self.normalize_field_names!(value)
+      return :default if value.nil?
+      mode = value.respond_to?(:to_sym) ? value.to_sym : value
+      return mode if FIELD_NAME_MODES.include?(mode)
+      raise ArgumentError,
+            "field_names: must be one of #{FIELD_NAME_MODES.inspect} (got #{value.inspect})."
+    end
+
+    # @return [Symbol] `:default` or `:server`.
+    attr_reader :field_names
+
     # @param data [Hash] the raw aggregation result hash
-    def initialize(data)
+    # @param field_names [Symbol, nil] `:default` (snake_case symbol keys) or
+    #   `:server` (keys exactly as returned).
+    def initialize(data, field_names: nil)
+      @field_names = self.class.normalize_field_names!(field_names)
       @data = {}
       @raw_data = data
+
+      if @field_names == :server
+        data.each { |key, value| @data[key.to_s] = value }
+        return
+      end
 
       # Convert keys to snake_case and store
       data.each do |key, value|
@@ -6154,6 +6196,7 @@ module Parse
     # @param key [String, Symbol] the field name
     # @return [Object] the field value
     def [](key)
+      return @data[server_key_for(key)] if server?
       @data[key.to_s] || @data[key.to_sym]
     end
 
@@ -6161,18 +6204,23 @@ module Parse
     # @param key [String, Symbol] the field name
     # @return [Boolean]
     def key?(key)
+      return @data.key?(server_key_for(key)) if server?
       @data.key?(key.to_s) || @data.key?(key.to_sym)
     end
 
-    # Get all keys (snake_case symbols)
-    # @return [Array<Symbol>]
+    # Get all keys: snake_case symbols by default, or the original String
+    # keys in `:server` mode.
+    # @return [Array<Symbol>, Array<String>]
     def keys
+      return @data.keys if server?
       @data.keys.select { |k| k.is_a?(Symbol) }
     end
 
-    # Convert to hash with snake_case symbol keys
+    # Convert to hash: snake_case symbol keys by default, or the original
+    # String keys (a copy, nested values untouched) in `:server` mode.
     # @return [Hash]
     def to_h
+      return @data.dup if server?
       @data.select { |k, _| k.is_a?(Symbol) }
     end
 
@@ -6185,8 +6233,18 @@ module Parse
       @raw_data
     end
 
+    # @return [Boolean] true in `:server` naming mode.
+    def server?
+      @field_names == :server
+    end
+
     # Method-style access to fields
     def method_missing(method_name, *args, &block)
+      if server?
+        key = server_key_for(method_name, strict: true)
+        return @data[key] if key
+        return super
+      end
       key = method_name.to_sym
       if @data.key?(key)
         @data[key]
@@ -6196,11 +6254,31 @@ module Parse
     end
 
     def respond_to_missing?(method_name, include_private = false)
+      return !server_key_for(method_name).nil? || super if server?
       @data.key?(method_name.to_sym) || super
     end
 
     def inspect
       "#<Parse::AggregationResult #{to_h.inspect}>"
+    end
+
+    private
+
+    # Resolve a requested name to a stored key in `:server` mode: an exact
+    # match first, else the single key whose snake_case form equals it. Two
+    # or more snake_case matches are ambiguous (e.g. `totalPlays` and
+    # `total_plays` both stored): `strict:` raises naming them, otherwise nil.
+    def server_key_for(name, strict: false)
+      str = name.to_s
+      return str if @data.key?(str)
+      matches = @data.keys.select { |k| Parse::Query.to_snake_case(k) == str }
+      return matches.first if matches.length == 1
+      if matches.length > 1 && strict
+        raise ArgumentError,
+              "Parse::AggregationResult: #{str.inspect} matches several fields " \
+              "(#{matches.inspect}); read one with result[#{matches.first.inspect}]."
+      end
+      nil
     end
   end
 
@@ -6320,7 +6398,13 @@ module Parse
     #
     # @yield a block to iterate for each object in the result
     # @return [Array<Parse::Object, AggregationResult>] array of results
-    def results(&block)
+    #
+    # @param field_names [Symbol, nil] naming mode for AggregationResult rows:
+    #   `:default` (snake_case symbol keys from `#to_h`) or `:server` (keys
+    #   exactly as the aggregation returned them). Parse::Object rows are
+    #   unaffected; use `#as_json` for their server-named form.
+    def results(field_names: nil, &block)
+      @result_field_names = AggregationResult.normalize_field_names!(field_names)
       response = execute!
 
       if @mongo_direct && defined?(Parse::MongoDB) && Parse::MongoDB.enabled?
@@ -6350,7 +6434,7 @@ module Parse
       if looks_like_parse_document?(item)
         @query.send(:decode, [item]).first
       else
-        AggregationResult.new(item)
+        AggregationResult.new(item, field_names: @result_field_names)
       end
     end
 
@@ -6368,7 +6452,7 @@ module Parse
         @query.send(:redact_excluded_keys!, [parse_doc])
         @query.send(:decode, [parse_doc]).first
       else
-        AggregationResult.new(Parse::MongoDB.convert_aggregation_document(raw))
+        AggregationResult.new(Parse::MongoDB.convert_aggregation_document(raw), field_names: @result_field_names)
       end
     end
 

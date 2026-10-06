@@ -982,6 +982,51 @@ session's logs. `DELETE` on the session forgets it.
 
 ---
 
+## Server Field Names (`field_names: :server`)
+
+`Parse::Agent.new(field_names: :server)` asks for data fields in the exact
+names Parse returns or the model declares through its `field_map`
+(`createdAt`, `totalPlays`, an alias such as `ExternalID`), with no
+snake_case conversion anywhere a tool would otherwise apply one. Omit it (or
+pass `:default`) to keep each tool's existing output; any other value raises
+`ArgumentError`. Sub-agents inherit the mode unless they set their own.
+
+```ruby
+analytics = Parse::Agent.new(field_names: :server, permissions: :readonly)
+```
+
+| Output | Default | `field_names: :server` |
+|---|---|---|
+| `query_class` / `get_object` rows, Atlas and `semantic_search` source records, exports (CSV headers) | Parse field names | Parse field names (unchanged) |
+| A Parse object returned by an `agent_method` (`call_method`) | Parse field names and values | Parse field names and values |
+| An `AggregationResult` returned by an `agent_method` | snake_case keys | keys exactly as the aggregation returned them |
+
+Most tool output already carried server names, so the visible difference is
+in values an `agent_method` returns. Two `call_method` serialization fixes
+ship alongside: a returned Parse object is now emitted with its values (it
+previously emitted the model's field-type map, e.g. `"title" => "string"`),
+and a returned `AggregationResult` is emitted as a Hash (it was previously its
+`inspect` String).
+
+The option changes **data-field keys only**:
+
+* MCP protocol keys and SDK envelope keys (`chunks`, `documents`,
+  `object_id`, `next_call`, ...) keep their contracts.
+* Date, Pointer, and File formatting, vector visibility, and metadata
+  redaction are unchanged.
+* "Server names" means the application-facing Parse names, never raw MongoDB
+  storage columns such as `_p_author`, `_rperm`, or `_session_token`.
+* Explicit export column aliases still win over automatic naming.
+
+Naming is presentation only. ACL/CLP, `protectedFields`, the class
+`agent_fields` ceiling, and per-agent `fields:` policies resolve against the
+canonical field names before anything is formatted, so a user-scoped agent
+and a master-key agent with the same policy return the same fields in either
+mode. Like `fields:`, the mode is scoped to each tool call, so agents with
+different modes can run concurrently in one process.
+
+---
+
 ## Built-in Agent Hardening & Telemetry
 
 5.2 adds several agent-side controls, all configured on `Parse::Agent`:
