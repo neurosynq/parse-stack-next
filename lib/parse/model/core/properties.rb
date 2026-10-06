@@ -264,7 +264,10 @@ module Parse
         data_type = :timezone if data_type == :time_zone
         data_type = :geopoint if data_type == :geo_point
         data_type = :polygon if data_type == :geo_polygon
-        data_type = :integer if data_type == :int || data_type == :number
+        data_type = :integer if data_type == :int
+        # Parse's Number type holds floating-point values; mapping :number to
+        # :integer silently truncated 4.75 to 4.
+        data_type = :float if data_type == :number
         data_type = :phone if data_type == :phone_number || data_type == :mobile || data_type == :e164
         data_type = :email if data_type == :email_address
 
@@ -654,7 +657,8 @@ module Parse
             end
             result = self.op_increment!(key, amount)
             if result
-              new_value = send(key).to_i + amount
+              current = send(key)
+              new_value = (data_type == :float ? current.to_f : current.to_i) + amount
               # set the updated value, with no dirty tracking
               self.send set_attribute_method, new_value, false
             end
@@ -881,6 +885,8 @@ module Parse
       elsif "Increment" == op && data_type == :integer || data_type == :integer
         # for operations that increment by a certain amount, they come as a hash
         val = (instance_variable_get(ivar) || 0) + (val["amount"] || 0).to_i
+      elsif "Increment" == op && data_type == :float
+        val = (instance_variable_get(ivar) || 0).to_f + (val["amount"] || 0).to_f
       end
       val
     end

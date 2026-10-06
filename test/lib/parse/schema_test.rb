@@ -4,7 +4,7 @@ class TestSchema < Minitest::Test
   def test_type_map_defined
     assert_kind_of Hash, Parse::Schema::TYPE_MAP
     assert_equal :string, Parse::Schema::TYPE_MAP["String"]
-    assert_equal :integer, Parse::Schema::TYPE_MAP["Number"]
+    assert_equal :float, Parse::Schema::TYPE_MAP["Number"]
     assert_equal :boolean, Parse::Schema::TYPE_MAP["Boolean"]
     assert_equal :date, Parse::Schema::TYPE_MAP["Date"]
     assert_equal :pointer, Parse::Schema::TYPE_MAP["Pointer"]
@@ -81,7 +81,7 @@ class TestSchemaInfo < Minitest::Test
 
   def test_field_type
     assert_equal :string, @schema_info.field_type(:title)
-    assert_equal :integer, @schema_info.field_type("duration")
+    assert_equal :float, @schema_info.field_type("duration")
     assert_equal :pointer, @schema_info.field_type(:artist)
     assert_equal :array, @schema_info.field_type(:tags)
     assert_equal :boolean, @schema_info.field_type(:released)

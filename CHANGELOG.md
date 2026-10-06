@@ -35,6 +35,16 @@
   so a caller could test guesses against its value. Master scopes and classes
   with nothing protected are unaffected. **Migration:** pass `fields:` listing
   the fields to search.
+- **BREAKING**: `property :name, :number` and a server `Number` column now
+  map to `:float` instead of `:integer`. Parse's Number type holds
+  floating-point values, and the integer cast silently truncated them:
+  `property :score, :number` set to 4.75 read back as 4, and a class built
+  from the server schema read 9.99 as 9. The same applies to
+  `Parse::Schema::TYPE_MAP["Number"]`, `auto_generate_models!`, the
+  `<field>_increment!` helper, and an `Increment` operation on a float
+  field. **Migration:** a whole-number value now reads back as a Float (`5.0`
+  rather than `5`); declare the property `:integer` where integer semantics
+  are wanted.
 - **BREAKING**: `MCPRackApp.user_scoped` refuses `permissions: :admin`. The
   admin tier skips the embedding spend cap and score quantization, so every
   signed-in user of the endpoint inherited that exemption. **Migration:** use
@@ -306,6 +316,20 @@
   generator. Single-word properties such as `embedding` are unaffected. An
   index created with the Ruby name as its path must be recreated with the
   stored name; drift detection reports the mismatch.
+
+#### Model and cache fixes
+
+- **FIXED**: The cache middleware's rescue list named
+  `Redis::CannotConnectError` and the other Redis errors directly. With a
+  memory or other non-Redis Moneta store, Redis is not loaded, so a store
+  error not listed before those names (anything but `TypeError` or
+  `EINVAL`) was replaced by `NameError: uninitialized constant Redis`,
+  hiding the real error. The Redis and `connection_pool` classes are now
+  listed only when those libraries are loaded.
+- **IMPROVED**: `Parse::Object.new` accepts hash-like input such as Rails
+  `ActionController::Parameters`, which is not a Hash and was previously
+  ignored. Conversion goes through `to_h`, so unpermitted strong parameters
+  are still refused.
 
 #### `protectedFields` resolution matches Parse Server
 

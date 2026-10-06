@@ -271,8 +271,7 @@ module Parse
           # under Redis Cluster. Without it those escape the middleware and turn a
           # cache problem into a failed application request, which inverts the
           # whole point of the cache being optional.
-        rescue ::TypeError, Errno::EINVAL, Redis::CannotConnectError, Redis::TimeoutError,
-               Redis::CommandError, ConnectionPool::TimeoutError => e
+        rescue *cache_store_errors => e
           # if the cache store fails to connect, catch the exception but proceed
           # with the regular request, but turn off caching for this request. It is possible
           # that the cache connection resumes at a later point, so this is temporary.
@@ -309,6 +308,25 @@ module Parse
       end
 
       private
+
+      # Store errors that disable caching for the request rather than fail
+      # it. The Redis and connection_pool classes are listed only when those
+      # libraries are loaded: naming an unloaded constant in a `rescue`
+      # raises NameError while the rescue is evaluated, so a TypeError from a
+      # memory or other non-Redis store would escape as
+      # "uninitialized constant Redis" instead of falling back.
+      #
+      # @return [Array<Class>]
+      def cache_store_errors
+        errors = [::TypeError, Errno::EINVAL]
+        if defined?(::Redis)
+          %w[CannotConnectError TimeoutError CommandError].each do |name|
+            errors << ::Redis.const_get(name) if ::Redis.const_defined?(name, false)
+          end
+        end
+        errors << ::ConnectionPool::TimeoutError if defined?(::ConnectionPool::TimeoutError)
+        errors
+      end
 
       # Emit an ActiveSupport::Notifications event under the `parse.cache.*`
       # namespace.

@@ -1363,6 +1363,13 @@ module Parse
       # the trust signal here.
       trusted = @_trusted_init == true
       @_trusted_init = nil
+      # Accept hash-like input such as Rails `ActionController::Parameters`,
+      # which is not a Hash. Its `to_h` raises for unpermitted parameters, so
+      # strong-parameter filtering still applies.
+      if !opts.is_a?(Hash) && !opts.is_a?(String) && !opts.is_a?(Array) && !opts.nil? &&
+         opts.respond_to?(:to_h)
+        opts = opts.to_h
+      end
       input_hash = opts.is_a?(Hash) ? opts : nil
       input_had_acl = input_hash && %w[ACL acl].any? do |key|
         input_hash.key?(key) || input_hash.key?(key.to_sym)

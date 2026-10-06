@@ -53,7 +53,7 @@ module Parse
     # Parse field type mappings to Ruby types
     TYPE_MAP = {
       "String" => :string,
-      "Number" => :integer,
+      "Number" => :float,
       "Boolean" => :boolean,
       "Date" => :date,
       "File" => :file,
