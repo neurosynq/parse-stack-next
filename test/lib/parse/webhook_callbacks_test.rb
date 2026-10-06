@@ -167,7 +167,9 @@ class WebhookCallbacksTest < Minitest::Test
     test_object = Object.new
     test_object.define_singleton_method(:run_before_save_callbacks) { before_save_called = true }
     test_object.define_singleton_method(:run_before_create_callbacks) { before_create_called = true }
-    test_object.define_singleton_method(:changes_payload) { { "name" => "test" } }
+    # No dirty fields: the reply is nil, which the Rack app sends as
+    # `{}` (no success key) so Parse Server keeps the client's write as sent.
+    test_object.define_singleton_method(:changed) { [] }
     test_object.define_singleton_method(:is_a?) { |klass| klass == Parse::Object }
 
     # Register a before_save webhook that returns the object
@@ -191,7 +193,7 @@ class WebhookCallbacksTest < Minitest::Test
 
     refute before_save_called, "before_save callbacks should not run for Ruby-initiated requests"
     refute before_create_called, "before_create callbacks should not run for Ruby-initiated requests"
-    assert_equal({ "name" => "test" }, result, "Should return changes payload")
+    assert_nil result, "an unchanged object replies nil (keep the write as sent)"
     puts "✅ Ruby-initiated before_save skips before callbacks"
 
     # Reset tracking
@@ -212,7 +214,7 @@ class WebhookCallbacksTest < Minitest::Test
 
     assert before_save_called, "before_save callbacks should run for client-initiated requests"
     assert before_create_called, "before_create callbacks should run for a client-initiated create"
-    assert_equal({ "name" => "test" }, result, "Should return changes payload")
+    assert_nil result, "an unchanged object replies nil (keep the write as sent)"
     puts "✅ Client-initiated before_save runs before_save + before_create"
 
     # Reset tracking

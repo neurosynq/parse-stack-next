@@ -1091,7 +1091,20 @@ module Parse
         if response.error?
           puts "[#{parse_class}:#{field} Operation] #{response.error}"
         end
+        # Keep the server's reply so a caller can adopt the field's new value
+        # (Parse Server returns the whole array for Add/AddUnique/Remove).
+        @_last_operation_result = response.success? && response.result.is_a?(Hash) ? response.result : nil
         response.success?
+      end
+
+      # @!visibility private
+      # The value Parse Server returned for `field` from the last
+      # {#operate_field!}, or nil when the reply did not include it.
+      def _last_operation_value(field)
+        result = @_last_operation_result
+        return nil unless result.is_a?(Hash)
+        wire = (self.field_map[field.to_sym] || field).to_s
+        result[wire]
       end
 
       # Perform an atomic add operation to the array field.

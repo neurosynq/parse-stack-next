@@ -27,6 +27,9 @@ class WebhookRackCallTest < Minitest::Test
     Parse::Webhooks.instance_variable_set(:@missing_key_warned, nil)
     Parse::Webhooks.logging = false
     Parse::Webhooks.instance_variable_set(:@routes, nil)
+    # Unregistered functions are answered with an error, so register the
+    # function names these requests call.
+    %w[test x].each { |name| Parse::Webhooks.route(:function, name) { true } }
     # NEW-EXT-4 replay protection: cache is process-wide, so reset between
     # tests so identical bodies across cases don't trip the dedup LRU.
     Parse::Webhooks::ReplayProtection.reset!
@@ -154,8 +157,8 @@ class WebhookRackCallTest < Minitest::Test
     capture_io do
       status, _headers, body = Parse::Webhooks.call(build_env)
       payload = JSON.parse(body.join)
-      # No route registered, but request was accepted past the auth gate.
-      # success() returns {"success":true} by default.
+      # The request was accepted past the auth gate and reached the
+      # registered "test" function.
       assert_equal 200, status
       assert payload.key?("success")
     end
@@ -212,7 +215,7 @@ class WebhookRackCallTest < Minitest::Test
     capture_io do
       _status, _headers, body = Parse::Webhooks.call(build_env(key_header: "secret"))
       payload = JSON.parse(body.join)
-      # No route registered, success() returns {"success":true}
+      # Past the auth gate, the registered "test" function answers success.
       assert payload.key?("success")
     end
   end
@@ -292,7 +295,7 @@ class WebhookRackCallTest < Minitest::Test
         build_env_with_content_type("application/json; charset=utf-8")
       )
       payload = JSON.parse(body.join)
-      # No route registered for "x"; success path returns {"success":true}.
+      # Past the content-type gate, the registered "x" function answers success.
       assert payload.key?("success")
     end
   end

@@ -422,10 +422,36 @@ class AssocAuditTest < Minitest::Test
     refute ptr.respond_to?(:name=)
   end
 
+  class ServerArrayDoc < Parse::Object
+    parse_class "AssocAuditServerArray"
+    property :tags, :array
+  end
+
+  # After an atomic add, a plain array adopts the array the server returned,
+  # so a local copy that was already stale is corrected.
+  def test_atomic_add_adopts_the_server_array
+    unless Parse::Client.client?
+      Parse.setup(server_url: "http://localhost:1/parse", application_id: "a", api_key: "k")
+    end
+    obj = ServerArrayDoc.new(objectId: "x1", tags: ["a"])
+    obj.send(:clear_changes!) if obj.respond_to?(:clear_changes!, true)
+    fake = Struct.new(:result) do
+      def error? = false
+      def success? = true
+    end
+    reply = fake.new({ "tags" => %w[a b server-only], "updatedAt" => "2026-01-01T00:00:00.000Z" })
+    obj.client.stub(:update_object, ->(*_a, **_k) { reply }) do
+      assert obj.tags.add!("b")
+    end
+    assert_equal %w[a b server-only], obj.tags.to_a
+    refute obj.tags_changed?, "adopting the server value is not a local change"
+  end
+
   private
 
   def silence_warnings_for
     capture_io { yield }
   end
+
 end
 

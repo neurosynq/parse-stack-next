@@ -97,11 +97,34 @@ class WebhookAfterFindIntegrationTest < Minitest::Test
     refute captured[:any_has_embedding],
            "afterFind objects must have their :vector column stripped (class resolved from the route)"
     refute_includes (captured[:first_keys] || []), "embedding"
-    # Critically: a registered afterFind that fails to route returns
-    # `{"success": true}` (not an objects array), which Parse Server rejects and
-    # the query EOFs. So a passing query here also proves the routing fix —
-    # before it, this raised Faraday::ConnectionFailed.
+    # Parse Server maps every row an HTTP afterFind returns through
+    # `toJSONwithObjects`, which turns plain JSON rows into `{}`. The router
+    # therefore never sends rows back: it replies `{}` (no `success`), which
+    # keeps the matched rows. Check the rows still carry their data, not just
+    # that the count survived.
     assert_nil query_error, "afterFind must not break the query (got #{query_error})"
     assert results.size >= 3, "afterFind must not drop the query results"
+    titles = results.map(&:title)
+    %w[p0 p1 p2].each do |t|
+      assert_includes titles, t, "afterFind must not blank the rows (got #{titles.inspect})"
+    end
+    assert results.all? { |r| r.id.present? }, "rows keep their objectId"
+  end
+
+  def test_after_find_that_filters_rows_denies_the_query
+    Parse::Webhooks.route(:after_find, "WebhookAfterFindPost") do
+      objects.first(1) # an HTTP afterFind cannot drop rows; the SDK denies instead
+    end
+    Parse::Webhooks.register_triggers!(@server.url)
+    2.times { |i| WebhookAfterFindPost.new(title: "f#{i}").save }
+
+    raised = nil
+    results = nil
+    begin
+      results = WebhookAfterFindPost.query.results
+    rescue StandardError => e
+      raised = e
+    end
+    assert(raised || results.blank?, "a filtering afterFind must not return the rows it meant to hide")
   end
 end

@@ -19,13 +19,19 @@ module Parse
     #
     # This module adds two layers on top of the existing static-key check:
     #
-    # 1. **Always-on body+request-id dedup.** A bounded LRU records a
-    #    SHA-256 of `(request_id || "")` joined with the request body. A
-    #    duplicate seen within `replay_window_seconds` is rejected with
-    #    `"Webhook replay detected."`. Cooperation with Parse Server is not
-    #    required; this protects against in-window replays only, but those
-    #    are the cheapest attack to mount (proxy retries, captured fast
-    #    loops, retransmits).
+    # 1. **Nonce-keyed dedup.** When a delivery carries a per-delivery
+    #    identifier (an `X-Parse-Request-Id` or `X-Parse-Webhook-Nonce`
+    #    header), a bounded LRU records a SHA-256 of that identifier joined
+    #    with the request body. A duplicate seen within
+    #    `replay_window_seconds` is rejected with
+    #    `"Webhook replay detected."`.
+    #
+    #    Parse Server sends neither header on its webhook deliveries, so for
+    #    a stock deployment this layer is inactive. It deliberately does NOT
+    #    fall back to the body alone: two legitimate calls with identical
+    #    bodies (the same function called twice with the same params, the
+    #    same find run twice) are indistinguishable from a replay by body,
+    #    and rejecting them breaks correct traffic.
     #
     # 2. **Opt-in HMAC freshness verification.** When a `signing_secret` is
     #    configured (programmatically or via
@@ -37,19 +43,21 @@ module Parse
     #      bytes `"#{timestamp}.#{body}"` keyed with the signing secret.
     #
     #    Requests outside `signing_max_skew_seconds` (default 300) or with
-    #    an invalid signature are rejected. Once enabled, this gives full
-    #    binding between the body and the time of delivery and closes the
-    #    replay window beyond the freshness skew.
+    #    an invalid signature are rejected. This bounds a replay to the skew
+    #    window; adding an `X-Parse-Webhook-Nonce` header as well closes that
+    #    window through layer 1.
     #
-    # Operators wanting layer 2 must arrange for Parse Server to add these
-    # headers. Parse Server does not natively sign webhook deliveries, so
-    # this is typically done with a thin Cloud Code wrapper or an egress
-    # proxy. Until enabled, layer 1 still applies.
+    # Operators wanting either layer must arrange for these headers to be
+    # added. Parse Server does not natively sign webhook deliveries or tag
+    # them with a nonce, so this is typically done with a thin Cloud Code
+    # wrapper or an egress proxy.
     module ReplayProtection
       # @!visibility private
       HEADER_TIMESTAMP = "HTTP_X_PARSE_WEBHOOK_TIMESTAMP"
       # @!visibility private
       HEADER_SIGNATURE = "HTTP_X_PARSE_WEBHOOK_SIGNATURE"
+      # @!visibility private
+      HEADER_NONCE = "HTTP_X_PARSE_WEBHOOK_NONCE"
       # @!visibility private
       DEFAULT_REPLAY_WINDOW = 300
       # @!visibility private
@@ -76,7 +84,7 @@ module Parse
           @signing_max_skew_seconds || DEFAULT_MAX_SKEW
         end
 
-        # How long a `(request_id, body)` digest stays in the dedup cache.
+        # How long a `(nonce, body)` digest stays in the dedup cache.
         # Duplicates seen within this window are rejected.
         def replay_window_seconds
           @replay_window_seconds || DEFAULT_REPLAY_WINDOW
@@ -113,7 +121,8 @@ module Parse
         # Returns nil when the request passes both replay and signature
         # checks; otherwise returns a short error string suitable for the
         # webhook error response. The headers come from `env` so this
-        # works with any Rack request.
+        # works with any Rack request. Replay dedup applies only when
+        # `request_id` or an `X-Parse-Webhook-Nonce` header is present.
         def verify!(env, body_str, request_id)
           secret = signing_secret
           if secret && !secret.empty?
@@ -130,7 +139,13 @@ module Parse
             end
           end
 
-          digest = Digest::SHA256.hexdigest("#{request_id}\x1f#{body_str}")
+          # Dedup only when the delivery carries a per-delivery identifier.
+          # Keying on the body alone rejects legitimate identical requests.
+          nonce = request_id.to_s.strip
+          nonce = env[HEADER_NONCE].to_s.strip if nonce.empty?
+          return nil if nonce.empty?
+
+          digest = Digest::SHA256.hexdigest("#{nonce}\x1f#{body_str}")
           if cache.seen?(digest, replay_window_seconds)
             return "Webhook replay detected."
           end

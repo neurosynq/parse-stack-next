@@ -4,9 +4,8 @@
 require_relative "../../test_helper"
 require "openssl"
 
-# Tests Parse::Webhooks::ReplayProtection: the always-on body+request-id
-# dedup LRU and the opt-in HMAC freshness verification added for
-# NEW-EXT-4.
+# Tests Parse::Webhooks::ReplayProtection: the nonce-keyed dedup LRU and
+# the opt-in HMAC freshness verification added for NEW-EXT-4.
 class WebhookReplayProtectionTest < Minitest::Test
   WEBHOOK_HEADER = "HTTP_X_PARSE_WEBHOOK_KEY"
 
@@ -28,6 +27,11 @@ class WebhookReplayProtectionTest < Minitest::Test
     Parse::Webhooks.instance_variable_set(:@missing_key_warned, nil)
     Parse::Webhooks.logging = false
     Parse::Webhooks.instance_variable_set(:@routes, nil)
+    # Unregistered functions are answered with an error, so register the
+    # function names these requests call.
+    %w[a b c expiry hello signed x].each do |name|
+      Parse::Webhooks.route(:function, name) { true }
+    end
     Parse::Webhooks::ReplayProtection.reset!
   end
 
@@ -64,7 +68,7 @@ class WebhookReplayProtectionTest < Minitest::Test
   end
 
   # ==========================================================================
-  # Layer 1 - always-on dedup
+  # Layer 1 - nonce-keyed dedup
   # ==========================================================================
 
   def test_first_request_passes_dedup
@@ -105,13 +109,33 @@ class WebhookReplayProtectionTest < Minitest::Test
     end
   end
 
-  def test_dedup_works_without_request_id_header
+  def test_identical_bodies_without_a_nonce_are_not_rejected
+    # Parse Server sends no request id or nonce on webhook deliveries, so two
+    # legitimate identical calls (the same function with the same params)
+    # must both run. Body-only dedup rejected the second one.
     body = '{"functionName":"hello"}'
     capture_io do
       Parse::Webhooks.call(build_env(body: body))
       _status, _headers, body_io = Parse::Webhooks.call(build_env(body: body))
       payload = parse_body([nil, nil, body_io])
-      assert_equal "Webhook replay detected.", payload["error"]
+      assert payload.key?("success"), "an identical repeat without a nonce must pass: #{payload.inspect}"
+    end
+  end
+
+  def test_nonce_header_enables_dedup
+    body = '{"functionName":"hello"}'
+    capture_io do
+      env = build_env(body: body)
+      env["HTTP_X_PARSE_WEBHOOK_NONCE"] = "n-1"
+      Parse::Webhooks.call(env)
+      env2 = build_env(body: body)
+      env2["HTTP_X_PARSE_WEBHOOK_NONCE"] = "n-1"
+      _status, _headers, body_io = Parse::Webhooks.call(env2)
+      assert_equal "Webhook replay detected.", parse_body([nil, nil, body_io])["error"]
+      env3 = build_env(body: body)
+      env3["HTTP_X_PARSE_WEBHOOK_NONCE"] = "n-2"
+      _status, _headers, body_io = Parse::Webhooks.call(env3)
+      assert parse_body([nil, nil, body_io]).key?("success"), "a fresh nonce must pass"
     end
   end
 

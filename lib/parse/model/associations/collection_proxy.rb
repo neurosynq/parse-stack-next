@@ -509,7 +509,12 @@ module Parse
       # Read the owner's dirty state before touching the items, so a change
       # that was already pending is still sent by the next save.
       was_dirty = delegate_field_dirty?
-      @collection = yield(collection.to_a.dup, items)
+      server = server_array_after_op
+      # A plain array adopts the array the server returned, so a local copy
+      # that was already out of date is corrected; otherwise (pointer
+      # collections, or a reply without the field) the operation is applied
+      # locally the same way the server applied it.
+      @collection = server || yield(collection.to_a.dup, items)
       @loaded = true
       unless was_dirty
         # Plain array properties detect in-place edits by comparing against
@@ -519,6 +524,16 @@ module Parse
         end
       end
       true
+    end
+
+    # The field's new array from the delegate's last atomic operation, when
+    # this is a plain array proxy and the server returned it.
+    # @return [Array, nil]
+    def server_array_after_op
+      return nil unless instance_of?(Parse::CollectionProxy)
+      return nil unless @delegate.respond_to?(:_last_operation_value, true)
+      value = @delegate.send(:_last_operation_value, @key)
+      value.is_a?(Array) ? Parse::Properties.deep_copy_value(value) : nil
     end
 
     # Convert items to pointer format for atomic operations.

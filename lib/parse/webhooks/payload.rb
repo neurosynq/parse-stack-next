@@ -561,9 +561,9 @@ module Parse
 
       # @!visibility private
       # Returns `true` when `@object`/`@original` contain a className that
-      # disagrees with the trigger's expected class. Used to skip building
-      # a typed object when the payload was clearly forged or routed
-      # incorrectly.
+      # disagrees with the trigger's expected class (the class from the
+      # webhook URL path). The Rack app refuses such a request before any
+      # handler runs, since the payload was forged or routed incorrectly.
       def payload_class_mismatch?
         expected = parse_class
         return false if expected.nil?
@@ -571,6 +571,44 @@ module Parse
           h.is_a?(Hash) && h["className"] &&
             !Parse::Model.same_parse_class?(h["className"], expected)
         end
+      end
+
+      # @!visibility private
+      # The memoized {#parse_object} if one was built during this request
+      # (by a handler or the field-guard step), else nil. Never builds one.
+      # @return [Parse::Object, nil]
+      def memoized_parse_object
+        defined?(@parse_object) ? @parse_object : nil
+      end
+
+      # @!visibility private
+      # A new, unmemoized build of the trigger object, as the client's write
+      # describes it (no handler edits, no field-guard reverts). The beforeSave
+      # reply diffs the handler's object against this.
+      # @return [Parse::Object, nil]
+      def unmemoized_parse_object
+        return nil unless object?
+        build_parse_object
+      rescue StandardError
+        # Comparison baseline only: an unbuildable payload (e.g. a class with
+        # no registered model) leaves every dirty field counted as changed.
+        nil
+      end
+
+      # @!visibility private
+      # The `object` hash exactly as Parse Server sent it, before credential
+      # and vector scrubbing. Used only to rebuild the client's write for a
+      # beforeSave reply; never logged or exposed through {#as_json}.
+      # @return [Hash, nil]
+      def raw_object
+        @raw.is_a?(Hash) ? @raw[:object] : nil
+      end
+
+      # @!visibility private
+      # The `original` hash exactly as Parse Server sent it (see {#raw_object}).
+      # @return [Hash, nil]
+      def raw_original
+        @raw.is_a?(Hash) ? @raw[:original] : nil
       end
 
       # Force a fresh build, discarding any memoized parse_object. Used by the
@@ -678,11 +716,20 @@ module Parse
       # a specific message. When used inside of a registered cloud code webhook
       # function or trigger, will halt processing and return the proper error response
       # code back to the Parse server.
+      # @example
+      #   error!("title is required")
+      #   error!("duplicate slug", code: 137) # see note on code
       # @param msg [String] the error message to send back.
+      # @param code [Integer, nil] an optional Parse error code, written to the
+      #   error body as `"code"` and available as
+      #   {Parse::Webhooks::ResponseError#code}. Parse Server's HTTP webhook
+      #   adapter (as of 9.10) still reports webhook errors to the client as
+      #   code 141; the code reaches in-process callers such as
+      #   {Parse::Webhooks.run_function}.
       # @raise Parse::Webhooks::ResponseError
       # @return [Parse::Webhooks::ResponseError] the raised exception
-      def error!(msg = "")
-        raise Parse::Webhooks::ResponseError, msg
+      def error!(msg = "", code: nil)
+        raise Parse::Webhooks::ResponseError.new(msg, code: code)
       end
 
       # Register a block to run **after** this webhook's response has been sent
@@ -729,10 +776,50 @@ module Parse
         @deferred_callbacks ||= []
       end
 
+      # The query of a beforeFind (or LiveQuery beforeSubscribe) trigger as a
+      # {Parse::Query}.
+      #
+      # Parse Server sends the query in its REST JSON form: the constraints sit
+      # under `where`, next to `limit`, `skip`, `order` (a comma-separated
+      # string, `-` for descending), `keys` and `include`. Only the `where`
+      # entries become constraints, and they are added verbatim, so a field
+      # that happens to be named like a query option (`limit`, `order`,
+      # `key`) is still a field constraint. A top-level `$or` is kept; other
+      # top-level operators are left out of the returned query (the raw form
+      # is always available as {#query}).
       # @return [Parse::Query] the Parse query for a beforeFind trigger.
       def parse_query
         return nil unless parse_class.present? && @query.is_a?(Hash)
-        Parse::Query.new parse_class, @query
+        spec = @query.with_indifferent_access
+        q = Parse::Query.new(parse_class)
+        where = spec[:where]
+        if where.is_a?(Hash)
+          constraints = where.filter_map do |field, value|
+            field = field.to_s
+            if field == "$or"
+              Parse::Constraint::CompoundQueryConstraint.new(:or, Array.wrap(value))
+            elsif field.start_with?("$")
+              # Other top-level operators ($and, $nor, $relatedTo) have no
+              # field-constraint form here; they stay visible in #query.
+              nil
+            else
+              Parse::Constraint.create(field, value)
+            end
+          end
+          q.add_constraints(constraints)
+        end
+        q.limit(spec[:limit].to_i) if spec[:limit].is_a?(Numeric) && spec[:limit].to_i >= 0
+        q.skip(spec[:skip].to_i) if spec[:skip].is_a?(Numeric) && spec[:skip].to_i > 0
+        split = ->(v) { v.is_a?(Array) ? v.map(&:to_s) : v.to_s.split(",").map(&:strip).reject(&:empty?) }
+        order = split.call(spec[:order]).map do |f|
+          f.start_with?("-") ? Parse::Order.new(f[1..].to_sym, :desc) : Parse::Order.new(f.to_sym, :asc)
+        end
+        q.order(order) if order.any?
+        keys = split.call(spec[:keys])
+        q.keys(keys) if keys.any?
+        includes = split.call(spec[:include])
+        q.includes(includes) if includes.any?
+        q
       end
 
       # Returns true if this webhook was triggered by a Ruby Parse Stack request.

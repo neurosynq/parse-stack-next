@@ -87,10 +87,18 @@ one-to-one — the SDK maps between them.
 - **`beforeFind` / `afterFind` are result-side, not object-side.** Unlike the
   save/delete triggers, a find payload carries no single `object` — `beforeFind`
   exposes the incoming `query` (via `payload.query`) and `afterFind` exposes the
-  matched rows (via `payload.objects`). And unlike `afterSave` (whose return
-  value Parse Server ignores), **`afterFind` is result-rewriting**: whatever the
-  handler returns *replaces* the rows sent to the client, so it can filter or
-  redact results. It also adds a webhook round-trip to every matching query, so
+  matched rows (via `payload.objects`). **Over an HTTP webhook, `afterFind` can
+  observe the rows or deny the query, but it cannot rewrite them.** Parse Server
+  passes every row a webhook returns through `toJSONwithObjects`, which turns
+  any plain JSON object into `{}`, so returned rows would reach the client
+  blank. The SDK therefore always replies "keep the rows" (`{}`, with no
+  `success` key). Returning `nil`, `true`, or the unchanged `payload.objects`
+  all pass the rows through. Returning a different set of rows (dropping or
+  adding some) denies the query with an error instead, so rows a handler meant
+  to hide are never returned. To restrict rows, constrain the query in
+  `beforeFind` or with ACLs/CLPs; to block a query, call `error!` or return
+  `false`. (In-process `Parse.Cloud.afterFind` cloud code is not subject to this
+  limit.) It also adds a webhook round-trip to every matching query, so
   register it deliberately.
 
   One non-obvious detail the SDK handles for you: **Parse Server does not put the
@@ -104,11 +112,9 @@ one-to-one — the SDK maps between them.
   Because the class is resolved from the route, declared `:vector` columns are
   stripped from `afterFind` `payload.objects` by default, exactly as they are
   from `object`/`original`/`update` on the other triggers (a
-  `vector_visibility :public` class keeps them). One consequence to keep in
-  mind: an `afterFind` handler that returns `payload.objects` to pass results
-  through passes the *vector-scrubbed* rows on to the client — which matches the
-  `as_json` default (an `owner_only` class never exposes vectors anyway). Return
-  your own array if you need different columns.
+  `vector_visibility :public` class keeps them). This affects only what the
+  handler sees. The rows the client receives are the ones Parse Server matched,
+  unchanged by the webhook.
 
 - **Auth triggers (`beforeLogin` / `afterLogin` / `afterLogout` /
   `beforePasswordResetRequest`) and LiveQuery triggers (`beforeConnect` /
@@ -259,10 +265,50 @@ abort "Webhook coverage gaps detected" if inert.positive?
 ## Returning a value from a handler
 
 A handler block runs with `self` bound to the `Parse::Webhooks::Payload`, so
-inside it you can call `parse_object`, `params`, `error!`, etc. directly. The
-value the handler produces is what Parse Server receives: for `before_save`,
-return the (possibly mutated) `parse_object` to allow the write, or `false` /
-`error!` to reject it.
+inside it you can call `parse_object`, `params`, `error!`, etc. directly. What
+the handler returns decides the reply Parse Server receives:
+
+| Trigger | Allow | Change | Reject |
+|---------|-------|--------|--------|
+| `before_save` | `true`, `nil`, or an unchanged `parse_object` | the mutated `parse_object`, or a Hash of field overrides | `false` or `error!` |
+| `before_delete` | anything else | n/a | `false`, `error!`, or a `before_destroy` callback that returns `false` |
+| `after_find` | `nil`, `true`, or the unchanged `payload.objects` | not possible over HTTP (see above) | `false` or `error!` |
+| function | the return value is the function result | | `error!` |
+
+How a `before_save` change reaches Parse Server: Parse Server *replaces* the
+pending write with the object a beforeSave webhook returns. The SDK therefore
+never replies with only your changes. When nothing changed, it replies "keep
+the write as sent", so the client's atomic operators (`Increment`, `Add`,
+`Remove`, `Delete`, relation operators) and any undeclared fields reach the
+database untouched. When the handler changed fields, the reply is the client's
+full write with your changes layered on top: operators on fields you did not
+touch are passed through as operators, fields the model does not declare (and
+`_User` signup fields such as `password` and `authData`) are kept, and a field
+you set back to its stored value is dropped from the write. Two limits come
+from what Parse Server sends the webhook: a field you rewrite is written as an
+absolute value, and an operator on a dotted sub-key (`"meta.count"`) arrives
+only as its resulting sub-document and is written back that way. Edits made
+in place on `parse_object` count even if the handler returns `true`. On a
+create, returning `parse_object` also writes the model's declared defaults
+(including its default ACL) for fields the client did not send.
+
+`after_destroy` callbacks run in the `after_delete` handler (once per delivery,
+skipped for deletes the SDK itself made, whose callbacks already ran locally).
+`before_destroy` callbacks run in `before_delete` when the handler returns
+`parse_object`.
+
+`error!(message, code: 137)` attaches a Parse error code to the error reply
+and to the raised `Parse::Webhooks::ResponseError#code`. Parse Server's HTTP
+webhook adapter currently reports every webhook error to the client as code
+141 (`SCRIPT_FAILED`), so the code is mainly useful to in-process callers such
+as `Parse::Webhooks.run_function`. Any other exception a handler raises is
+answered with a generic `{"error": "Webhook handler failed."}` reply (the
+exception class and a redacted message are logged), so internal details never
+reach the client.
+
+A request for a function with no registered handler is answered with an
+error. A trigger with no registered handler passes the operation through
+unchanged.
 
 You can set that value either with an explicit `return` or by letting it be the
 block's last expression — both work:
@@ -396,16 +442,23 @@ usual.
 This protects the webhook endpoint against **replayed inbound POSTs** —
 `lib/parse/webhooks/replay_protection.rb`:
 
-- **Always-on body + request-id dedup.** A bounded LRU records a digest of each
-  `(request_id, body)`; a duplicate seen within `replay_window_seconds` is
-  rejected with `"Webhook replay detected."`. No cooperation from Parse Server is
-  required; this stops in-window replays.
+- **Nonce-keyed dedup.** When a delivery carries an `X-Parse-Request-Id` or
+  `X-Parse-Webhook-Nonce` header, a bounded LRU records a digest of
+  `(nonce, body)`; a duplicate seen within `replay_window_seconds` is rejected
+  with `"Webhook replay detected."`. Parse Server sends neither header on its
+  own deliveries, so add one in the proxy or wrapper that delivers webhooks if
+  you want dedup. Without a nonce the SDK does not dedup on the body alone:
+  two legitimate identical requests (the same function called twice with the
+  same params) cannot be told apart from a replay that way.
 - **Opt-in HMAC freshness verification.** Set a `signing_secret` and the receiver
   verifies two headers:
   - `X-Parse-Webhook-Timestamp` — Unix epoch seconds; requests outside
     `signing_max_skew_seconds` (default 300) are rejected as stale.
   - `X-Parse-Webhook-Signature` — hex HMAC-SHA256 of `"#{timestamp}.#{body}"`
     keyed with the signing secret.
+
+  Signing bounds a replay to the skew window. Add a nonce header as well to
+  reject replays inside it.
 
 ```ruby
 Parse::Webhooks::ReplayProtection.signing_secret = ENV["PARSE_WEBHOOK_SIGNING_SECRET"]
