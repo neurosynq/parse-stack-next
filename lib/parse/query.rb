@@ -8300,26 +8300,22 @@ module Parse
 
     # @param klass [Class] the class whose methods are wrapped.
     # @param methods [Array<Symbol>]
-    # @param table_expr [String] a Ruby expression, evaluated on the
-    #   receiver, that yields its Parse class name.
-    def self.wrap(klass, methods, table_expr)
+    # @param table_of [Proc] `->(receiver) { parse_class_name }`.
+    def self.wrap(klass, methods, table_of)
       private_methods = methods.select { |m| klass.private_method_defined?(m) }
       protected_methods = methods.select { |m| klass.protected_method_defined?(m) }
       mod = Module.new
       methods.each do |m|
         next unless klass.method_defined?(m) || klass.private_method_defined?(m)
-        # Generated with `def` (not define_method) to keep the per-call cost
-        # low: every query build passes through several of these. A call
-        # for the table already in scope goes straight to the original.
-        mod.module_eval <<~RUBY, __FILE__, __LINE__ + 1
-          def #{m}(*args, **kwargs, &blk)
-            table = #{table_expr}
-            scope = Fiber[Parse::Query::FIELD_ALIAS_SCOPE_KEY]
-            return super(*args, **kwargs, &blk) if scope && table == scope.table
-            blk = Parse::Query.block_outside_field_aliases(blk, table) if blk
-            Parse::Query.with_field_aliases(table) { super(*args, **kwargs, &blk) }
-          end
-        RUBY
+        # A call for the table already in scope goes straight to the
+        # original, so nested query building pays only the table lookup.
+        mod.send(:define_method, m) do |*args, **kwargs, &blk|
+          table = table_of.call(self)
+          scope = Fiber[Parse::Query::FIELD_ALIAS_SCOPE_KEY]
+          return super(*args, **kwargs, &blk) if scope && table == scope.table
+          blk = Parse::Query.block_outside_field_aliases(blk, table) if blk
+          Parse::Query.with_field_aliases(table) { super(*args, **kwargs, &blk) }
+        end
       end
       # Keep each wrapped method's original visibility.
       mod.send(:private, *private_methods) unless private_methods.empty?
@@ -8328,10 +8324,12 @@ module Parse
     end
   end
 
-  QueryFieldAliasScope.wrap(Query, QueryFieldAliasScope::QUERY_METHODS, "@table")
+  QueryFieldAliasScope.wrap(Query, QueryFieldAliasScope::QUERY_METHODS,
+                            ->(query) { query.instance_variable_get(:@table) })
   Query.prepend(QueryFieldAliasScope::DirectMethods)
   [Aggregation, GroupBy, GroupByDate].each do |helper|
-    QueryFieldAliasScope.wrap(helper, QueryFieldAliasScope::HELPER_METHODS, "@query&.table")
+    QueryFieldAliasScope.wrap(helper, QueryFieldAliasScope::HELPER_METHODS,
+                              ->(agg) { agg.instance_variable_get(:@query)&.table })
   end
 end
 
