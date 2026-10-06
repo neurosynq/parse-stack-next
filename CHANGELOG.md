@@ -107,6 +107,53 @@
   and `responses` holds one entry per request. **Migration:** call them only
   on arrays of `Parse::Object`, and read per-request responses.
 
+- **BREAKING**: Mongo-direct reads (`results_direct`, `count_direct`,
+  `first_direct`, `distinct_direct`, and queries that auto-route there) no
+  longer fall back to the master key for non-master clients. A client from
+  `Parse::Client#become`, `Parse::User#session_client`, or a webhook
+  `user_client` is scoped to its session, and a client without a master key,
+  `Parse.client_mode`, or `use_master_key = false` reads in the public scope,
+  as REST does. **Migration:** set `use_master_key = true` on a master-keyed
+  client, or pass `master: true`, where a master read is intended.
+- **BREAKING**: Scoped mongo-direct queries refuse to filter, sort, or join
+  on a protectedFields column, or to copy one through `$$ROOT`,
+  `$$CURRENT`, `$getField`, or a join sub-pipeline, with
+  `Parse::CLPScope::Denied`, as REST refuses with error 119. They also apply
+  Parse Server's default `_User` protection (other users' `email`) and each
+  included or joined class's protected fields, and a `$graphLookup` into a
+  class with protected fields is refused. **Migration:** run such queries
+  with `master: true`, and set `Parse::CLPScope.default_protected_fields` if
+  your server's `protectedFields` option differs from the default.
+- **BREAKING**: `Parse.with_session(nil)`, and `with_session` given a user or
+  session with no token, run the block anonymously (no session token and no
+  master key) instead of with the master key. **Migration:** pass
+  `use_master_key: true` on calls that need it; `Parse.anonymous_session?`
+  reports the state.
+- **BREAKING**: Signup (`Parse::User#signup!`, `.create`, `.signup`,
+  `.anonymous_signup`, `.autologin_service`) no longer sends the master key
+  or an ambient session, so Parse Server returns a session token and
+  `upgrade_anonymous!` works. **Migration:** deployments that close `_User`
+  create and provision users server-side should pass `use_master_key: true`.
+- **BREAKING**: A `before_save` webhook that makes no change keeps the
+  client's write as sent (it used to erase the whole write), and one that
+  does change the object replies with the client's full write plus its
+  changes, so operators, undeclared fields, and signup fields survive. An
+  `after_find` webhook can no longer rewrite results (Parse Server blanks
+  them and crashed on `nil`); it keeps the rows or denies the find. A call to
+  an unregistered function returns an error, and replay dedup runs only with
+  a request id, a nonce header, or a signature. **Migration:** remove
+  undeclared fields explicitly in `before_save`, move row filtering to
+  `before_find`, ACLs, or CLPs, and register every function Parse Server
+  calls.
+- **BREAKING**: `add!`, `add_unique!`, and `remove!` on collections return
+  `true` or `false`, and an array `has_many` or `belongs_to` refuses `nil`,
+  non-object values, and objects of another class when the declared class is
+  a registered model (an objectId String becomes a pointer of the declared
+  class). Setting a field on a bare `Parse::Pointer` raises instead of
+  writing a hidden copy that was never saved. **Migration:** check the
+  boolean, pass objects of the declared class, and fetch a pointer before
+  editing it.
+
 #### MCP deployments can expose less than their users can read
 
 - **NEW**: `Parse::Agent.new(fields: { Customer => %i[display_name timezone], default: [...] })`
@@ -576,6 +623,97 @@
   prompt-marker scrubbing works without the MCP client loaded.
 - **CHANGED**: `Parse::User.model_name` is relative to the `Parse`
   namespace, so Rails forms and routes use `params[:user]` and `users_path`.
+
+#### Sessions, MFA, and the response cache
+
+- **FIXED**: `login`, `login_with_mfa`, `verify_password`,
+  `request_password_reset`, and `request_email_verification` are always
+  sent without the master key or any session token. With the master key,
+  Parse Server skipped MFA validation and saved the submitted
+  `authData.mfa` over the enrolled TOTP secret, so any code was accepted and
+  MFA was silently disabled for the account.
+- **FIXED**: An explicit session token (a call's `session_token:` or an
+  `X-Parse-Session-Token` header) is never replaced by the ambient
+  `with_session` token or a client-bound token. `Parse::User.session(a)`
+  inside `with_session(b)` returned user B and cached token A as B.
+- **FIXED**: Logout, `logout_all!`, session destroy, password change, user
+  deletion, and `Role` saves invalidate the cached identity and role
+  closures, so revocations and role changes reach mongo-direct and Atlas
+  paths immediately instead of after the identity or role TTL. The MCP
+  session check treats Parse Server's answer for a revoked token (HTTP 400,
+  code 209) as a rejection.
+- **FIXED**: The response cache never stores `users/me`, `sessions/me`,
+  `login`, `verifyPassword`, or `logout`. Cache keys in both layouts carry
+  the application id and a digest of the credential sent, so a client with
+  other keys sharing the store cannot read another's entries. A write
+  retires every cached variant of the resource and every cached query over
+  its class (including batch sub-requests), so a revoked row is not served
+  from a cached query until it expires.
+- **FIXED**: `Parse::Client#send_request` honors the request's own
+  `session_token:`, `use_master_key:`, `cache:`, and `retry:` options; a
+  request opting out of the master key still sent it.
+- **FIXED**: A password-only login on an MFA account raises
+  `Parse::MFA::RequiredError`, and a wrong code raises
+  `Parse::MFA::VerificationError`, instead of `ServiceUnavailableError`.
+- **CHANGED**: Session tokens are redacted from `Parse::User`,
+  `Parse::Session`, and `Parse::Query` `inspect` output, and
+  `Parse::Session#as_json` omits `sessionToken` unless
+  `include_session_token: true` is passed.
+
+#### Mongo-direct reads match REST access rules
+
+- **FIXED**: `readUserFields` and pointer-permission CLPs are enforced on
+  mongo-direct, Atlas Search, vector, and hybrid reads (every authenticated
+  user saw every row) and are applied before `$skip`/`$limit`/`$count`, so
+  `count_direct` and pages are correct. Joins into another class apply that
+  class's ownership rules and fail closed on a denied CLP.
+- **FIXED**: A user keeps their own protected `_User` fields only when no
+  pipeline stage can rewrite `_id`; a pipeline that set another user's `_id`
+  to the caller's exposed that user's email.
+- **FIXED**: Direct queries inside `with_session` were denied by CLP because
+  the schema lookup sent the session token; it now uses the master key.
+- **FIXED**: `$inQuery`, `$notInQuery`, `$select`, `$dontSelect`, and
+  `$containedBy` work on `results_direct` and `count_direct`, and direct rows
+  decode like REST: included objects carry their class, `includes` with
+  `keys` keeps them, File columns decode as files, and a dotted key returns
+  its whole column.
+- **CHANGED**: protectedFields stripping removes top-level columns only,
+  matching Parse Server.
+
+#### Webhooks follow Parse Server's contract
+
+- **FIXED**: `before_delete` can deny a delete, and `after_destroy` fires for
+  afterDelete webhooks. `Payload#parse_query` reads constraints only from
+  `where` and applies `limit`, `skip`, `order`, `keys`, and `include`. The
+  response log is redacted, an unexpected handler exception returns a JSON
+  error without its message, and a trigger whose body names a different
+  class than its URL is refused.
+- **FIXED**: A signed webhook delivery is deduplicated on its signature, so a
+  captured request cannot be replayed within the timestamp window by
+  altering or dropping the unsigned nonce.
+- **NEW**: `error!(message, code:)` and `Parse::Webhooks::ResponseError#code`
+  carry a Parse error code (Parse Server's HTTP adapter still reports 141).
+
+#### Associations save exactly what changed
+
+- **FIXED**: Relation additions and removals are cleared after a save and
+  deduplicated (a stale `RemoveRelation` was resent on every later save),
+  staged without loading the relation, and never queried with a null owner.
+  A relation declared with `field:` reads the remote column, and `rollback!`
+  works on relations.
+- **FIXED**: `clear` on an array collection is saved, and atomic
+  `add!`/`add_unique!`/`remove!` keep the local array in step with the
+  server instead of emptying it (the next save overwrote the server array).
+  A clean array adopts the array the server returns; unsaved local edits are
+  kept and still sent.
+- **FIXED**: Nested partial fetches cover multi-word `belongs_to` fields, a
+  query `has_many` on an unsaved owner returns a chainable empty query, and
+  `CollectionProxy#replace` is added.
+- **FIXED**: Reading `acl` on an object fetched with `keys:` that left the
+  ACL out fetches the stored ACL instead of returning nil, so code that
+  edits it cannot replace the record's real ACL. Saving other fields never
+  sends the ACL. Reassigning a property to itself after an in-place edit
+  keeps the edit.
 
 #### `protectedFields` resolution matches Parse Server
 
