@@ -1693,6 +1693,57 @@ Parse::Agent::Tools.register(
 
 **ACL-scope subset invariant (v4.4.0):** when the parent carries a resolved ACL scope (session_token / acl_user / acl_role), an explicit child override must resolve to a `permission_strings` set that is a SUBSET of the parent's. A tool handler that tries `Parse::Agent.new(parent: user_scoped, acl_role: "admin")` raises `ArgumentError` at construction because the child's claim set would include `"role:admin"`, which the parent's claim set does not. The same applies to a different `acl_user:` (different user_id), or to a child that resolves to master-key while the parent was scoped. This closes the analogous footgun for the acl_user / acl_role identity axis — the precedent of session_token swap is misleading because session tokens are externally verified by Parse Server, while `acl_user:` and `acl_role:` are unverified constructor assertions. A master-key parent (`@acl_scope.nil?`) allows any child scope because the parent already has unrestricted reach.
 
+### `fields:` per-agent field narrowing (5.8)
+
+A class's `agent_fields` is the most any agent may read. `fields:` narrows
+that ceiling for one agent, so two MCP deployments in the same process can
+expose different subsets of the same model: a user-facing assistant sees
+less than an analytics endpoint. Effective access is the intersection of the
+caller's Parse ACL/CLP, the class `agent_fields`, the agent's `fields:`
+policy, its tenant scope, and its tool and method filters.
+
+```ruby
+class Customer < Parse::Object
+  property :display_name, :string
+  property :timezone, :string
+  property :plan, :string
+  property :billing_email, :string
+  agent_fields :display_name, :timezone, :plan, :billing_email  # ceiling for every agent
+end
+
+assistant = Parse::Agent.new(session_token: token,
+                             fields: { Customer => %i[display_name timezone] })
+analytics = Parse::Agent.new(permissions: :readonly,
+                             fields: { Customer => %i[display_name plan] })
+```
+
+* **Narrow only.** A field outside `agent_fields` stays hidden even if a
+  policy lists it. A class without `agent_fields` is narrowed to exactly the
+  listed fields (plus `objectId`, `createdAt`, `updatedAt`).
+* **`default:`** narrows every class the policy does not name.
+* **Sub-agents intersect.** `Parse::Agent.new(parent: assistant, fields: ...)`
+  sees only fields both policies permit; omitting `fields:` inherits the
+  parent's policy.
+* **Everywhere the class allowlist applied.** Query projection, `keys:`,
+  include projections, aggregation pipelines, Atlas Search fields,
+  `get_schema` and `completion/complete` field names, exports,
+  `agent.describe`, and `semantic_search` chunk text, reranker input, and
+  filter fields all use the effective set.
+* **No inference through filters.** `query_class`, `count_objects`, and
+  `export_data` refuse a `where:` or `order:` on a field outside the
+  effective set with `:field_denied` (filtering or sorting on a hidden field
+  reveals it through which rows match). `group_by`, `distinct`, and
+  aggregation already refused. This also applies to the class ceiling with
+  no `fields:` policy.
+* **Writes stay on declared methods.** `fields:` governs what the agent
+  reads; writes still go through `agent_method`s and the per-agent
+  `methods:` filter.
+
+The policy is applied for the duration of each tool call (fiber-local), so
+agents serving concurrent requests never see each other's policy.
+
+---
+
 ### Developer introspection — `agent.describe` / `describe_for` / `would_permit?` (v4.4.0)
 
 Three helpers on every agent for answering "why is this agent refusing this call?" and "what can this agent actually see?" without parsing audit payloads or tracing through tool implementations. NOT exposed to the LLM — operator-side observability only.

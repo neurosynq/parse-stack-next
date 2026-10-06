@@ -1,5 +1,127 @@
 ## parse-stack-next Changelog
 
+### 5.8.0
+
+#### MCP deployments can expose less than their users can read
+
+- **NEW**: `Parse::Agent.new(fields: { Customer => %i[display_name timezone], default: [...] })`
+  narrows a class's `agent_fields` ceiling for one agent, so two MCP
+  deployments in one process can expose different subsets of the same model.
+  A policy can never widen past `agent_fields`, a class without `agent_fields`
+  is narrowed to exactly the listed fields, and a sub-agent intersects its
+  parent's policy. The effective set applies everywhere the class allowlist
+  did: projection, `keys:`, include projections, aggregation pipelines, Atlas
+  Search fields, `get_schema`, `completion/complete`, exports,
+  `agent.describe`, and `semantic_search` chunk text, reranker input, and
+  filter fields. The policy is scoped fiber-locally to each tool call, so
+  concurrent agents never see each other's policy.
+- **FIXED**: `query_class`, `count_objects`, and `export_data` accepted a
+  caller `where:` or `order:` on a field outside `agent_fields`, so an agent
+  could infer a hidden field's value from which rows matched or how they were
+  ordered. They now refuse with `AccessDenied` (`kind: :field_denied`), as
+  `group_by`, `distinct`, and aggregation already did. Server-owned tenant,
+  per-agent, and canonical filters are not affected.
+- **FIXED**: Field refusals from `group_by`, `group_by_date`, and `distinct`
+  passed the refusal into `AccessDenied`'s class-name slot, so the message was
+  a stringified Hash and `kind`, `denied_field`, and `allowed_fields` were
+  lost. They now carry the structured details like every other refusal.
+
+#### Supported user-scoped and analytics deployment patterns
+
+- **NEW**: `Parse::Agent::MCPRackApp.user_scoped(...)` builds an endpoint for
+  signed-in application users. The session token comes from
+  `Authorization: Bearer` or `X-Parse-Session-Token` (or a custom
+  `session_token_from:`); a missing, blank, or invalid token gets 401 before
+  any agent is built, and it never falls back to the master key. Identity and
+  tenant are pinned server-side (`tenant_from:`), and `agent_options:` passes
+  extra agent settings such as `fields:` while refusing identity or authority
+  keys.
+- **NEW**: `Parse::Agent::MCPRackApp.master_analytics(principal_resolver:, ...)`
+  builds a shared master-key endpoint (read-only by default) that refuses to
+  construct without a callable `principal_resolver`: without one every
+  master-key caller fingerprints as the same principal and shares stream,
+  approval, and cancellation ownership. An unresolved operator gets 401.
+  Direct `MCPRackApp.new` construction and single-operator master-key use are
+  unchanged.
+- **FIXED**: `notifications/cancelled` and elicitation replies were bound only
+  to the session id, so a caller who knew another principal's
+  `Mcp-Session-Id` could cancel its requests or answer its approval prompts.
+  A session bound to an owner now accepts them only from that owner; a
+  mismatch is a silent 202.
+- **FIXED**: `Parse::Authorization` resolved a session through `/users/me`
+  without bypassing the response cache, so a revoked token could re-resolve
+  from a cached response. Revocation is now bounded by the identity cache's
+  TTL and invalidation hooks. The guide documents the interval for each path
+  (REST, mongo-direct, listening streams).
+- **NEW**: Orphaned subscription sessions (subscribed but never streamed, or
+  whose stream closed without `DELETE`) are reaped after `orphan_ttl` (default
+  300 seconds, `nil` disables), releasing their LiveQuery subscriptions.
+  `MCPSubscriptions::Manager#reap_orphans!` reaps on demand.
+
+#### Retrieval profiles for `semantic_search`
+
+- **NEW**: `Parse::Retrieval::Profiles.register(name, ...)` defines
+  server-configured strategies (result counts, hybrid search, a reranker
+  referenced by `Parse::Retrieval.register_reranker` name, candidate and
+  top-n counts, a per-document text cap, a timeout, a failure mode, and a
+  response budget). The `semantic_search` tool takes an optional `profile:`;
+  without it behavior is unchanged. Profiles are validated at registration,
+  an unknown name at call time is refused with the available list, and an
+  agent can never supply a provider, endpoint, or credential.
+- **NEW**: Reranking under a profile cuts each document's text before it
+  leaves the process, charges estimated tokens to the tenant's `SpendCap`,
+  and is bounded by a timeout. On a timeout or provider error,
+  `on_rerank_failure: :fallback` keeps the retrieval order and adds
+  `rerank_fallback: true` and `rerank_fallback_reason` to the result;
+  `:raise` fails the call.
+- **NEW**: Each `semantic_search` call emits one `parse.retrieval.search`
+  notification with the profile, counts, rerank stats, and timings, and never
+  the query, document text, field values, URLs, or credentials.
+  Rerank token counts are SDK estimates, not provider-reported usage.
+- **NEW**: `Parse::Retrieval::Benchmark` scores profiles on a labeled case set
+  (recall@k, MRR, hit rate, mean and p95 latency, forbidden-id violations,
+  estimated tokens), overall and per tag, through the real `semantic_search`
+  tool.
+
+#### Contextualized embedding batches adapt to provider limits
+
+- **IMPROVED**: Contextualized requests are packed by document count, an
+  estimated 120k-token budget (bytes divided by 3, deliberately
+  conservative), and the 5.7.5 response-size cap, never splitting a
+  document. When Voyage rejects a request as too large, it is halved by
+  document and retried (bounded), keeping vectors aligned with their inputs.
+  Only recognized size errors trigger a split; a single document that is
+  still too large raises an error naming its index. This is robust
+  adaptation, not exact token counting.
+- **CHANGED**: Voyage 4xx errors now carry the provider's sanitized error
+  detail (`BadRequestError#status`, `#detail`) and include it in the message.
+
+#### Vector index definitions from the model
+
+- **NEW**: `Parse::VectorSearch::IndexDefinition.build(klass)` (also
+  `Parse::Schema.vector_index_definition`) derives an Atlas `vectorSearch`
+  definition from the `:vector` property, `agent_searchable filter_fields:`,
+  and `agent_tenant_scope`, with deterministic output. `preview` and `diff`
+  compare it with a live index, and the `vector_search_index` model macro
+  registers it with `SearchIndexMigrator`. Applying stays an explicit
+  `apply_search_indexes!` call.
+- **NEW**: `property :embedding, :vector, ..., quantization: :scalar` (or
+  `:binary`) adds Atlas automatic quantization to the generated index
+  definition, cutting index memory roughly 4x or 32x. Stored vectors and the
+  write path are unchanged. Drift detection reports a quantization mismatch
+  between the declaration and the live index.
+
+#### Query model resolution works for any Parse class name
+
+- **FIXED**: `Parse::Query` looked up its table's model with
+  `Parse::Model.const_get`, which fails for Parse class names that are not
+  Ruby constants (`"contacts"`, `"_User"`) and misses models whose
+  `parse_class` differs from the Ruby class name. The error was rescued to
+  nil, so pointer fields were silently treated as plain fields: mongo-direct
+  pipelines addressed `owner` instead of `_p_owner` and pointer values were
+  not converted to storage form. Models now resolve through
+  `Parse::Model.find_class`.
+
 ### 5.7.6
 
 #### `semantic_search` no longer returns hidden fields as chunk content
