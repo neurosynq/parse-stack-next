@@ -483,6 +483,7 @@ module Parse
           }
 
           self.field_map.merge!(key => parse_field)
+          Parse::Model.model_registry_changed!
           # dirty tracking
           define_attribute_methods key
 

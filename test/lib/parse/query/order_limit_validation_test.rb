@@ -129,28 +129,35 @@ class TestOrderLimitValidation < Minitest::Test
 
   # --- first ---
 
-  # Stub out the network-touching `results` method so we can assert the
-  # @limit side-effect without booting a Parse client.
+  # Stub out the network-touching `results` method and record the limit
+  # each fetch ran with. `first` applies its limit for the fetch only.
   def stub_results!(query)
-    query.define_singleton_method(:results) { |**_kw| [] }
+    seen = []
+    query.define_singleton_method(:results) do |**_kw|
+      seen << instance_variable_get(:@limit)
+      []
+    end
+    seen
   end
 
   def test_first_accepts_integer
-    stub_results!(@query)
+    seen = stub_results!(@query)
     @query.first(5)
-    assert_equal 5, @query.instance_variable_get(:@limit)
+    assert_equal [5], seen
+    assert_nil @query.instance_variable_get(:@limit), "first must not change the query"
   end
 
   def test_first_accepts_numeric_string
-    stub_results!(@query)
+    seen = stub_results!(@query)
     @query.first("3")
-    assert_equal 3, @query.instance_variable_get(:@limit)
+    assert_equal [3], seen
   end
 
   def test_first_accepts_hash_constraints
-    stub_results!(@query)
+    seen = stub_results!(@query)
     @query.first(:limit => 4, :name => "Bob")
-    assert_equal 4, @query.instance_variable_get(:@limit)
+    assert_equal [4], seen
+    assert_empty @query.compile_where, "first must not keep its constraints"
   end
 
   def test_first_raises_on_garbage_string

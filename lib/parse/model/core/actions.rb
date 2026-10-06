@@ -34,8 +34,10 @@ module Parse
       end
       hash_constraints = constraints(true)
 
-      klass.save_all(hash_constraints, &block) if block_given?
-      klass.save_all(hash_constraints)
+      # One call: with a block it saves what the block modifies; without one
+      # it force-saves every match. (Previously a block call also ran a
+      # second, forced pass over every matching record.)
+      klass.save_all(hash_constraints, &block)
     end
   end
 
@@ -99,6 +101,8 @@ module Parse
       # late for this: the public API documents mutating an object and adding it
       # afterwards.
       TRANSACTION_CONTEXT_KEY = :__parse_transaction_context__
+      # Parse Server error code for a transaction write conflict.
+      TRANSACTION_CONFLICT_CODE = 251
 
       # Distinguishes a property whose ivar did not exist from one explicitly
       # set to nil. Rollback removes the former instead of defining it as nil.
@@ -476,10 +480,23 @@ module Parse
             end
 
             # Submit with retry logic for transaction conflicts.
+            # Parse Server reports a write conflict inside a transaction as
+            # error code 251 in the failed response. Retry on that code (the
+            # error raised below carries it in its message so a conflict
+            # raised from a lower layer is retried the same way).
             attempts = 0
-            begin
+            loop do
               attempts += 1
-              responses = batch.submit
+              begin
+                responses = batch.submit
+              rescue Parse::Error => e
+                conflict = e.message.match?(/\b#{TRANSACTION_CONFLICT_CODE}\b/)
+                if conflict && attempts < retries
+                  sleep(0.1 * attempts)
+                  next
+                end
+                raise
+              end
 
               if responses.all?(&:success?)
                 # Match responses to objects using the request tag (Ruby object_id).
@@ -511,13 +528,13 @@ module Parse
               end
 
               error_response = responses.find { |response| !response.success? }
-              raise Parse::Error, "Transaction failed: #{error_response.error}"
-            rescue Parse::Error => e
-              if e.message.include?("251") && attempts < retries
+              error_code = error_response&.code.to_i
+              if error_code == TRANSACTION_CONFLICT_CODE && attempts < retries
                 sleep(0.1 * attempts)
-                retry
+                next
               end
-              raise
+              detail = error_response&.error || "unknown error"
+              raise Parse::Error, "Transaction failed (code #{error_code}): #{detail}"
             end
           rescue StandardError
             original_states.each_value do |state|
@@ -989,59 +1006,60 @@ module Parse
           iterator_block = nil
           if block_given?
             iterator_block = block
-            force ||= false
           else
             # if no block given, assume you want to just save all objects
             # regardless of modification.
             force = true
           end
-          # Only generate the comparison block once.
-          # updated_comparison_block = Proc.new { |x| x.updated_at }
 
+          # Work on a copy so the caller's constraints hash is not mutated.
+          base_constraints = constraints.dup
           anchor_date = Parse::Date.now
-          constraints.merge! :updated_at.on_or_before => anchor_date
-          constraints.merge! cache: false
+          base_constraints[:updated_at.on_or_before] = anchor_date
+          base_constraints[:cache] = false
           # oldest first, so we create a reduction-cycle
-          constraints.merge! order: :updated_at.asc, limit: batch_size
-          update_query = query(constraints)
-          #puts "Setting Anchor Date: #{anchor_date}"
-          cursor = nil
+          base_constraints[:order] = :updated_at.asc
+          base_constraints[:limit] = batch_size
+
+          # Keyset cursor over (updated_at, objectId). Saved objects move past
+          # the anchor date and drop out of the query. Objects the block left
+          # unchanged keep their updated_at, so each page resumes at the last
+          # seen updated_at and excludes the ids already visited at exactly
+          # that timestamp. Every page therefore makes progress, and records
+          # the block does not modify are visited once instead of ending the
+          # run early.
+          cursor_time = nil
+          seen_at_cursor = []
           has_errors = false
           loop do
-            results = update_query.results
+            page_constraints = base_constraints.dup
+            if cursor_time
+              page_constraints[:updated_at.gte] = cursor_time
+              page_constraints[:objectId.nin] = seen_at_cursor if seen_at_cursor.any?
+            end
+            results = query(page_constraints).results
 
             break if results.empty?
-
-            # verify we didn't get duplicates fetches
-            if cursor.is_a?(Parse::Object) && results.any? { |x| x.id == cursor.id }
-              warn "[#{self}.save_all] Unbounded update detected with id #{cursor.id}."
-              has_errors = true
-              break cursor
-            end
 
             results.each(&iterator_block) if iterator_block.present?
             # we don't need to refresh the objects in the array with the results
             # since we will be throwing them away. Force determines whether
             # to save these objects regardless of whether they are dirty.
             batch = results.save(merge: false, force: force)
-
-            # faster version assuming sorting order wasn't messed up
-            cursor = results.last
-            # slower version, but more accurate
-            # cursor_item = results.max_by(&updated_comparison_block).updated_at
-            # puts "[Parse::SaveAll] Updated #{results.count} records updated <= #{cursor.updated_at}"
+            # Record failures before any break, so a failing last page is
+            # reported.
+            has_errors ||= batch.error?
 
             break if results.count < batch_size # we didn't hit a cap on results.
-            if cursor.is_a?(Parse::Object)
-              update_query.where :updated_at.gte => cursor.updated_at
 
-              if cursor.updated_at.present? && cursor.updated_at > anchor_date
-                warn "[#{self}.save_all] Reached anchor date  #{anchor_date} < #{cursor.updated_at}"
-                break cursor
-              end
+            last_time = results.last.updated_at
+            break if last_time.nil?
+            if cursor_time && last_time == cursor_time
+              seen_at_cursor.concat(results.map(&:id))
+            else
+              cursor_time = last_time
+              seen_at_cursor = results.select { |r| r.updated_at == last_time }.map(&:id)
             end
-
-            has_errors ||= batch.error?
           end
           not has_errors
         end
@@ -1197,19 +1215,47 @@ module Parse
 
       # Creates an array of all possible operations that need to be performed
       # on this object. This includes all property and relational operation changes.
+      #
+      # This is the path batch saves ({Array#save}) and
+      # {Parse::Object.transaction} use, so it applies the same save-time
+      # rules as {#save} that do not depend on callbacks:
+      # - a new object resolves its {Parse::Object.acl_policy} owner ACL
+      #   first, so batch-created records get the same ACL as single saves;
+      # - a new object sends its relation additions in the create body,
+      #   since there is no objectId yet for a separate relation PUT;
+      # - a reference to an unsaved object raises {Parse::RecordNotSaved}
+      #   instead of writing a pointer with a null objectId.
       # @param force [Boolean] whether this object should be saved even if does not have
       #  pending changes.
       # @return [Array<Parse::Request>] the list of API requests.
+      # @raise [Parse::RecordNotSaved] if a pointer, array or relation field
+      #  references an object that has not been saved.
       def change_requests(force = false)
         requests = []
         # get the URI path for this object.
         uri = self.uri_path
+        creating = new?
+
+        _resolve_default_acl if creating && respond_to?(:_resolve_default_acl, true)
+        _assert_no_unsaved_references!
+
+        if creating
+          body = attribute_updates
+          relation_additions = relation_changes? ? relation_change_operations.first : {}
+          if attribute_changes? || relation_additions.present? || force
+            body.merge!(relation_additions)
+            # Forward a client-assigned objectId, as {#create} does.
+            body[Parse::Model::OBJECT_ID] = @id if @id.present?
+            r = Request.new(:post, uri, body: body)
+            r.tag = object_id
+            requests << r
+          end
+          return requests
+        end
 
         # generate the request to update the object (PUT)
         if attribute_changes? || force
-          # if it's new, then we should call :post for creating the object.
-          method = new? ? :post : :put
-          r = Request.new(method, uri, body: attribute_updates)
+          r = Request.new(:put, uri, body: attribute_updates)
           r.tag = object_id
           requests << r
         end
@@ -1225,6 +1271,52 @@ module Parse
           end
         end
         requests
+      end
+
+      # @!visibility private
+      # Names of changed fields that reference a Parse object without an
+      # objectId: a pointer field, an array of objects, or relation
+      # additions. Saving such a field would store a pointer whose objectId
+      # is null.
+      # @return [Array<String>]
+      def unsaved_reference_fields
+        unsaved = ->(v) { v.is_a?(Parse::Pointer) && v.id.blank? }
+        changed.each_with_object([]) do |key, list|
+          sym = key.to_sym
+          next unless fields[sym].present? || relations[sym].present?
+          value = instance_variable_get(:"@#{key}")
+          bad = if relations[sym].present?
+              value.respond_to?(:additions) && value.additions.any?(&unsaved)
+            elsif value.is_a?(Parse::CollectionProxy) || value.is_a?(Array)
+              value.to_a.any?(&unsaved)
+            else
+              unsaved.call(value)
+            end
+          list << key.to_s if bad
+        end
+      end
+
+      # @!visibility private
+      # @raise [Parse::RecordNotSaved] when {#unsaved_reference_fields} is not empty.
+      def _assert_no_unsaved_references!
+        fields_list = unsaved_reference_fields
+        return if fields_list.empty?
+        raise Parse::RecordNotSaved.new(self),
+              "#{parse_class} references unsaved object(s) in #{fields_list.join(", ")}. " \
+              "Save the referenced object(s) first."
+      end
+
+      # @!visibility private
+      # Refuses a write that would store a dangling pointer. Adds an error to
+      # {#errors} and returns false (save turns that into false, or raises
+      # with autoraise).
+      def _check_unsaved_references
+        fields_list = unsaved_reference_fields
+        return true if fields_list.empty?
+        fields_list.each do |f|
+          errors.add(f.to_sym, "references an unsaved object; save it first")
+        end
+        false
       end
 
       # This methods sends an update request for this object with the any change
@@ -1249,6 +1341,7 @@ module Parse
             self.updated_at_will_change! if respond_to?(:updated_at_will_change!)
           end
         end
+        return false unless _check_unsaved_references
         response = client.update_object(parse_class, id, attribute_updates, session_token: _session_token)
         @_last_response = response
         if response.success?
@@ -1286,6 +1379,9 @@ module Parse
       # @return [Boolean] true/false whether it was successful.
       def create
         run_callbacks :create do
+          # Checked after the before_save / before_create callbacks so a
+          # callback that saves the referenced object first still works.
+          next false unless _check_unsaved_references
           body = attribute_updates
           # Forward a client-assigned objectId when a `before_create` callback
           # set it (e.g. `parse_reference precompute: true`). attribute_updates
@@ -1300,9 +1396,14 @@ module Parse
           unless res.error?
             result = res.result
             @id = result[Parse::Model::OBJECT_ID] || @id
-            @created_at = result["createdAt"] || @created_at
+            # Store Parse::Date values, not the raw ISO strings. The :date
+            # property reader converts a String on read and marks the field
+            # dirty while doing so, which made a freshly created record
+            # report unsaved changes (and send an empty PUT on the next
+            # save) as soon as `updated_at` was read.
+            @created_at = _server_date(result["createdAt"]) || @created_at
             #if the object is created, updatedAt == createdAt
-            @updated_at = result["updatedAt"] || result["createdAt"] || @updated_at
+            @updated_at = _server_date(result["updatedAt"] || result["createdAt"]) || @updated_at
             # Because beforeSave hooks can change the fields we are saving, any items that were
             # changed, are returned to us and we should apply those locally to be in sync.
             set_attributes!(result)
@@ -1310,6 +1411,18 @@ module Parse
           puts "Error creating #{self.parse_class}: #{res.error}" if res.error?
           res.success?
         end
+      end
+
+      # @!visibility private
+      # Parse a server timestamp (ISO string or Parse date hash) into a
+      # Parse::Date. Returns nil for nil or unparseable input.
+      def _server_date(value)
+        return nil if value.nil?
+        return value if value.is_a?(Parse::Date)
+        value = value["iso"] || value[:iso] if value.is_a?(Hash)
+        Parse::Date.parse(value.to_s)
+      rescue ArgumentError
+        nil
       end
 
       # @!visibility private
@@ -1356,6 +1469,15 @@ module Parse
         if _deleted?
           error_msg = "Cannot save deleted object. Object with id '#{@id}' no longer exists on the server."
           raise Parse::Error::ProtocolError, error_msg
+        end
+
+        # A destroyed record is never recreated by a later save (ActiveRecord
+        # returns false here too). Build a new object to write it again.
+        if destroyed?
+          if self.class.raise_on_save_failure || autoraise.present?
+            raise Parse::RecordNotSaved.new(self), "Cannot save a destroyed #{parse_class} (id '#{@id}')."
+          end
+          return false
         end
 
         @_session_token = _validate_session_token! session, :save
@@ -1446,6 +1568,11 @@ module Parse
 
       # Delete this record from the Parse collection. Only valid if this object has an `id`.
       # This will run all the `destroy` callbacks.
+      #
+      # After a successful destroy the object keeps its `id`, {Parse::Object#destroyed?}
+      # returns true and {Parse::Object#persisted?} returns false. Saving a destroyed
+      # object is refused: {#save} returns false and {#save!} raises
+      # {Parse::RecordNotSaved}, as in ActiveRecord.
       # @param session [String] a session token if you want to apply ACLs for a user in this operation.
       # @raise ArgumentError if a non-nil value is passed to `session` that doesn't provide a session token string.
       # @return [Boolean] whether the operation was successful.
@@ -1457,7 +1584,11 @@ module Parse
           res = client.delete_object parse_class, id, session_token: _session_token
           success = res.success?
           if success
-            @id = nil
+            # Keep the objectId so `dom_id`, `to_key` and Turbo Stream
+            # removals still identify the record, and mark it destroyed so
+            # `persisted?` is false and a later `save` refuses rather than
+            # recreating it.
+            @_destroyed = true
             changes_applied!
           elsif self.class.raise_on_save_failure
             raise Parse::RecordNotSaved.new(self), "Failed to create or save attributes. #{self.parse_class} was not saved."
@@ -1573,7 +1704,7 @@ module Parse
       # local attributes.
       def changes_applied!
         # find all fields that are of type :array
-        fields(:array) do |key, v|
+        fields(:array).each_key do |key|
           proxy = send(key)
           # clear changes
           proxy.changes_applied! if proxy.respond_to?(:changes_applied!)
@@ -1586,6 +1717,12 @@ module Parse
           proxy.changes_applied! if proxy.respond_to?(:changes_applied!)
         end
         changes_applied
+        # The saved ACL is the new baseline. Without this, the snapshot from
+        # before the first edit survived the save, so `acl_was` kept
+        # reporting the pre-save ACL: revoking a grant after saving it
+        # compared equal to that stale snapshot, `acl_changed?` was false,
+        # and the revocation was silently dropped while save returned true.
+        @_acl_snapshot_before_change = nil
       end
     end
   end

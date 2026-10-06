@@ -207,6 +207,15 @@ module Parse
 
         # Apply attributes from server (only keys in result get updated)
         apply_attributes!(result, dirty_track: false)
+        # The server row is now the source of truth for the ACL. A full
+        # fetch whose response has no ACL key is a public (ACL-less) row, so
+        # drop any locally stamped default rather than misreport it. Either
+        # way the record exists, so the save-time default-ACL resolver must
+        # not replace its ACL.
+        if !is_partial_fetch && !result.key?("ACL") && !result.key?(:ACL)
+          @acl = nil
+        end
+        @_acl_pristine = false
         record_authorization_hydration!(result, partial: is_partial_fetch) if
           respond_to?(:record_authorization_hydration!)
 

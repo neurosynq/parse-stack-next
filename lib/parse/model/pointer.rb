@@ -320,10 +320,15 @@ module Parse
     end
 
     # Two Parse::Pointers (or Parse::Objects) are equal if both of them have
-    # the same Parse class and the same id.
+    # the same Parse class and the same id. An instance without an id (an
+    # unsaved object) is equal only to itself, as in ActiveRecord: two
+    # distinct new records are different records even though neither has
+    # an id yet.
     # @return [Boolean]
     def ==(o)
+      return true if equal?(o)
       return false unless o.is_a?(Pointer)
+      return false if id.blank? || o.id.blank?
       #only equal if the Parse class and object ID are the same.
       self.parse_class == o.parse_class && id == o.id
     end
@@ -339,8 +344,14 @@ module Parse
     # - Hash key lookups to find objects by identity
     # - Set operations
     #
+    # An instance without an id hashes by Ruby identity, consistent with
+    # {#==}. Its hash therefore changes once it is saved and receives an id,
+    # so re-index any Hash or Set that holds it as a key after saving (the
+    # same caveat as ActiveRecord).
+    #
     # @return [Integer] hash code based on class name and object id
     def hash
+      return super if id.blank?
       [parse_class, id].hash
     end
 
@@ -376,6 +387,12 @@ module Parse
     # @return [Object] the result of calling the method on the fetched object
     # @raise [Parse::AutofetchTriggeredError] if autofetch_raise_on_missing_keys is enabled
     def method_missing(method_name, *args, &block)
+      # A Parse::Object defines real accessors for its fields, so reaching
+      # here means a name with no accessor (for example the remote alias
+      # `objectId=` sent by ActiveModel's `assign_attributes`). Autofetching
+      # would issue a network request and run the call on a separate fetched
+      # copy, not on this object, so raise NoMethodError instead.
+      return super if is_a?(Parse::Object)
       # Try to find the model class for this pointer
       klass = Parse::Model.find_class(parse_class)
 
@@ -411,6 +428,7 @@ module Parse
     # @param include_private [Boolean] whether to include private methods
     # @return [Boolean] true if the method can be handled
     def respond_to_missing?(method_name, include_private = false)
+      return super if is_a?(Parse::Object)
       klass = Parse::Model.find_class(parse_class)
       if klass && klass.respond_to?(:fields)
         field_name = method_name.to_s.chomp("=").to_sym

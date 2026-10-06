@@ -150,6 +150,10 @@ module Parse
       # @!visibility private
       attr_reader :model_cache, :model_cache_mutex, :model_cache_misses
       # @!visibility private
+      # Anonymous Parse::Object descendants seen by the last missed
+      # {find_class} scan. Guarded by {model_cache_mutex}.
+      attr_accessor :model_anonymous_descendants
+      # @!visibility private
       # @return [Integer] the current model registry generation.
       attr_reader :model_generation
 
@@ -159,9 +163,96 @@ module Parse
       # {model_generation}.
       def model_registry_changed!
         model_cache_mutex.synchronize do
+          # Hits are cleared too: a model redefined after `remove_const`
+          # (a code reload, or a test) must replace the old class, whose
+          # field_map and references no longer describe the table.
+          @model_cache = {}
           @model_cache_misses = {}
+          @model_anonymous_descendants = nil
           @model_generation += 1
         end
+      end
+
+      # @!visibility private
+      # Whether `klass` is the class its name currently resolves to. A class
+      # left behind by `remove_const` (or one whose `name` is overridden to a
+      # constant that does not exist) is not live. Never triggers autoload.
+      #
+      # @param klass [Class]
+      # @return [Boolean]
+      def live_model?(klass)
+        name = klass.name
+        return false unless name.is_a?(String) && !name.empty?
+        scope = Object
+        name.split("::").each do |part|
+          return false if scope.autoload?(part)
+          return false unless scope.const_defined?(part, false)
+          scope = scope.const_get(part, false)
+          return false unless scope.is_a?(Module)
+        end
+        scope.equal?(klass)
+      rescue StandardError
+        false
+      end
+
+      # @!visibility private
+      # The one rule that turns a field name into its column for `klass`.
+      # Used by query compilation ({Parse::Query.format_field}) and by the
+      # agent field allowlist ({Parse::Agent::MetadataRegistry.wire_field_names}),
+      # so the name a policy check approves is the column a query addresses.
+      #
+      # Precedence:
+      # 1. A Ruby property name maps to its declared column (`field_map`).
+      # 2. Otherwise a name that is exactly a declared column stays as is.
+      # 3. Otherwise nil: the caller applies its default formatting.
+      #
+      # So with `property :email, field: "contactEmail"` and
+      # `property :legacy_email, field: "email"`, the name `email` resolves to
+      # `contactEmail`. Model code writes Ruby names (`Klass.query(email: x)`),
+      # and the Ruby name must not be redirected to another property's column.
+      #
+      # @param klass [Class] a model class (anything responding to field_map).
+      # @param name [String, Symbol]
+      # @return [String, nil] the declared column, or nil when undeclared.
+      def wire_name_for(klass, name)
+        return nil unless klass.respond_to?(:field_map)
+        field_resolution(klass)[name.to_s]
+      end
+
+      # @!visibility private
+      # Every name {wire_name_for} resolves for `klass`, as a frozen
+      # `{name => column}` Hash. Cached on the class and rebuilt when the
+      # model registry generation or the field_map size changes.
+      #
+      # @param klass [Class]
+      # @return [Hash{String => String}]
+      def field_resolution(klass)
+        fmap = klass.field_map
+        cached = klass.instance_variable_get(:@_parse_field_resolution)
+        generation = @model_generation
+        if cached && cached[0] == generation && cached[1] == fmap.size
+          return cached[2]
+        end
+        map = field_resolution_map(fmap)
+        klass.instance_variable_set(:@_parse_field_resolution, [generation, fmap.size, map].freeze)
+        map
+      end
+
+      # @!visibility private
+      # Build the {wire_name_for} table from a field_map. Declared columns map
+      # to themselves; Ruby property names map to their column and win over a
+      # declared column spelled the same.
+      #
+      # @param fmap [Hash{Symbol => Symbol, String}]
+      # @return [Hash{String => String}] frozen.
+      def field_resolution_map(fmap)
+        map = {}
+        fmap.each_value do |remote|
+          wire = remote.to_s
+          map[wire] = wire
+        end
+        fmap.each { |ruby_name, remote| map[ruby_name.to_s] = remote.to_s }
+        map.freeze
       end
       # @!attribute self.raise_on_save_failure
       # By default, we return `true` or `false` for save and destroy operations.
@@ -238,28 +329,58 @@ module Parse
       # subclasses (e.g. Parse::Object.find_class), so a bare `@model_cache`
       # would resolve on the subclass singleton — which has no cache. The
       # cache lives on Parse::Model itself.
+      generation = nil
       Parse::Model.model_cache_mutex.synchronize do
         cached = Parse::Model.model_cache[str]
         return cached if cached
-        misses = Parse::Model.model_cache_misses
-        return nil if misses.key?(str)
-
-        result = Parse::Object.descendants.find do |f|
-          begin
-            cls = f.parse_class
-          rescue StandardError
-            next false
-          end
-          cls == str || cls == "_#{str}"
+        if Parse::Model.model_cache_misses.key?(str)
+          # A recorded miss holds until the registry changes, unless an
+          # anonymous model seen by the last scan has since been named
+          # (`Foo = Class.new(Parse::Object)` fires no hook when the
+          # constant is assigned). Without anonymous models this is free.
+          anonymous = Parse::Model.model_anonymous_descendants
+          return nil if anonymous.nil? || anonymous.none? { |k| (k.name rescue nil) }
+          Parse::Model.model_cache_misses.clear
         end
-        if result
-          Parse::Model.model_cache[str] = result
-        else
-          misses.clear if misses.size >= MODEL_CACHE_MISSES_MAX
-          misses[str] = true
-        end
-        result
+        generation = Parse::Model.model_generation
       end
+
+      # Scan outside the lock: the liveness check reads constants, and a
+      # constant read must never run a model definition (whose `inherited`
+      # hook takes this lock) while the lock is held.
+      matches = []
+      anonymous = []
+      Parse::Object.descendants.each do |f|
+        anonymous << f if (f.name rescue nil).nil?
+        begin
+          cls = f.parse_class
+        rescue StandardError
+          next
+        end
+        matches << f if cls == str || cls == "_#{str}"
+      end
+      # Prefer the class the constant currently names over one left behind by
+      # `remove_const`; keep descendant order otherwise.
+      result = if matches.size > 1
+          matches.find { |m| Parse::Model.live_model?(m) } || matches.first
+        else
+          matches.first
+        end
+
+      Parse::Model.model_cache_mutex.synchronize do
+        # Cache only when no model was defined or renamed during the scan.
+        if generation == Parse::Model.model_generation
+          if result
+            Parse::Model.model_cache[str] = result
+          else
+            misses = Parse::Model.model_cache_misses
+            misses.clear if misses.size >= MODEL_CACHE_MISSES_MAX
+            misses[str] = true
+            Parse::Model.model_anonymous_descendants = anonymous.freeze
+          end
+        end
+      end
+      result
     end
 
     # Whether two Parse class-name strings denote the same class. This is the

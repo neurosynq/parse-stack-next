@@ -67,6 +67,24 @@ module Parse
       @parse_class = parse_class
     end
 
+    # Copies (`dup` and `clone`) get their own backing array and their own
+    # dirty-tracking state. ActiveModel records a property's previous value
+    # by cloning it; with a shared array the "previous" proxy changed along
+    # with the live one, so change history showed the new value twice and
+    # `rollback!` restored nothing.
+    # @!visibility private
+    def initialize_copy(other)
+      super
+      @collection = other.instance_variable_get(:@collection).dup
+      # Pending relation operations (RelationCollectionProxy) are copied too.
+      %i[@additions @removals].each do |ivar|
+        value = instance_variable_get(ivar) if instance_variable_defined?(ivar)
+        instance_variable_set(ivar, value.dup) if value.is_a?(Array)
+      end
+      @mutations_from_database = nil
+      @mutations_before_last_save = nil
+    end
+
     # true if the collection has been loaded
     def loaded?
       @loaded
@@ -81,10 +99,12 @@ module Parse
       params.nil? ? @delegate.send(method) : @delegate.send(method, params)
     end
 
-    # Reset the state of the collection.
+    # Reset the state of the collection. The items are dropped and the
+    # collection is marked as not loaded. This is not a change to the
+    # field, so it is not dirty tracked; use {#clear} to empty the field.
     def reset!
       @loaded = false
-      clear
+      @collection.clear
     end
 
     # @return [Boolean] true if two collection proxies have similar items.
@@ -102,9 +122,25 @@ module Parse
       collection #force reload
     end
 
-    # clear all items in the collection
+    # Remove all items from the collection. The field is marked as changed,
+    # so the next save stores the empty array.
+    # @return [Array] the (now empty) collection.
     def clear
+      notify_will_change!
       @collection.clear
+      @loaded = true
+      @collection
+    end
+
+    # Replace the contents of the collection with a new set of items, as
+    # Array#replace does. The field is marked as changed.
+    # @param items [Array] the new contents.
+    # @return [self]
+    def replace(items)
+      notify_will_change!
+      @collection = Array(items.is_a?(Parse::CollectionProxy) ? items.to_a : items).dup
+      @loaded = true
+      self
     end
 
     # @return [Array]
@@ -233,36 +269,56 @@ module Parse
 
     alias_method :delete, :remove
 
-    # Atomically adds all items from the array.
-    # This request is sent directly to the Parse backend.
-    # @param items [Array] items to uniquely add
+    # Atomically adds all items to the array field. The request is sent
+    # directly to the Parse backend. On success the local collection is
+    # updated to match (the items are appended) without marking the field
+    # as changed, so a later save does not overwrite the server array. On
+    # an owner that has not been saved yet there is nothing to update on
+    # the server, so the items are added locally as a normal change and
+    # sent with the next save.
+    # @param items [Array] items to add
     # @note Parse objects are automatically converted to pointer format
+    # @return [Boolean] whether the operation succeeded.
     # @see #add_unique!
     def add!(*items)
+      items = items.flatten
       return false unless @delegate.respond_to?(:op_add!)
-      @delegate.send :op_add!, @key, items_to_pointers(items.flatten)
-      reset!
+      return add(*items) && true if unsaved_delegate?
+      apply_atomic_op(:op_add!, items) do |list, objs|
+        list + objs
+      end
     end
 
-    # Atomically adds all items from the array that are not already part of the collection.
-    # This request is sent directly to the Parse backend.
+    # Atomically adds the items that are not already part of the array
+    # field. The request is sent directly to the Parse backend. The local
+    # collection is updated as in {#add!}.
     # @param items [Array] items to uniquely add
     # @note Parse objects are automatically converted to pointer format
+    # @return [Boolean] whether the operation succeeded.
     # @see #add!
     def add_unique!(*items)
+      items = items.flatten
       return false unless @delegate.respond_to?(:op_add_unique!)
-      @delegate.send :op_add_unique!, @key, items_to_pointers(items.flatten)
-      reset!
+      return add_unique(*items) && true if unsaved_delegate?
+      apply_atomic_op(:op_add_unique!, items) do |list, objs|
+        objs.each { |o| list << o unless list.include?(o) }
+        list
+      end
     end
 
-    # Atomically deletes all items from the array. This request is sent
-    # directly to the Parse backend.
+    # Atomically removes the items from the array field. The request is
+    # sent directly to the Parse backend. The local collection is updated
+    # as in {#add!}.
     # @param items [Array] items to remove
     # @note Parse objects are automatically converted to pointer format
+    # @return [Boolean] whether the operation succeeded.
     def remove!(*items)
+      items = items.flatten
       return false unless @delegate.respond_to?(:op_remove!)
-      @delegate.send :op_remove!, @key, items_to_pointers(items.flatten)
-      reset!
+      return remove(*items) && true if unsaved_delegate?
+      apply_atomic_op(:op_remove!, items) do |list, objs|
+        list.reject { |x| objs.include?(x) }
+      end
     end
 
     # Atomically deletes all items in the array, and marks the field as `undefined` directly
@@ -276,8 +332,15 @@ module Parse
     end
 
     # Locally restores previous attributes (not from the persistent store)
+    # and clears the dirty tracking of the collection. The values are
+    # restored directly: going through the public writers would report a
+    # new change to the owner while undoing one.
     def rollback!
-      restore_attributes
+      changed.each do |attr|
+        instance_variable_set(:"@#{attr}", attribute_was(attr))
+      end
+      clear_changes_information
+      @collection
     end
 
     # clears all dirty tracked information.
@@ -415,6 +478,44 @@ module Parse
     end
 
     private
+
+    # @return [Boolean] true when the owner has no objectId yet, so an
+    #   atomic server operation has nothing to apply to.
+    def unsaved_delegate?
+      @delegate.respond_to?(:id) && @delegate.id.blank?
+    end
+
+    # @return [Boolean] whether the owner reports this field as changed.
+    def delegate_field_dirty?
+      return false unless @delegate.respond_to?(:changed)
+      @delegate.changed.include?(@key.to_s)
+    rescue StandardError
+      false
+    end
+
+    # Run an atomic operation on the owner and, when it succeeds, apply the
+    # same change to the local collection without marking the field dirty.
+    # The block receives a copy of the current items and the operation's
+    # items and returns the new contents.
+    # @return [Boolean] whether the operation succeeded.
+    def apply_atomic_op(op, items)
+      return true if items.empty?
+      success = @delegate.send(op, @key, items_to_pointers(items))
+      return false unless success
+      # Read the owner's dirty state before touching the items, so a change
+      # that was already pending is still sent by the next save.
+      was_dirty = delegate_field_dirty?
+      @collection = yield(collection.to_a.dup, items)
+      @loaded = true
+      unless was_dirty
+        # Plain array properties detect in-place edits by comparing against
+        # a snapshot; take a new one so this update is not seen as an edit.
+        if @delegate.respond_to?(:_rebaseline_mutable_value!, true)
+          @delegate.send(:_rebaseline_mutable_value!, @key)
+        end
+      end
+      true
+    end
 
     # Convert items to pointer format for atomic operations.
     # Parse objects/pointers are converted to pointer hashes, other items pass through.

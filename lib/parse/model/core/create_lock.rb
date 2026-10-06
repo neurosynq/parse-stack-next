@@ -34,11 +34,18 @@ module Parse
   # material against snapshot/MONITOR exposure should set
   # `PARSE_STACK_LOCK_SECRET` or `Parse.synchronize_create_secret`.
   module CreateLock
+    # Floor for the lock lease, in seconds. When no `ttl:` is given the
+    # lease is sized from the client's request budget instead (see
+    # {.default_ttl}); this is the minimum it can be.
     DEFAULT_TTL = 3
     DEFAULT_WAIT = 2.0
     DEFAULT_POLL_BASE = 0.05
     DEFAULT_POLL_JITTER = 0.015
-    MAX_TTL = 30
+    # Ceiling for the lock lease, in seconds. The lease only matters when a
+    # holder dies without releasing; a normal exit always releases.
+    MAX_TTL = 300
+    # Requests the locked block is sized for: the find, then the create.
+    LOCKED_REQUESTS = 2
     MAX_WAIT = 30
     MAX_PAYLOAD_BYTES = 8_192
     MAX_DEPTH = 4
@@ -60,7 +67,7 @@ module Parse
       def synchronize(parse_class:, query_attrs:, options: {}, session_token: nil, master_key: nil, &block)
         raise ArgumentError, "block required" unless block_given?
 
-        ttl = clamp(Integer(options[:ttl] || DEFAULT_TTL), 1, MAX_TTL)
+        ttl = options[:ttl] ? clamp(Integer(options[:ttl]), 1, MAX_TTL) : default_ttl
         wait = clamp(Float(options[:wait] || DEFAULT_WAIT), 0.0, MAX_WAIT)
         on_degraded = options[:on_degraded] || :warn
 
@@ -113,6 +120,24 @@ module Parse
             instrument("released", key, held_ms: held_ms)
           end
         end
+      end
+
+      # The lease used when no `ttl:` is given. The lock is not renewed
+      # while held, so the lease must outlast the block it guards: a find
+      # and a create, each of which may run through every retry at the full
+      # request timeout. A lease shorter than that expires mid-block, lets a
+      # second caller in, and produces the duplicate the lock exists to
+      # prevent. The result is clamped to DEFAULT_TTL..MAX_TTL. Pass `ttl:`
+      # to override it.
+      # @param client [Parse::Client, nil] the client whose timeouts and
+      #   retry limit size the lease; the default client when nil.
+      # @return [Integer] seconds.
+      def default_ttl(client = nil)
+        client ||= Parse::Client.client
+        budget = client.respond_to?(:request_time_budget) ? client.request_time_budget : 0
+        clamp((budget * LOCKED_REQUESTS).ceil, DEFAULT_TTL, MAX_TTL)
+      rescue StandardError
+        DEFAULT_TTL
       end
 
       # Canonical lock key for the given inputs. Public for tests.

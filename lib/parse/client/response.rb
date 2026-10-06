@@ -133,17 +133,60 @@ module Parse
       @batch_response
     end
 
-    # If it is a batch respnose, we'll create an array of Response objects for each
+    # If it is a batch response, we'll create an array of Response objects for each
     # of the ones in the batch.
-    # @return [Array] an array of Response objects.
+    #
+    # Each entry is classified by its envelope key, not by its contents. A
+    # `success` entry is always a successful response, even when the saved
+    # object carries a column named `code` or `error` (for example one set by a
+    # beforeSave trigger). An `error` entry is always a failed response. An
+    # entry with neither key, or one that is not a Hash, is malformed and is
+    # reported as a failed response so the caller never treats it as a write
+    # that landed.
+    # @return [Array<Parse::Response>] an array of Response objects.
     def batch_responses
-      return [@result] unless @batch_response
+      return [self] unless @batch_response
       # if batch response, generate array based on the response hash.
       @result.map do |r|
-        next r unless r.is_a?(Hash)
-        hash = r[SUCCESS] || r[ERROR]
-        Parse::Response.new hash
+        if r.is_a?(Hash) && r.key?(SUCCESS)
+          Parse::Response.success_entry(r[SUCCESS])
+        elsif r.is_a?(Hash) && r[ERROR].is_a?(Hash)
+          Parse::Response.error_response(
+            r[ERROR][CODE] || ERROR_INTERNAL,
+            r[ERROR][ERROR] || "Unknown batch error",
+          )
+        elsif r.is_a?(Hash) && r.key?(ERROR)
+          Parse::Response.error_response(ERROR_INTERNAL, r[ERROR].to_s)
+        else
+          Parse::Response.error_response(ERROR_INTERNAL, "Malformed batch response entry")
+        end
       end
+    end
+
+    # Build a successful response from a result hash. Unlike {#initialize},
+    # a `code` or `error` key in the hash is kept as data and never turns the
+    # response into a failure.
+    # @param result [Hash, Object] the result body.
+    # @return [Parse::Response]
+    def self.success_entry(result)
+      r = new(result.is_a?(Hash) ? result : {})
+      r.code = nil
+      r.error = nil
+      r.result = result unless result.is_a?(Hash)
+      r
+    end
+
+    # Build a failed response with the given code and message.
+    # @param code [Integer] the Parse error code.
+    # @param message [String] the error message.
+    # @param http_status [Integer] the HTTP status to record.
+    # @return [Parse::Response]
+    def self.error_response(code, message, http_status: 0)
+      r = new
+      r.code = code
+      r.error = message
+      r.http_status = http_status
+      r
     end
 
     # This method takes the result hash and determines if it is a regular

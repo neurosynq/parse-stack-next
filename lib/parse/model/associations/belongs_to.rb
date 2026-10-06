@@ -183,6 +183,7 @@ module Parse
           self.fields.merge!(key => :pointer, parse_field => :pointer)
           # Mapping between local attribute name and the remote column name
           self.field_map.merge!(key => parse_field)
+          Parse::Model.model_registry_changed!
 
           # Agent metadata: a belongs_to pointer can carry a semantic description
           # (and per-value enum descriptions) just like a `property` can. This

@@ -68,6 +68,179 @@ module Parse
       num == num.floor ? num.to_i : num
     end
 
+    # Raised when a value assigned to a typed property cannot be converted to
+    # that type. Assignments refuse such values instead of storing a guess:
+    # before this, `true` assigned to an `:integer` became nil and was sent as
+    # a Delete operation that erased the column, and `""` became 0.
+    # Values hydrated from a server response (untracked assignment) never
+    # raise; an unconvertible server value is kept as-is.
+    class TypecastError < ArgumentError; end
+
+    # Cast a value for an `:integer` property.
+    #
+    # - nil and blank Strings become nil (a blank form field clears the column).
+    # - Integers pass through; Floats and other Numerics truncate with `to_i`.
+    # - Strings must be a decimal literal with an integral value: `"5"`,
+    #   `"5.0"` and `"1e3"` cast, while `"1.5"` and `"abc"` are refused
+    #   rather than silently becoming 1 or 0.
+    # - true/false, NaN, Infinity and values with no numeric meaning raise.
+    #
+    # @param val [Object] the value to cast.
+    # @return [Integer, nil]
+    # @raise [TypecastError] when the value cannot be represented as an Integer.
+    def self.typecast_integer(val)
+      case val
+      when nil then nil
+      when true, false
+        raise TypecastError, "cannot cast boolean #{val.inspect} to an Integer"
+      when Integer then val
+      when Float
+        raise TypecastError, "cannot cast #{val.inspect} to an Integer" unless val.finite?
+        val.to_i
+      when String
+        str = val.strip
+        return nil if str.empty?
+        unless NUMBER_STRING_FORMAT.match?(str)
+          raise TypecastError, "cannot cast #{val.inspect} to an Integer"
+        end
+        return Integer(str, 10) unless str.match?(/[.eE]/)
+        num = Float(str)
+        unless num.finite? && num == num.floor
+          raise TypecastError, "cannot cast #{val.inspect} to an Integer without losing its fractional part"
+        end
+        num.to_i
+      when Numeric
+        begin
+          val.to_i
+        rescue FloatDomainError, RangeError, NoMethodError
+          raise TypecastError, "cannot cast #{val.inspect} to an Integer"
+        end
+      else
+        return typecast_integer(val.to_str) if val.respond_to?(:to_str)
+        raise TypecastError, "cannot cast #{val.class} to an Integer" unless val.respond_to?(:to_i)
+        val.to_i
+      end
+    end
+
+    # Cast a value for a `:float` property.
+    #
+    # - nil and blank Strings become nil.
+    # - Numerics convert with `to_f`; numeric Strings with `Float()`.
+    # - true/false, non-numeric Strings, NaN and Infinity raise. JSON has no
+    #   NaN or Infinity, so those were serialized as null, which Parse Server
+    #   treats as clearing the column.
+    #
+    # @param val [Object] the value to cast.
+    # @return [Float, nil]
+    # @raise [TypecastError] when the value is not a finite number.
+    def self.typecast_float(val)
+      num = case val
+            when nil then return nil
+            when true, false
+              raise TypecastError, "cannot cast boolean #{val.inspect} to a Float"
+            when Numeric
+              begin
+                val.to_f
+              rescue StandardError
+                raise TypecastError, "cannot cast #{val.inspect} to a Float"
+              end
+            when String
+              str = val.strip
+              return nil if str.empty?
+              unless NUMBER_STRING_FORMAT.match?(str)
+                raise TypecastError, "cannot cast #{val.inspect} to a Float"
+              end
+              Float(str)
+            else
+              return typecast_float(val.to_str) if val.respond_to?(:to_str)
+              raise TypecastError, "cannot cast #{val.class} to a Float" unless val.respond_to?(:to_f)
+              val.to_f
+            end
+      unless num.is_a?(Float) && num.finite?
+        raise TypecastError, "cannot store non-finite #{num.inspect} (JSON would send it as null)"
+      end
+      num
+    end
+
+    # Strict variant of {typecast_number} used by property assignment: nil
+    # and blank Strings become nil, while values {typecast_number} would
+    # turn into nil (booleans, non-numeric Strings) and non-finite Floats
+    # raise instead of being sent as a Delete or a JSON null.
+    # @param val [Object] the value to cast.
+    # @return [Integer, Float, nil]
+    # @raise [TypecastError]
+    def self.typecast_number!(val)
+      return nil if val.nil? || (val.is_a?(String) && val.strip.empty?)
+      if val == true || val == false
+        raise TypecastError, "cannot cast boolean #{val.inspect} to a Number"
+      end
+      num = typecast_number(val)
+      raise TypecastError, "cannot cast #{val.inspect} to a Number" if num.nil?
+      if num.is_a?(Float) && !num.finite?
+        raise TypecastError, "cannot store non-finite #{num.inspect} (JSON would send it as null)"
+      end
+      num
+    end
+
+    # String forms read as false for a `:boolean` property, in addition to
+    # ActiveModel's set ("0", "f", "false", "off", and their upper-case forms).
+    EXTRA_FALSE_STRINGS = %w[no n].freeze
+
+    # Property types whose values are mutable containers. In-place edits to
+    # these (`obj.meta["k"] = 1`) do not pass through the property setter, so
+    # they are detected by comparing against a snapshot instead.
+    MUTABLE_TRACKED_TYPES = [:object, :array].freeze
+
+    # Copy a value deeply enough that in-place edits to the original cannot
+    # reach the copy. Hashes, Arrays and unfrozen Strings are copied
+    # recursively; every other value (numbers, dates, Parse objects) is
+    # shared, since replacing those goes through a setter.
+    # @param value [Object]
+    # @return [Object]
+    # @!visibility private
+    def self.deep_copy_value(value)
+      case value
+      when Hash
+        copy = value.dup
+        copy.each_key { |k| copy[k] = deep_copy_value(copy[k]) }
+        copy
+      when Array
+        value.map { |v| deep_copy_value(v) }
+      when String
+        value.frozen? ? value : value.dup
+      else
+        value
+      end
+    end
+
+    # Encode Ruby time values nested anywhere inside an `:array` or
+    # `:object` value as Parse Date dictionaries
+    # (`{"__type" => "Date", "iso" => ...}`), matching how a top-level
+    # `:date` property is stored. Without this, a Time inside an array or
+    # hash serialized through `as_json` as a bare ISO-8601 String, so the
+    # server stored text rather than a Date. Returns new containers; the
+    # input is not modified.
+    # @param value [Object]
+    # @return [Object]
+    # @!visibility private
+    def self.encode_nested_dates(value)
+      case value
+      when Parse::Date then { Parse::Model::TYPE_FIELD => Parse::Model::TYPE_DATE, "iso" => value.iso }
+      when ::Time, ::DateTime, ::Date, ActiveSupport::TimeWithZone
+        encode_nested_dates(value.parse_date)
+      when Hash
+        value.each_with_object({}) { |(k, v), h| h[k] = encode_nested_dates(v) }
+      when Parse::PointerCollectionProxy
+        value
+      when Parse::CollectionProxy
+        value.to_a.map { |v| encode_nested_dates(v) }
+      when Array
+        value.map { |v| encode_nested_dates(v) }
+      else
+        value
+      end
+    end
+
     # These are the base mappings of the remote field name types.
     BASE = { objectId: :string, createdAt: :date, updatedAt: :date, ACL: :acl }.freeze
     # The list of properties that are part of all objects
@@ -664,18 +837,24 @@ module Parse
 
           # if the value is a String (like an iso8601 date) and the data type of
           # this object is :date, then let's be nice and create a parse date for it.
+          # A String here came from server data (tracked assignment already
+          # converts), so converting it is not a change and must not mark
+          # the record dirty.
           if value.is_a?(String) && data_type == :date
             value = format_value(key, value, data_type)
             instance_variable_set ivar, value
-            send will_change_method
           end
+          # Remember the value as last seen so in-place edits can be
+          # detected later (see #_detect_in_place_changes!).
+          _snapshot_mutable_value!(key, value) if MUTABLE_TRACKED_TYPES.include?(data_type)
+
           # finally return the value
           if symbolize_value
             if data_type == :string
               return value.respond_to?(:to_sym) ? value.to_sym : value
             elsif data_type == :array && value.is_a?(Array)
               # value.map(&:to_sym)
-              return value.compact.map { |m| m.respond_to?(:to_sym) ? m.to_sym : m }
+              return value.map { |m| m.respond_to?(:to_sym) ? m.to_sym : m }
             end
           end
 
@@ -735,8 +914,20 @@ module Parse
         define_method(set_attribute_method) do |val, track = true|
           # Each value has a data type, based on that we can treat the incoming
           # value as input, and format it to the correct storage format. This method is
-          # defined in this file (instance method)
-          val = format_value(key, val, data_type)
+          # defined in this file (instance method).
+          #
+          # A tracked assignment of a value the type cannot represent raises
+          # TypecastError rather than storing a guess. Untracked assignment
+          # (hydration from a server response) keeps the raw value instead,
+          # so a schema mismatch never makes a fetch fail or drop data; an
+          # untracked value is not dirty and is never sent back.
+          begin
+            val = format_value(key, val, data_type)
+          rescue Parse::Properties::TypecastError
+            raise if track == true
+          end
+          # A replaced value starts a new in-place tracking baseline.
+          @_mutable_snapshots&.delete(key)
           # if dirty trackin is enabled, call the ActiveModel required method of _will_change!
           # this will grab the current value and keep a copy of it - but we only do this if
           # the new value being set is different from the current value stored.
@@ -866,6 +1057,155 @@ module Parse
       apply_attributes!(hash, dirty_track: true)
     end
 
+    # Run a cast, re-raising a {TypecastError} with the class and property
+    # name so the failing assignment is identifiable.
+    # @!visibility private
+    def _typecast_for(key)
+      yield
+    rescue Parse::Properties::TypecastError => e
+      raise Parse::Properties::TypecastError, "#{self.class}##{key}: #{e.message}"
+    end
+    private :_typecast_for
+
+    # ----------------------------------------------------------------
+    # In-place change detection for :object and :array properties
+    # ----------------------------------------------------------------
+    #
+    # ActiveModel dirty tracking only sees assignments through a setter, so
+    # `obj.meta["k"] = 1` (or editing a Hash inside an array) was never
+    # saved. Rather than marking these properties dirty on every read (the
+    # ActiveRecord approach for serialized columns, which would make every
+    # read look like a change), the getter records a deep copy of the value
+    # the first time it hands it out. {#changed}, {#changes},
+    # {#changed_attributes} and {#attribute_changed?} compare the live value
+    # against that copy and, on a difference, mark the property changed with
+    # the copy as its previous value. `rollback!` therefore restores the
+    # pre-edit value. The baseline is reset by any assignment, and is
+    # retaken from the current value by `changes_applied` (after a save) and
+    # `clear_changes_information`. Only plain `:array` proxies take part;
+    # pointer and relation collections keep their own tracking.
+
+    # @!visibility private
+    def _snapshot_mutable_value!(key, value)
+      snapshots = (@_mutable_snapshots ||= {})
+      return if snapshots.key?(key)
+      data = _mutable_value_data(value)
+      snapshots[key] = Parse::Properties.deep_copy_value(data) unless data.nil?
+    end
+
+    # @!visibility private
+    def _mutable_value_data(value)
+      if value.instance_of?(Parse::CollectionProxy)
+        value.instance_variable_get(:@collection)
+      elsif value.is_a?(Hash)
+        value
+      end
+    end
+
+    # @!visibility private
+    def _reset_mutable_snapshots!
+      @_mutable_snapshots = {}
+      self.class.field_map.each_key { |key| _rebaseline_mutable_value!(key) }
+    end
+
+    # Retake one property's baseline from its current value.
+    # @!visibility private
+    def _rebaseline_mutable_value!(key)
+      key = key.to_sym
+      return unless MUTABLE_TRACKED_TYPES.include?(self.class.fields[key])
+      snapshots = (@_mutable_snapshots ||= {})
+      snapshots.delete(key)
+      ivar = :"@#{key}"
+      return unless instance_variable_defined?(ivar)
+      data = _mutable_value_data(instance_variable_get(ivar))
+      snapshots[key] = Parse::Properties.deep_copy_value(data) unless data.nil?
+    end
+
+    # Mark :object/:array properties edited in place as changed, with the
+    # last-seen copy as the previous value.
+    # @!visibility private
+    def _detect_in_place_changes!
+      return if @_detecting_in_place_changes
+      snapshots = @_mutable_snapshots
+      return if snapshots.nil? || snapshots.empty?
+      @_detecting_in_place_changes = true
+      begin
+        snapshots.each do |key, snapshot|
+          ivar = :"@#{key}"
+          current = instance_variable_get(ivar)
+          data = _mutable_value_data(current)
+          next if data.nil? || data == snapshot
+          next if mutations_from_database.changed?(key.to_s)
+          original = if current.instance_of?(Parse::CollectionProxy)
+              Parse::CollectionProxy.new(Parse::Properties.deep_copy_value(snapshot), delegate: self, key: key)
+            else
+              Parse::Properties.deep_copy_value(snapshot)
+            end
+          # `<key>_will_change!` records a clone of the current value as the
+          # previous one, so present the snapshot as current for that call.
+          instance_variable_set(ivar, original)
+          begin
+            send(:"#{key}_will_change!")
+          ensure
+            instance_variable_set(ivar, current)
+          end
+        end
+      ensure
+        @_detecting_in_place_changes = false
+      end
+    end
+    private :_snapshot_mutable_value!, :_mutable_value_data, :_reset_mutable_snapshots!,
+            :_rebaseline_mutable_value!, :_detect_in_place_changes!
+
+    # @return [Array<String>] changed attribute names, including :object and
+    #   :array properties edited in place.
+    def changed
+      _detect_in_place_changes!
+      super
+    end
+
+    # @return [ActiveSupport::HashWithIndifferentAccess] see ActiveModel::Dirty#changes.
+    def changes
+      _detect_in_place_changes!
+      super
+    end
+
+    # @return [ActiveSupport::HashWithIndifferentAccess] see ActiveModel::Dirty#changed_attributes.
+    def changed_attributes
+      _detect_in_place_changes!
+      super
+    end
+
+    # @see ActiveModel::Dirty#attribute_changed?
+    def attribute_changed?(attr_name, **options)
+      _detect_in_place_changes!
+      super
+    end
+
+    # Clears dirty tracking and retakes the in-place baselines from the
+    # current values. See ActiveModel::Dirty#changes_applied.
+    def changes_applied
+      super
+      _reset_mutable_snapshots!
+    end
+
+    # Clears dirty tracking and retakes the in-place baselines from the
+    # current values. See ActiveModel::Dirty#clear_changes_information.
+    def clear_changes_information
+      super
+      _reset_mutable_snapshots!
+    end
+
+    # Forgetting one attribute's change (`clear_attribute_change!`, and the
+    # final step of `restore_attributes`) also retakes its baseline, so the
+    # current value is not reported as an in-place edit afterwards.
+    # @!visibility private
+    def clear_attribute_change(attr_name)
+      super
+      _rebaseline_mutable_value!(attr_name)
+    end
+    private :clear_attribute_change
+
     # Returns a hash of attributes for properties that have changed. This will
     # not include any of the base attributes (ex. id, created_at, etc).
     # This method helps generate the change payload that will be sent when saving
@@ -886,10 +1226,17 @@ module Parse
         # if it is a Parse::PointerCollectionProxy, then make sure we get a list of pointers.
         h[remote_field] = h[remote_field].parse_pointers if h[remote_field].is_a?(Parse::PointerCollectionProxy)
         # For regular CollectionProxy arrays containing Parse objects, convert to pointers for storage
+        # Nested times are encoded as Parse Dates first, since as_json would
+        # turn them into plain ISO-8601 Strings.
         if h[remote_field].is_a?(Parse::CollectionProxy) && !h[remote_field].is_a?(Parse::PointerCollectionProxy)
-          h[remote_field] = h[remote_field].as_json(pointers_only: true)
+          items = Parse::Properties.encode_nested_dates(h[remote_field].to_a)
+          h[remote_field] = Parse::CollectionProxy.new(items).as_json(pointers_only: true)
         end
         h[remote_field] = h[remote_field].pointer if h[remote_field].respond_to?(:pointer)
+        # Times nested inside arrays and objects are sent as Parse Dates.
+        if MUTABLE_TRACKED_TYPES.include?(fields[key]) && (h[remote_field].is_a?(Array) || h[remote_field].is_a?(Hash))
+          h[remote_field] = Parse::Properties.encode_nested_dates(h[remote_field])
+        end
       end
       h
     end
@@ -951,12 +1298,22 @@ module Parse
 
       case data_type
       when :object
-        val = val.with_indifferent_access if val.is_a?(Hash)
+        # Copy so the property never shares containers with the caller's
+        # hash: an edit through one must not silently change the other.
+        val = Parse::Properties.deep_copy_value(val).with_indifferent_access if val.is_a?(Hash)
       when :array
-        # All "array" types use a collection proxy
+        # All "array" types use a collection proxy. nil elements are kept:
+        # dropping them shifted every later element to a new index.
         val = val.to_a if val.is_a?(Parse::CollectionProxy) #all objects must be in array form
-        val = [val] unless val.is_a?(Array) #all objects must be in array form
-        val.compact! #remove any nil
+        val = if val.nil?
+            []
+          elsif val.is_a?(Array)
+            # Copy so the proxy does not alias the caller's array (or another
+            # proxy's backing store).
+            Parse::Properties.deep_copy_value(val)
+          else
+            [val]
+          end
         val = Parse::CollectionProxy.new val, delegate: self, key: key
       when :geopoint
         val = Parse::GeoPoint.new(val) unless val.blank?
@@ -975,11 +1332,7 @@ module Parse
           val = Parse::Bytes.new(val)
         end
       when :integer
-        if val.nil? || val.respond_to?(:to_i) == false
-          val = nil
-        else
-          val = val.to_i
-        end
+        val = _typecast_for(key) { Parse::Properties.typecast_integer(val) }
       when :boolean
         # Coerce via ActiveModel's boolean caster rather than Ruby
         # truthiness. Plain `val ? true : false` treats every non-nil,
@@ -989,13 +1342,27 @@ module Parse
         # wrong way (e.g. an `archived` or admin gate). ActiveModel maps the
         # string forms ("false"/"0"/"f"/"off"/"") to false/nil. Parse wire
         # JSON already sends real booleans, which pass through unchanged.
-        val = val.nil? ? nil : BOOLEAN_CASTER.cast(val)
+        # "no" and "n" are also false (ActiveModel would cast them to true).
+        val = if val.nil?
+            nil
+          elsif val.is_a?(String) && EXTRA_FALSE_STRINGS.include?(val.strip.downcase)
+            false
+          else
+            BOOLEAN_CASTER.cast(val)
+          end
       when :string
-        val = val.to_s unless val.blank?
+        # Every non-nil value becomes a String (false becomes "false", as
+        # true already became "true"). Arrays and Hashes are refused: their
+        # String form is Ruby inspect output, not data.
+        if val.is_a?(Array) || val.is_a?(Hash) || val.is_a?(Parse::CollectionProxy)
+          _typecast_for(key) { raise TypecastError, "cannot store a #{val.class} in a String property" }
+        elsif !val.nil? && !val.is_a?(String)
+          val = val.to_s
+        end
       when :float
-        val = val.to_f unless val.blank?
+        val = _typecast_for(key) { Parse::Properties.typecast_float(val) }
       when :number
-        val = Parse::Properties.typecast_number(val)
+        val = _typecast_for(key) { Parse::Properties.typecast_number!(val) }
       when :acl
         # ACL types go through a special conversion
         val = ACL.typecast(val, self)
@@ -1010,9 +1377,14 @@ module Parse
         elsif val.is_a?(String)
           # if it's a string, try parsing the date
           val = (stripped = val.strip).present? ? Parse::Date.parse(stripped) : nil
-          #elsif val.present?
-          #  pus "[Parse::Stack] Invalid date value '#{val}' assigned to #{self.class}##{key}, it should be a Parse::Date or DateTime."
-          #   raise ValueError, "Invalid date value '#{val}' assigned to #{self.class}##{key}, it should be a Parse::Date or DateTime."
+        elsif !val.nil? && !val.is_a?(Parse::Date)
+          # A Numeric (or any other value) was previously stored raw and sent
+          # as a plain number. Refuse it: an epoch value is ambiguous
+          # (seconds or milliseconds), so convert with Time.at explicitly.
+          _typecast_for(key) do
+            raise TypecastError, "cannot cast #{val.class} to a Date; pass a Time, DateTime, " \
+                                 "Parse::Date or ISO-8601 String"
+          end
         end
       when :timezone
         val = Parse::TimeZone.new(val) if val.present?

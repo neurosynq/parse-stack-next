@@ -83,8 +83,8 @@ class NumberFloatAndParamsTest < Minitest::Test
   def test_number_blank_and_invalid_values_are_nil
     assert_nil Scored.new(score: nil).score
     assert_nil Scored.new(score: "").score
-    assert_nil Scored.new(score: "abc").score
-    assert_nil Scored.new(score: "0x1A").score
+    assert_raises(Parse::Properties::TypecastError) { Scored.new(score: "abc") }
+    assert_raises(Parse::Properties::TypecastError) { Scored.new(score: "0x1A") }
   end
 
   def test_integer_and_float_types_are_unchanged

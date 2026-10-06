@@ -703,7 +703,13 @@ module Parse
     # @param contents [Object]
     # @param mime_type [String] Default see default_mime_type
     def initialize(name, contents = nil, mime_type = nil)
-      mime_type ||= Parse::File.default_mime_type
+      # The default mime type applies only to content this instance will
+      # upload. A file hydrated from a server hash or copied from another
+      # Parse::File describes an existing upload whose type is not known
+      # here, so it keeps an explicit mime_type or the source's, never a
+      # guessed "image/jpeg".
+      hydrated = name.is_a?(Hash) || name.is_a?(Parse::File)
+      mime_type ||= hydrated ? nil : Parse::File.default_mime_type
 
       if name.is_a?(String) && name.start_with?("http") #could be url string
         file = Parse::File.safe_open_url(name)
@@ -717,6 +723,7 @@ module Parse
         @name = File.basename name.to_path
       elsif name.is_a?(Parse::File)
         @name = name.name
+        @mime_type = name.mime_type
         # Route through the single URL normalization point so the copy
         # gets the same strip + stash treatment as a caller-side
         # `url=`. Preserve the source's presigned-URL stash
@@ -1088,7 +1095,7 @@ module Parse
     def inspect
       url_state = @url.present? ? "set" : "blank"
       "<Parse::File @name=#{@name.inspect} @mime_type=#{@mime_type.inspect} " \
-      "@contents=#{@contents.nil?} @url=#{url_state}>"
+      "@contents=#{!@contents.nil?} @url=#{url_state}>"
     end
 
     # @return [String] the url

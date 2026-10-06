@@ -1098,6 +1098,22 @@ module Parse
       @retry_limit
     end
 
+    # The longest one request through {#request} can take, in seconds,
+    # counting every retry attempt at its full open and read timeout plus
+    # the largest retry backoff. A server-supplied Retry-After is not
+    # included. Used to size locks that must be held across a request.
+    # @return [Float]
+    def request_time_budget
+      options = @conn.respond_to?(:options) ? @conn.options : nil
+      read = options.respond_to?(:timeout) ? options.timeout.to_f : 0.0
+      open = options.respond_to?(:open_timeout) ? options.open_timeout.to_f : 0.0
+      read = 30.0 if read <= 0
+      open = 5.0 if open <= 0
+      retries = [retry_limit.to_i, 0].max
+      backoff = (1..retries).sum { |attempt| RETRY_DELAY * attempt * 1.25 }
+      (open + read) * (retries + 1) + backoff
+    end
+
     # @return [String] the url prefix of the Parse Server url.
     def url_prefix
       @conn.url_prefix
@@ -1244,10 +1260,12 @@ module Parse
       # attempt, turning a transient 500/503/429 into an infinite retry loop.
       _retry_count ||= self.retry_limit
 
+      # `retry: false` and `retry: 0` both disable retries; a positive
+      # Integer sets the budget. Anything else keeps the client default.
       if opts[:retry] == false
         _retry_count = 0
-      elsif opts[:retry].to_i > 0
-        _retry_count = opts[:retry]
+      elsif opts[:retry].is_a?(Numeric)
+        _retry_count = [opts[:retry].to_i, 0].max
       end
 
       # The effective starting budget, captured ONCE after the opts override
@@ -1258,6 +1276,15 @@ module Parse
       # caller passes `opts: { retry: N }` with N above the instance default,
       # silently disabling the backoff (every retry firing at zero delay).
       _retry_max ||= _retry_count
+
+      # Work on a copy of the caller's headers. The request id header is
+      # written into this hash, and it must survive the `retry` keyword (so
+      # it is set above the `begin`) without leaking into a hash the caller
+      # reuses for its next request.
+      headers = headers ? headers.dup : {}
+      # Set once a request is re-sent after an ambiguous failure, so a
+      # replayed DELETE that finds the object already gone can be recognized.
+      _replayed = false
 
       begin
         headers ||= {}
@@ -1272,6 +1299,9 @@ module Parse
           headers.merge! _request.headers
         else
           _request = Parse::Request.new(method, uri, body: body, headers: headers, opts: opts)
+          # Request copies the headers it is given, so carry its request id
+          # back onto the outgoing headers.
+          headers.merge!(_request.headers)
         end
 
         # http method
@@ -1305,7 +1335,18 @@ module Parse
         end
 
         raw_token = opts[:session_token]
-        # SEC-02: an EXPLICITLY-supplied session_token that is a blank /
+        # A session token the caller put in the request headers directly
+        # (`current_user(token)`, `fetch_session(token)`, `logout(token)`)
+        # is as explicit as `session_token:`. Treat it as the per-call token
+        # so the ambient `with_session` token or this client's bound token
+        # cannot overwrite it: otherwise `User.session(token_a)` inside
+        # `with_session(token_b)` resolved user B, and the identity cache
+        # then mapped token A (or a garbage token) to user B for its TTL.
+        if raw_token.nil?
+          header_token = headers[Parse::Protocol::SESSION_TOKEN]
+          raw_token = header_token if header_token.is_a?(String)
+        end
+        # SEC-02:an EXPLICITLY-supplied session_token that is a blank /
         # whitespace-only string is an unusable credential — NOT an invitation
         # to fall back to the master key. Treat it as "no credential"
         # (anonymous) and fail closed: suppress the master key and send no
@@ -1336,6 +1377,7 @@ module Parse
         if explicit_blank_token
           # Fail closed: never send the master key for an unusable explicit token.
           headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
+          headers.delete(Parse::Protocol::SESSION_TOKEN)
         elsif token.present?
           token = token.session_token if token.respond_to?(:session_token)
           headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
@@ -1355,11 +1397,25 @@ module Parse
           Parse::Client._safe_warn("AuthenticationError", response)
           raise Parse::Error::AuthenticationError, response
         when 400, 408
-          if response.code == Parse::Response::ERROR_TIMEOUT || response.code == 143 #"net/http: timeout awaiting response headers"
+          # Only Parse's timeout code maps here. Code 143 is Parse Server's
+          # WEBHOOK_ERROR (for example "no function named: foo is defined"),
+          # not a timeout.
+          if response.code == Parse::Response::ERROR_TIMEOUT
             Parse::Client._safe_warn("TimeoutError", response)
             raise Parse::Error::TimeoutError, response
           end
         when 404
+          if response.object_not_found? && _replayed && method == :delete
+            # An earlier attempt of this DELETE failed ambiguously and was
+            # re-sent. "Object not found" on the replay means the first
+            # attempt removed it, so report the delete as applied.
+            warn "[Parse:Retry] #{_request} : object already deleted by an earlier attempt"
+            applied = Parse::Response.new({})
+            applied.http_status = 200
+            applied.headers = response.headers
+            applied.request = _request
+            return applied
+          end
           unless response.object_not_found?
             Parse::Client._safe_warn("ConnectionError", response)
             raise Parse::Error::ConnectionError, response
@@ -1370,12 +1426,24 @@ module Parse
         when 429 # Request over the throttle limit
           Parse::Client._safe_warn("RequestLimitExceededError", response)
           raise Parse::Error::RequestLimitExceededError, response
-        when 500, 503
+        when 500, 502, 503, 504
+          # 502 and 504 come from a gateway or load balancer in front of
+          # Parse Server. Like 500/503, the request may or may not have been
+          # applied, so they are retried only when the request is idempotent.
           Parse::Client._safe_warn("ServiceUnavailableError", response)
           raise Parse::Error::ServiceUnavailableError, response
         end
 
         if response.error?
+          if response.code == -1 && response.error.to_s.start_with?("Missing additional authData mfa")
+            # Parse Server's OTHER_CAUSE (-1) for a password login on an
+            # account with MFA enabled and no token supplied. It is a 400, not
+            # an outage: without this branch the `<= 2` check below mapped it
+            # to ServiceUnavailableError and retried the login. Surface the
+            # typed error callers are documented to rescue to prompt for a code.
+            Parse::Client._safe_warn("MFA::RequiredError", response)
+            raise Parse::MFA::RequiredError
+          end
           if response.code <= Parse::Response::ERROR_SERVICE_UNAVAILABLE
             Parse::Client._safe_warn("ServiceUnavailableError", response)
             raise Parse::Error::ServiceUnavailableError, response
@@ -1404,10 +1472,11 @@ module Parse
         # re-sending is safe for any method. 500/503 (ServiceUnavailable) is
         # ambiguous — a write may have applied before the error — so only
         # re-send when the request is idempotent (see #idempotent_retry?).
-        retryable = e.is_a?(Parse::Error::RequestLimitExceededError) || idempotent_retry?(method, body, headers)
+        retryable = e.is_a?(Parse::Error::RequestLimitExceededError) || idempotent_retry?(method, body, headers, uri)
         if _retry_count > 0 && retryable
-          warn "[Parse:Retry] Retries remaining #{_retry_count} : #{response.request}"
+          warn "[Parse:Retry] Retries remaining #{_retry_count} : #{response&.request || _request}"
           _retry_count -= 1
+          _replayed = true unless e.is_a?(Parse::Error::RequestLimitExceededError)
           # Use Retry-After header if available, otherwise use linear backoff
           retry_after = response.retry_after if response.respond_to?(:retry_after)
           if retry_after && retry_after > 0
@@ -1443,8 +1512,9 @@ module Parse
         #     Retrying only adds backoff latency and `[Parse:Retry]` noise
         #     before the inevitable error, so it propagates raw and fast.
         raise unless connection_reset_error?(e)
-        if _retry_count > 0 && idempotent_retry?(method, body, headers)
+        if _retry_count > 0 && idempotent_retry?(method, body, headers, uri)
           _retry_count = consume_retry_with_backoff(_retry_count, _retry_max, _request)
+          _replayed = true
           retry
         end
         raise Parse::Error::ConnectionError, "#{_request} : #{e.class} - #{e.message}"
@@ -1458,8 +1528,9 @@ module Parse
         # not `ClientError`, so it must be listed explicitly to be caught.
         # `Faraday::ConnectionFailed` is handled in its own rescue above,
         # split into retry-reset / fail-fast-refused.
-        if _retry_count > 0 && idempotent_retry?(method, body, headers)
+        if _retry_count > 0 && idempotent_retry?(method, body, headers, uri)
           _retry_count = consume_retry_with_backoff(_retry_count, _retry_max, _request)
+          _replayed = true
           retry
         end
         raise Parse::Error::ConnectionError, "#{_request} : #{e.class} - #{e.message}"
@@ -1547,9 +1618,12 @@ module Parse
     # @param body [Hash, Object, nil] the request body.
     # @param headers [Hash, nil] the outgoing request headers (consulted for
     #   the request-id header on the server-dedup fast path).
+    # @param uri [String, nil] the request path, used to confirm the
+    #   endpoint is one Parse Server deduplicates. Without it the
+    #   server-dedup fast path does not apply.
     # @return [Boolean]
-    def idempotent_retry?(method, body, headers = nil)
-      return true if server_deduped_request?(headers)
+    def idempotent_retry?(method, body, headers = nil, uri = nil)
+      return true if server_deduped_request?(headers, method, uri)
       case method
       when :get, :delete then true
       when :put then !body_carries_atomic_op?(body)
@@ -1557,34 +1631,86 @@ module Parse
       end
     end
 
+    # Routes on which Parse Server runs its request-id deduplication
+    # (`promiseEnsureIdempotency`), by HTTP method. Paths are relative to the
+    # mount point. Every other endpoint (notably `POST /batch`, files, push,
+    # login, logout, schemas, config, and hooks) applies a replay again, so
+    # a request to one of them is never treated as server-deduplicated.
+    SERVER_DEDUP_ROUTES = {
+      post: [
+        %r{\Aclasses/[^/]+\z},
+        %r{\Ausers\z},
+        %r{\Ainstallations\z},
+        %r{\Afunctions/[^/]+\z},
+        %r{\Ajobs/[^/]+\z},
+      ].freeze,
+      put: [
+        %r{\Aclasses/[^/]+/[^/]+\z},
+        %r{\Ausers/[^/]+\z},
+        %r{\Ainstallations/[^/]+\z},
+      ].freeze,
+    }.freeze
+
     # Whether this request is covered by Parse Server's server-side request-id
     # deduplication, making a replay a no-op. True only when the operator has
-    # opted in via {Parse::Request.assume_server_idempotency} AND the request
-    # actually carries a non-blank request-id header (writes to inherently
-    # non-idempotent paths — sessions, logout, functions, push, jobs — never
-    # get a request id, so they correctly fail this check).
+    # opted in via {Parse::Request.assume_server_idempotency}, the request
+    # carries a non-blank request-id header, AND it targets a route Parse
+    # Server deduplicates (see {SERVER_DEDUP_ROUTES}).
     # @param headers [Hash, nil] the outgoing request headers.
+    # @param method [Symbol, nil] the HTTP method.
+    # @param uri [String, nil] the request path.
     # @return [Boolean]
-    def server_deduped_request?(headers)
+    def server_deduped_request?(headers, method = nil, uri = nil)
       return false unless Parse::Request.assume_server_idempotency
       return false unless headers.is_a?(Hash)
       rid = headers[Parse::Request.request_id_header]
-      rid.is_a?(String) && !rid.strip.empty?
+      return false unless rid.is_a?(String) && !rid.strip.empty?
+      routes = SERVER_DEDUP_ROUTES[method.to_s.downcase.to_sym] if method
+      return false if routes.nil?
+      path = api_relative_path(uri)
+      return false if path.nil?
+      routes.any? { |route| path.match?(route) }
     end
 
-    # Whether a request body carries a Parse atomic operation, i.e. any field
-    # whose value is a Hash with an `__op` key (Increment, Add, AddUnique,
-    # Remove, AddRelation, RemoveRelation, Delete). Such ops are not idempotent
-    # and must not be replayed on an ambiguous failure. Assumes the body is a
-    # Ruby Hash, which the SDK's normal save/update path always provides; a
-    # pre-serialized String body is treated as op-free (and therefore
-    # retryable), so callers handing `request` a raw JSON string for a
-    # PUT-with-op would bypass this guard.
+    # The request path relative to the Parse mount point, without a query
+    # string or surrounding slashes. Accepts relative paths (`classes/Post`)
+    # and absolute ones that include the mount prefix (`/parse/classes/Post`).
+    # @param uri [String, nil]
+    # @return [String, nil]
+    def api_relative_path(uri)
+      return nil if uri.nil?
+      path = uri.to_s.split("?", 2).first.to_s
+      prefix = url_prefix.path.to_s rescue ""
+      prefix = prefix.chomp("/")
+      if !prefix.empty? && path.start_with?("#{prefix}/")
+        path = path.delete_prefix(prefix)
+      end
+      path.sub(%r{\A/+}, "").sub(%r{/+\z}, "")
+    end
+
+    # Whether a request body carries a Parse operation: an `__op` key at any
+    # depth, including the top level. That covers field ops (Increment, Add,
+    # AddUnique, Remove, AddRelation, RemoveRelation, Delete), nested ops such
+    # as a schema update's `fields: { name: { __op: "Delete" } }`, and
+    # whole-body ops such as a hook delete's `{ __op: "Delete" }`. Replaying
+    # any of them after the first attempt applied turns a landed write into a
+    # reported failure, or applies it twice. A pre-serialized String body is
+    # scanned for the literal `"__op"` key.
     # @param body [Object] the request body.
     # @return [Boolean]
-    def body_carries_atomic_op?(body)
-      return false unless body.is_a?(Hash)
-      body.any? { |_k, v| v.is_a?(Hash) && (v.key?("__op") || v.key?(:__op)) }
+    def body_carries_atomic_op?(body, depth = 0)
+      return false if depth > 32
+      case body
+      when Hash
+        body.key?("__op") || body.key?(:__op) ||
+          body.each_value.any? { |v| body_carries_atomic_op?(v, depth + 1) }
+      when Array
+        body.any? { |v| body_carries_atomic_op?(v, depth + 1) }
+      when String
+        depth.zero? && body.include?('"__op"')
+      else
+        false
+      end
     end
 
     # Send a GET request.
@@ -1629,7 +1755,7 @@ module Parse
     # @return (see #request)
     def send_request(req) #Parse::Request object
       raise ArgumentError, "Object not of Parse::Request type." unless req.is_a?(Parse::Request)
-      request req.method, req.path, req.body, req.headers
+      request req
     end
 
     # The connectable  module adds methods to objects so that they can get a default

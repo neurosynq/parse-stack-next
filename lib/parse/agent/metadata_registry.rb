@@ -380,28 +380,20 @@ module Parse
       end
 
       # Translate Ruby property names (or wire names) for `class_name` into
-      # wire-format column names, the same way {#class_field_allowlist}
-      # resolves `agent_fields`: the class's `field_map` alias when present,
-      # else lowerCamelCase columnization.
+      # wire-format column names with {Parse::Model.wire_name_for}, the same
+      # rule query compilation uses: a Ruby property name maps to its declared
+      # column first, then a name that is exactly a declared column stays as
+      # is, else lowerCamelCase columnization. Sharing the rule keeps the
+      # column an allowlist check approves identical to the column the
+      # compiled query addresses.
       #
       # @param class_name [String, Class]
       # @param names [Array<Symbol, String>]
       # @return [Array<String>]
       def wire_field_names(class_name, names)
         klass = find_model_class(class_name_string(class_name))
-        fmap = klass.respond_to?(:field_map) ? klass.field_map : {}
-        declared_wire = fmap.values.map(&:to_s)
         Array(names).map do |name|
-          mapped = fmap[name.to_sym]
-          if mapped
-            mapped.to_s
-          elsif declared_wire.include?(name.to_s)
-            # Already a declared server name (an explicit alias such as
-            # "PublicText"): keep it exactly, never re-case it.
-            name.to_s
-          else
-            name.to_s.columnize
-          end
+          Parse::Model.wire_name_for(klass, name) || name.to_s.columnize
         end.uniq
       end
 
@@ -430,15 +422,10 @@ module Parse
         # the allowlist filter was case-sensitive against snake_case strings
         # and silently stripped legitimate camelCase columns from schema
         # enrichment, `keys:` projection, and pipeline policy enforcement.
-        fmap = klass.respond_to?(:field_map) ? klass.field_map : {}
+        # Same resolution rule as {#wire_field_names}: an explicit wire name
+        # is used verbatim (columnize would lowercase its first character).
         resolved = allowlist.map do |name|
-          mapped = fmap[name.to_sym]
-          # When field_map carries an explicit wire name (e.g. a `property
-          # :external_id, field: :ExternalReferenceCode` alias), use it
-          # verbatim — columnize would lowercase the first character and
-          # break the alias. Without a mapping, columnize the Ruby symbol
-          # to convert snake_case to lowerCamelCase wire format.
-          mapped ? mapped.to_s : name.to_s.columnize
+          Parse::Model.wire_name_for(klass, name) || name.to_s.columnize
         end
         # Defense-in-depth: refuse to surface Parse Server internal columns
         # (`_hashed_password`, `_session_token`, `_rperm`/`_wperm`, etc.) on

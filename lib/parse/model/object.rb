@@ -1397,7 +1397,7 @@ module Parse
         end
         #if the objectId is provided we will consider the object pristine
         #and not track dirty items
-        dirty_track = opts[Parse::Model::OBJECT_ID] || opts[:objectId] || opts[:id]
+        dirty_track = opts[Parse::Model::OBJECT_ID] || opts[:objectId] || opts[:id] || opts[Parse::Model::ID]
         # Always filter the narrow PROTECTED_INITIALIZE_KEYS set unless
         # the caller is a trusted hydration path. Decoupled from
         # dirty_track so an objectId-bearing hash from a controller,
@@ -1427,11 +1427,18 @@ module Parse
       # self-write-plus-public-read ACL on signup; stamping any value from
       # the SDK side (even `{}`) overrides that and locks the new user out
       # of editing their own profile without the master key.
+      #
+      # A trusted hydration of an existing row (server JSON with an objectId)
+      # is also exempt. A row without an `ACL` key is public on the server,
+      # so stamping the local default would misreport it (usually as
+      # private). Such a row is never ACL-pristine either: the save-time
+      # resolver must not replace the ACL of a record that already exists.
+      server_row = trusted && input_had_id
       acl_was_user_supplied = !self.acl.nil?
-      unless self.class.builtin_acl_default_active?
+      unless self.class.builtin_acl_default_active? || server_row
         self.acl = self.class.default_acls.as_json if self.acl.nil?
       end
-      @_acl_pristine = !acl_was_user_supplied
+      @_acl_pristine = !acl_was_user_supplied && !server_row
       @_acl_owner_override = acl_owner_override
 
       # Record where our ACL knowledge came from. `acl.nil?` alone is not
@@ -1505,11 +1512,80 @@ module Parse
     # The one exception is an objectId assigned client-side during a create
     # (`parse_reference precompute: true`, `acl_owner :self`): the object
     # is not persisted until the create succeeds and returns `createdAt`.
+    #
+    # A destroyed object is not persisted, matching ActiveModel's
+    # `persisted? == !new_record? && !destroyed?` contract.
     # @return [Boolean] true if this object exists on the server.
     def persisted?
       return false if @id.blank?
+      return false if destroyed?
       return @created_at.present? if defined?(@_creating_record) && @_creating_record
       true
+    end
+
+    # Whether this object was deleted from the server by a successful
+    # {#destroy}. A destroyed object keeps its objectId (so `dom_id`,
+    # `to_key` and Turbo Stream removals keep working) but is no longer
+    # {#persisted?}, and {#save} refuses to write it.
+    # @return [Boolean]
+    def destroyed?
+      @_destroyed == true
+    end
+
+    # An ActiveRecord-compatible cache key: `"<collection>/<objectId>"` for an
+    # object with an id, `"<collection>/new"` otherwise. The collection
+    # segment comes from `model_name.cache_key` (for example `"songs"` or
+    # `"music/albums"`), so records of different classes that share an
+    # objectId never collide in a fragment cache.
+    # @return [String]
+    def cache_key
+      prefix = self.class.model_name.cache_key
+      @id.present? ? "#{prefix}/#{@id}" : "#{prefix}/new"
+    end
+
+    # The cache version, derived from `updated_at` in the same
+    # `"%Y%m%d%H%M%S%6N"` form ActiveRecord uses. Returns nil when the
+    # object has no `updated_at` (new or pointer-state objects). Reads the
+    # stored value directly, so it never triggers an autofetch or changes
+    # dirty state.
+    # @return [String, nil]
+    def cache_version
+      value = @updated_at
+      value = Parse::Date.parse(value) if value.is_a?(String)
+      return nil unless value.respond_to?(:to_time)
+      value.to_time.utc.strftime("%Y%m%d%H%M%S%6N")
+    rescue ArgumentError
+      nil
+    end
+
+    # The cache key with the {#cache_version} appended, as in ActiveRecord.
+    # @return [String]
+    def cache_key_with_version
+      version = cache_version
+      version ? "#{cache_key}-#{version}" : cache_key
+    end
+
+    # The current values of this object's properties, keyed by local
+    # attribute name (as Strings).
+    #
+    # {#attributes} returns the property TYPE map (`{"title" => :string}`
+    # style, with Symbol keys). That shape is load-bearing: ActiveModel
+    # serialization reads its keys and then calls each reader, and
+    # {#as_json} depends on it. This method is the value form. It reads the
+    # stored values directly, so it never autofetches a pointer, never
+    # applies defaults, and never changes dirty state; an unfetched field
+    # reads as nil.
+    # @return [Hash{String => Object}]
+    def attribute_values
+      self.class.fields.each_key.with_object({}) do |key, h|
+        ivar = :"@#{key}"
+        next unless self.class.field_map.key?(key)
+        value = instance_variable_defined?(ivar) ? instance_variable_get(ivar) : nil
+        if value.is_a?(String) && self.class.fields[key] == :date
+          value = (Parse::Date.parse(value) rescue value)
+        end
+        h[key.to_s] = value
+      end
     end
 
     # Force reload from the database and replace any local fields with data from
@@ -1817,8 +1893,72 @@ module Parse
     # @note This does not reload the object from the persistent store, for this use "reload!" instead.
     # @see #reload!
     def rollback!
+      snapshot = defined?(@_acl_snapshot_before_change) ? @_acl_snapshot_before_change : nil
       restore_attributes
+      # ACL edits are usually made in place (`acl.apply`, `acl.delete`), so
+      # the value ActiveModel restores may be the edited object itself.
+      # Restore from the pre-change snapshot instead, and drop the snapshot
+      # so a later edit captures a fresh baseline.
+      @acl = Parse::ACL.typecast(snapshot.as_json, self) if snapshot && !@acl.nil?
+      @_acl_snapshot_before_change = nil
     end
+
+    # Keys that mass assignment never applies to an object: the objectId
+    # under its local and remote names. An existing object's id must not be
+    # retargeted by a params hash (`{"id" => "victim"}` would redirect the
+    # next save to another record). A new object gets an id only through
+    # the constructor, {Parse::Object.build}, or an explicit `id=` call.
+    PROTECTED_IDENTITY_KEYS = %w[id objectId].freeze
+
+    # Mass-assign attributes with dirty tracking (the Rails form path).
+    # Filters {Parse::Properties::PROTECTED_MASS_ASSIGNMENT_KEYS} (session
+    # token, roles, ACL row permissions, auth data, timestamps, className)
+    # and {PROTECTED_IDENTITY_KEYS}. Accepts a Hash or hash-like input such as
+    # permitted `ActionController::Parameters` (unpermitted parameters raise
+    # from `to_h`).
+    # @param hash [Hash]
+    def attributes=(hash)
+      hash = hash.to_h if self.class.hash_like_init_input?(hash)
+      return unless hash.is_a?(Hash)
+      super(_without_identity_keys(hash))
+    end
+
+    # @!visibility private
+    # Strips {PROTECTED_IDENTITY_KEYS} on every mass-assignment
+    # (`dirty_track: true`) call, and on hydration once the object already
+    # has an id. Hydration of an object without an id (the constructor,
+    # {Parse::Object.build}) may still set it.
+    def apply_attributes!(hash, dirty_track: false, filter_protected: nil, protected_set: nil)
+      if hash.is_a?(Hash) && (dirty_track || @id.present?)
+        hash = _without_identity_keys(hash)
+      end
+      super(hash, dirty_track: dirty_track, filter_protected: filter_protected, protected_set: protected_set)
+    end
+
+    private
+
+    # ActiveModel's `assign_attributes` funnels through this method after
+    # its strong-parameters check. Apply the same protected-key filter as
+    # {#attributes=} so `assign_attributes("session_token" => …, "id" => …,
+    # "created_at" => …)` cannot set those fields.
+    def _assign_attributes(attributes)
+      if attributes.key?("ACL") || attributes.key?("acl") || attributes.key?(:ACL) || attributes.key?(:acl)
+        Parse::Properties.warn_acl_mass_assignment_once!
+      end
+      blocked = Parse::Properties::PROTECTED_MASS_ASSIGNMENT_KEYS
+      filtered = attributes.reject do |key, _|
+        name = key.to_s
+        blocked.include?(name) || PROTECTED_IDENTITY_KEYS.include?(name)
+      end
+      super(filtered)
+    end
+
+    def _without_identity_keys(hash)
+      return hash unless hash.any? { |key, _| PROTECTED_IDENTITY_KEYS.include?(key.to_s) }
+      hash.reject { |key, _| PROTECTED_IDENTITY_KEYS.include?(key.to_s) }
+    end
+
+    public
 
     # Overrides ActiveModel::Validations#validate! instance method.
     # It runs all validations for this object. If validation fails,

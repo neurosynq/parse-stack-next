@@ -229,8 +229,10 @@ module Parse
     # model's explicit `field:` names while a query compiles.
     # Stored in inheritable fiber storage (`Fiber[]`), so a fiber or thread
     # started while a query compiles sees the same names, and an assignment in
-    # the child never leaks back to the parent. The value is a frozen
-    # {FieldAliasScope} (or nil when no query is compiling).
+    # the child never leaks back to the parent. The value is a
+    # {FieldAliasFrame} (or nil when no query is compiling). The frame is
+    # closed when the block that opened it returns, so a long-lived thread
+    # started during a compile stops using that query's names afterwards.
     FIELD_ALIAS_SCOPE_KEY = :parse_query_field_alias_scope
     EMPTY_FIELD_ALIASES = {}.freeze
     FIELD_ALIAS_CACHE_MAX = 1_000
@@ -239,6 +241,10 @@ module Parse
     # One cached alias map for a table, stamped with the model registry
     # generation and the model's field_map size it was built from.
     FieldAliasScope = Struct.new(:table, :aliases, :generation, :klass, :field_count)
+    # @!visibility private
+    # One {with_field_aliases} activation: the scope plus whether the block
+    # that set it is still running.
+    FieldAliasFrame = Struct.new(:scope, :aliases, :open)
     # Per-table {FieldAliasScope} cache. Replaced (never mutated) under the
     # mutex, so readers need no lock.
     @field_alias_cache = {}.freeze
@@ -329,8 +335,8 @@ module Parse
       #   declared, whether the caller used the Ruby name or the remote name.
       def format_field(str)
         res = str.to_s.strip
-        scope = Fiber[FIELD_ALIAS_SCOPE_KEY]
-        if scope && (mapped = scope.aliases[res])
+        frame = Fiber[FIELD_ALIAS_SCOPE_KEY]
+        if frame && frame.open && (mapped = frame.aliases[res])
           return mapped
         end
         if field_formatter.present? && res.respond_to?(field_formatter)
@@ -351,20 +357,32 @@ module Parse
       def with_field_aliases(table)
         table = table.to_s unless table.nil? || table.is_a?(String)
         previous = Fiber[FIELD_ALIAS_SCOPE_KEY]
-        return yield if table == previous&.table
+        return yield if table == (previous && previous.open ? previous.scope.table : nil)
+        scope = field_alias_scope_for(table)
+        frame = FieldAliasFrame.new(scope, scope.aliases, true)
         begin
-          Fiber[FIELD_ALIAS_SCOPE_KEY] = field_alias_scope_for(table)
+          Fiber[FIELD_ALIAS_SCOPE_KEY] = frame
           yield
         ensure
+          frame.open = false
           Fiber[FIELD_ALIAS_SCOPE_KEY] = previous
         end
+      end
+
+      # @!visibility private
+      # The {FieldAliasScope} in effect, or nil. A frame inherited from a
+      # block that has since returned is ignored.
+      # @return [FieldAliasScope, nil]
+      def current_field_alias_scope
+        frame = Fiber[FIELD_ALIAS_SCOPE_KEY]
+        frame.scope if frame && frame.open
       end
 
       # @!visibility private
       # The Parse class whose aliases are in scope, or nil.
       # @return [String, nil]
       def field_alias_table
-        Fiber[FIELD_ALIAS_SCOPE_KEY]&.table
+        current_field_alias_scope&.table
       end
 
       # @!visibility private
@@ -383,7 +401,7 @@ module Parse
         table = table.to_s unless table.nil? || table.is_a?(String)
         # Re-entrant call for the table already in scope: the block either
         # belongs to the caller that opened it or is internal.
-        return blk if table == outer&.table
+        return blk if table == (outer && outer.open ? outer.scope.table : nil)
         wrapped = proc do |*args, &inner|
           scoped = Fiber[FIELD_ALIAS_SCOPE_KEY]
           Fiber[FIELD_ALIAS_SCOPE_KEY] = outer
@@ -441,29 +459,27 @@ module Parse
       end
 
       # @!visibility private
+      # The query-side view of {Parse::Model.field_resolution_map}: the same
+      # resolution rule (Ruby property name first, then an exact declared
+      # column), keeping only the names whose column differs from the default
+      # lowerCamelCase form. Every other name keeps {field_formatter}
+      # (including nil) exactly as before.
+      #
       # @param fmap [Hash{Symbol => Symbol}] a model's field_map.
       # @return [Hash{String => String}] frozen alias map.
       def build_field_aliases(fmap)
-        ruby_aliases = {}
-        wire_aliases = {}
-        fmap.each do |ruby_name, remote|
-          ruby = ruby_name.to_s
-          wire = remote.to_s
-          # Only explicit `field:` names: an entry equal to the default
-          # lowerCamelCase form is not an alias, so field_formatter (including
-          # nil) keeps governing it exactly as before. Built-in system fields
-          # keep their existing handling.
-          next if wire == ruby.columnize
-          next if FIELD_ALIAS_BUILTINS.include?(ruby)
+        # Built-in system fields keep their existing handling, under both
+        # their Ruby and their column names.
+        builtin_wires = FIELD_ALIAS_BUILTINS.filter_map { |b| fmap[b.to_sym]&.to_s }
+        aliases = {}
+        Parse::Model.field_resolution_map(fmap).each do |name, wire|
+          next if wire == name.columnize
+          next if FIELD_ALIAS_BUILTINS.include?(name) || builtin_wires.include?(name)
           # Never let an alias address an internal Parse Server column.
           next if wire.start_with?("_")
-          ruby_aliases[ruby] = wire
-          wire_aliases[wire] = wire
+          aliases[name] = wire
         end
-        return EMPTY_FIELD_ALIASES if ruby_aliases.empty?
-        # An exact server name wins over a Ruby name that collides with it, so
-        # a key that IS a declared column is never redirected elsewhere.
-        ruby_aliases.merge(wire_aliases).freeze
+        aliases.empty? ? EMPTY_FIELD_ALIASES : aliases.freeze
       end
 
       # Convert camelCase string to snake_case
@@ -555,26 +571,102 @@ module Parse
       end
 
       # @!visibility private
+      # Reduce a list of constraints into one where hash. Constraints on the
+      # same field are combined so every one of them still applies:
+      #
+      # * Operator hashes with distinct operators merge
+      #   (`:plays.gt => 1` and `:plays.lt => 9` give `{"$gt" => 1, "$lt" => 9}`).
+      # * An equality next to operators becomes `$eq`
+      #   (`:plays => 5` and `:plays.gt => 1` give `{"$eq" => 5, "$gt" => 1}`).
+      # * Anything that cannot merge without changing its meaning (the same
+      #   operator with a different value, two different equalities, two
+      #   regular expressions, two `$or` groups) is kept in a top-level `$and`,
+      #   so both conditions must hold. The first constraint keeps the field
+      #   key and each later conflicting one is appended to `$and`.
+      #
+      # Identical constraints collapse to one.
       def constraint_reduce(clauses)
-        # @todo Need to add proper constraint merging
         clauses.reduce({}) do |clause, subclause|
-          #puts "Merging Subclause: #{subclause.as_json}"
-
           subclause_json = subclause.as_json || {}
-
-          # Special handling for aggregation pipeline constraints
-          # Instead of overwriting, concatenate the pipeline arrays
-          if clause.key?("__aggregation_pipeline") && subclause_json.key?("__aggregation_pipeline")
-            clause["__aggregation_pipeline"].concat(subclause_json["__aggregation_pipeline"])
-            # Don't merge the __aggregation_pipeline key using deep_merge
-            subclause_without_pipeline = subclause_json.reject { |k, v| k == "__aggregation_pipeline" }
-            clause.deep_merge!(subclause_without_pipeline)
-          else
-            clause.deep_merge!(subclause_json)
-          end
-
+          subclause_json.each { |key, value| merge_constraint_entry!(clause, key, value) }
           clause
         end
+      end
+
+      # Operators whose meaning depends on a partner operator in the same
+      # hash. Two hashes that both use one of a group are never merged.
+      COUPLED_OPERATOR_GROUPS = [
+        %w[$regex $options],
+        %w[$near $nearSphere $maxDistance $maxDistanceInRadians $maxDistanceInMiles
+           $maxDistanceInKilometers $geoWithin $geoIntersects $within],
+        %w[$text $search],
+      ].freeze
+
+      # @!visibility private
+      def merge_constraint_entry!(clause, key, value)
+        unless clause.key?(key)
+          clause[key] = value.is_a?(Array) && key == "__aggregation_pipeline" ? value.dup : value
+          return
+        end
+        existing = clause[key]
+        return if existing == value
+
+        if key == "__aggregation_pipeline" || (key == "$and" && existing.is_a?(Array) && value.is_a?(Array))
+          clause[key] = existing + value
+        elsif key.is_a?(String) && key.start_with?("__")
+          # SDK-internal routing markers keep their previous merge behavior.
+          clause[key] = existing.is_a?(Hash) && value.is_a?(Hash) ? existing.deep_merge(value) : value
+        elsif operator_hash?(existing) && operator_hash?(value)
+          if mergeable_operator_hashes?(existing, value)
+            clause[key] = existing.merge(value)
+          else
+            append_and_constraint!(clause, key, value)
+          end
+        elsif operator_hash?(existing) && !operator_value_key?(key)
+          eq = { "$eq" => value }
+          if mergeable_operator_hashes?(existing, eq)
+            clause[key] = existing.merge(eq)
+          else
+            append_and_constraint!(clause, key, value)
+          end
+        elsif operator_hash?(value) && !operator_value_key?(key)
+          eq = { "$eq" => existing }
+          if mergeable_operator_hashes?(eq, value)
+            clause[key] = eq.merge(value)
+          else
+            append_and_constraint!(clause, key, value)
+          end
+        else
+          append_and_constraint!(clause, key, value)
+        end
+      end
+
+      # @!visibility private
+      def append_and_constraint!(clause, key, value)
+        list = clause["$and"]
+        clause["$and"] = (list.is_a?(Array) ? list : []) + [{ key => value }]
+      end
+
+      # @!visibility private
+      # A top-level operator key (`$or`, `$relatedTo`) holds a value, not a
+      # field constraint.
+      def operator_value_key?(key)
+        key.to_s.start_with?("$")
+      end
+
+      # @!visibility private
+      def operator_hash?(value)
+        value.is_a?(Hash) && !value.empty? && value.each_key.all? { |k| k.to_s.start_with?("$") }
+      end
+
+      # @!visibility private
+      def mergeable_operator_hashes?(a, b)
+        a_ops = a.transform_keys(&:to_s)
+        b_ops = b.transform_keys(&:to_s)
+        a_keys = a_ops.keys
+        b_keys = b_ops.keys
+        return false if (a_keys & b_keys).any? { |op| a_ops[op] != b_ops[op] }
+        COUPLED_OPERATOR_GROUPS.none? { |group| (a_keys & group).any? && (b_keys & group).any? }
       end
 
       # Applies special singleton methods to a query instance in order to
@@ -1236,15 +1328,18 @@ module Parse
       where_clauses = where_clauses.where if where_clauses.is_a?(Parse::Query)
       where_clauses = Parse::Query.new(@table, where_clauses).where if where_clauses.is_a?(Hash)
       return self if where_clauses.blank?
-      # we can only have one compound query constraint. If we need to add another OR clause
-      # let's find the one we have (if any)
-      compound = @where.find { |f| f.is_a?(Parse::Constraint::CompoundQueryConstraint) }
-      # create a set of clauses that are not an OR clause.
-      remaining_clauses = @where.select { |f| f.is_a?(Parse::Constraint::CompoundQueryConstraint) == false }
+      # Reuse the existing OR only when it is the query's sole constraint.
+      # When other constraints sit beside it, the current where is
+      # `(A or B) and C`, so that whole expression becomes one branch of the
+      # new OR. Appending to the existing OR would silently drop `C`.
+      compound = nil
+      if @where.size == 1 && @where.first.is_a?(Parse::Constraint::CompoundQueryConstraint)
+        compound = @where.first
+      end
       # if we don't have a OR clause to reuse, then create a new one with then
       # current set of constraints
       if compound.blank?
-        initial_constraints = Parse::Query.compile_where(remaining_clauses)
+        initial_constraints = Parse::Query.compile_where(@where)
         # Only include initial constraints if they're not empty
         initial_values = initial_constraints.empty? ? [] : [initial_constraints]
         compound = Parse::Constraint::CompoundQueryConstraint.new :or, initial_values
@@ -1578,9 +1673,13 @@ module Parse
         { "$count" => "distinctCount" },
       ]
 
+      # `limit(0)` selects no rows.
+      return 0 if @limit == 0
+
       # Use the Aggregation class to execute
-      # The aggregate method will automatically handle where conditions
-      aggregation = aggregate(pipeline, verbose: @verbose_aggregate)
+      # The aggregate method will automatically handle where conditions,
+      # and the query's order / skip / limit pick the rows before `$group`.
+      aggregation = aggregate(pipeline, verbose: @verbose_aggregate, window_before_pipeline: true)
       raw_results = aggregation.raw
 
       # Extract the count from the response
@@ -1636,35 +1735,36 @@ module Parse
         return first_direct(limit_or_constraints)
       end
 
-      if limit_or_constraints.is_a?(Hash)
-        conditions(limit_or_constraints)
-        # Check if limit was set in constraints, otherwise use 1
-        # Handle :max case - if @limit is :max, default to 1 for first()
-        fetch_count = (@limit.is_a?(Numeric) ? @limit : nil) || 1
-        # Set @limit to ensure query only fetches the needed records
-        @results = nil if @limit != fetch_count
-        @limit = fetch_count
-      else
-        fetch_count = case limit_or_constraints
-          when Numeric then limit_or_constraints.to_i
-          when String
-            unless limit_or_constraints =~ /\A-?\d+\z/
+      # Fetch on a temporary state: the limit, constraints, and cached
+      # results set for this call never stay on the query.
+      with_temporary_query_state do
+        if limit_or_constraints.is_a?(Hash)
+          conditions(limit_or_constraints)
+          # Check if limit was set in constraints, otherwise use 1
+          # Handle :max case - if @limit is :max, default to 1 for first()
+          fetch_count = (@limit.is_a?(Numeric) ? @limit : nil) || 1
+        else
+          fetch_count = case limit_or_constraints
+            when Numeric then limit_or_constraints.to_i
+            when String
+              unless limit_or_constraints =~ /\A-?\d+\z/
+                raise ArgumentError,
+                      "Invalid first() argument #{limit_or_constraints.inspect}. " \
+                      "Expected an Integer, a numeric String, or a Hash of constraints."
+              end
+              limit_or_constraints.to_i
+            else
               raise ArgumentError,
                     "Invalid first() argument #{limit_or_constraints.inspect}. " \
                     "Expected an Integer, a numeric String, or a Hash of constraints."
             end
-            limit_or_constraints.to_i
-          else
-            raise ArgumentError,
-                  "Invalid first() argument #{limit_or_constraints.inspect}. " \
-                  "Expected an Integer, a numeric String, or a Hash of constraints."
-          end
+        end
         @results = nil if @limit != fetch_count
         @limit = fetch_count
+        # Apply any additional keyword options as conditions (e.g., keys:, includes:)
+        conditions(options) unless options.empty?
+        fetch_count == 1 ? results.first : results.first(fetch_count)
       end
-      # Apply any additional keyword options as conditions (e.g., keys:, includes:)
-      conditions(options) unless options.empty?
-      fetch_count == 1 ? results.first : results.first(fetch_count)
     end
 
     # Returns the most recently created object(s) (ordered by created_at descending).
@@ -1672,21 +1772,16 @@ module Parse
     # @return [Parse::Object] if limit == 1
     # @return [Array<Parse::Object>] if limit > 1
     # @note Supports all constraint options like :keys, :includes, :limit, etc.
+    #   The query itself is not changed: the order, limit, and constraints
+    #   apply to this call only. `createdAt` descending is the primary sort;
+    #   an existing order on other fields breaks ties.
     # @example
     #   query.latest                          # single most recent
     #   query.latest(5)                       # 5 most recent
     #   query.latest(:user.eq => x)           # most recent for user
     #   query.latest(:user.eq => x, limit: 5) # 5 most recent for user
     def latest(limit = 1, **options)
-      # Allow limit to be overridden via options
-      limit = options.delete(:limit) if options.key?(:limit)
-      @results = nil if @limit != limit
-      @limit = limit
-      # Add created_at descending order if not already present
-      order(:created_at.desc) unless @order.any? { |o| o.operand == :created_at }
-      # Apply any additional keyword options as conditions (e.g., keys:, includes:)
-      conditions(options) unless options.empty?
-      limit == 1 ? results.first : results.first(limit)
+      newest_by(:created_at, limit, **options)
     end
 
     # Returns the most recently updated object(s) (ordered by updated_at descending).
@@ -1694,21 +1789,53 @@ module Parse
     # @return [Parse::Object] if limit == 1
     # @return [Array<Parse::Object>] if limit > 1
     # @note Supports all constraint options like :keys, :includes, :limit, etc.
+    #   The query itself is not changed, as with {#latest}.
     # @example
     #   query.last_updated                          # single most recently updated
     #   query.last_updated(5)                       # 5 most recently updated
     #   query.last_updated(:user.eq => x)           # most recently updated for user
     #   query.last_updated(:user.eq => x, limit: 5) # 5 most recently updated for user
     def last_updated(limit = 1, **options)
+      newest_by(:updated_at, limit, **options)
+    end
+
+    # @!visibility private
+    # Shared body of {#latest} and {#last_updated}.
+    def newest_by(field, limit, **options)
       # Allow limit to be overridden via options
       limit = options.delete(:limit) if options.key?(:limit)
-      @results = nil if @limit != limit
-      @limit = limit
-      # Add updated_at descending order if not already present
-      order(:updated_at.desc) unless @order.any? { |o| o.operand == :updated_at }
-      # Apply any additional keyword options as conditions (e.g., keys:, includes:)
-      conditions(options) unless options.empty?
-      limit == 1 ? results.first : results.first(limit)
+      with_temporary_query_state do
+        @results = nil
+        @limit = limit
+        column = Query.format_field(field)
+        # Put the timestamp first; keep any other existing order as a
+        # tiebreaker. An existing order on the same column is replaced.
+        existing = @order.reject { |o| Query.format_field(o.field) == column }
+        @order = []
+        order(field.to_sym.desc)
+        @order.concat(existing)
+        # Apply any additional keyword options as conditions (e.g., keys:, includes:)
+        conditions(options) unless options.empty?
+        limit == 1 ? results.first : results.first(limit)
+      end
+    end
+
+    # @!visibility private
+    # Run the block, then restore every instance variable to its value from
+    # before the block (Arrays and Hashes are copied, so in-place appends
+    # are undone too). Used by the fetch helpers that adjust the limit,
+    # order, or constraints for one call.
+    def with_temporary_query_state
+      saved = instance_variables.each_with_object({}) do |ivar, memo|
+        value = instance_variable_get(ivar)
+        memo[ivar] = value.is_a?(Array) || value.is_a?(Hash) ? value.dup : value
+      end
+      begin
+        yield
+      ensure
+        (instance_variables - saved.keys).each { |ivar| remove_instance_variable(ivar) }
+        saved.each { |ivar, value| instance_variable_set(ivar, value) }
+      end
     end
 
     # Retrieve a single object by its objectId.
@@ -1739,8 +1866,10 @@ module Parse
       batch_size = 100
       results = []
       # determine if there is a user provided hard limit
+      return [] if @limit == 0
       _limit = (@limit.is_a?(Numeric) && @limit > 0) ? @limit : nil
       compiled_query[:skip] ||= 0
+      add_paging_tiebreaker!(compiled_query)
 
       loop do
         # always reset the batch size
@@ -1787,6 +1916,23 @@ module Parse
         compiled_query[:skip] += batch_size
       end
       results
+    end
+
+    # @!visibility private
+    # Skip-based paging is only stable under a total order. When several rows
+    # share the sort value, the server may return them in a different order
+    # on each page request, so rows repeat on one page and are skipped on
+    # another. Ending the order with `objectId` makes every page boundary
+    # deterministic. Left alone when the query already orders by objectId, or
+    # when `$near` / `$text` supply their own relevance order.
+    # @param compiled_query [Hash] a compiled query (mutated).
+    def add_paging_tiebreaker!(compiled_query)
+      where = compiled_query[:where].to_s
+      return if where.include?("$near") || where.include?("$text")
+      order = compiled_query[:order].to_s
+      fields = order.split(",").map { |f| f.strip.delete_prefix("-") }
+      return if fields.include?("objectId") || fields.any? { |f| f.start_with?("$") }
+      compiled_query[:order] = order.empty? ? "objectId" : "#{order},objectId"
     end
 
     # @!visibility private
@@ -1969,6 +2115,9 @@ module Parse
     # @param mongo_direct [Boolean] if true, queries MongoDB directly bypassing Parse Server.
     #   Requires Parse::MongoDB to be configured. Default: false.
     def results(raw: false, return_pointers: false, mongo_direct: false, &block)
+      # `limit(0)` asks for no rows: answer without a request. Sending no
+      # limit would return the server default page of 100.
+      return [] if @limit == 0
       # Use direct MongoDB query if requested
       if mongo_direct
         return results_direct(raw: raw, **mongo_direct_auth_kwargs, &block)
@@ -2473,6 +2622,9 @@ module Parse
     # @note This is a read-only operation. Direct MongoDB queries cannot modify data.
     # @see Parse::MongoDB.configure
     def results_direct(raw: false, max_time_ms: nil, session_token: nil, master: nil, acl_user: nil, acl_role: nil, client: nil, &block)
+      # `limit(0)` asks for no rows. MongoDB rejects `$limit: 0`, and
+      # omitting the stage would return every row.
+      return [] if @limit == 0
       require_relative "mongodb"
       Parse::MongoDB.require_gem!
 
@@ -3306,6 +3458,8 @@ module Parse
 
         # Convert field name for MongoDB
         mongo_field = convert_field_for_direct_mongodb(field_str)
+        # Bare objectIds against a pointer column use the storage form.
+        value = coerce_bare_pointer_ids(field_str, value, arrays: true)
 
         # Convert value
         result[mongo_field] = convert_value_for_direct_mongodb(field_str, value)
@@ -3822,7 +3976,8 @@ module Parse
     #   at the top-level stage.
     BLOCKED_PIPELINE_STAGES = Parse::PipelineSecurity::DENIED_OPERATORS
 
-    def aggregate(pipeline, verbose: nil, mongo_direct: nil, rewrite_lookups: nil, raw_values: false, raw_field_names: false)
+    def aggregate(pipeline, verbose: nil, mongo_direct: nil, rewrite_lookups: nil, raw_values: false, raw_field_names: false,
+                  window_before_pipeline: false)
       validate_pipeline!(pipeline)
 
       # Auto-rewrite LLM-style $lookup stages against logical Parse class
@@ -3922,29 +4077,31 @@ module Parse
         end
       end
 
-      # Append the provided pipeline stages
-      complete_pipeline.concat(pipeline)
+      if window_before_pipeline
+        # The query's order / skip / limit select the rows the pipeline
+        # (a `$group` from sum, average, group_by, ...) runs over. Leading
+        # `$match` stages of the pipeline filter rows, so they run first.
+        leading = pipeline.take_while { |stage| stage.is_a?(Hash) && stage.keys == ["$match"] }
+        complete_pipeline.concat(leading)
+        complete_pipeline.concat(query_window_stages)
+        complete_pipeline.concat(pipeline.drop(leading.size))
+      else
+        # Append the provided pipeline stages
+        complete_pipeline.concat(pipeline)
 
-      # Add $sort stage from order constraints if any exist
-      unless @order.empty?
-        sort_stage = {}
-        @order.each do |order_obj|
-          # order_obj is a Parse::Order object with field and direction
-          field_name = order_obj.field.to_s
-          direction = order_obj.direction == :desc ? -1 : 1
-          sort_stage[field_name] = direction
+        # Add $sort stage from order constraints if any exist
+        sort = query_sort_stage
+        complete_pipeline << sort if sort
+
+        # Add $skip stage if specified
+        if @skip > 0
+          complete_pipeline << { "$skip" => @skip }
         end
-        complete_pipeline << { "$sort" => sort_stage } if sort_stage.any?
-      end
 
-      # Add $skip stage if specified
-      if @skip > 0
-        complete_pipeline << { "$skip" => @skip }
-      end
-
-      # Add $limit stage if specified
-      if @limit.is_a?(Numeric) && @limit > 0
-        complete_pipeline << { "$limit" => @limit }
+        # Add $limit stage if specified
+        if @limit.is_a?(Numeric) && @limit > 0
+          complete_pipeline << { "$limit" => @limit }
+        end
       end
 
       # Optimize pipeline by merging consecutive $match stages
@@ -4014,6 +4171,35 @@ module Parse
       Aggregation.new(self, complete_pipeline, verbose: verbose, mongo_direct: use_mongo_direct || false,
                                                allow_internal_fields: uses_internal_fields,
                                                raw_values: raw_values, raw_field_names: raw_field_names)
+    end
+
+    # @!visibility private
+    # The `$sort` stage for the query's order, or nil.
+    # @return [Hash, nil]
+    def query_sort_stage
+      return nil if @order.empty?
+      sort_stage = {}
+      @order.each do |order_obj|
+        sort_stage[order_obj.field.to_s] = order_obj.direction == :desc ? -1 : 1
+      end
+      sort_stage.any? ? { "$sort" => sort_stage } : nil
+    end
+
+    # @!visibility private
+    # The stages that select which rows an aggregate helper groups: the
+    # query's order, skip, and limit, in that order. Empty unless a skip or
+    # a limit is set (an order alone does not change which rows are
+    # grouped).
+    # @return [Array<Hash>]
+    def query_window_stages
+      limited = @limit.is_a?(Numeric) && @limit > 0
+      return [] unless @skip > 0 || limited
+      stages = []
+      sort = query_sort_stage
+      stages << sort if sort
+      stages << { "$skip" => @skip } if @skip > 0
+      stages << { "$limit" => @limit } if limited
+      stages
     end
 
     # Apply the direct-MongoDB stage converter to every stage in a pipeline.
@@ -4725,7 +4911,9 @@ module Parse
 
       run_callbacks :prepare do
         q = {} #query
-        q[:limit] = @limit if @limit.is_a?(Numeric) && @limit > 0
+        # An explicit `limit(0)` is sent as 0 (no rows). Omitting it would let
+        # the server apply its default page size.
+        q[:limit] = @limit if @limit.is_a?(Numeric) && @limit >= 0
         q[:skip] = @skip if @skip > 0
 
         q[:include] = @includes.join(",") unless @includes.empty?
@@ -5477,6 +5665,8 @@ module Parse
     # @param result_key [String] the key to extract from the result
     # @return [Object] the aggregation result
     def execute_basic_aggregation(pipeline, operation, field, result_key)
+      # `limit(0)` selects no rows.
+      return nil if @limit == 0
       # Add match stage if there are where conditions
       compiled_where = compile_where
       if compiled_where.present?
@@ -5486,8 +5676,9 @@ module Parse
         pipeline.unshift({ "$match" => stringified_where })
       end
 
-      # Use the Aggregation class to execute
-      aggregation = aggregate(pipeline, verbose: @verbose_aggregate)
+      # Use the Aggregation class to execute. The query's order / skip /
+      # limit pick the rows before `$group`.
+      aggregation = aggregate(pipeline, verbose: @verbose_aggregate, window_before_pipeline: true)
       raw_results = aggregation.raw
 
       # Extract the result from the response
@@ -5563,6 +5754,44 @@ module Parse
       end
 
       nil
+    end
+
+    # @!visibility private
+    # Rewrite bare objectId strings compared to a pointer column into the
+    # "Class$objectId" storage form, for the aggregate and mongo-direct
+    # paths. Only applies when the column is a declared pointer with a known
+    # target class; values already in storage form, pointer hashes, and
+    # non-string values are left alone.
+    #
+    # @param field [String, Symbol] the constraint key.
+    # @param value [Object] the compiled constraint value.
+    # @param arrays [Boolean] also rewrite `$in` / `$nin` / `$all` arrays.
+    # @return [Object] the value, rewritten when it applies.
+    def coerce_bare_pointer_ids(field, value, arrays:)
+      return value unless value.is_a?(String) || value.is_a?(Hash)
+      name = field.to_s
+      name = name.delete_prefix("_p_")
+      return value if name.include?(".")
+      klass = table_model_class
+      return value unless klass
+      target = get_pointer_target_class_for(klass, name)
+      return value unless target
+      bare = ->(v) { v.is_a?(String) && !v.empty? && !v.include?("$") }
+      to_storage = ->(v) { bare.(v) ? "#{target}$#{v}" : v }
+      case value
+      when String
+        to_storage.(value)
+      when Hash
+        return value if value.key?("__type") || value.key?(:__type)
+        value.each_with_object({}) do |(op, op_value), out|
+          out[op] = case op.to_s
+            when "$eq", "$ne" then to_storage.(op_value)
+            when "$in", "$nin", "$all"
+              arrays && op_value.is_a?(Array) ? op_value.map(&to_storage) : op_value
+            else op_value
+            end
+        end
+      end
     end
 
     # Handle a constraint value that is a bare String inside `$in`/`$nin`
@@ -5820,6 +6049,12 @@ module Parse
           end
           next
         end
+
+        # A bare objectId compared to a pointer column becomes the
+        # "Class$objectId" storage form. Compared as-is it never equals the
+        # stored value, so equality matched nothing and `$ne` matched every
+        # row. (`$in` / `$nin` arrays are converted below.)
+        value = coerce_bare_pointer_ids(field, value, arrays: false)
 
         # Convert field name to aggregation format
         # If field already has _p_ prefix, don't reformat it
@@ -6923,7 +7158,9 @@ module Parse
       pipeline << sort if sort
       pipeline << { "$project" => { "_id" => 0, "objectId" => "$_id", "count" => 1 } }
 
-      @query.aggregate(pipeline, verbose: @query.instance_variable_get(:@verbose_aggregate)).raw || []
+      return [] if @query.instance_variable_get(:@limit) == 0
+      @query.aggregate(pipeline, verbose: @query.instance_variable_get(:@verbose_aggregate),
+                                 window_before_pipeline: true).raw || []
     end
 
     # Count the number of items in each group.
@@ -7055,6 +7292,9 @@ module Parse
       # what the caller meant.
       validate_sort_target_for_operation!(operation)
 
+      # `limit(0)` selects no rows, so there are no groups.
+      return {} if @query.instance_variable_get(:@limit) == 0
+
       # Format the group field name
       formatted_group_field = @query.send(:format_aggregation_field, @group_field)
 
@@ -7109,8 +7349,10 @@ module Parse
         },
       }
 
-      # Use the Aggregation class to execute
-      aggregation = @query.aggregate(pipeline, verbose: @query.instance_variable_get(:@verbose_aggregate))
+      # Use the Aggregation class to execute. The query's order / skip /
+      # limit pick the rows before `$group`.
+      aggregation = @query.aggregate(pipeline, verbose: @query.instance_variable_get(:@verbose_aggregate),
+                                               window_before_pipeline: true)
       raw_results = aggregation.raw
 
       # Convert array of results to hash
@@ -7177,6 +7419,10 @@ module Parse
         mongo_constraints = @query.send(:convert_constraints_for_direct_mongodb, compiled_where)
         pipeline << { "$match" => mongo_constraints } if mongo_constraints.any?
       end
+
+      # The query's order / skip / limit pick the rows before `$group`.
+      window = @query.send(:query_window_stages)
+      pipeline.concat(@query.send(:translate_pipeline_for_direct_mongodb, window)) if window.any?
 
       # Add unwind stage if flatten_arrays is enabled
       if @flatten_arrays
@@ -8311,8 +8557,8 @@ module Parse
         # original, so nested query building pays only the table lookup.
         mod.send(:define_method, m) do |*args, **kwargs, &blk|
           table = table_of.call(self)
-          scope = Fiber[Parse::Query::FIELD_ALIAS_SCOPE_KEY]
-          return super(*args, **kwargs, &blk) if scope && table == scope.table
+          frame = Fiber[Parse::Query::FIELD_ALIAS_SCOPE_KEY]
+          return super(*args, **kwargs, &blk) if frame && frame.open && table == frame.scope.table
           blk = Parse::Query.block_outside_field_aliases(blk, table) if blk
           Parse::Query.with_field_aliases(table) { super(*args, **kwargs, &blk) }
         end

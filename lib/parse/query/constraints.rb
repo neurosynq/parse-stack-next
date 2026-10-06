@@ -64,6 +64,31 @@ module Parse
   end
 
   class Constraint
+    # @!visibility private
+    # The constraint value as a list for the array operators (`$in`, `$nin`,
+    # `$all`, `$containedBy`). A Set or a finite Range is expanded into its
+    # members; before, it was wrapped as a single element (`[Set[1, 2]]`,
+    # `["1..3"]`) and matched nothing. A Range that cannot be enumerated
+    # (endless, beginless, or Float bounds) raises ArgumentError; use
+    # `:field.between` for a numeric interval.
+    # @return [Array]
+    def list_value
+      raw = @value
+      if raw.is_a?(Set)
+        raw = raw.to_a
+      elsif raw.is_a?(Range)
+        unless raw.begin.respond_to?(:succ) && !raw.end.nil?
+          raise ArgumentError,
+                "Cannot expand #{raw.inspect} into a list for #{key}. " \
+                "Pass an Array, or use :field.between for an interval."
+        end
+        raw = raw.to_a
+      end
+      val = self.class.formatted_value(raw)
+      val = [val].compact unless val.is_a?(Array)
+      val
+    end
+
     # A constraint for matching by a specific objectId value.
     #
     #  # where this Parse object equals the object in the column `field`.
@@ -396,8 +421,7 @@ module Parse
 
       # @return [Hash] the compiled constraint.
       def build
-        val = formatted_value
-        val = [val].compact unless val.is_a?(Array)
+        val = list_value
 
         # Convert Parse objects to pointers for array contains queries
         if val.is_a?(Array)
@@ -447,8 +471,7 @@ module Parse
 
       # @return [Hash] the compiled constraint.
       def build
-        val = formatted_value
-        val = [val].compact unless val.is_a?(Array)
+        val = list_value
 
         # Convert Parse objects to pointers for array contains queries
         if val.is_a?(Array)
@@ -493,8 +516,7 @@ module Parse
 
       # @return [Hash] the compiled constraint.
       def build
-        val = formatted_value
-        val = [val].compact unless val.is_a?(Array)
+        val = list_value
         { @operation.operand => { key => val } }
       end
     end
@@ -522,8 +544,7 @@ module Parse
 
       # @return [Hash] the compiled constraint.
       def build
-        val = formatted_value
-        val = [val].compact unless val.is_a?(Array)
+        val = list_value
         { @operation.operand => { key => val } }
       end
     end
@@ -864,8 +885,7 @@ module Parse
 
       # @return [Hash] the compiled constraint using aggregation pipeline.
       def build
-        val = formatted_value
-        val = [val].compact unless val.is_a?(Array)
+        val = list_value
 
         field_name = Parse::Query.format_field(@operation.operand)
 
@@ -960,8 +980,7 @@ module Parse
 
       # @return [Hash] the compiled constraint using aggregation pipeline.
       def build
-        val = formatted_value
-        val = [val].compact unless val.is_a?(Array)
+        val = list_value
 
         field_name = Parse::Query.format_field(@operation.operand)
 
@@ -1050,8 +1069,7 @@ module Parse
 
       # @return [Hash] the compiled constraint using aggregation pipeline.
       def build
-        val = formatted_value
-        val = [val].compact unless val.is_a?(Array)
+        val = list_value
 
         field_name = Parse::Query.format_field(@operation.operand)
 
@@ -1140,8 +1158,7 @@ module Parse
 
       # @return [Hash] the compiled constraint using aggregation pipeline.
       def build
-        val = formatted_value
-        val = [val].compact unless val.is_a?(Array)
+        val = list_value
 
         field_name = Parse::Query.format_field(@operation.operand)
 
@@ -1307,8 +1324,7 @@ module Parse
 
       # @return [Hash] the compiled constraint using aggregation pipeline.
       def build
-        val = formatted_value
-        val = [val].compact unless val.is_a?(Array)
+        val = list_value
 
         field_name = Parse::Query.format_field(@operation.operand)
 
@@ -3085,15 +3101,19 @@ module Parse
         target_field = @value[:field]
         local_field = @operation.operand
 
-        # Format field names according to Parse conventions
-        # Pointer fields in MongoDB are stored with _p_ prefix
-        formatted_through = "_p_" + Parse::Query.format_field(through_field)
-        formatted_target = "_p_" + Parse::Query.format_field(target_field)
-        formatted_local = "_p_" + Parse::Query.format_field(local_field)
-
         # Determine the target collection name from the through field
         # Use classify to convert field name to class name (e.g., :project -> "Project")
         target_collection = through_field.to_s.classify
+
+        # Format field names according to Parse conventions
+        # Pointer fields in MongoDB are stored with _p_ prefix. The local and
+        # through fields are columns of the queried class; the target field is
+        # a column of the linked class, so it uses that class's names.
+        formatted_through = "_p_" + Parse::Query.format_field(through_field)
+        formatted_target = "_p_" + Parse::Query.with_field_aliases(target_collection) do
+          Parse::Query.format_field(target_field)
+        end
+        formatted_local = "_p_" + Parse::Query.format_field(local_field)
 
         # Build the aggregation pipeline
         # Use clean alias name without _p_ prefix for readability
@@ -3168,14 +3188,19 @@ module Parse
         through_field = @value[:through]
         target_field = @value[:field]
 
-        # Convert field names to Parse format (snake_case to camelCase) with _p_ prefix for pointers
-        local_field_name = format_field_name(@operation.operand, is_pointer: true)
-        through_field_name = format_field_name(through_field, is_pointer: true)
-        target_field_name = format_field_name(target_field, is_pointer: true)
-
         # Determine the collection name for the lookup (Rails pluralization)
         through_class_name = through_field.to_s.classify
         lookup_collection = through_class_name
+
+        # Convert field names to Parse format with _p_ prefix for pointers.
+        # The local and through fields are columns of the queried class; the
+        # target field is a column of the linked class, so it uses that
+        # class's names.
+        local_field_name = format_field_name(@operation.operand, is_pointer: true)
+        through_field_name = format_field_name(through_field, is_pointer: true)
+        target_field_name = Parse::Query.with_field_aliases(lookup_collection) do
+          format_field_name(target_field, is_pointer: true)
+        end
 
         # Generate unique alias name for the joined data (use clean name without _p_ prefix)
         lookup_alias = "#{through_field.to_s.camelize(:lower)}_data"
@@ -3229,13 +3254,14 @@ module Parse
 
       private
 
-      # Converts field names from snake_case to camelCase for Parse Server compatibility
-      # and adds _p_ prefix for pointer fields in MongoDB
+      # Formats a field name with {Parse::Query.format_field} (so declared
+      # `field:` names in the current alias scope are honored) and adds the
+      # _p_ prefix for pointer fields in MongoDB.
       # @param field [Symbol, String] the field name to format
       # @param is_pointer [Boolean] whether this field is a pointer field
       # @return [String] the formatted field name
       def format_field_name(field, is_pointer: true)
-        formatted = field.to_s.camelize(:lower)
+        formatted = Parse::Query.format_field(field)
         # Add _p_ prefix for pointer fields as they're stored that way in MongoDB
         is_pointer ? "_p_#{formatted}" : formatted
       end

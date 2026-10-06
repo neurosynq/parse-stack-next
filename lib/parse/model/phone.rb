@@ -71,7 +71,25 @@ module Parse
     # Regex to strip non-digit characters (except +)
     STRIP_NON_DIGITS = /[^\d+]/
 
+    # A 10-digit North American Numbering Plan number: area code and
+    # exchange code each start with 2-9.
+    NANP_NATIONAL = /\A[2-9]\d{2}[2-9]\d{6}\z/
+
     class << self
+      # Country calling code (digits only, no `+`) assumed for numbers
+      # entered without a leading `+`. Defaults to `"1"` (North America),
+      # under which 10-digit numbers get `+1`. Set to another code (for
+      # example `"44"`) to apply that country to national numbers, or to
+      # `nil` to make no assumption, in which case a national number
+      # without `+` is left unprefixed and fails validation.
+      # @return [String, nil]
+      attr_writer :default_country_code
+
+      # @return [String, nil] see {default_country_code=}.
+      def default_country_code
+        defined?(@default_country_code) ? @default_country_code : "1"
+      end
+
       # Check if phonelib is available for enhanced validation
       # @return [Boolean] true if phonelib gem is loaded
       def phonelib_available?
@@ -131,7 +149,25 @@ module Parse
     end
 
     # Normalize a phone number string to E.164 format.
-    # Removes all non-digit characters except leading +.
+    # Removes all non-digit characters except a leading +.
+    #
+    # Input that already starts with `+` is kept as dialed. Input without
+    # a `+` is resolved as follows, identically with and without phonelib
+    # (phonelib parses the normalized result):
+    #
+    # 1. A leading `00` (international access prefix) becomes `+`.
+    # 2. With {Parse::Phone.default_country_code} set to `"1"` (the
+    #    default), a 10-digit North American number (`4155551234`,
+    #    `(415) 555-1234`) becomes `+14155551234`, and an 11-digit number
+    #    starting with `1` gets a `+`.
+    # 3. Any other number of 11 or more digits that does not start with
+    #    `0` is assumed to already include its country code.
+    # 4. A shorter national number (or one with a leading trunk `0`) gets
+    #    the default country code, minus the trunk `0`, when that code is
+    #    not `"1"`. With no default country code it is left without a `+`
+    #    so it fails validation instead of being read as some other
+    #    country's code (previously `4155551234` became the Swiss
+    #    `+41 55 551 234`).
     #
     # @param value [String] the phone number string
     # @return [String, nil] the normalized number or nil if invalid
@@ -140,12 +176,25 @@ module Parse
 
       # Remove all non-digit characters except +
       cleaned = value.to_s.gsub(STRIP_NON_DIGITS, "")
+      return cleaned if cleaned.start_with?("+")
 
-      # If it doesn't start with +, add it
-      cleaned = "+#{cleaned}" unless cleaned.start_with?("+")
+      digits = cleaned.delete("+")
+      return "+#{digits}" if digits.empty?
+      return "+#{digits[2..]}" if digits.start_with?("00")
 
-      # Return the cleaned value (may still be invalid, but we store it)
-      cleaned
+      default_cc = Parse::Phone.default_country_code.to_s.delete("+").presence
+      if default_cc == "1"
+        return "+1#{digits}" if NANP_NATIONAL.match?(digits)
+        return "+#{digits}" if digits.length == 11 && digits.start_with?("1") && NANP_NATIONAL.match?(digits[1..])
+      end
+
+      return "+#{digits}" if digits.length >= 11 && !digits.start_with?("0")
+
+      if default_cc && default_cc != "1"
+        "+#{default_cc}#{digits.sub(/\A0/, "")}"
+      else
+        digits
+      end
     end
 
     # @return [String, nil] the E.164 formatted phone number

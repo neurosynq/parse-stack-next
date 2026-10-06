@@ -58,10 +58,8 @@ class TestGeoPoint < Minitest::Test
     assert_equal loc2.lat, loc.latitude
     assert_equal loc2.lng, loc.longitude
 
-    # zero on non-numeric
-    loc = Parse::GeoPoint.new "false", true
-    assert_equal loc.latitude, 0
-    assert_equal loc.longitude, 0
+    # non-numeric coordinates are refused rather than becoming (0, 0)
+    assert_raises(ArgumentError) { Parse::GeoPoint.new "false", true }
   end
 
   def test_equality

@@ -53,27 +53,66 @@ module Parse
 
     alias_method :__type, :parse_class
 
-    # The initializer can create a GeoPoint with a hash, array or values.
+    # The initializer can create a GeoPoint with a hash, array, keyword
+    # arguments or values.
     # @example
     #  san_diego = Parse::GeoPoint.new(32.8233, -117.6542)
     #  san_diego = Parse::GeoPoint.new [32.8233, -117.6542]
-    #  san_diego = Parse::GeoPoint.new { latitude: 32.8233, longitude: -117.6542}
+    #  san_diego = Parse::GeoPoint.new({ latitude: 32.8233, longitude: -117.6542 })
+    #  san_diego = Parse::GeoPoint.new(lat: 32.8233, lng: -117.6542)
+    #  san_diego = Parse::GeoPoint.new(latitude: 32.8233, longitude: -117.6542)
+    #
+    # Coordinates may be Numerics or numeric Strings. A value that is not a
+    # finite number (for example `"abc"`, `nil` inside a pair, NaN) raises
+    # ArgumentError rather than silently becoming 0.0, which would place the
+    # point at (0, 0) and corrupt geo queries.
     #
     # @param latitude [Numeric] The latitude value between LAT_MIN and LAT_MAX.
     # @param longitude [Numeric] The longitude value between LNG_MIN and LNG_MAX.
-    def initialize(latitude = nil, longitude = nil)
+    # @param coords [Hash] keyword form: `lat:`/`lng:` or `latitude:`/`longitude:`.
+    # @raise ArgumentError if a coordinate is not a finite number.
+    def initialize(latitude = nil, longitude = nil, **coords)
       @latitude = @longitude = 0.0
-      if latitude.is_a?(Hash) || latitude.is_a?(Array)
+      if coords.any?
+        unless latitude.nil? && longitude.nil?
+          raise ArgumentError, "[Parse::GeoPoint] pass either positional or keyword coordinates, not both."
+        end
+        self.attributes = coords
+      elsif latitude.is_a?(Hash) || latitude.is_a?(Array)
         self.attributes = latitude
-      elsif latitude.is_a?(Numeric) && longitude.is_a?(Numeric)
-        @latitude = latitude
-        @longitude = longitude
       elsif latitude.is_a?(GeoPoint)
         @latitude = latitude.latitude
         @longitude = latitude.longitude
+      elsif latitude.is_a?(String) && longitude.nil?
+        # "lat,lng" string form.
+        parts = latitude.split(",")
+        unless parts.length == 2
+          raise ArgumentError, "[Parse::GeoPoint] cannot build a GeoPoint from #{latitude.inspect}."
+        end
+        self.attributes = parts
+      elsif !latitude.nil? || !longitude.nil?
+        @latitude = self.class.coerce_coordinate(latitude, :latitude)
+        @longitude = self.class.coerce_coordinate(longitude, :longitude)
       end
 
       _validate_point
+    end
+
+    # Convert a single coordinate to a Float.
+    # @param value [Numeric, String] the coordinate.
+    # @param name [Symbol] the coordinate name, for the error message.
+    # @return [Float]
+    # @raise ArgumentError when the value is not a finite number.
+    # @!visibility private
+    def self.coerce_coordinate(value, name)
+      num = case value
+            when Numeric then value.to_f
+            when String then Float(value.strip, exception: false)
+            end
+      unless num.is_a?(Float) && num.finite?
+        raise ArgumentError, "[Parse::GeoPoint] #{name} must be a finite number (got #{value.inspect})."
+      end
+      num
     end
 
     # @!visibility private
@@ -134,15 +173,24 @@ module Parse
     end
 
     # Setting lat and lng for an GeoPoint can be done using a hash with the attributes set
-    # or with an array of two items where the first is the lat and the second is the lng (ex. [32.22,-118.81])
+    # or with an array of two items where the first is the lat and the second is the lng (ex. [32.22,-118.81]).
+    # Hash keys may be `latitude`/`longitude` or `lat`/`lng`, as Symbols or
+    # Strings. A coordinate missing from the hash keeps its current value.
+    # @raise ArgumentError when a supplied coordinate is not a finite number,
+    #   or an Array does not hold exactly two coordinates.
     def attributes=(h)
       if h.is_a?(Hash)
         h = h.symbolize_keys
-        @latitude = h[:latitude].to_f || h[:lat].to_f || @latitude
-        @longitude = h[:longitude].to_f || h[:lng].to_f || @longitude
-      elsif h.is_a?(Array) && h.count == 2
-        @latitude = h.first.to_f
-        @longitude = h.last.to_f
+        lat = h.key?(:latitude) ? h[:latitude] : h[:lat]
+        lng = h.key?(:longitude) ? h[:longitude] : h[:lng]
+        @latitude = self.class.coerce_coordinate(lat, :latitude) unless lat.nil?
+        @longitude = self.class.coerce_coordinate(lng, :longitude) unless lng.nil?
+      elsif h.is_a?(Array)
+        unless h.count == 2
+          raise ArgumentError, "[Parse::GeoPoint] expects [latitude, longitude] (got #{h.inspect})."
+        end
+        @latitude = self.class.coerce_coordinate(h.first, :latitude)
+        @longitude = self.class.coerce_coordinate(h.last, :longitude)
       end
       _validate_point
     end
