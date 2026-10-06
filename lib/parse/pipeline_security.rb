@@ -772,7 +772,10 @@ module Parse
           # `$getField` reads a field by NAME, so `{ $getField: "ssn" }`
           # reaches a protected column without a `$ssn` reference. It reads
           # the current document unless `input` names something else.
-          check_get_field!(value, protected_set, class_name, "#{path}.#{key}") if key.to_s == "$getField"
+          # `$setField` / `$unsetField` take a name the same way and are held
+          # to the same literal-name rule.
+          check_field_name_operator!(key.to_s, value, protected_set, class_name, "#{path}.#{key}") if
+            FIELD_NAME_OPERATORS.include?(key.to_s)
           # Recurse into every value. Hash keys are field NAMES in
           # most contexts, not references; the post-fetch redact
           # would still strip a key literally named "ssn". The bypass
@@ -812,31 +815,60 @@ module Parse
 
     private_class_method :walk_rehome_operands!
 
+    # Expression operators that take a field NAME rather than a `$field`
+    # reference.
     # @!visibility private
-    def check_get_field!(spec, protected_set, class_name, path)
+    FIELD_NAME_OPERATORS = %w[$getField $setField $unsetField].freeze
+
+    # Check the field-name argument of `$getField`, `$setField`, or
+    # `$unsetField`. The name must be fixed when the pipeline is written: a
+    # plain string that does not start with `$`, or `{ $literal: "<name>" }`.
+    # Anything else is computed at run time. `{ $getField: "$selector" }`
+    # takes the name from the document's own `selector` field, so a caller
+    # who first sets `selector` to a protected field's name reads that field
+    # under another name. A fixed `$getField` name that reads a protected
+    # field of the current document is refused as well.
+    # @!visibility private
+    def check_field_name_operator!(op, spec, protected_set, class_name, path)
       field, input = if spec.is_a?(Hash)
           [spec.key?("field") ? spec["field"] : spec[:field], spec.key?("input") ? spec["input"] : spec[:input]]
         else
           [spec, nil]
         end
-      return unless input.nil? || %w[$$ROOT $$CURRENT].include?(input)
-      field = field["$literal"] || field[:$literal] if field.is_a?(Hash) && field.size == 1 &&
-                                                       (field.key?("$literal") || field.key?(:$literal))
-      if field.is_a?(String) || field.is_a?(Symbol)
-        name = field.to_s
-        return unless protected_set.include?(name) || protected_set.include?(name.delete_prefix("_p_"))
-        raise_protected_ref!(class_name, path, "$getField(#{name})", name.delete_prefix("_p_"))
-      else
+      name = literal_field_name(field)
+      if name.nil?
         raise Parse::CLPScope::Denied.new(
           class_name, :read,
-          "Pipeline at #{path} reads a field whose name is computed at run time. " \
-          "Class #{class_name} has protected fields for the current scope, so the " \
-          "field name must be a literal string.",
+          "Pipeline at #{path} uses #{op} with a field name computed at run time " \
+          "(#{field.inspect}). Class #{class_name} has protected fields for the current " \
+          "scope, so the field name must be a plain string that does not start with " \
+          "'$', or a $literal string.",
         )
       end
+      return unless op == "$getField"
+      return unless input.nil? || WHOLE_DOCUMENT_VARS.include?(input)
+      return unless protected_set.include?(name) || protected_set.include?(name.delete_prefix("_p_"))
+      raise_protected_ref!(class_name, path, "$getField(#{name})", name.delete_prefix("_p_"))
     end
 
-    private_class_method :check_get_field!
+    private_class_method :check_field_name_operator!
+
+    # The fixed field name a `$getField` / `$setField` / `$unsetField`
+    # argument names, or nil when the name is computed at run time. A bare
+    # string starting with `$` is an expression (a field path or variable),
+    # not a name.
+    # @!visibility private
+    def literal_field_name(field)
+      if field.is_a?(String) || field.is_a?(Symbol)
+        name = field.to_s
+        return name.start_with?("$") ? nil : name
+      end
+      return nil unless field.is_a?(Hash) && field.size == 1
+      literal = field.key?("$literal") ? field["$literal"] : field[:$literal]
+      literal.is_a?(String) || literal.is_a?(Symbol) ? literal.to_s : nil
+    end
+
+    private_class_method :literal_field_name
 
     # @!visibility private
     def raise_protected_ref!(class_name, path, node, field)

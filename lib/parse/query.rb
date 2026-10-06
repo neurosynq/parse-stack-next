@@ -2406,7 +2406,11 @@ module Parse
           false
         end
       server_mode_master = (use_master_key != false) && !Parse.client_mode && client_has_master_key
-      unless use_master_key || server_mode_master || @acl_user || @acl_role || has_session || has_ambient_session
+      # Inside `Parse.without_master_key` REST sends no master key, so
+      # neither the explicit opt-in nor the server-mode default authorizes
+      # a direct read there.
+      master_authorized = (use_master_key || server_mode_master) && !master_key_suppressed?
+      unless master_authorized || @acl_user || @acl_role || has_session || has_ambient_session
         raise MongoDirectRequired,
           "[Parse::Query] This query uses a constraint that can only run " \
           "via mongo-direct. Mongo-direct bypasses Parse Server's enforcement, " \
@@ -2540,6 +2544,9 @@ module Parse
     # @return [Boolean]
     # @!visibility private
     def mongo_direct_master_posture?
+      # `Parse.without_master_key` strips the master key from every REST
+      # request in the block, an explicit `use_master_key: true` included.
+      return false if master_key_suppressed?
       c = begin
           client
         rescue StandardError
@@ -2549,6 +2556,23 @@ module Parse
       return false unless has_key
       return true if use_master_key == true
       use_master_key != false && !Parse.client_mode
+    end
+
+    # @return [Boolean] true inside a `Parse.without_master_key` block (and
+    #   not re-enabled by a nested `Parse.with_master_key`), where REST sends
+    #   no master key on any request.
+    # @!visibility private
+    def master_key_suppressed?
+      Parse.respond_to?(:master_key_disabled?) && Parse.master_key_disabled?
+    end
+
+    # An explicit `master: true` passed to a direct terminal, dropped inside
+    # a `Parse.without_master_key` block. REST strips the master key there
+    # even when a call asks for it, so the direct read falls back to the
+    # public scope as REST would.
+    # @!visibility private
+    def direct_master_kwarg(master)
+      master == true && master_key_suppressed? ? nil : master
     end
 
     # Auth kwargs for the Atlas Search bridge (`#atlas_search` builder
@@ -2582,7 +2606,11 @@ module Parse
         end
 
       explicit = %i[session_token master acl_user acl_role].select { |k| options.key?(k) }
-      return client_kwarg.merge(explicit.to_h { |k| [k, options[k]] }) if explicit.any?
+      if explicit.any?
+        given = explicit.to_h { |k| [k, options[k]] }
+        given.delete(:master) if direct_master_kwarg(given[:master]).nil?
+        return client_kwarg.merge(given)
+      end
 
       client_kwarg.merge(atlas_search_scope_kwargs)
     end
@@ -2596,7 +2624,10 @@ module Parse
       elsif @session_token.is_a?(String) && !@session_token.empty?
         { session_token: @session_token }
       elsif use_master_key == true
-        { master: true }
+        # An explicit master request skips the ambient session, as on REST.
+        # Inside `Parse.without_master_key` the key is stripped, so the
+        # search runs in the public scope.
+        master_key_suppressed? ? {} : { master: true }
       elsif (ambient = ambient_session_token)
         { session_token: ambient }
       elsif anonymous_session_block?
@@ -2739,6 +2770,7 @@ module Parse
         acl_user = auth[:acl_user]
         acl_role = auth[:acl_role]
       end
+      master = direct_master_kwarg(master)
 
       # Execute the aggregation directly on MongoDB. The pipeline was built
       # entirely from SDK constraint translation (no user-supplied stages),
@@ -2884,6 +2916,7 @@ module Parse
         acl_user = auth[:acl_user]
         acl_role = auth[:acl_role]
       end
+      master = direct_master_kwarg(master)
 
       # SDK-built pipeline only — see results_direct for rationale.
       # ACL simulation runs inside Parse::MongoDB.aggregate when
@@ -2984,6 +3017,7 @@ module Parse
         acl_user = auth[:acl_user]
         acl_role = auth[:acl_role]
       end
+      master = direct_master_kwarg(master)
       raw_results = Parse::MongoDB.aggregate(@table, pipeline,
                                              allow_internal_fields: true,
                                              read_preference: @read_preference,
@@ -3518,6 +3552,9 @@ module Parse
     # with "unknown operator".
     DIRECT_SUBQUERY_OPERATORS = %w[$inQuery $notInQuery $select $dontSelect].freeze
 
+    # Logical operators whose clauses may hold subquery constraints.
+    DIRECT_LOGICAL_OPERATORS = %w[$and $or $nor].freeze
+
     # Split compiled constraints into a MongoDB `$match` and the extra
     # stages that implement subquery operators.
     #
@@ -3528,6 +3565,15 @@ module Parse
     #   matching its `where` whose `key` equals this row's field, then keep
     #   rows whose join is non-empty (or empty).
     #
+    # A subquery inside `$and` / `$or` / `$nor` (at any depth, as
+    # `or_where` produces) gets its own `$lookup` too. The logical clause
+    # holding it moves to the post-join `$match`, with the subquery replaced
+    # by a test on its join result, so `$or` keeps its meaning. Constraints
+    # with no subquery stay in the first `$match`, ahead of the joins. A
+    # subquery in any other position (under `$not`, `$elemMatch`, `$expr`)
+    # cannot be translated and raises ArgumentError rather than reaching
+    # MongoDB as an unknown operator.
+    #
     # The joins run through Parse::MongoDB.aggregate, so the ACL rewriter
     # filters the joined rows by `_rperm`, the joined class's CLP is
     # checked, and a `where` on the joined class's protectedFields is
@@ -3536,43 +3582,141 @@ module Parse
     #
     # @param constraints [Hash] compiled where constraints.
     # @return [Array(Hash, Array<Hash>)] the `$match` body and the stages.
+    # @raise [ArgumentError] when a subquery sits where it cannot be translated.
     # @api private
     def direct_subquery_stages(constraints)
-      return [convert_constraints_for_direct_mongodb(constraints), []] unless direct_subquery_present?(constraints)
-
-      remaining = {}
-      lookups = []
-      post = {}
-      temps = []
-      constraints.each do |field, value|
-        ops = value.is_a?(Hash) ? value.keys.map(&:to_s) & DIRECT_SUBQUERY_OPERATORS : []
-        if ops.empty?
-          remaining[field] = value
-          next
-        end
-        others = value.reject { |k, _| DIRECT_SUBQUERY_OPERATORS.include?(k.to_s) }
-        remaining[field] = others if others.any?
-        ops.each do |op|
-          spec = value[op] || value[op.to_sym]
-          temp = "_subquery_#{temps.size}_#{field.to_s.gsub(/[^A-Za-z0-9_]/, "_")}"
-          temps << temp
-          lookups << direct_subquery_lookup(field.to_s, op, spec, temp)
-          post[temp] = %w[$inQuery $select].include?(op) ? { "$ne" => [] } : { "$eq" => [] }
-        end
+      unless direct_subquery_present?(constraints)
+        return [convert_constraints_for_direct_mongodb(constraints), []]
       end
 
+      plain = {}
+      post = {}
+      lookups = []
+      temps = []
+      constraints.each do |field, value|
+        direct_translate_subquery_pair(field, value, plain, post, lookups, temps)
+      end
+      match = convert_constraints_for_direct_mongodb(plain)
+      refuse_untranslated_subquery!(match)
+      refuse_untranslated_subquery!(post)
+
       stages = lookups
-      stages << { "$match" => post }
-      stages << { "$unset" => temps }
-      [convert_constraints_for_direct_mongodb(remaining), stages]
+      stages << { "$match" => post } if post.any?
+      stages << { "$unset" => temps } if temps.any?
+      [match, stages]
     end
 
-    # @return [Boolean] true when a top-level constraint uses a subquery operator.
+    # Translate one `field => value` constraint. A constraint with no
+    # subquery is collected into `plain` unchanged (converted later by the
+    # caller). A subquery operator adds a `$lookup` to `lookups` and a test
+    # on its join result to `out`. A logical operator holding a subquery is
+    # rebuilt clause by clause into `out`.
+    # @api private
+    def direct_translate_subquery_pair(field, value, plain, out, lookups, temps)
+      key = field.to_s
+      if DIRECT_LOGICAL_OPERATORS.include?(key) && value.is_a?(Array)
+        if direct_subquery_present?(value)
+          direct_merge_clause!(out, key, value.map { |clause| direct_translate_subquery_clause(clause, lookups, temps) })
+        else
+          plain[field] = value
+        end
+        return
+      end
+
+      ops = value.is_a?(Hash) ? value.keys.map(&:to_s) & DIRECT_SUBQUERY_OPERATORS : []
+      if ops.empty?
+        plain[field] = value
+        return
+      end
+      others = value.reject { |k, _| DIRECT_SUBQUERY_OPERATORS.include?(k.to_s) }
+      plain[field] = others if others.any?
+      ops.each do |op|
+        spec = value.key?(op) ? value[op] : value[op.to_sym]
+        temp = "_subquery_#{temps.size}_#{key.gsub(/[^A-Za-z0-9_]/, "_")}"
+        temps << temp
+        lookups << direct_subquery_lookup(key, op, spec, temp)
+        out[temp] = %w[$inQuery $select].include?(op) ? { "$ne" => [] } : { "$eq" => [] }
+      end
+    end
+
+    # Translate one clause of a logical operator into a MongoDB filter
+    # that reads the join results.
+    # @api private
+    def direct_translate_subquery_clause(clause, lookups, temps)
+      unless clause.is_a?(Hash)
+        raise ArgumentError,
+              "[Parse::Query] a logical operator clause holding a subquery must be a Hash, got #{clause.class}."
+      end
+      plain = {}
+      out = {}
+      clause.each do |field, value|
+        direct_translate_subquery_pair(field, value, plain, out, lookups, temps)
+      end
+      converted = convert_constraints_for_direct_mongodb(plain)
+      return converted.merge(out) if (converted.keys & out.keys).empty?
+      # The same operator appeared twice (a String and a Symbol key).
+      # Keep both by matching them together rather than letting one
+      # overwrite the other.
+      { "$and" => [converted, out] }
+    end
+
+    # Add a translated logical clause to `out` without overwriting one that
+    # is already there under the same operator.
+    # @api private
+    def direct_merge_clause!(out, key, clauses)
+      if out.key?(key)
+        existing = out.delete(key)
+        out["$and"] = Array(out.delete("$and")) + [{ key => existing }, { key => clauses }]
+      else
+        out[key] = clauses
+      end
+    end
+
+    # Fail closed when a subquery operator is still present after
+    # translation. MongoDB has no such operator, and a subquery in a
+    # position the SDK cannot join (under `$not`, `$elemMatch`, `$expr`)
+    # must not run as some other filter.
+    # @raise [ArgumentError]
+    # @api private
+    def refuse_untranslated_subquery!(node, context: :direct)
+      case node
+      when Hash
+        node.each do |key, value|
+          if DIRECT_SUBQUERY_OPERATORS.include?(key.to_s)
+            if context == :aggregate
+              raise ArgumentError,
+                    "[Parse::Query] #{key} cannot be translated into an aggregation pipeline in " \
+                    "this position. Aggregations translate only top-level $inQuery / $notInQuery " \
+                    "field constraints into joins. Use results_direct / count_direct, which also " \
+                    "translate subqueries inside $and / $or / $nor, or run the query via REST."
+            end
+            raise ArgumentError,
+                  "[Parse::Query] #{key} cannot run on the mongo-direct path in this position. " \
+                  "A subquery is translated into a join only as a field constraint, at the top " \
+                  "level or inside $and / $or / $nor. Run this query via REST, or move the " \
+                  "subquery out of the enclosing operator."
+          end
+          refuse_untranslated_subquery!(value, context: context)
+        end
+      when Array
+        node.each { |child| refuse_untranslated_subquery!(child, context: context) }
+      end
+      nil
+    end
+
+    # @return [Boolean] true when a subquery operator appears anywhere in
+    #   the constraints, at any depth.
     # @api private
     def direct_subquery_present?(constraints)
-      return false unless constraints.is_a?(Hash)
-      constraints.any? do |_field, value|
-        value.is_a?(Hash) && value.keys.any? { |k| DIRECT_SUBQUERY_OPERATORS.include?(k.to_s) }
+      case constraints
+      when Hash
+        constraints.any? do |key, value|
+          DIRECT_SUBQUERY_OPERATORS.include?(key.to_s) || direct_subquery_present?(value)
+        end
+      when Array
+        constraints.any? { |child| direct_subquery_present?(child) }
+      else
+        false
       end
     end
 
@@ -4926,21 +5070,17 @@ module Parse
             # $notInQuery: keep documents where lookup found no matches
             post_lookup_match[lookup_result_field] = { "$eq" => [] }
           end
-        elsif value.is_a?(Hash)
-          # Recursively handle nested constraints
-          nested = extract_subquery_to_lookup_stages(value)
-          if nested[:lookup_stages].any?
-            lookup_stages.concat(nested[:lookup_stages])
-            post_lookup_match.merge!(nested[:post_lookup_match])
-            remaining_constraints[field] = nested[:constraints]
-          else
-            remaining_constraints[field] = value
-          end
         else
+          # A subquery nested anywhere else (under `$or` / `$and` / `$nor`,
+          # `$not`, `$elemMatch`) is not translated on this path. Lifting it
+          # into the post-join `$match` would drop the enclosing operator and
+          # change the query's meaning, and leaving it in place hands MongoDB
+          # an operator it does not have. The scan below refuses it.
           remaining_constraints[field] = value
         end
       end
 
+      refuse_untranslated_subquery!(remaining_constraints, context: :aggregate)
       { constraints: remaining_constraints, lookup_stages: lookup_stages, post_lookup_match: post_lookup_match }
     end
 
@@ -4972,18 +5112,11 @@ module Parse
     # @return [Boolean] true if subquery constraints are present
     def has_subquery_constraints?(constraints)
       return false unless constraints.is_a?(Hash)
-
-      constraints.any? do |field, value|
-        if value.is_a?(Hash)
-          # Check for both string and symbol keys since constraints can come from
-          # different sources (JSON parsing vs Ruby symbol keys)
-          value.key?("$inQuery") || value.key?(:"$inQuery") ||
-          value.key?("$notInQuery") || value.key?(:"$notInQuery") ||
-          has_subquery_constraints?(value)
-        else
-          false
-        end
-      end
+      # Any subquery operator at any depth (string or symbol keys, inside
+      # logical-operator arrays too), so a nested one reaches
+      # {#extract_subquery_to_lookup_stages} and is refused there rather
+      # than passed to MongoDB verbatim.
+      direct_subquery_present?(constraints)
     end
 
     alias_method :result, :results
