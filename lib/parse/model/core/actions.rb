@@ -1530,7 +1530,9 @@ module Parse
           callback_executed = true
           #first process the create/update action if any
           #then perform any relation changes that need to be performed
-          success = new? ? create : perform_update(force: force)
+          was_new = new?
+          success = was_new ? create : perform_update(force: force)
+          saved_fields = changed.map(&:to_sym)
 
           # if the save was successful and we have relational changes
           # let's update send those next.
@@ -1542,13 +1544,13 @@ module Parse
               success = update_relations
               if success
                 changes_applied!
-                clear_partial_fetch_state!
+                _after_save_partial_fetch_state!(was_new, saved_fields)
               elsif self.class.raise_on_save_failure || autoraise.present?
                 raise Parse::RecordNotSaved.new(self), "Failed updating relations. #{self.parse_class} partially saved."
               end
             else
               changes_applied!
-              clear_partial_fetch_state!
+              _after_save_partial_fetch_state!(was_new, saved_fields)
             end
           elsif self.class.raise_on_save_failure || autoraise.present?
             raise Parse::RecordNotSaved.new(self), "Failed to create or save attributes. #{self.parse_class} was not saved."

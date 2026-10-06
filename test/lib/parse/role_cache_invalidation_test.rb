@@ -60,4 +60,22 @@ class RoleCacheInvalidationTest < Minitest::Test
     assert_empty auth.users
     assert_equal 0, auth.all
   end
+
+  # Atomic relation operations write without a save, so they invalidate too.
+  def test_atomic_relation_ops_invalidate
+    role = Parse::Role.build({ "objectId" => "r1", "name" => "Editor",
+                               "createdAt" => "2026-01-01T00:00:00.000Z",
+                               "updatedAt" => "2026-01-01T00:00:00.000Z" }, "_Role")
+    auth = FakeAuth.new
+    ok = Parse::Response.new({ "updatedAt" => "2026-01-02T00:00:00.000Z" })
+    role.client.stub(:authorization, auth) do
+      role.client.stub(:update_object, ->(*_a, **_k) { ok }) do
+        assert role.op_remove_relation!(:users, [Parse::User.new(objectId: "u9")])
+        assert role.op_add_relation!(:roles, [Parse::Role.new(objectId: "r2", name: "V")])
+      end
+    end
+    assert_equal ["u9"], auth.users
+    assert_equal 1, auth.all
+  end
+
 end

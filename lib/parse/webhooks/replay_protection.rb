@@ -134,10 +134,18 @@ module Parse
             ts = ts_header.to_i
             skew = (Time.now.to_i - ts).abs
             return "Stale webhook timestamp." if skew > signing_max_skew_seconds
-            expected = OpenSSL::HMAC.hexdigest("SHA256", secret, "#{ts}.#{body_str}")
-            unless ActiveSupport::SecurityUtils.secure_compare(expected, sig_header)
-              return "Invalid webhook signature."
+            # A sender that signs a per-delivery nonce (`ts.nonce.body`) gets a
+            # distinct signature for every delivery, so identical bodies sent
+            # in the same second are not mistaken for replays. The original
+            # `ts.body` form is still accepted.
+            delivery_nonce = env[HEADER_NONCE].to_s.strip
+            candidates = ["#{ts}.#{body_str}"]
+            candidates.unshift("#{ts}.#{delivery_nonce}.#{body_str}") unless delivery_nonce.empty?
+            matched = candidates.any? do |material|
+              expected = OpenSSL::HMAC.hexdigest("SHA256", secret, material)
+              ActiveSupport::SecurityUtils.secure_compare(expected, sig_header)
             end
+            return "Invalid webhook signature." unless matched
             # A signed delivery is deduplicated on its signature, which covers
             # the timestamp and body and cannot be changed without the secret.
             # Keying it on the unsigned nonce would let a captured request be

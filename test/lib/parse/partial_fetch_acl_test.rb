@@ -67,4 +67,21 @@ class PartialFetchAclTest < Minitest::Test
     end
     assert_equal 0, post_fetches
   end
+
+  # A delta-only update keeps the partial-fetch tracking, so the ACL the
+  # partial fetch left out is still fetched on read after the save.
+  def test_acl_is_still_fetched_after_saving_a_partial_record
+    post = partial_post
+    post.title = "edited"
+    updated = response({ "updatedAt" => "2026-01-02T00:00:00.000Z" })
+    post.client.stub(:update_object, ->(*_a, **_k) { updated }) { assert post.save }
+    full = response(ROW.merge("title" => "edited", "body" => "b", "ACL" => { "u1" => { "read" => true } }))
+    fetches = 0
+    post.client.stub(:fetch_object, ->(*_a, **_k) { fetches += 1; full }) do
+      assert_equal({ "u1" => { "read" => true } }, post.acl.as_json)
+    end
+    assert_equal 1, fetches
+    assert_equal "edited", post.title
+  end
+
 end

@@ -69,6 +69,38 @@ module Parse
     before_save :_capture_role_membership_changes
     after_save :_invalidate_role_caches
 
+    # Atomic relation operations (`role.users.add!`, `role.roles.remove!`)
+    # write immediately without a save, so they invalidate the same caches.
+    # @!visibility private
+    def op_add_relation!(field, objects = [])
+      result = super
+      _invalidate_after_relation_op(field, objects) if result
+      result
+    end
+
+    # @!visibility private
+    def op_remove_relation!(field, objects = [])
+      result = super
+      _invalidate_after_relation_op(field, objects) if result
+      result
+    end
+
+    # @!visibility private
+    def _invalidate_after_relation_op(field, objects)
+      key = field.to_s
+      if %w[roles].include?(key)
+        @_role_hierarchy_changed = true
+      elsif %w[users].include?(key)
+        @_role_membership_changed_ids = Array(objects).filter_map do |u|
+          id = u.respond_to?(:id) ? u.id : (u.is_a?(Hash) ? (u["objectId"] || u[:objectId]) : u)
+          id.to_s if id.present?
+        end
+      else
+        return
+      end
+      _invalidate_role_caches
+    end
+
     # @!visibility private
     def _capture_role_membership_changes
       users_proxy = instance_variable_get(:@users)

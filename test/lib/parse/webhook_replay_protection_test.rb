@@ -225,6 +225,29 @@ class WebhookReplayProtectionTest < Minitest::Test
     end
   end
 
+  # A sender that signs its per-delivery nonce can send identical bodies in
+  # the same second; each delivery has its own signature.
+  def test_identical_bodies_with_signed_nonces_both_pass
+    Parse::Webhooks::ReplayProtection.signing_secret = SECRET
+    body = '{"functionName":"signed"}'
+    ts = Time.now.to_i
+    capture_io do
+      %w[n-1 n-2].each do |nonce|
+        sig = OpenSSL::HMAC.hexdigest("SHA256", SECRET, "#{ts}.#{nonce}.#{body}")
+        env = build_env(body: body, timestamp: ts, signature: sig)
+        env["HTTP_X_PARSE_WEBHOOK_NONCE"] = nonce
+        result = parse_body([nil, nil, Parse::Webhooks.call(env)[2]])
+        assert result.key?("success"), "#{nonce}: #{result.inspect}"
+      end
+      # A nonce-signed delivery cannot be replayed under another nonce.
+      sig = OpenSSL::HMAC.hexdigest("SHA256", SECRET, "#{ts}.n-1.#{body}")
+      env = build_env(body: body, timestamp: ts, signature: sig)
+      env["HTTP_X_PARSE_WEBHOOK_NONCE"] = "n-3"
+      result = parse_body([nil, nil, Parse::Webhooks.call(env)[2]])
+      assert_equal "Invalid webhook signature.", result["error"]
+    end
+  end
+
   def test_tampered_body_is_rejected
     Parse::Webhooks::ReplayProtection.signing_secret = SECRET
     body = '{"functionName":"signed"}'

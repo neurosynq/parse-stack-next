@@ -1828,8 +1828,25 @@ module Parse
       @_nested_fetched_keys[field_name]
     end
 
+    # @!visibility private
+    # Partial-fetch tracking after a successful save. A create leaves a fully
+    # known object. An update returns only `updatedAt`, so fields the partial
+    # fetch never loaded (the ACL among them) are still unknown: keep the
+    # tracking, and count the fields just written as known. Clearing it made
+    # an unloaded `acl` read nil, and a grant added to that nil replaced the
+    # record's existing grants on the next save.
+    # @param was_new [Boolean] whether the save created the object.
+    # @param saved_fields [Array<Symbol>] the fields the save wrote.
+    # @return [void]
+    def _after_save_partial_fetch_state!(was_new, saved_fields)
+      if was_new || !has_selective_keys?
+        clear_partial_fetch_state!
+        return
+      end
+      @_fetched_keys = (@_fetched_keys + Array(saved_fields).map(&:to_sym)).uniq
+    end
+
     # Clears all partial fetch tracking state.
-    # Called after successful save since server returns updated object.
     # @return [void]
     def clear_partial_fetch_state!
       @_fetched_keys = nil

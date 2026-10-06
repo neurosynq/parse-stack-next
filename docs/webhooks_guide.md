@@ -457,8 +457,12 @@ This protects the webhook endpoint against **replayed inbound POSTs** —
   - `X-Parse-Webhook-Signature` — hex HMAC-SHA256 of `"#{timestamp}.#{body}"`
     keyed with the signing secret.
 
-  Signing bounds a replay to the skew window. Add a nonce header as well to
-  reject replays inside it.
+  A signed delivery is deduplicated on its signature, so a captured request
+  cannot be replayed inside the skew window, even with an altered or missing
+  nonce. To send identical bodies more than once in the same second, include
+  an `X-Parse-Webhook-Nonce` header and sign
+  `"#{timestamp}.#{nonce}.#{body}"` instead; each delivery then has its own
+  signature, and a signature cannot be reused under another nonce.
 
 ```ruby
 Parse::Webhooks::ReplayProtection.signing_secret = ENV["PARSE_WEBHOOK_SIGNING_SECRET"]
