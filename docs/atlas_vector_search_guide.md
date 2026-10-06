@@ -775,6 +775,69 @@ adapters implement only the network call (`#rerank_scores`).
 > rate-limited tool error). Admin agents are exempt; direct
 > `find_similar` / `retrieve` callers are not metered.
 
+### Retrieval profiles for `semantic_search` (5.8)
+
+An agent can choose among a few server-configured retrieval strategies by
+name, without ever choosing a provider, endpoint, or credential. Register
+rerankers by name, then profiles that reference them:
+
+```ruby
+Parse::Retrieval.register_reranker(:voyage,
+  Parse::Retrieval::Reranker::Voyage.new(api_key: ENV.fetch("VOYAGE_API_KEY"), model: "rerank-3-lite"))
+
+Parse::Retrieval::Profiles.register(:fast, k: 5, max_k: 10)
+Parse::Retrieval::Profiles.register(:balanced, k: 8, hybrid: true)
+Parse::Retrieval::Profiles.register(:precise,
+  k: 8, reranker: :voyage,
+  rerank_candidates: 30,            # documents retrieved and sent to the reranker (max 100)
+  rerank_top_n: 8,                  # documents kept after reranking
+  rerank_max_document_chars: 4_000, # each document's text is cut before it leaves the process
+  rerank_timeout: 5,                # seconds
+  on_rerank_failure: :fallback,     # or :raise
+  max_total_tokens: 8_000)          # default response budget
+
+agent.execute(:semantic_search, class_name: "Article", query: "refund policy", profile: "precise")
+```
+
+* **Validated at registration.** An unknown option, an unregistered reranker,
+  `k` above `max_k`, or a non-positive budget raises `ArgumentError` at boot.
+  An unknown profile name at call time is refused with the list of available
+  profiles.
+* **Field-safe reranking.** The reranker receives the same text source as
+  chunk content, which `semantic_search` restricts to fields the agent may
+  read (its effective `agent_fields`, including any per-agent `fields:`
+  narrowing), cut to `rerank_max_document_chars`.
+* **Spend.** Estimated rerank tokens are charged to the same per-tenant
+  `SpendCap` budget as the query embedding (admin agents are exempt).
+* **Fallback is observable.** On a reranker timeout or provider error,
+  `:fallback` keeps the retrieval order and adds `rerank_fallback: true` and
+  `rerank_fallback_reason` to the result; `:raise` fails the call.
+* **Defaults are unchanged.** Without `profile:` the tool behaves as before.
+
+Each call emits one `parse.retrieval.search` notification with the profile,
+`k`, candidate count, rerank stats (`used`, `documents`, `chars`,
+`tokens_estimated`, `duration_ms`, `fallback`, `fallback_reason`), chunk and
+document counts, budget drops, and timings. It never carries the query,
+document text, field values, URLs, or credentials, and `tokens_estimated` is
+the SDK's estimate, not provider-reported usage.
+
+**Measuring profiles.** `Parse::Retrieval::Benchmark` scores profiles on a
+labeled case set (recall@k, MRR, hit rate, mean and p95 latency, estimated
+rerank tokens), overall and per tag. Cases may list `forbidden` ids that must
+never be returned (restrictive ACLs, other tenants); any such hit is reported
+as a violation.
+
+```ruby
+cases = Parse::Retrieval::Benchmark.load_cases("eval/cases.json")
+runner = Parse::Retrieval::Benchmark.semantic_search_runner(agent, class_name: "Article")
+report = Parse::Retrieval::Benchmark.run(cases: cases, profiles: [nil, "fast", "precise"], runner: runner)
+report["precise"]                          # => { recall_at_k:, mrr:, hit_rate:, violations:, mean_ms:, p95_ms:, ... }
+report["precise"][:by_tag]["long_document"]
+```
+
+Run it against your own data and Atlas index before recommending a profile;
+the SDK does not ship measured defaults.
+
 ### Chunkers
 
 The default is a fixed-size sliding window with overlap. Subclass

@@ -1,0 +1,9 @@
+[
+  {"id": "exact-sku", "query": "PX-4410 replacement filter", "relevant": ["doc_sku"], "tags": ["exact_name"]},
+  {"id": "exact-person", "query": "Ada Lindqvist onboarding notes", "relevant": ["doc_person"], "tags": ["exact_name"]},
+  {"id": "semantic-refund", "query": "how do I get my money back for a broken order", "relevant": ["doc_refund", "doc_returns"], "tags": ["semantic"]},
+  {"id": "semantic-outage", "query": "why was the service down last week", "relevant": ["doc_incident"], "tags": ["semantic"]},
+  {"id": "long-appendix", "query": "data retention period in the appendix", "relevant": ["doc_policy_long"], "tags": ["long_document"]},
+  {"id": "acl-private", "query": "salary bands for engineering", "relevant": [], "forbidden": ["doc_hr_private"], "tags": ["acl"]},
+  {"id": "tenant-boundary", "query": "quarterly roadmap", "relevant": ["doc_roadmap_tenant_a"], "forbidden": ["doc_roadmap_tenant_b"], "tags": ["tenant"]}
+]

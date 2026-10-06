@@ -8,3 +8,5 @@
 # `semantic_search` agent tool (which depends on the agent layer) is
 # loaded separately from `lib/parse/agent.rb`.
 require_relative "retrieval/retriever"
+require_relative "retrieval/profiles"
+require_relative "retrieval/benchmark"

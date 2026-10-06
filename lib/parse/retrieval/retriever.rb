@@ -359,9 +359,14 @@ module Parse
     # document's presentation text (the same `text_field` used for
     # chunking). Index alignment between `documents` and `raw_hits` is
     # preserved so the returned `index` maps back to the right hit.
+    #
+    # A reranker that returns nil (Parse::Retrieval::BudgetedReranker after
+    # a timeout or provider failure under `on_rerank_failure: :fallback`)
+    # keeps the retrieval order, trimmed to `top_n`.
     def apply_rerank(reranker, query, raw_hits, text_wire, top_n)
       documents = raw_hits.map { |doc| fetch_field(doc, text_wire, text_wire).to_s }
       results = reranker.rerank(query: query, documents: documents, top_n: top_n)
+      return top_n ? raw_hits.first(top_n) : raw_hits if results.nil?
       results.map do |r|
         hit = raw_hits[r.index]
         next nil if hit.nil?

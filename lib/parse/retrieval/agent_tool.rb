@@ -75,10 +75,11 @@ module Parse
       #   by objectId) instead of being duplicated on every chunk. When the
       #   token budget trims the result, `budget_truncated: true` and
       #   `budget_dropped: <n>` are added.
-      def semantic_search(agent, class_name: nil, query: nil, k: DEFAULT_K,
+      def semantic_search(agent, class_name: nil, query: nil, k: nil,
                                  filter: nil, vector_filter: nil, text_field: nil,
                                  chunk_size: nil, chunk_overlap: nil, chunk_by: nil,
                                  max_chunks_per_document: nil, max_total_tokens: nil,
+                                 profile: nil,
                                  # Back-compat / ergonomic aliases for direct callers:
                                  # `klass:`/`class:` for class_name, and the chunker's
                                  # own `size:`/`overlap:`/`by:` names.
@@ -97,6 +98,9 @@ module Parse
         end
 
         resolved_text_field = normalize_text_field!(text_field, klass)
+        # A named, server-configured retrieval profile (Parse::Retrieval::Profiles).
+        # Unknown names fail here, before any provider call.
+        prof = profile.nil? || profile.to_s.strip.empty? ? nil : Parse::Retrieval::Profiles.fetch!(profile)
 
         # Reject reserved underscore keys at any depth, then enforce the
         # per-class filter-field allowlist on top-level keys.
@@ -133,6 +137,29 @@ module Parse
         score_quantize = (agent.permissions != :admin)
         vector_field = Parse::Agent::MetadataRegistry.searchable_field(cname)
 
+        # Profile resolution: k is bounded by the profile's max_k; a reranking
+        # profile retrieves `rerank_candidates` and keeps `rerank_top_n` (or
+        # the effective k); hybrid settings come only from the profile.
+        effective_k = if prof
+            requested = k.to_i.positive? ? k.to_i : prof.k
+            clamp_k([requested, prof.max_k].min)
+          else
+            clamp_k(k)
+          end
+        reranker = nil
+        retrieve_k = effective_k
+        rerank_top_n = nil
+        if prof&.rerank?
+          reranker = Parse::Retrieval::BudgetedReranker.new(
+            Parse::Retrieval.reranker(prof.reranker), prof,
+            charge: ->(tokens) { charge_rerank_tokens!(agent, scope, tokens) },
+          )
+          retrieve_k = [prof.rerank_candidates, effective_k].max
+          rerank_top_n = [prof.rerank_top_n || effective_k, effective_k].min
+        end
+        max_total_tokens = prof.max_total_tokens if prof && max_total_tokens.nil? && prof.max_total_tokens
+        started = monotonic_now
+
         # with_precharged: the cap was charged above with per-tenant
         # identity (or deliberately skipped for trusted admin agents) —
         # suppress the generic query-embed charge inside
@@ -144,7 +171,10 @@ module Parse
             klass: klass,
             field: vector_field,
             text_field: resolved_text_field,
-            k: clamp_k(k),
+            k: retrieve_k,
+            hybrid: prof&.hybrid ? prof.hybrid : nil,
+            rerank: reranker,
+            rerank_top_n: rerank_top_n,
             filter: filter,
             vector_filter: vector_filter,
             chunker: build_chunker(chunk_size, chunk_overlap, chunk_by, max_chunks_per_document),
@@ -181,7 +211,68 @@ module Parse
           envelope[:budget_truncated] = true
           envelope[:budget_dropped] = dropped
         end
+        if prof
+          envelope[:profile] = prof.name
+          if reranker&.stats&.dig(:fallback)
+            # Observable fallback: the result is in retrieval order, not
+            # reranked, and the caller is told why.
+            envelope[:rerank_fallback] = true
+            envelope[:rerank_fallback_reason] = reranker.stats[:fallback_reason]
+          end
+        end
+        emit_search_event(cname, prof, effective_k, retrieve_k, reranker, envelope, dropped, started)
         envelope
+      end
+
+      # @!visibility private
+      def monotonic_now
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      # @!visibility private
+      # One sanitized `parse.retrieval.search` event per semantic_search
+      # call: profile, budgets, stage counts and timings, and estimated
+      # rerank usage. Never document text, field values, URLs, or
+      # credentials. Rerank tokens are the SDK's estimate
+      # (`tokens_estimated`), not provider-reported usage.
+      def emit_search_event(cname, prof, k, retrieve_k, reranker, envelope, dropped, started)
+        return unless defined?(ActiveSupport::Notifications)
+        total_ms = ((monotonic_now - started) * 1000).round(1)
+        rerank = reranker ? reranker.stats.dup : { used: false }
+        payload = {
+          class_name: cname,
+          profile: prof&.name,
+          hybrid: !prof&.hybrid.nil?,
+          k: k,
+          candidates: retrieve_k,
+          rerank: rerank,
+          chunks_returned: envelope[:count],
+          documents_returned: envelope[:documents].size,
+          budget_dropped: dropped,
+          duration_ms: total_ms,
+          retrieve_ms: (total_ms - (rerank[:duration_ms] || 0)).round(1),
+        }
+        ActiveSupport::Notifications.instrument("parse.retrieval.search", payload)
+      rescue StandardError
+        nil
+      end
+
+      # @!visibility private
+      # Charge estimated reranker tokens to the same per-tenant spend cap
+      # the query embedding uses (admin agents are exempt, as there). A
+      # transient cap hit surfaces as RateLimitExceeded; an impossible one
+      # as ValidationError, mirroring {#charge_spend_cap!}.
+      def charge_rerank_tokens!(agent, scope, tokens)
+        return if agent.permissions == :admin
+        tenant_id = scope && (scope[:value] || scope["value"])
+        Parse::Embeddings::SpendCap.charge!(tenant_id: tenant_id, tokens: tokens)
+      rescue Parse::Embeddings::SpendCap::Exceeded => e
+        if e.retry_after.nil?
+          raise Parse::Agent::ValidationError,
+                "semantic_search: reranking exceeds the spend cap " \
+                "(#{e.requested} tokens requested, limit #{e.limit}/#{e.window}s)."
+        end
+        raise Parse::Agent::RateLimitExceeded.new(retry_after: e.retry_after, limit: e.limit, window: e.window)
       end
 
       # @!visibility private
@@ -437,6 +528,7 @@ module Parse
           "filter" => { "type" => "object", "description" => "Post-search field filter (allowlisted fields only)." },
           "vector_filter" => { "type" => "object", "description" => "Atlas pre-search filter (allowlisted fields only)." },
           "text_field" => { "type" => "string", "description" => "Which embedded text source to chunk and return as content. Required only when the class embeds more than one text field; must name one of those sources." },
+          "profile" => { "type" => "string", "description" => "Optional server-configured retrieval profile name (for example fast, balanced, precise). Profiles set result counts, hybrid search, and reranking; omit for the default search. An unknown name is refused with the list of available profiles." },
           "chunk_size" => { "type" => "integer", "description" => "Override chunk window size." },
           "chunk_overlap" => { "type" => "integer", "description" => "Override chunk overlap." },
           "chunk_by" => { "type" => "string", "enum" => %w[chars tokens], "description" => "Chunk unit." },
