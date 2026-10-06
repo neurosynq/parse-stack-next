@@ -715,7 +715,15 @@ Because this model embeds **two** text sources (`:title` and `:body`),
 `semantic_search` cannot guess which one to chunk and return as the
 result `content`. Pass `text_field:` to choose (it must name one of the
 embedded sources); a single-source model infers it automatically and the
-parameter is optional:
+parameter is optional.
+
+Through the agent tool, the chosen source must also be inside the class's
+`agent_fields` allowlist, because chunk `content` is that field's text. A
+class may embed a field it hides from agents (search the `body`, expose only
+the `title`), but `semantic_search` then refuses that source with
+`:field_denied` instead of returning it, and infers only among the readable
+sources. Direct `Parse::Retrieval.retrieve` calls are application code and
+are not subject to `agent_fields`:
 
 ```ruby
 # via the agent tool (LLM-facing parameter)

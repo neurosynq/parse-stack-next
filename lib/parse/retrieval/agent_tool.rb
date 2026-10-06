@@ -59,10 +59,12 @@ module Parse
 
       # @param agent [Parse::Agent]
       # @param text_field [String, Symbol, nil] which embedded text source to
-      #   chunk and return as `content`. Required only for models with more
-      #   than one `embed` text source (otherwise inferred). Must name one of
-      #   the class's declared embed sources — an arbitrary field is refused so
-      #   the chunk `content` can't disclose a non-embedded field.
+      #   chunk and return as `content`. Must name one of the class's declared
+      #   embed sources that is also inside its `agent_fields` allowlist: an
+      #   arbitrary field is refused so chunk `content` can't disclose a
+      #   non-embedded field, and an embedded-but-hidden field is refused with
+      #   `:field_denied` so it can't disclose a field the agent may not read.
+      #   When omitted, it is inferred from the readable embed sources.
       # @param max_chunks_per_document [Integer, nil] cap on chunks emitted per
       #   matched document (forwarded to the chunker).
       # @param max_total_tokens [Integer, nil] ceiling on total returned
@@ -330,19 +332,73 @@ module Parse
       end
 
       # @!visibility private
+      # The embed text sources the agent may also READ: those whose wire
+      # column is inside the class's `agent_fields` allowlist. Chunk
+      # `content` (and any reranker input) is built from the chosen source's
+      # raw value BEFORE the per-record projection strips disallowed fields,
+      # so the source itself must be readable. With no allowlist every
+      # source is readable, as before.
+      #
+      # @return [Array<String>, nil] readable sources, or nil when the class
+      #   declares no `agent_fields` allowlist.
+      def readable_text_fields(klass)
+        allowlist = Parse::Agent::MetadataRegistry.field_allowlist(klass.parse_class)
+        return nil if allowlist.nil? || allowlist.empty?
+        permitted = allowlist.map(&:to_s)
+        searchable_text_fields(klass).select do |source|
+          permitted.include?(Parse::Retrieval.send(:wire_name, klass, source))
+        end
+      end
+
+      # @!visibility private
       # Validate a caller-supplied text_field against the embedded-source
-      # allowlist. nil/blank → nil (retrieve infers; works for single-source
-      # models, raises AmbiguousTextField for multi-source so the agent knows
-      # to pass one).
+      # list and the `agent_fields` allowlist, or infer one.
+      #
+      # * Explicit field that is not an embed source: ValidationError.
+      # * Explicit embed source outside `agent_fields`: AccessDenied
+      #   (`:field_denied`), raised before any search runs.
+      # * Omitted, class has no `agent_fields`: nil, so retrieve infers as
+      #   before (single source) or raises AmbiguousTextField (several).
+      # * Omitted, class has `agent_fields`: the sole readable source; a
+      #   `:field_denied` refusal when none is readable; a ValidationError
+      #   asking for `text_field` when several are.
       def normalize_text_field!(text_field, klass)
-        return nil if text_field.nil? || text_field.to_s.strip.empty?
+        readable = readable_text_fields(klass)
+
+        if text_field.nil? || text_field.to_s.strip.empty?
+          return nil if readable.nil?
+          return readable.first.to_sym if readable.length == 1
+          if readable.empty?
+            raise text_field_denied(klass, searchable_text_fields(klass).first)
+          end
+          raise Parse::Agent::ValidationError,
+                "semantic_search: this class embeds several readable text sources; pass " \
+                "text_field (allowed: #{readable.inspect})."
+        end
+
         allowed = searchable_text_fields(klass)
         unless allowed.include?(text_field.to_s)
           raise Parse::Agent::ValidationError,
                 "semantic_search: text_field #{text_field.to_s.inspect} is not an embedded " \
-                "text source for this class (allowed: #{allowed.inspect})."
+                "text source for this class (allowed: #{(readable || allowed).inspect})."
+        end
+        if readable && !readable.include?(text_field.to_s)
+          raise text_field_denied(klass, text_field.to_s)
         end
         text_field.to_sym
+      end
+
+      # @!visibility private
+      def text_field_denied(klass, source)
+        allowlist = Parse::Agent::MetadataRegistry.field_allowlist(klass.parse_class)
+        Parse::Agent::AccessDenied.new(
+          klass.parse_class,
+          "semantic_search: text source #{source.to_s.inspect} is outside the agent_fields " \
+          "allowlist for class '#{klass.parse_class}', so it cannot be returned as chunk content.",
+          kind: :field_denied,
+          denied_field: source.to_s,
+          allowed_fields: allowlist&.map(&:to_s),
+        )
       end
 
       # @!visibility private
