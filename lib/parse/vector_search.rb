@@ -501,3 +501,5 @@ module Parse
     @default_index = nil
   end
 end
+
+require_relative "vector_search/index_definition"

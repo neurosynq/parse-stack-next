@@ -164,7 +164,13 @@ module Parse
       # than as an Atlas index error much later.
       VECTOR_SIMILARITIES = %w[euclidean cosine dotProduct].freeze
 
-      # `{ dimensions: Integer, provider: Symbol, model: String, similarity: Symbol }`.
+      # Index-side quantization Atlas vectorSearch can apply to a float
+      # vector field. Declared per `:vector` property; affects only the
+      # generated index definition, never stored data.
+      VECTOR_QUANTIZATIONS = %w[scalar binary].freeze
+
+      # `{ dimensions: Integer, provider: Symbol, model: String, similarity: Symbol,
+      #    quantization: Symbol }`.
       # `dimensions:` is required; the rest are optional and only carry
       # meaning for the embedding provider plumbing layered above this
       # type. Consumed by `Parse::Embeddings` and
@@ -431,11 +437,22 @@ module Parse
                   "#{VECTOR_SIMILARITIES.inspect} (got #{similarity.inspect})."
           end
 
+          # Optional index-side quantization (Atlas automatic quantization).
+          # Off by default. Only the generated vectorSearch index carries
+          # it; stored vectors and the write path stay full-precision.
+          quantization = opts[:quantization]
+          if quantization && !VECTOR_QUANTIZATIONS.include?(quantization.to_s)
+            raise ArgumentError,
+                  "Property #{self}##{key} :vector `quantization:` must be one of " \
+                  "#{VECTOR_QUANTIZATIONS.inspect} (got #{quantization.inspect})."
+          end
+
           vector_properties[key] = {
             dimensions: dims,
             provider: opts[:provider],
             model: opts[:model],
             similarity: similarity,
+            quantization: quantization&.to_sym,
             searchable: searchable,
           }.freeze
 
