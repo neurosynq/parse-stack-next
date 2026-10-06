@@ -19,7 +19,9 @@ module Parse
   # * {Cohere}    — embed-{english,multilingual}-v3.0 and `*-light-v3.0`.
   #   Distinguishes `:search_query` / `:search_document` at the wire.
   # * {Voyage}    — voyage-4 family (incl. open-weight `voyage-4-nano`),
-  #   voyage-3 family, voyage-code-3, voyage-finance-2, voyage-law-2.
+  #   voyage-3 family, voyage-code-4, voyage-code-3, voyage-finance-2,
+  #   voyage-law-2, multimodal, and contextualized chunk models
+  #   (voyage-context-4, voyage-context-3).
   #   Distinguishes input types.
   # * {Jina}      — jina-embeddings-v3/v4/v5 (text + omni-text mode),
   #   jina-code-embeddings-{0.5b,1.5b}. Matryoshka via `dimensions:`.

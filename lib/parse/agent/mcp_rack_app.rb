@@ -405,6 +405,10 @@ module Parse
         # and always present; they only do work when
         # Parse::Agent.require_approval_for opts a tier in.
         @elicitation_capabilities = Parse::Agent::ClientCapabilityRegistry.new
+        # Per-session minimum log level set by `logging/setLevel`. Log
+        # messages ride the response stream of an SSE request, so a session
+        # that never sets a level (or never streams) receives none.
+        @log_levels = Parse::Agent::MCPDispatcher::LogLevelRegistry.new
         @pending_elicitations = Parse::Agent::PendingElicitationRegistry.new
         @approval_timeout = approval_timeout
 
@@ -627,6 +631,7 @@ module Parse
           # session's cached elicitation capability.
           @pending_elicitations.abort_all_for(clean_sid, :session_terminated)
           @elicitation_capabilities.forget(clean_sid)
+          @log_levels.forget(clean_sid)
           # Tear down any resource subscriptions and the listening stream
           # bound to this session so a terminated session leaves no LiveQuery
           # sockets behind.
@@ -941,6 +946,7 @@ module Parse
           body: body, agent: agent, logger: @logger,
           subscription_manager: @subscription_manager,
           approval_gate: build_approval_gate(agent),
+          log_levels: @log_levels,
         )
         headers = json_headers
         merge_session_header!(headers, body, agent)
@@ -1007,6 +1013,7 @@ module Parse
         correlation_id = agent.respond_to?(:correlation_id) ? agent.correlation_id : nil
         registry_entry_id = @cancellation_registry.register(correlation_id, req_id, cancellation_token)
         registry = @cancellation_registry
+        log_levels = @log_levels
 
         # The block receives the SSEBody's progress_callback so tools can
         # emit `notifications/progress` events through it. The callback is
@@ -1016,7 +1023,8 @@ module Parse
           progress_token, req_id, interval, logger,
           cancellation_token: cancellation_token,
           on_close: -> { registry.deregister(correlation_id, req_id, registry_entry_id) if registry_entry_id },
-        ) do |progress_callback|
+          log_level_lookup: -> { log_levels.get(correlation_id) },
+        ) do |progress_callback, log_callback|
           Parse::Agent::MCPDispatcher.call(
             body: body,
             agent: agent,
@@ -1025,6 +1033,8 @@ module Parse
             cancellation_token: cancellation_token,
             subscription_manager: @subscription_manager,
             approval_gate: build_approval_gate(agent),
+            log_callback: log_callback,
+            log_levels: log_levels,
           )
         end
 
@@ -1217,6 +1227,14 @@ module Parse
         # @return [Proc]
         attr_reader :progress_callback
 
+        # Callback exposed to the dispatcher block as the agent's
+        # `log_callback`. Pushes a `notifications/message` event when the
+        # message's level is at or above the session's level, and drops it
+        # otherwise. nil when no level lookup was supplied.
+        #
+        # @return [Proc, nil]
+        attr_reader :log_callback
+
         # @param progress_token [String] MCP progressToken value.
         # @param req_id         [Object] JSON-RPC request id (may be nil).
         # @param interval       [Numeric] heartbeat period in seconds.
@@ -1228,8 +1246,11 @@ module Parse
         # @param on_close [Proc, nil] callback invoked from {#close} after
         #   the worker has been terminated. Used by MCPRackApp to
         #   deregister the cancellation token from the per-app registry.
-        # @param dispatcher_blk [Proc] called with one argument (the
-        #   {#progress_callback} Proc); must return the same
+        # @param log_level_lookup [Proc, nil] returns the session's
+        #   minimum log level (a String) or nil when the client never set
+        #   one. nil disables {#log_callback} entirely.
+        # @param dispatcher_blk [Proc] called with the {#progress_callback}
+        #   and {#log_callback} Procs; must return the same
         #   `{ status:, body: }` hash that MCPDispatcher.call returns.
         # @param heartbeat_waiter [Proc, nil] test hook. Called as
         #   `waiter.call(dispatcher_thread, interval)` once per heartbeat
@@ -1240,7 +1261,7 @@ module Parse
         #   to OS scheduler jitter.
         def initialize(progress_token, req_id, interval, logger,
                        cancellation_token: nil, on_close: nil,
-                       heartbeat_waiter: nil, &dispatcher_blk)
+                       heartbeat_waiter: nil, log_level_lookup: nil, &dispatcher_blk)
           @progress_token = progress_token
           # Heartbeats use a dedicated server-generated progressToken so
           # the elapsed-seconds scale of heartbeats never appears on the
@@ -1277,6 +1298,7 @@ module Parse
           # actively reporting, time-based heartbeats are noise.
           @tool_progress_reported = false
           @progress_callback = build_progress_callback
+          @log_callback = build_log_callback(log_level_lookup)
           # Deregistration callbacks for the Tools/Prompts subscribe
           # bindings. Set when the worker starts (so a request that is
           # never driven via #each does not register a stale entry) and
@@ -1500,7 +1522,7 @@ module Parse
                     # tools running inside MCPDispatcher.call can emit
                     # notifications/progress events without coupling to
                     # SSEBody internals.
-                    result = @dispatcher_blk.call(@progress_callback)
+                    result = @dispatcher_blk.call(@progress_callback, @log_callback)
                   rescue StandardError => e
                     # Log the unexpected failure (MCPDispatcher.call normally catches
                     # StandardError internally; anything reaching here is unusual).
@@ -1644,6 +1666,33 @@ module Parse
               else
                 warn line
               end
+            end
+            nil
+          end
+        end
+
+        # Build the callback behind {#log_callback}. The session's level is
+        # read on every message, so a `logging/setLevel` sent mid-request
+        # takes effect for later messages. Encoder or queue failures are
+        # logged and swallowed, like {#build_progress_callback}.
+        def build_log_callback(lookup)
+          return nil if lookup.nil?
+          diag = @logger
+          levels = Parse::Agent::MCPDispatcher::LOG_LEVELS
+          lambda do |level:, data:, logger: nil|
+            begin
+              min = lookup.call
+              rank = levels.index(level.to_s)
+              min_rank = min && levels.index(min)
+              if rank && min_rank && rank >= min_rank
+                params = { "level" => level.to_s, "data" => data }
+                params["logger"] = logger.to_s if logger
+                payload = JSON.generate({ "jsonrpc" => "2.0", "method" => "notifications/message", "params" => params })
+                @queue << "event: message\ndata: #{payload}\n\n"
+              end
+            rescue StandardError => e
+              line = "[Parse::Agent::MCPRackApp::SSEBody] log_callback error: #{e.class}: #{e.message}"
+              diag ? diag.warn(line) : warn(line)
             end
             nil
           end

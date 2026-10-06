@@ -118,6 +118,23 @@ class EmbeddingsVoyageTest < Minitest::Test
     assert_equal 1024, build(model: "voyage-3.5-lite").dimensions
     assert_equal 1536, build(model: "voyage-code-2").dimensions
     assert_equal 1024, build(model: "voyage-multimodal-3.5").dimensions
+    assert_equal 1024, build(model: "voyage-code-4").dimensions
+    assert_equal 1024, build(model: "voyage-context-4").dimensions
+    assert_equal 1024, build(model: "voyage-context-3").dimensions
+  end
+
+  def test_voyage_code_4_matryoshka_and_text_routing
+    assert_equal 2048, build(model: "voyage-code-4", dimensions: 2048).dimensions
+    assert_equal 32_000, build(model: "voyage-code-4").max_input_tokens
+    captured_path = nil
+    stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+      stub.post("/v1/embeddings") do |env|
+        captured_path = env.url.path
+        [200, { "Content-Type" => "application/json" }, fake_response(1, 1024)]
+      end
+    end
+    build(model: "voyage-code-4", connection: stubbed_conn(stubs)).embed_text(["def x; end"])
+    assert_equal "/v1/embeddings", captured_path
   end
 
   def test_matryoshka_widths_are_per_model
@@ -445,6 +462,87 @@ class EmbeddingsVoyageTest < Minitest::Test
     refute captured_body.key?("input_type")
   end
 
+  # ---- contextualized chunk models -----------------------------------
+
+  def test_contextualized_embed_text_sends_one_chunk_documents
+    captured_body = nil
+    captured_path = nil
+    stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+      stub.post("/v1/contextualizedembeddings") do |env|
+        captured_path = env.url.path
+        captured_body = JSON.parse(env.request_body)
+        [200, { "Content-Type" => "application/json" }, fake_contextualized_response([1, 1], 1024)]
+      end
+    end
+    provider = build(model: "voyage-context-4", connection: stubbed_conn(stubs))
+    vectors = provider.embed_text(["alpha", "beta"], input_type: :search_query)
+
+    assert_equal "/v1/contextualizedembeddings", captured_path
+    assert_equal [["alpha"], ["beta"]], captured_body["inputs"]
+    assert_equal "voyage-context-4", captured_body["model"]
+    assert_equal "query", captured_body["input_type"]
+    refute captured_body.key?("truncation"), "the contextualized endpoint has no truncation field"
+    refute captured_body.key?("input")
+    assert_equal 2, vectors.length
+    assert_equal 1024, vectors.first.length
+  end
+
+  def test_embed_chunks_returns_vectors_per_document_in_order
+    captured_body = nil
+    stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+      stub.post("/v1/contextualizedembeddings") do |env|
+        captured_body = JSON.parse(env.request_body)
+        # Outer and inner lists both arrive out of order; the
+        # provider must sort each by `index`.
+        body = JSON.parse(fake_contextualized_response([3, 1], 256))
+        body["data"].reverse!
+        body["data"].each { |doc| doc["data"].reverse! }
+        [200, { "Content-Type" => "application/json" }, body.to_json]
+      end
+    end
+    provider = build(model: "voyage-context-3", dimensions: 256, connection: stubbed_conn(stubs))
+    result = provider.embed_chunks([%w[a b c], %w[d]])
+
+    assert_equal [%w[a b c], %w[d]], captured_body["inputs"]
+    assert_equal 256, captured_body["output_dimension"]
+    assert_equal "document", captured_body["input_type"]
+    assert_equal [3, 1], result.map(&:length)
+    # fake_contextualized_response tags each vector's first element
+    # with doc * 100 + chunk so ordering is observable.
+    assert_equal [[0.0, 1.0, 2.0], [100.0]], result.map { |doc| doc.map(&:first) }
+  end
+
+  def test_embed_chunks_rejects_non_contextualized_model
+    err = assert_raises(Parse::Embeddings::Voyage::BadRequestError) do
+      build(model: "voyage-4", connection: stubbed_conn(empty_stubs)).embed_chunks([["x"]])
+    end
+    assert_match(/contextualized model/, err.message)
+  end
+
+  def test_embed_chunks_validates_shape_and_limits
+    provider = build(model: "voyage-context-4", connection: stubbed_conn(empty_stubs))
+    assert_equal [], provider.embed_chunks([])
+    assert_raises(ArgumentError) { provider.embed_chunks("x") }
+    assert_raises(ArgumentError) { provider.embed_chunks([[]]) }
+    assert_raises(ArgumentError) { provider.embed_chunks([["ok", ""]]) }
+    assert_raises(ArgumentError) { provider.embed_chunks([["ok", 1]]) }
+    assert_raises(ArgumentError) { provider.embed_chunks([["ok"]], input_type: :bogus) }
+    too_many_docs = Array.new(Parse::Embeddings::Voyage::MAX_CONTEXT_DOCUMENTS + 1) { ["x"] }
+    assert_match(/documents exceeds/, assert_raises(ArgumentError) { provider.embed_chunks(too_many_docs) }.message)
+    too_many_chunks = Array.new(2) { Array.new(Parse::Embeddings::Voyage::MAX_CONTEXT_CHUNKS / 2 + 1, "x") }
+    assert_match(/chunks exceeds/, assert_raises(ArgumentError) { provider.embed_chunks(too_many_chunks) }.message)
+  end
+
+  def test_embed_chunks_rejects_mismatched_chunk_count
+    stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+      stub.post("/v1/contextualizedembeddings") do |_|
+        [200, { "Content-Type" => "application/json" }, fake_contextualized_response([1], 1024)]
+      end
+    end
+    provider = build(model: "voyage-context-4", connection: stubbed_conn(stubs))
+    assert_raises(Parse::Embeddings::InvalidResponseError) { provider.embed_chunks([%w[a b]]) }
+  end
+
   def test_text_model_does_not_route_to_multimodal_path
     captured_path = nil
     stubs = Faraday::Adapter::Test::Stubs.new do |stub|
@@ -582,6 +680,27 @@ class EmbeddingsVoyageTest < Minitest::Test
       end,
       "model" => "voyage-3",
       "usage" => { "total_tokens" => count },
+    }.to_json
+  end
+
+  # One inner list per document, `chunk_counts[i]` vectors each. The
+  # first element of every vector is doc * 100 + chunk.
+  def fake_contextualized_response(chunk_counts, dim)
+    {
+      "object" => "list",
+      "data" => chunk_counts.each_with_index.map do |count, d|
+        {
+          "object" => "list",
+          "index" => d,
+          "data" => (0...count).map do |c|
+            vec = Array.new(dim, 0.0)
+            vec[0] = (d * 100 + c).to_f
+            { "object" => "embedding", "index" => c, "embedding" => vec }
+          end,
+        }
+      end,
+      "model" => "voyage-context-4",
+      "usage" => { "total_tokens" => chunk_counts.sum },
     }.to_json
   end
 

@@ -9,9 +9,11 @@ require_relative "provider"
 module Parse
   module Embeddings
     # Voyage AI embeddings provider. Wraps `POST /v1/embeddings` for
-    # text-only models and `POST /v1/multimodalembeddings` for the
+    # text-only models, `POST /v1/multimodalembeddings` for the
     # multimodal text+image models (text via {#embed_text}, images via
-    # {#embed_image}).
+    # {#embed_image}), and `POST /v1/contextualizedembeddings` for the
+    # contextualized chunk models (single texts via {#embed_text},
+    # whole chunked documents via {#embed_chunks}).
     #
     # Supported models:
     #
@@ -21,7 +23,8 @@ module Parse
     #   llama.cpp).
     # * **v3 family** — `voyage-3-large`, `voyage-3.5`,
     #   `voyage-3.5-lite`, `voyage-3`, `voyage-3-lite`.
-    # * **code models** — `voyage-code-3`, `voyage-code-2` (1536-dim).
+    # * **code models**: `voyage-code-4`, `voyage-code-3`,
+    #   `voyage-code-2` (1536-dim).
     # * **domain models** — `voyage-finance-2`, `voyage-law-2`.
     # * **multimodal** — `voyage-multimodal-3` (text+image) and
     #   `voyage-multimodal-3.5` (text+image+video). Unified vector
@@ -31,6 +34,11 @@ module Parse
     #   {#embed_image}, video through {#embed_video}. All three share
     #   the same space, so stored text vectors are comparable against
     #   image and video vectors without re-embedding.
+    # * **contextualized chunk**: `voyage-context-4` and
+    #   `voyage-context-3`. Each chunk's vector also encodes the
+    #   document it came from, so chunks are embedded a document at a
+    #   time through {#embed_chunks}. {#embed_text} sends every string
+    #   as a one-chunk document, which is the right shape for queries.
     #
     # Audio is not offered by any Voyage model, and neither PDF nor
     # DOCX is accepted as a content type — render document pages to
@@ -147,12 +155,15 @@ module Parse
         "voyage-3.5-lite" => 1024,
         "voyage-3" => 1024,
         "voyage-3-lite" => 512,
+        "voyage-code-4" => 1024,
         "voyage-code-3" => 1024,
         "voyage-code-2" => 1536,
         "voyage-finance-2" => 1024,
         "voyage-law-2" => 1024,
         "voyage-multimodal-3" => 1024,
         "voyage-multimodal-3.5" => 1024,
+        "voyage-context-4" => 1024,
+        "voyage-context-3" => 1024,
       }.freeze
 
       # Every width a model's Matryoshka head will actually return.
@@ -174,12 +185,15 @@ module Parse
         "voyage-3.5-lite" => [256, 512, 1024, 2048],
         "voyage-3" => [1024],
         "voyage-3-lite" => [512],
+        "voyage-code-4" => [256, 512, 1024, 2048],
         "voyage-code-3" => [256, 512, 1024, 2048],
         "voyage-code-2" => [1536],
         "voyage-finance-2" => [1024],
         "voyage-law-2" => [1024],
         "voyage-multimodal-3" => [1024],
         "voyage-multimodal-3.5" => [256, 512, 1024, 2048],
+        "voyage-context-4" => [256, 512, 1024, 2048],
+        "voyage-context-3" => [256, 512, 1024, 2048],
       }.freeze
 
       # Back-compat alias: the set of models accepting any
@@ -198,12 +212,17 @@ module Parse
         "voyage-3.5-lite" => 32_000,
         "voyage-3" => 32_000,
         "voyage-3-lite" => 32_000,
+        "voyage-code-4" => 32_000,
         "voyage-code-3" => 32_000,
         "voyage-code-2" => 16_000,
         "voyage-finance-2" => 32_000,
         "voyage-law-2" => 16_000,
         "voyage-multimodal-3" => 32_000,
         "voyage-multimodal-3.5" => 32_000,
+        # Per document (one inner list of chunks). The request as a
+        # whole is capped at 120k tokens across every document.
+        "voyage-context-4" => 32_000,
+        "voyage-context-3" => 32_000,
       }.freeze
 
       # Models that route to `/v1/multimodalembeddings` with the
@@ -225,6 +244,19 @@ module Parse
       # `voyage-multimodal-3` rejects video with an explicit
       # "does not support video inputs" 400.
       VIDEO_MODELS = %w[voyage-multimodal-3.5].freeze
+
+      # Models that route to `/v1/contextualizedembeddings` with the
+      # `{ inputs: [[chunk, ...], ...] }` envelope: one inner list per
+      # document, each chunk embedded with the rest of its document as
+      # context. The endpoint has no `truncation` field, so it is never
+      # sent for these models.
+      CONTEXTUALIZED_MODELS = %w[voyage-context-4 voyage-context-3].freeze
+
+      # Voyage's per-request limits for the contextualized endpoint:
+      # at most this many documents, and this many chunks summed
+      # across them.
+      MAX_CONTEXT_DOCUMENTS = 1_000
+      MAX_CONTEXT_CHUNKS = 16_000
 
       # Models Voyage's hosted API serves but the Atlas Embedding and
       # Reranking API does not. Verified against both endpoints.
@@ -400,6 +432,12 @@ module Parse
         # different request envelope. The response envelope shape is
         # the same (`{ data: [{ embedding, index }], usage: {...} }`)
         # so `extract_vectors!` is reused as-is.
+        if CONTEXTUALIZED_MODELS.include?(@model)
+          # Each string is its own one-chunk document, so the response
+          # carries exactly one vector per document.
+          return embed_contextualized(strings.map { |s| [s] }, input_type, wire_input_type).map(&:first)
+        end
+
         body = if MULTIMODAL_MODELS.include?(@model)
             build_multimodal_body(strings, wire_input_type)
           else
@@ -500,6 +538,72 @@ module Parse
                              allow_insecure: allow_insecure)
       end
 
+      # Embed chunked documents through Voyage's
+      # `/v1/contextualizedembeddings` endpoint. Every chunk's vector
+      # encodes the surrounding document as well as the chunk itself,
+      # so pass the chunks of one document together, in order, rather
+      # than one call per chunk.
+      #
+      # **Contextualized model required.** Only {CONTEXTUALIZED_MODELS}
+      # accept this shape; any other model raises {BadRequestError}
+      # before any network call.
+      #
+      # @param documents [Array<Array<String>>] one inner Array per
+      #   document, holding that document's chunks in order. At most
+      #   {MAX_CONTEXT_DOCUMENTS} documents and {MAX_CONTEXT_CHUNKS}
+      #   chunks in total.
+      # @param input_type [Symbol] one of {INPUT_TYPE_WIRE_VALUES}'s keys.
+      # @return [Array<Array<Array<Float>>>] one Array of chunk vectors
+      #   per document, aligned 1:1 with `documents` and with each
+      #   document's chunks.
+      def embed_chunks(documents, input_type: :search_document)
+        unless CONTEXTUALIZED_MODELS.include?(@model)
+          raise BadRequestError,
+                "Parse::Embeddings::Voyage#embed_chunks: model #{@model.inspect} does not " \
+                "accept chunked documents. Configure the provider with a contextualized model " \
+                "(supported: #{CONTEXTUALIZED_MODELS.inspect})."
+        end
+        unless documents.is_a?(Array)
+          raise ArgumentError,
+                "Parse::Embeddings::Voyage#embed_chunks expects Array<Array<String>> " \
+                "(got #{documents.class})."
+        end
+        return [] if documents.empty?
+
+        documents.each_with_index do |chunks, i|
+          unless chunks.is_a?(Array) && !chunks.empty?
+            raise ArgumentError,
+                  "Parse::Embeddings::Voyage#embed_chunks documents[#{i}] must be a non-empty " \
+                  "Array of chunk Strings."
+          end
+          chunks.each_with_index do |c, j|
+            unless c.is_a?(String) && !c.empty?
+              raise ArgumentError,
+                    "Parse::Embeddings::Voyage#embed_chunks documents[#{i}][#{j}] must be a " \
+                    "non-empty String."
+            end
+          end
+        end
+        if documents.length > MAX_CONTEXT_DOCUMENTS
+          raise ArgumentError,
+                "Parse::Embeddings::Voyage#embed_chunks: #{documents.length} documents exceeds " \
+                "Voyage's per-request cap (#{MAX_CONTEXT_DOCUMENTS}). Split the input."
+        end
+        chunk_total = documents.sum(&:length)
+        if chunk_total > MAX_CONTEXT_CHUNKS
+          raise ArgumentError,
+                "Parse::Embeddings::Voyage#embed_chunks: #{chunk_total} chunks exceeds " \
+                "Voyage's per-request cap (#{MAX_CONTEXT_CHUNKS}). Split the input."
+        end
+        unless INPUT_TYPE_WIRE_VALUES.key?(input_type)
+          raise ArgumentError,
+                "Parse::Embeddings::Voyage#embed_chunks input_type #{input_type.inspect} not in " \
+                "#{INPUT_TYPE_WIRE_VALUES.keys.inspect}."
+        end
+
+        embed_contextualized(documents, input_type, INPUT_TYPE_WIRE_VALUES[input_type])
+      end
+
       def inspect_attrs
         super.merge(base: safe_base_host, endpoint: @endpoint, retries: @max_retries)
       end
@@ -559,6 +663,37 @@ module Parse
         body[:truncation] = @truncation
         apply_output_dimension!(body)
         body
+      end
+
+      # Build the wire body for `/v1/contextualizedembeddings`. The
+      # endpoint documents no `truncation` field, so none is sent.
+      def build_contextualized_body(documents, wire_input_type)
+        body = { inputs: documents, model: @model }
+        body[:input_type] = wire_input_type if wire_input_type
+        apply_output_dimension!(body)
+        body
+      end
+
+      # Issue one contextualized request and return one Array of chunk
+      # vectors per document.
+      def embed_contextualized(documents, input_type, wire_input_type)
+        body = build_contextualized_body(documents, wire_input_type)
+
+        instrument_embed(documents.sum(&:length), input_type) do |emit_payload|
+          payload = post_embeddings(body, path: "contextualizedembeddings")
+          if payload.is_a?(Hash) && payload["usage"].is_a?(Hash)
+            tt = payload["usage"]["total_tokens"]
+            emit_payload[:total_tokens] = tt if tt.is_a?(Integer) && tt >= 0
+          end
+          # The response nests the standard envelope: the outer `data`
+          # holds one `{ data: [...], index: }` list per document, and
+          # each inner list is shaped like a `/v1/embeddings` response.
+          per_document = extract_vectors!(payload, documents.length, value_key: "data")
+          per_document.each_with_index.map do |entry, i|
+            vectors = extract_vectors!({ "data" => entry }, documents[i].length)
+            validate_response!(documents[i].length, vectors)
+          end
+        end
       end
 
       # Forward `output_dimension` only when the configured width
@@ -871,7 +1006,11 @@ module Parse
       #     "model": "voyage-3",
       #     "usage": { "total_tokens": N }
       #   }
-      def extract_vectors!(payload, input_count)
+      #
+      # `value_key` names the field read from each entry: `"embedding"`
+      # for the flat envelope, `"data"` for the outer list of the
+      # contextualized envelope.
+      def extract_vectors!(payload, input_count, value_key: "embedding")
         unless payload.is_a?(Hash)
           raise InvalidResponseError,
                 "Parse::Embeddings::Voyage: response body is not a JSON object."
@@ -895,7 +1034,7 @@ module Parse
             raise InvalidResponseError,
                   "Parse::Embeddings::Voyage: response.data[#{i}].index #{idx.inspect} out of range."
           end
-          [idx, entry["embedding"]]
+          [idx, entry[value_key]]
         end
         indices = sorted.map(&:first)
         if indices.uniq.length != indices.length

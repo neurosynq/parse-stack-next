@@ -1,5 +1,113 @@
 ## parse-stack-next Changelog
 
+### 5.7.5
+
+#### MongoDB 9.0 support
+
+Parse Server 9.10 and the SDK's mongo-direct paths run against MongoDB 9.0.
+This release moves the test stack to 9.0, re-runs reads that 9.0 kills
+mid-flight, and documents the server-side behavior changes that reach SDK
+callers.
+
+- **CHANGED**: The integration test stack runs `mongo:9` by default. Set
+  `MONGO_VERSION=8` to run it against the previous major. A data volume
+  written by one major is not guaranteed to start under another, so switch
+  with `docker-compose down -v` or a separate `PSNEXT_PREFIX`. Atlas Local
+  stays on 8.0, since no 9.x image of it is published yet.
+- **CHANGED**: Applications using `Parse::MongoDB`, `Parse::AtlasSearch`,
+  or the `*_direct` query methods against a 9.0 server should require the
+  `mongo` driver 2.26 or newer, which adds handling for MongoDB 9.0's
+  overload (Intelligent Workload Management) errors. The gem's development
+  lock is already on 2.26.0.
+- **NEW**: Mongo-direct reads (`Parse::MongoDB.aggregate`,
+  `Parse::MongoDB.find`, everything routed through them such as
+  `results_direct`, and `Parse::AtlasSearch` searches) re-run a query the
+  server killed with `QueryPlanKilled` (code 175; the 9.0 release notes call
+  it a `QueryKilledError`). MongoDB 9.0 kills a running query this way when an
+  indexed field it references becomes multikey because a concurrent write
+  stored an array there. The read is retried up to
+  `Parse::MongoDB::QUERY_KILLED_RETRIES` (2) times before the error
+  propagates. Retries are immediate, since the kill means a concurrent write
+  changed the index rather than that the server is overloaded. Each retry
+  emits a `parse.mongodb.query_killed_retry` notification. Other driver
+  errors are not retried.
+
+#### Voyage `voyage-code-4` and contextualized chunk embeddings
+
+- **NEW**: `Parse::Embeddings::Voyage` accepts `voyage-code-4` (1024
+  native, Matryoshka 256/512/1024/2048, 32k tokens). It routes through
+  `/v1/embeddings` like the other text models.
+- **NEW**: `voyage-context-4` and `voyage-context-3` are supported. These
+  models embed each chunk together with the document it came from, through
+  Voyage's `/v1/contextualizedembeddings` endpoint. `embed_text` sends each
+  string as a one-chunk document, which is the right shape for queries and
+  for the `embed` class macro.
+- **NEW**: `Voyage#embed_chunks(documents, input_type:)` takes one Array of
+  chunk Strings per document and returns one Array of chunk vectors per
+  document, aligned with the input. It enforces Voyage's per-request limits
+  (1,000 documents and 16,000 chunks) before any network call, and raises
+  `BadRequestError` on a model that is not contextualized. The endpoint has
+  no `truncation` field, so none is sent for these models.
+- **NEW**: `Parse::Retrieval::Reranker::Voyage` wraps Voyage's `/v1/rerank`
+  and plugs into `Parse::Retrieval.retrieve(rerank:)` like the Cohere
+  reranker. It defaults to `rerank-3` and accepts `rerank-3-lite` and the
+  2.5 and 2 series. An Atlas model API key (`al-` prefix) routes to the
+  Atlas Embedding and Reranking API automatically. `truncation: false`
+  makes over-length inputs an error instead of truncating them.
+
+#### MCP server speaks protocol version 2025-11-25
+
+- **NEW**: The MCP server negotiates `2025-11-25` and advertises it as its
+  preferred version; `2025-06-18`, `2025-03-26`, and `2024-11-05` are still
+  accepted. `serverInfo` now carries `title` and `description`.
+- **NEW**: `completion/complete` is implemented and the `completions`
+  capability advertised. Prompt arguments named `class_name`,
+  `parent_class`, `child_class`, or `classes`, and the `{className}`
+  variable of the `parse://` resource templates, complete to the class
+  names the connecting agent can see. `group_by` and `pointer_field`
+  complete to field names of the class given in the request's
+  `context.arguments`. Candidates come from the same tools that back
+  `resources/list` and `get_schema`, so hidden classes and fields are never
+  offered.
+- **NEW**: `logging/setLevel` is implemented and the `logging` capability
+  advertised. On a streaming request, `notifications/message` events at or
+  above the session's level are sent on that request's response stream.
+  Nothing is sent until the client sets a level. Tools emit messages with
+  `agent.log(level, data, logger:)`, and failed tool calls are logged at
+  `warning` with the tool name and error code.
+- **CHANGED**: A `tools/call` whose `arguments` is not a JSON object now
+  returns a tool result with `isError: true` instead of an internal error,
+  as `2025-11-25` requires for input validation failures.
+
+#### `server/discover` no longer fails the MCP version check
+
+- **FIXED**: Newer MCP clients send `server/discover` before `initialize`,
+  carrying a protocol version this server does not support. The transport
+  rejected it with a 400 before it reached the dispatcher, so the client
+  treated the server as broken instead of falling back to `initialize`. The
+  request now reaches the dispatcher, which answers `-32601`, and the client
+  negotiates a supported version through `initialize`. Other methods still
+  get a 400 for an unsupported version.
+
+### Behavior Notes
+
+These are MongoDB 9.0 server changes, not SDK changes. They apply to REST
+queries (Parse Server passes them to MongoDB) and to mongo-direct queries
+alike.
+
+- Equality and range comparisons against `null` (`$eq`, `$ne`, `$in`,
+  `$nin`, `$gte`, `$lte`, and `$lookup` equality) treat a dotted path that
+  traverses an array and resolves to no non-null value as `null`. For
+  `{ a: [] }` or `{ a: [1] }`, a query for `"a.b"` equal to `nil` now
+  matches, and `"a.b"` not equal to `nil` no longer does.
+- `$group` rejects an accumulator with an empty field name.
+- A query fails with `QueryPlanKilled` if an indexed field becomes
+  multikey while it runs. The SDK's mongo-direct reads re-run it (see
+  above); REST queries surface Parse Server's error.
+- `$where`, `$function`, and `$accumulator` are no longer deprecated in
+  9.0. The SDK continues to block them in every pipeline and constraint it
+  validates.
+
 ### 5.7.4
 
 #### Reset connections are retried instead of surfacing a raw Faraday error

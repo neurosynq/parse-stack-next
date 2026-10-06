@@ -1696,4 +1696,41 @@ class MCPStreamingTest < Minitest::Test
     sse_body.close  # idempotent
     refute token.cancelled?
   end
+  # ---- notifications/message (logging/setLevel) --------------------------
+
+  def test_log_callback_emits_messages_at_or_above_session_level
+    level = "warning"
+    sse_body = Parse::Agent::MCPRackApp::SSEBody.new(
+      "tok", 1, 5, nil, log_level_lookup: -> { level },
+    ) do |_pc, lc|
+      lc.call(level: "info", data: "quiet", logger: nil)
+      lc.call(level: "error", data: { "tool" => "x" }, logger: "parse.agent.tools")
+      { status: 200, body: { "jsonrpc" => "2.0", "id" => 1, "result" => {} } }
+    end
+    messages = drain_body(sse_body).filter_map do |chunk|
+      line = chunk[/^data: (.*)$/, 1]
+      line && JSON.parse(line)
+    end.select { |m| m["method"] == "notifications/message" }
+
+    assert_equal 1, messages.size
+    assert_equal({ "level" => "error", "data" => { "tool" => "x" }, "logger" => "parse.agent.tools" },
+                 messages.first["params"])
+  end
+
+  def test_log_callback_sends_nothing_before_set_level
+    sse_body = Parse::Agent::MCPRackApp::SSEBody.new(
+      "tok", 1, 5, nil, log_level_lookup: -> { nil },
+    ) do |_pc, lc|
+      lc.call(level: "emergency", data: "x", logger: nil)
+      { status: 200, body: { "jsonrpc" => "2.0", "id" => 1, "result" => {} } }
+    end
+    refute drain_body(sse_body).any? { |c| c.include?("notifications/message") }
+  end
+
+  def test_log_callback_is_nil_without_lookup
+    sse_body = Parse::Agent::MCPRackApp::SSEBody.new("tok", 1, 5, nil) do |_pc, lc|
+      { status: 200, body: { "jsonrpc" => "2.0", "id" => 1, "result" => { "lc" => lc.nil? } } }
+    end
+    assert drain_body(sse_body).any? { |c| c.include?('"lc":true') }
+  end
 end

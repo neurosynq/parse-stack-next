@@ -37,6 +37,8 @@ module Parse
       # The Cohere `/v2/rerank` adapter is loaded lazily — it requires
       # Faraday, which the core retrieval path does not.
       autoload :Cohere, ::File.expand_path("reranker/cohere", __dir__)
+      # The Voyage `/v1/rerank` adapter, also lazy for the same reason.
+      autoload :Voyage, ::File.expand_path("reranker/voyage", __dir__)
 
       # Base error for the reranker layer. Adapters raise subclasses.
       class Error < StandardError; end

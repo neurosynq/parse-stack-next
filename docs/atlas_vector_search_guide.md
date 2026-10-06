@@ -120,8 +120,11 @@ providers:
   `{ type: "image_url", image_url: { url: ... } }` content rows.
 * `Parse::Embeddings::Voyage` — voyage-4 family (`voyage-4-large` 2048,
   Matryoshka; `voyage-4` 1024; `voyage-4-lite` 512; `voyage-4-nano` 256),
-  voyage-3 family, domain models (`voyage-code-3`, `voyage-finance-2`,
-  `voyage-law-2`), and `voyage-multimodal-3` (1024-dim, 32k token
+  voyage-3 family, domain models (`voyage-code-4`, `voyage-code-3`,
+  `voyage-finance-2`, `voyage-law-2`), contextualized chunk models
+  (`voyage-context-4`, `voyage-context-3`; route to
+  `/v1/contextualizedembeddings`, with whole chunked documents embedded
+  through `embed_chunks`), and `voyage-multimodal-3` (1024-dim, 32k token
   context, routes to `/v1/multimodalembeddings` with the wrapped
   `{inputs: [{content: [{type: "text", text: ...}]}]}` envelope for
   text and `{type: "image_url", image_url: <url>}` content rows for
