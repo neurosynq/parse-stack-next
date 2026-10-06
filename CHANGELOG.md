@@ -1,5 +1,31 @@
 ## parse-stack-next Changelog
 
+### 5.7.6
+
+#### `semantic_search` no longer returns hidden fields as chunk content
+
+A focused security fix for the `semantic_search` agent tool. When a class
+embedded a field that its `agent_fields` allowlist hides from agents (for
+example, searching on `body` while exposing only `title`), the tool returned
+that field's text as `chunks[].content`, even though the `documents` map
+correctly omitted it. The chunk text is now restricted to fields the agent may
+read.
+
+- **FIXED**: `semantic_search` built chunk content from the raw value of the
+  embedded text source before the per-record `agent_fields` projection ran,
+  and its `text_field` check compared against the class's embed sources but
+  not its `agent_fields` allowlist. A text source is now usable only when it
+  is both an embed source and inside `agent_fields`. An explicit `text_field`
+  naming an embedded-but-hidden field is refused with `AccessDenied`
+  (`kind: :field_denied`) before any search runs. When `text_field` is
+  omitted, the tool infers the sole readable source, refuses with
+  `:field_denied` when no embedded source is readable, and asks for an
+  explicit `text_field` when several are. Reranker input is built from the
+  same text source, so it is covered by the same check. Classes without an
+  `agent_fields` allowlist behave as before, and direct
+  `Parse::Retrieval.retrieve` callers, which are application code rather than
+  agents, are unaffected.
+
 ### 5.7.5
 
 #### MongoDB 9.0 support

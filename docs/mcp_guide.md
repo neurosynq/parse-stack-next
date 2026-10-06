@@ -912,6 +912,7 @@ front avoids discovering each only on impact:
 | Reserved underscore key | A `filter:` / `vector_filter:` / `where:` contains an underscore-prefixed key (`_rperm`, `_p_*`, …) at any depth | `ArgumentError` / `ValidationError` (recursive refusal) |
 | Filter-field allowlist | A `filter:` / `vector_filter:` names a field not in the class's `agent_searchable filter_fields:` | `ValidationError` naming the offending field(s) |
 | `text_field` not embedded | `semantic_search` `text_field:` names a field that isn't a declared `embed` source | `ValidationError` listing the allowed sources |
+| `text_field` hidden | The `semantic_search` text source (explicit or inferred) is an `embed` source outside the class's `agent_fields` allowlist | `Parse::Agent::AccessDenied` (`kind: :field_denied`), before any search runs |
 | Tool filtered | A tool/method removed by a per-instance `tools:` / `methods:` filter is invoked | `error_code: :tool_filtered` |
 | Approval denied/unavailable | A gated write/admin op is rejected or the approver is unreachable | `error_code: :approval_denied` |
 

@@ -6,6 +6,7 @@ A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [
 
 ## What's new in 5.7
 
+- **5.7.6: `semantic_search` respects `agent_fields` for chunk content.** A class that embedded a field hidden by its `agent_fields` allowlist returned that field's text as chunk content. Chunk text now comes only from embedded fields the agent may read; a hidden text source is refused with `:field_denied` before the search runs. See [CHANGELOG.md](./CHANGELOG.md)
 - **5.7.5: MongoDB 9.0 support.** The test stack runs MongoDB 9 by default (`MONGO_VERSION=8` selects the previous major), and use the `mongo` driver 2.26 or newer for 9.0's overload handling. MongoDB 9.0 changes how `null` comparisons treat dotted paths through arrays; see the behavior notes in [CHANGELOG.md](./CHANGELOG.md)
 - **5.7.5: `voyage-code-4` and contextualized chunk embeddings.** The Voyage provider accepts `voyage-code-4`, `voyage-context-4`, and `voyage-context-3`. `Voyage#embed_chunks` embeds whole chunked documents so each chunk's vector carries its document's context. See [CHANGELOG.md](./CHANGELOG.md)
 - **5.7.5: Voyage reranker and MCP 2025-11-25.** `Parse::Retrieval::Reranker::Voyage` adds `rerank-3` and `rerank-3-lite` reranking, including through the Atlas endpoint. The MCP server negotiates protocol `2025-11-25` and adds `completion/complete` (class and field names scoped to the agent) and `logging/setLevel`. Mongo-direct reads re-run queries MongoDB 9.0 kills mid-flight. See [CHANGELOG.md](./CHANGELOG.md)
