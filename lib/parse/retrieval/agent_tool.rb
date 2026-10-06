@@ -103,6 +103,15 @@ module Parse
         Parse::Retrieval.assert_no_underscore_keys!(filter) unless filter.nil?
         Parse::Retrieval.assert_no_underscore_keys!(vector_filter) unless vector_filter.nil?
         allowed = Parse::Agent::MetadataRegistry.searchable_filter_fields(cname).map(&:to_s)
+        # A per-agent `fields:` narrowing also narrows the filterable fields:
+        # filtering on a field the agent cannot read would reveal its value
+        # through which rows match.
+        if Parse::Agent::FieldPolicy.narrowing_for(cname)
+          readable = Parse::Agent::MetadataRegistry.field_allowlist(cname).map(&:to_s)
+          allowed = allowed.select do |f|
+            readable.include?(Parse::Agent::MetadataRegistry.wire_field_names(cname, [f]).first)
+          end
+        end
         assert_filter_fields_allowed!(filter, allowed)
         assert_filter_fields_allowed!(vector_filter, allowed)
 

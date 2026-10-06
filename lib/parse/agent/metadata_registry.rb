@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "set"
+require_relative "field_policy"
 
 module Parse
   class Agent
@@ -363,7 +364,50 @@ module Parse
       #
       # @param class_name [String] the Parse class name
       # @return [Array<String>, nil] allowlist or nil
+      #
+      # This is the EFFECTIVE allowlist: the class ceiling
+      # ({#class_field_allowlist}) narrowed by the per-agent `fields:` policy
+      # of the agent whose tool is executing ({Parse::Agent::FieldPolicy}).
+      # Outside a tool call, or for an agent with no narrowing on this class,
+      # it equals the class ceiling.
       def field_allowlist(class_name)
+        ceiling = class_field_allowlist(class_name)
+        narrow = Parse::Agent::FieldPolicy.narrowing_for(class_name_string(class_name))
+        return ceiling if narrow.nil?
+        base = ceiling ? (narrow & ceiling) : narrow.dup
+        base.reject! { |wire| Parse::PipelineSecurity::INTERNAL_FIELDS_DENYLIST.include?(wire) }
+        base | ALWAYS_KEEP_FIELDS
+      end
+
+      # Translate Ruby property names (or wire names) for `class_name` into
+      # wire-format column names, the same way {#class_field_allowlist}
+      # resolves `agent_fields`: the class's `field_map` alias when present,
+      # else lowerCamelCase columnization.
+      #
+      # @param class_name [String, Class]
+      # @param names [Array<Symbol, String>]
+      # @return [Array<String>]
+      def wire_field_names(class_name, names)
+        klass = find_model_class(class_name_string(class_name))
+        fmap = klass.respond_to?(:field_map) ? klass.field_map : {}
+        Array(names).map do |name|
+          mapped = fmap[name.to_sym]
+          mapped ? mapped.to_s : name.to_s.columnize
+        end.uniq
+      end
+
+      # @!visibility private
+      def class_name_string(class_name)
+        class_name.respond_to?(:parse_class) ? class_name.parse_class.to_s : class_name.to_s
+      end
+
+      # The class-level `agent_fields` CEILING: the declared allowlist in
+      # wire format plus the always-on system fields, ignoring any per-agent
+      # narrowing. nil when the model declares no allowlist.
+      #
+      # @param class_name [String]
+      # @return [Array<String>, nil]
+      def class_field_allowlist(class_name)
         klass = find_model_class(class_name)
         return nil unless klass&.respond_to?(:agent_field_allowlist)
         allowlist = klass.agent_field_allowlist
@@ -426,7 +470,26 @@ module Parse
       #   omits (used to populate the `truncated_include_fields` envelope).
       #   `source` is one of :join_fields, :allowlist_minus_large,
       #   :field_map_minus_large for diagnostics / testing.
+      #
+      # Per-agent `fields:` narrowing applies here too: an included record is
+      # never projected wider than the executing agent's narrowing for its
+      # class, and a narrowed class with no join declaration projects to that
+      # narrowing.
       def join_projection_fields(class_name)
+        projection = class_join_projection_fields(class_name)
+        narrow = Parse::Agent::FieldPolicy.narrowing_for(class_name_string(class_name))
+        return projection if narrow.nil?
+        if projection
+          return finalize_join_projection(projection[:project] & narrow, projection[:dropped], projection[:source])
+        end
+        ceiling = class_field_allowlist(class_name)
+        base = ceiling ? (narrow & ceiling) : narrow
+        finalize_join_projection(base, [], :agent_field_policy)
+      end
+
+      # @!visibility private
+      # Class-level join projection, ignoring per-agent narrowing.
+      def class_join_projection_fields(class_name)
         klass = find_model_class(class_name)
         return nil unless klass
         fmap = klass.respond_to?(:field_map) ? klass.field_map : {}

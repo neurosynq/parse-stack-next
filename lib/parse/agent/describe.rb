@@ -298,7 +298,9 @@ module Parse
       # the wire-format field name Array so the output reads identically to
       # the schema-enriched `get_schema` echo.
       def class_field_allowlist(class_name)
-        list = Parse::Agent::MetadataRegistry.field_allowlist(class_name)
+        # Effective allowlist for THIS agent: the class ceiling narrowed by
+        # its `fields:` policy.
+        list = Parse::Agent::FieldPolicy.with(self) { Parse::Agent::MetadataRegistry.field_allowlist(class_name) }
         list && list.any? ? list.dup : nil
       end
 

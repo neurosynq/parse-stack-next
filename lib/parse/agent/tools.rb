@@ -1243,6 +1243,14 @@ module Parse
         #   its declared timeout (handled by Agent#execute and the approval
         #   preview, which both rescue it).
         def invoke(agent, name, **kwargs)
+          # Every tool runs with the agent's per-agent `fields:` narrowing in
+          # scope, so each allowlist check (MetadataRegistry.field_allowlist)
+          # resolves to the effective set for THIS agent.
+          Parse::Agent::FieldPolicy.with(agent) { invoke_unscoped(agent, name, **kwargs) }
+        end
+
+        # @!visibility private
+        def invoke_unscoped(agent, name, **kwargs)
           sym = name.to_sym
           entry = REGISTRY_MUTEX.synchronize { @registry[sym] }
 
@@ -3185,6 +3193,14 @@ module Parse
                              order: nil, keys: nil, include: nil,
                              apply_canonical_filter: true, format: nil, **_kwargs)
         assert_class_accessible!(class_name, agent: agent, op: :find)
+        # Hidden-field inference: the caller's own where:/order: may only
+        # reference readable fields. Filtering or sorting on a field outside
+        # the effective agent_fields allowlist reveals its value through
+        # which rows match or how they are ordered. Checked on the CALLER's
+        # constraints, before the server-owned tenant / per-agent /
+        # canonical constraints are merged in.
+        assert_where_fields_in_allowlist!(class_name, where)
+        assert_fields_in_allowlist!(class_name, order_field_names(order))
         limit = [limit || Agent::DEFAULT_LIMIT, Agent::MAX_LIMIT].min
 
         # Tenant scope enforcement: resolve before any query building so that
@@ -3343,6 +3359,9 @@ module Parse
       # @return [Hash] count result
       def count_objects(agent, class_name:, where: nil, apply_canonical_filter: true, **_kwargs)
         assert_class_accessible!(class_name, agent: agent, op: :count)
+        # Hidden-field inference: a count over a hidden field's values is an
+        # oracle for that field, same as a filtered query.
+        assert_where_fields_in_allowlist!(class_name, where)
         # Tenant scope enforcement. TRACK-AGENT-7 split: per-agent filter is
         # UNCONDITIONAL, canonical filter is LLM-controllable.
         scope = resolve_tenant_scope!(agent, class_name)
@@ -4329,14 +4348,28 @@ module Parse
           root = raw.to_s.sub(/\A_p_/, "").split(".").first
           next if root.nil? || root.empty?
           unless permitted.include?(root)
-            raise Parse::Agent::AccessDenied.new(
-              build_allowlist_refusal("field", raw.to_s, root, permitted),
-            )
+            # raise_allowlist_refusal! carries kind/denied_field/allowed_fields
+            # as structured attributes. Passing the refusal Hash positionally
+            # (as this did before 5.8) landed it in the class-name slot, so the
+            # message was a stringified Hash and `kind` was lost.
+            raise_allowlist_refusal!("field", raw.to_s, root, permitted)
           end
         end
       end
 
       module_function :assert_fields_in_allowlist!
+
+      # @api private
+      # Field names an `order:` value sorts on. Accepts Parse REST form
+      # ("-createdAt,title"), an Array of such entries, or nil.
+      def order_field_names(order)
+        return [] if order.nil?
+        Array(order).flat_map { |entry| entry.to_s.split(",") }
+                    .map { |f| f.strip.sub(/\A[-+]/, "") }
+                    .reject(&:empty?)
+      end
+
+      module_function :order_field_names
 
       # @api private
       # Resolve a wire-format field name to its MongoDB aggregation form.
@@ -4772,6 +4805,14 @@ module Parse
 
       # @api private
       def export_via_query(agent, class_name:, where:, keys:, include:, order:, limit:, skip: nil, scope: nil)
+        # Hidden-field inference: the caller's own where:/order: may only
+        # reference readable fields. Filtering or sorting on a field outside
+        # the effective agent_fields allowlist reveals its value through
+        # which rows match or how they are ordered. Checked on the CALLER's
+        # constraints, before the server-owned tenant / per-agent /
+        # canonical constraints are merged in.
+        assert_where_fields_in_allowlist!(class_name, where)
+        assert_fields_in_allowlist!(class_name, order_field_names(order))
         # Reuse query_class's gates by routing through it directly.
         # query_class returns a ResultFormatter-wrapped hash; we want the raw rows.
         query = {}
