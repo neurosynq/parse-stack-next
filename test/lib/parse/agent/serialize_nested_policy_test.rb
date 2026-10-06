@@ -41,15 +41,32 @@ class SerializeNestedPolicyTest < Minitest::Test
       "name" => "kid", "secret" => "do-not-leak" }
   end
 
-  def test_child_embedded_in_a_parent_object_is_projected
+  STAMP = "2026-01-01T00:00:00.000Z"
+
+  # Real Parse::Object#as_json, no stubbing: a parent fetched with its
+  # belongs_to child included serializes the child as a full embedded object.
+  def test_fetched_belongs_to_child_is_projected
+    parent = SNParent.build({
+      "objectId" => "p1", "createdAt" => STAMP, "updatedAt" => STAMP, "title" => "p",
+      "child" => { "__type" => "Object", "className" => "SerializeNestedChild", "objectId" => "c1",
+                   "createdAt" => STAMP, "updatedAt" => STAMP, "name" => "kid", "secret" => "do-not-leak" },
+    })
+    raw = parent.as_json
+    assert_equal "do-not-leak", raw.dig("child", "secret"), "precondition: as_json embeds the child's fields"
+    out = serialize(parent)
+    refute_includes JSON.generate(out), "do-not-leak"
+    assert_equal "kid", out["child"]["name"]
+    assert_equal "p", out["title"]
+  end
+
+  # An unsaved child (no objectId) assigned to an unsaved parent: as_json
+  # still embeds it as an Object, and it is still projected.
+  def test_unsaved_belongs_to_child_is_projected
     parent = SNParent.new(title: "p")
-    parent.define_singleton_method(:as_json) do |*|
-      { "__type" => "Object", "className" => "SerializeNestedParent", "objectId" => "p1",
-        "title" => "p", "child" => {
-          "__type" => "Object", "className" => "SerializeNestedChild", "objectId" => "c1",
-          "name" => "kid", "secret" => "do-not-leak",
-        } }
-    end
+    parent.child = SNChild.new(name: "kid", secret: "do-not-leak")
+    raw = parent.as_json
+    assert_nil raw["child"]["objectId"], "precondition: the child has no objectId"
+    assert_equal "do-not-leak", raw.dig("child", "secret")
     out = serialize(parent)
     refute_includes JSON.generate(out), "do-not-leak"
     assert_equal "kid", out["child"]["name"]
@@ -73,4 +90,17 @@ class SerializeNestedPolicyTest < Minitest::Test
     refute_includes JSON.generate(out), "do-not-leak"
     assert_equal "kid", out["draft"]["name"]
   end
+
+  def test_aggregation_rows_drop_parse_server_internal_columns
+    row = Parse::AggregationResult.new(
+      { "_id" => "g1", "total" => 3, "_rperm" => ["*"], "_hashed_password" => "h",
+        "nested" => { "_auth_data_github" => { "id" => "1" }, "ok" => 1 } },
+    )
+    out = serialize(row)
+    assert_equal 3, out["total"]
+    refute out.key?("_rperm")
+    refute out.key?("_hashed_password")
+    assert_equal({ "ok" => 1 }, out["nested"])
+  end
+
 end

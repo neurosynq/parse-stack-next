@@ -365,7 +365,9 @@ module Parse
     # Returns: (field < last_value) OR (field = last_value AND objectId < last_id)
     # for descending order, or the inverse for ascending.
     def build_cursor_constraint
-      formatted_field = Parse::Query.format_field(@order_field)
+      formatted_field = Parse::Query.with_field_aliases(@query.table) do
+        Parse::Query.format_field(@order_field)
+      end
 
       if @order_direction == :desc
         # Descending: (field < last_value) OR (field = last_value AND objectId < last_id)

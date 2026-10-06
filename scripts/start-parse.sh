@@ -61,8 +61,14 @@ export PARSE_SERVER_ALLOW_CLIENT_CLASS_CREATION="${PARSE_SERVER_ALLOW_CLIENT_CLA
 export PARSE_SERVER_ALLOW_CUSTOM_OBJECT_ID="${PARSE_SERVER_ALLOW_CUSTOM_OBJECT_ID:-true}"
 
 # LiveQuery configuration via environment variables
-export PARSE_SERVER_LIVE_QUERY="${PARSE_SERVER_LIVE_QUERY:-{\"classNames\":[\"Song\",\"Album\",\"User\",\"_User\",\"TestLiveQuery\"]}}"
+export PARSE_SERVER_LIVE_QUERY="${PARSE_SERVER_LIVE_QUERY:-{\"classNames\":[\"Song\",\"Album\",\"User\",\"_User\",\"TestLiveQuery\",\"LiveQueryRoleProbe\"]}}"
 export PARSE_SERVER_START_LIVE_QUERY_SERVER="${PARSE_SERVER_START_LIVE_QUERY_SERVER:-true}"
+# Resolve the subscriber's roles when LiveQuery evaluates Class Level
+# Permissions (Parse Server 9.10.3+). Without it, a CLP that grants `find` or
+# `get` to `role:<Name>` is honored for REST queries but REJECTED for LiveQuery
+# subscriptions, even for role members. Object ACL `role:` entries are not
+# affected either way. Older servers ignore the unknown variable.
+export PARSE_SERVER_ENABLE_LIVE_QUERY_CLASS_LEVEL_PERMISSION_ROLES="${PARSE_SERVER_ENABLE_LIVE_QUERY_CLASS_LEVEL_PERMISSION_ROLES:-true}"
 
 # Push configuration — test-stack only. Points at a no-op adapter bind-mounted
 # from test/cloud (see test/cloud/dummy-push-adapter.js). It does NOT deliver to
@@ -158,6 +164,7 @@ echo "Environment configured:"
 echo "  PARSE_SERVER_APPLICATION_ID: $PARSE_SERVER_APPLICATION_ID"
 echo "  PARSE_SERVER_LIVE_QUERY: $PARSE_SERVER_LIVE_QUERY"
 echo "  PARSE_SERVER_START_LIVE_QUERY_SERVER: $PARSE_SERVER_START_LIVE_QUERY_SERVER"
+echo "  PARSE_SERVER_ENABLE_LIVE_QUERY_CLASS_LEVEL_PERMISSION_ROLES: $PARSE_SERVER_ENABLE_LIVE_QUERY_CLASS_LEVEL_PERMISSION_ROLES"
 
 # Start Parse Server
 echo "Starting Parse Server..."

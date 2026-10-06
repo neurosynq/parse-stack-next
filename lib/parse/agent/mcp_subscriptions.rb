@@ -190,6 +190,13 @@ module Parse
       # `register`/`unregister` run on Rack I/O threads, so all three guard the
       # listener table with a mutex. The delivery callback itself is invoked
       # outside the lock so a slow consumer can't block registry mutation.
+      #
+      # The {Manager} calls `register` and `unregister` while holding its own
+      # lock, so attach and detach stay atomic with its session table. An
+      # implementation must therefore return promptly and must not call back
+      # into the Manager (that would raise a recursive-lock ThreadError). A
+      # clustered notifier should hand network I/O (subscribing a pub/sub
+      # channel) to a background thread rather than doing it inline.
       class LocalNotifier
         def initialize
           @listeners = {}

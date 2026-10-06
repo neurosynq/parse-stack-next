@@ -139,10 +139,14 @@ row["totalPlays"] # => 500
 row.total_plays   # => 500 (a snake_case name still resolves when it matches one key)
 ```
 
-In `:server` mode keys are Strings, nested values are untouched, and two keys
-whose snake_case forms collide (`"totalPlays"` and `"total_plays"`) both
-survive; a snake_case method name that matches more than one key raises
-instead of guessing. Parse::Object rows are unaffected; `#as_json` already
+In `:server` mode keys are Strings, nested values are untouched, and keys
+whose snake_case forms collide all survive. A name that is itself a key always
+wins: with both `"totalPlays"` and `"total_plays"` stored, `row.total_plays`
+reads `"total_plays"`. A snake_case name that is not itself a key but matches
+more than one key (`"totalPlays"` and `"TotalPlays"` both stored) is
+ambiguous: the method form (`row.total_plays`) raises `ArgumentError` naming
+the candidates instead of guessing, and `row["total_plays"]` returns nil. Read
+such a field by its exact key. Parse::Object rows are unaffected; `#as_json` already
 returns their server field names. This is a presentation option only, and it
 is separate from:
 

@@ -46,7 +46,20 @@ class RetrievalProfilesTest < Minitest::Test
     end
   end
 
+  # Snapshot the process-wide profile and reranker registries so a
+  # single-process `rake test` run keeps whatever other files registered;
+  # each test still starts from empty registries.
+  def snapshot_registry(owner, ivar)
+    owner.instance_variable_get(ivar).dup
+  end
+
+  def restore_registry(owner, ivar, saved)
+    owner.instance_variable_get(ivar).replace(saved)
+  end
+
   def setup
+    @saved_profiles = snapshot_registry(P, :@registry)
+    @saved_rerankers = snapshot_registry(Parse::Retrieval, :@rerankers)
     P.reset!
     Parse::Retrieval.reset_rerankers!
     @reverse = ReverseReranker.new
@@ -56,8 +69,8 @@ class RetrievalProfilesTest < Minitest::Test
   end
 
   def teardown
-    P.reset!
-    Parse::Retrieval.reset_rerankers!
+    restore_registry(P, :@registry, @saved_profiles)
+    restore_registry(Parse::Retrieval, :@rerankers, @saved_rerankers)
   end
 
   def fake_agent(permissions: :readonly)
@@ -127,7 +140,9 @@ class RetrievalProfilesTest < Minitest::Test
       assert_equal 25, c[:k]
       assert_equal 3, c[:rerank_top_n]
       assert_kind_of Parse::Retrieval::BudgetedReranker, c[:rerank]
-      assert_equal({}, c[:hybrid])
+      # No allowlist: the lexical branch searches the embedded text sources,
+      # never a wildcard over every column.
+      assert_equal({ lexical: { fields: ["body"] } }, c[:hybrid])
       assert_equal "precise", result[:profile]
     end
   end
@@ -317,4 +332,25 @@ class RetrievalProfilesTest < Minitest::Test
     assert_operator report["default"][:violations], :>, 0, "forbidden ids are counted as violations"
     assert_equal 2, report["precise"][:by_tag]["exact_name"][:cases]
   end
+
+  def test_overlong_query_is_refused_before_any_provider_call
+    with_retrieve_spy do |c|
+      long = "a" * (Parse::Retrieval::AgentTool::MAX_QUERY_CHARS + 1)
+      assert_raises(Parse::Agent::ValidationError) do
+        Parse::Retrieval::AgentTool.semantic_search(fake_agent, class_name: "RetrievalProfileDoc", query: long)
+      end
+      assert_empty c, "retrieve never ran"
+    end
+  end
+
+  def test_budgeted_reranker_truncates_the_query
+    seen = nil
+    inner = Object.new
+    inner.define_singleton_method(:rerank) { |query:, documents:, top_n: nil| seen = query; [] }
+    P.register(:capped, k: 5, reranker: :reverse, rerank_candidates: 10)
+    reranker = Parse::Retrieval::BudgetedReranker.new(inner, P.fetch!(:capped))
+    reranker.rerank(query: "q" * 10_000, documents: %w[a b])
+    assert_equal Parse::Retrieval::BudgetedReranker::MAX_QUERY_CHARS, seen.length
+  end
+
 end

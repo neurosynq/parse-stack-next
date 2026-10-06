@@ -87,7 +87,11 @@ module Parse
         includes_array = includes.present? ? Array(includes) : nil
 
         # Build formatted keys once (reused for query and tracking)
-        formatted_keys = keys_array&.map { |k| Parse::Query.format_field(k) }
+        formatted_keys = if keys_array
+            Parse::Query.with_field_aliases(parse_class) do
+              keys_array.map { |k| Parse::Query.format_field(k) }
+            end
+          end
 
         # Validate keys against model fields if validation is enabled
         # Skip validation if warnings are disabled (nothing to report)
@@ -318,7 +322,9 @@ module Parse
       def fetch_json(keys: nil, includes: nil)
         query = {}
         if keys.present?
-          keys_array = Array(keys).map { |k| Parse::Query.format_field(k) }
+          keys_array = Parse::Query.with_field_aliases(parse_class) do
+            Array(keys).map { |k| Parse::Query.format_field(k) }
+          end
           query[:keys] = keys_array.join(",")
         end
         if includes.present?

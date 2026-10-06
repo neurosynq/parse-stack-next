@@ -21,9 +21,10 @@ module Parse
     # wraps every tool call in {.with}, so the policy applies without
     # threading the agent through each helper.
     #
-    # The scope is fiber-local (`Thread.current[]`), and tools run on the
-    # calling fiber (`Timeout.timeout` yields in place), so concurrent
-    # requests on different threads never see each other's policy.
+    # The scope lives in fiber storage (`Fiber[]`), which child fibers and
+    # threads inherit when they are created. Concurrent requests on
+    # different threads never see each other's policy, and work a custom
+    # tool hands to a thread or fiber it starts stays narrowed.
     module FieldPolicy
       SCOPE_KEY = :parse_agent_field_policy_scope
 
@@ -38,16 +39,16 @@ module Parse
       # constructed without `parent:`) runs under BOTH policies, so the inner
       # call can only narrow further, never escape the outer agent's policy.
       def with(agent)
-        previous = Thread.current[SCOPE_KEY]
-        Thread.current[SCOPE_KEY] = (previous || []) + [agent]
+        previous = Fiber[SCOPE_KEY]
+        Fiber[SCOPE_KEY] = (previous || []) + [agent]
         yield
       ensure
-        Thread.current[SCOPE_KEY] = previous
+        Fiber[SCOPE_KEY] = previous
       end
 
       # @return [Parse::Agent, nil] the innermost agent whose tool is executing.
       def current_agent
-        Thread.current[SCOPE_KEY]&.last
+        Fiber[SCOPE_KEY]&.last
       end
 
       # Wire-format field names the current agent narrows `class_name` to, or
@@ -57,7 +58,7 @@ module Parse
       # @param class_name [String]
       # @return [Array<String>, nil]
       def narrowing_for(class_name)
-        stack = Thread.current[SCOPE_KEY]
+        stack = Fiber[SCOPE_KEY]
         return nil if stack.nil? || stack.empty?
         result = nil
         stack.uniq.each do |agent|

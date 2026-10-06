@@ -160,6 +160,13 @@ module Parse
                         session_revalidate_interval: DEFAULT_SESSION_REVALIDATE_INTERVAL,
                         agent_options: {}, **rack_options, &block)
           raise ArgumentError, "MCPRackApp.user_scoped builds its own agent factory; do not pass a block" if block
+          if permissions.to_s == "admin"
+            # The admin tier skips the spend cap and score quantization, which
+            # are cost and inference controls meant for untrusted callers. Every
+            # signed-in user of this endpoint would inherit that exemption.
+            raise ArgumentError,
+                  "MCPRackApp.user_scoped does not accept permissions: :admin; use :readonly or :write"
+          end
           assert_factory_options!(:user_scoped, agent_options, rack_options)
           extractor = session_token_from || DEFAULT_SESSION_TOKEN_FROM
           raise ArgumentError, "session_token_from must respond to #call" unless extractor.respond_to?(:call)

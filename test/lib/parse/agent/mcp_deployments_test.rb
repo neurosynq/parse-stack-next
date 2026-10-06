@@ -269,13 +269,27 @@ class MCPDeploymentsTest < Minitest::Test
     assert_equal 1, a1.instance_variable_get(:@limit)
   end
 
+  # Two real agents built by the factory for one user share a limiter, so the
+  # second agent's first tool call is refused once the first agent spent the
+  # budget. Parse::Agent.new is not stubbed: this is the wiring end to end.
   def test_shared_limiter_actually_limits_across_requests
-    limiter = App::PrincipalRateLimiters.new(limit: 1, window: 60).fetch("user:u_a")
-    limiter.check!
-    assert_raises(Parse::Agent::RateLimitExceeded) do
-      App::PrincipalRateLimiters.new(limit: 1, window: 60) # a new registry is a new window...
-      limiter.check!                                       # ...but the shared limiter is not reset
+    # A real Parse::Client (Parse::Agent.new requires one) whose /users/me
+    # answers locally: both tokens belong to u_a.
+    client = Parse::Client.new(server_url: "http://localhost:1/parse", application_id: "rl-app",
+                               api_key: "rl-key")
+    users = { "tok-a" => "u_a", "tok-a2" => "u_a" }
+    client.define_singleton_method(:current_user) do |token, cache: nil|
+      Resp.new({ "objectId" => users.fetch(token) }, false)
     end
+    app = user_app(client, agent_options: { rate_limit: 1 })
+    factory = app.instance_variable_get(:@agent_factory)
+    env = ->(token) { { "HTTP_AUTHORIZATION" => "Bearer #{token}" } }
+    first = factory.call(env.call("tok-a"))
+    second = factory.call(env.call("tok-a2"))
+    assert_kind_of Parse::Agent, first
+    refute_same first, second
+    first.execute(:no_such_tool) # spends the user's single call (refused after the limiter check)
+    assert_raises(Parse::Agent::RateLimitExceeded) { second.execute(:no_such_tool) }
   end
 
   def test_injected_rate_limiter_is_honored
@@ -472,6 +486,47 @@ class MCPDeploymentsTest < Minitest::Test
     assert_includes reader.value, ": connected\n\n"
   end
 
+  # A transient revalidation error does not drop the stream; errors that
+  # persist do, since the identity can no longer be confirmed.
+  def test_transient_revalidation_errors_keep_the_stream_until_they_persist
+    detached = Queue.new
+    manager = Object.new
+    manager.define_singleton_method(:attach_listener) { |_sid, &_cb| nil }
+    manager.define_singleton_method(:detach_listener) { |sid| detached << sid }
+    outcomes = Queue.new
+    ([:raise, :ok] + [:raise] * App::ListeningStreamBody::MAX_REVALIDATION_ERRORS).each { |o| outcomes << o }
+    checks = Queue.new
+    check = lambda do
+      outcome = outcomes.pop
+      checks << outcome
+      raise IOError, "blip" if outcome == :raise
+      true
+    end
+    body = App::ListeningStreamBody.new(manager, "S", 0, Logger.new(nil),
+                                        revalidate: check, revalidate_interval: 0.01)
+    reader = Thread.new { body.each { |_c| } }
+    2.times { checks.pop(timeout: 1) }
+    assert_nil detached.pop(timeout: 0.03), "one error followed by success keeps the stream open"
+    assert_equal "S", detached.pop(timeout: 1), "persistent errors close the stream"
+    reader.join(1)
+  end
+
+  # Closing wakes the revalidator at once rather than after its interval.
+  def test_close_wakes_the_revalidator_without_killing_it
+    manager = Object.new
+    manager.define_singleton_method(:attach_listener) { |_sid, &_cb| nil }
+    manager.define_singleton_method(:detach_listener) { |_sid| nil }
+    body = App::ListeningStreamBody.new(manager, "S", 0, nil,
+                                        revalidate: -> { true }, revalidate_interval: 60)
+    reader = Thread.new { body.each { |_c| } }
+    deadline = Time.now + 1
+    sleep 0.01 until body.instance_variable_get(:@revalidator_thread) || Time.now > deadline
+    thread = body.instance_variable_get(:@revalidator_thread)
+    body.close
+    assert thread.join(1), "the revalidator exits promptly after close"
+    reader.join(1)
+  end
+
   def test_stream_closed_during_first_frame_starts_no_revalidation
     manager = Object.new
     manager.define_singleton_method(:attach_listener) { |_sid, &_cb| nil }
@@ -487,6 +542,84 @@ class MCPDeploymentsTest < Minitest::Test
     assert_nil body.instance_variable_get(:@heartbeat)
   end
 
+  # The factory's revalidator reaches the GET stream the app actually serves:
+  # once the session stops validating, the open stream closes on its own.
+  def test_user_scoped_get_stream_closes_when_the_session_is_revoked
+    client = FakeClient.new("tok-a" => "u_a")
+    app = user_app(client, session_revalidate_interval: 0.05)
+    with_agent_double do
+      assert_equal 200, post(app, "initialize", session_id: "S", headers: bearer("tok-a")).first
+      status, _h, body = get_stream(app, session_id: "S", headers: bearer("tok-a"))
+      assert_equal 200, status
+      chunks = Queue.new
+      reader = Thread.new { body.each { |c| chunks << c } }
+      begin
+        assert_equal ": connected\n\n", chunks.pop(timeout: 2)
+        assert reader.alive?, "stream stays open while the session validates"
+        client.tokens.delete("tok-a") # logout / revocation
+        assert reader.join(2), "the GET stream must close once revalidation fails"
+      ensure
+        body.close
+        reader.join(1)
+      end
+    end
+  end
+
+  # Live sessions are pinned in the owner registry, so a flood of new
+  # sessions from another principal cannot evict their bindings (an evicted
+  # binding is unbound, and an unbound session accepts anyone's control
+  # messages).
+  def flood_initializes(app, headers, count)
+    count.times { |i| assert_equal 200, post(app, "initialize", session_id: "flood-#{i}", headers: headers).first }
+  end
+
+  def shrink_owner_registry(app, max)
+    registry = app.instance_variable_get(:@session_owners)
+    registry.instance_variable_set(:@max, max)
+    registry
+  end
+
+  def test_pending_approval_keeps_its_owner_binding_under_an_initialize_flood
+    client = FakeClient.new("tok-a" => "u_a", "tok-b" => "u_b")
+    app = user_app(client)
+    shrink_owner_registry(app, 3)
+    with_agent_double do
+      assert_equal 200, post(app, "initialize", session_id: "S", headers: bearer("tok-a")).first
+      queue = app.instance_variable_get(:@pending_elicitations).register("S", "elic-1")
+      flood_initializes(app, bearer("tok-b"), 10)
+
+      reply = { "jsonrpc" => "2.0", "id" => "elic-1", "result" => { "action" => "accept" } }
+      post(app, nil, session_id: "S", headers: bearer("tok-b"), body: reply)
+      assert_nil queue.pop(timeout: 0.05), "the flooder must not answer the pinned session's approval"
+      assert_equal 403, get_stream(app, session_id: "S", headers: bearer("tok-b")).first
+      post(app, nil, session_id: "S", headers: bearer("tok-a"), body: reply)
+      assert_equal :accept, queue.pop(timeout: 1)
+    end
+  end
+
+  def test_attached_stream_keeps_its_owner_binding_under_an_initialize_flood
+    client = FakeClient.new("tok-a" => "u_a", "tok-b" => "u_b")
+    app = user_app(client)
+    shrink_owner_registry(app, 3)
+    with_agent_double do
+      assert_equal 200, post(app, "initialize", session_id: "S", headers: bearer("tok-a")).first
+      status, _h, body = get_stream(app, session_id: "S", headers: bearer("tok-a"))
+      assert_equal 200, status
+      chunks = Queue.new
+      reader = Thread.new { body.each { |c| chunks << c } }
+      begin
+        assert_equal ": connected\n\n", chunks.pop(timeout: 2)
+        flood_initializes(app, bearer("tok-b"), 10)
+        assert_equal 403, get_stream(app, session_id: "S", headers: bearer("tok-b")).first,
+                     "the flooder must not take over a session with an attached stream"
+        assert_equal 403, post(app, "initialize", session_id: "S", headers: bearer("tok-b")).first
+      ensure
+        body.close
+        reader.join(1)
+      end
+    end
+  end
+
   def test_user_scoped_installs_listening_stream_revalidation
     client = FakeClient.new("tok-a" => "u_a")
     app = user_app(client, session_revalidate_interval: 5)
@@ -497,4 +630,11 @@ class MCPDeploymentsTest < Minitest::Test
     client.tokens.delete("tok-a")
     refute revalidator.call(agent)
   end
+
+  def test_user_scoped_refuses_the_admin_tier
+    client = FakeClient.new({ "tok-a" => "u_a" }, master_key: "mk")
+    err = assert_raises(ArgumentError) { user_app(client, permissions: :admin) }
+    assert_match(/admin/, err.message)
+  end
+
 end

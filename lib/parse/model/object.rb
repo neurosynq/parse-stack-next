@@ -387,8 +387,19 @@ module Parse
       # @return [String] the name of the Parse collection for this model.
       def parse_class(remoteName = nil)
         @parse_class ||= model_name.name
-        @parse_class = remoteName.to_s unless remoteName.nil?
+        unless remoteName.nil?
+          @parse_class = remoteName.to_s
+          Parse::Model.model_registry_changed!
+        end
         @parse_class
+      end
+
+      # @!visibility private
+      # A new model can answer a class name {Parse::Model.find_class} already
+      # recorded as a miss, so the registry caches are reset.
+      def inherited(subclass)
+        super
+        Parse::Model.model_registry_changed!
       end
 
       # The set of default ACLs to be applied on newly created instances of this class.
@@ -1618,7 +1629,9 @@ module Parse
         @_fetched_keys = nil
       else
         # Always include :id and convert to symbols
-        @_fetched_keys = keys.map { |k| Parse::Query.format_field(k).to_sym }
+        @_fetched_keys = Parse::Query.with_field_aliases(parse_class) do
+          keys.map { |k| Parse::Query.format_field(k).to_sym }
+        end
         @_fetched_keys << :id unless @_fetched_keys.include?(:id)
         @_fetched_keys << :objectId unless @_fetched_keys.include?(:objectId)
         @_fetched_keys.uniq!
@@ -1877,7 +1890,9 @@ module Parse
         o.instance_variable_set(:@_nested_fetched_keys, nested_fetched_keys) if nested_fetched_keys.present?
         if fetched_keys.present?
           # Process fetched_keys like the setter does - convert to symbols and include :id
-          processed_keys = fetched_keys.map { |k| Parse::Query.format_field(k).to_sym }
+          processed_keys = Parse::Query.with_field_aliases(klass.parse_class) do
+            fetched_keys.map { |k| Parse::Query.format_field(k).to_sym }
+          end
           processed_keys << :id unless processed_keys.include?(:id)
           processed_keys << :objectId unless processed_keys.include?(:objectId)
           processed_keys.uniq!

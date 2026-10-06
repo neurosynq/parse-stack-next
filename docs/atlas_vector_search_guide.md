@@ -836,7 +836,9 @@ as a violation.
 ```ruby
 cases = Parse::Retrieval::Benchmark.load_cases("eval/cases.json")
 runner = Parse::Retrieval::Benchmark.semantic_search_runner(agent, class_name: "Article")
+# nil is the baseline (no profile); its results are reported under "default".
 report = Parse::Retrieval::Benchmark.run(cases: cases, profiles: [nil, "fast", "precise"], runner: runner)
+report["default"]                          # => the baseline, for comparison
 report["precise"]                          # => { recall_at_k:, mrr:, hit_rate:, violations:, mean_ms:, p95_ms:, ... }
 report["precise"][:by_tag]["long_document"]
 ```

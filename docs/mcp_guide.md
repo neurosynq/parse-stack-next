@@ -410,32 +410,43 @@ cannot drift from one access mode into the other by accident:
 Both factories take `agent_options:` (extra `Parse::Agent.new` options such
 as `tools:`, `methods:`, `classes:`, `filters:`) and pass the remaining
 keywords to `MCPRackApp.new` (`transport:`, `logger:`, `allowed_origins:`,
-...). Options that set identity or authority (`session_token`, `acl_user`,
-`acl_role`, `impersonate_*`, `tenant_id`, `client`, `permissions`) are refused
-in `agent_options:`, and the factory owns `agent_factory:` and
-`principal_resolver:`. A deliberate single-operator master-key endpoint is
-still built with `MCPRackApp.new` directly.
+...). Options that set identity or authority are refused in
+`agent_options:` with `ArgumentError` at construction: `session_token`,
+`acl_user`, `acl_role`, `impersonate_user`, `impersonation_user`,
+`impersonate_mint`, `impersonation_mint`, `impersonate_label`,
+`impersonation_label`, `tenant_id`, `client`, `permissions`, `permission`, and
+`parent`. `user_scoped` also refuses `master_atlas` and `allow_mutations`,
+since a signed-in user's agent never receives authority beyond its session.
+The factory owns the Rack options `agent_factory:`, `principal_resolver:`,
+`listening_stream_revalidator:`, and `listening_stream_revalidate_interval:`,
+so passing any of them is refused as well. A deliberate single-operator
+master-key endpoint is still built with `MCPRackApp.new` directly.
 
 ### Personal assistant (user-scoped)
 
 ```ruby
 # config/routes.rb (Rails), or `run` it from config.ru
-MCP = Parse::Agent::MCPRackApp.user_scoped(
+MCP_APP = Parse::Agent::MCPRackApp.user_scoped(
   transport: :streamable_http,
   permissions: :write,                       # writes still go only through agent_methods
   tenant_from: ->(env, user_id) { Workspace.id_for_user(user_id) },  # pinned server-side
   agent_options: { classes: %w[Post Comment], methods: %w[archive] },
 )
-mount MCP, at: "/mcp"
+mount MCP_APP, at: "/mcp"
 ```
 
 ```ruby
 # The only write this assistant can make, declared by the application.
 class Post < Parse::Object
+  property :archived, :boolean
+  property :archive_reason, :string
+
   agent_method :archive, permission: :write, supports_dry_run: true, permitted_keys: [:reason]
   def archive(reason:, agent: nil, dry_run: false, **)
     return { would: "archive #{id}", reason: reason } if dry_run
-    update!(archived_at: Time.now, archive_reason: reason)
+    self.archived = true
+    self.archive_reason = reason
+    save
   end
 end
 
@@ -478,14 +489,20 @@ ActiveSupport::Notifications.subscribe("parse.agent.tool_call") do |*, payload|
 end
 ```
 
-`master_analytics` raises `ArgumentError` at construction without a
-`principal_resolver`. Without one every master-key agent has the same
+`principal_resolver:` is a required keyword: `master_analytics` raises
+`ArgumentError` at construction when it is missing or does not respond to
+`#call`. Without one every master-key agent has the same
 fingerprint, so two operators sharing the endpoint could attach to, approve,
 or cancel each other's sessions. The operator identity governs session
 ownership and audit; master authority governs what data the agent can reach,
 and the configured tools and classes govern what it may actually do. It
-defaults to `permissions: :readonly`, and refuses a client without a master
-key.
+defaults to `permissions: :readonly`.
+
+The master-key check runs per request, not at construction. The factory
+resolves its client on each request (the `client:` you passed, else
+`Parse.client` at that moment), and any request whose client has no master key
+is answered with 401. Construction succeeds even when the master key is not
+configured yet.
 
 ### Session ownership
 
@@ -498,6 +515,12 @@ initialized it (the session token for `user_scoped`, the resolved operator for
 - cancel its in-flight requests (`notifications/cancelled` is a silent 202 no-op),
 - answer its approval prompts (the elicitation reply is a silent 202 no-op),
 - change its log level.
+
+A session with an attached listening stream or a pending approval keeps its
+owner binding for as long as it is live. When the owner registry is full of
+live sessions, a new `initialize` or listening stream is refused with `503`
+rather than displacing one (see Capacity and eviction under the listening
+stream's owner binding, below).
 
 ### Revocation intervals
 
@@ -529,9 +552,6 @@ disable). Reaping runs whenever a session subscribes or attaches a stream,
 and can be triggered with `manager.reap_orphans!`. A session that attaches
 its stream within the grace period keeps its subscriptions.
 
----
-
-
 ### Operational notes for deployment factories
 
 * **Validation load.** `user_scoped` with the default
@@ -544,6 +564,8 @@ its stream within the grace period keeps its subscriptions.
   treated as an invalid session: the request gets 401 and a listening stream
   is closed at its next revalidation. Clients reconnect once Parse Server is
   back.
+
+---
 
 ## Connecting Claude Desktop (stdio bridge)
 
@@ -808,10 +830,36 @@ The principal fingerprint is derived, in order, from: an operator-supplied
 per-`MCPRackApp` instance and **single-process** — it does not span Puma workers
 or survive a restart. In a clustered deployment the `initialize` POST and the
 `GET` stream may land on different workers, so the initialize-binding degrades
-to TOFU there. The registry is LRU-bounded (default 10,000 sessions) so a stream
-of `initialize`-without-`DELETE` sessions cannot grow it without limit; evicting
-an active owner just downgrades that id to TOFU on its next attach. Blank
-session ids or blank fingerprints fail closed.
+to TOFU there. Blank session ids or blank fingerprints fail closed.
+
+**Capacity and eviction.** The registry is LRU-bounded (default 10,000
+sessions) so a stream of `initialize`-without-`DELETE` sessions cannot grow it
+without limit. Only idle bindings are evicted. A live session (one with an
+attached listening stream or a pending approval prompt) is pinned and keeps its
+owner binding under any amount of LRU pressure, so a flood of new sessions
+cannot strip a victim's owner and then answer its approvals or cancel its
+requests. An evicted idle id is unbound, and the next principal to attach a
+stream to it claims it TOFU. When every binding is live and the registry is
+full, new bindings are refused rather than displacing a live one: `initialize`
+and the listening-stream `GET` answer `503` (`-32000`, "Session capacity
+exhausted"). Clients retry once sessions close or are terminated with
+`DELETE`.
+
+**Per-principal bound.** Each principal may hold at most 100 session
+bindings. Past that, its own least recently used idle binding is evicted (or
+the new one refused with `503` when all of its bindings are live), so one
+caller flooding `initialize` cannot push other principals' sessions out of
+the registry. `initialize` and `resources/subscribe` are charged against the
+principal's rate limiter and answer `429` when it is exhausted; with
+`user_scoped` and `master_analytics` that limiter is shared across the
+principal's requests.
+
+**Requests on another principal's session.** Any POST whose `Mcp-Session-Id`
+is bound to a different principal is refused with `403`.
+`resources/subscribe` additionally requires a session the caller established,
+through `initialize` or by attaching its listening stream, because each
+subscription holds a LiveQuery socket and a slot in the global session limit.
+A stateless client that never initializes can still call tools.
 
 ---
 
@@ -1289,6 +1337,12 @@ MCPRackApp (per-request factory)
 
 The same problem exists in miniature whenever a tool handler constructs a sub-agent inside its block — a fresh `Parse::Agent.new` produces a fresh limiter, so an attacker who can induce delegation amplifies the per-process budget linearly with delegation depth × branching. The v4.2 `parent:` kwarg closes that case automatically (see [Per-Agent Tool Filtering & Sub-Agent Delegation](#per-agent-tool-filtering--sub-agent-delegation-v42)); the shared external limiter pattern below covers the cross-request case at the MCPRackApp boundary.
 
+### Deployment factories already share a limiter per principal
+
+`MCPRackApp.user_scoped` and `MCPRackApp.master_analytics` do not have this problem. Each keeps one in-process `RateLimiter` per principal (the validated user id for `user_scoped`, the resolved operator for `master_analytics`) and hands it to every agent it builds for that principal, so `rate_limit:` and `rate_window:` in `agent_options:` accumulate across requests. The registry is LRU-bounded (default 10,000 principals); an evicted principal starts a fresh window. Passing your own `rate_limiter:` in `agent_options:` bypasses the registry and uses that limiter as-is, which is the way to share one budget across processes.
+
+The workarounds below apply to a custom `agent_factory:` lambda (including `Parse::Agent.rack_app do |env| ... end`), which builds a fresh agent per request and gets no shared limiter unless you inject one.
+
 ### The solution
 
 Inject a shared, externally-stateful limiter:
@@ -1610,7 +1664,9 @@ class Project < Parse::Object
     # _wperm so the update only sees rows the agent's scope is allowed
     # to modify, defense-in-depth alongside Parse Server's own ACL.
     Audit.all(**agent.acl_scope_kwargs).each { |a| a.cancel! } if agent&.acl_scope
-    update!(archived_at: Time.now, archive_reason: reason)
+    self.archived = true              # property :archived, :boolean
+    self.archive_reason = reason      # property :archive_reason, :string
+    save
     { archived: true, objectId: id }
   end
 end

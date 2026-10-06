@@ -196,6 +196,22 @@ class AgentFieldPolicyTest < Minitest::Test
     end
   end
 
+  def test_export_data_refuses_where_and_order_on_hidden_fields_before_any_request
+    a = agent(fields: { FPDoc => %i[title] })
+    Parse::Agent::Tools.stub(:assert_class_accessible!, nil) do
+      a.client.stub(:find_objects, ->(*) { flunk "export_data reached the server" }) do
+        r = a.execute(:export_data, class_name: "FieldPolicyDoc", where: { "body" => "secret" })
+        refute r[:success], r.inspect
+        assert_equal :access_denied, r[:error_code]
+        assert_equal :field_denied, r.dig(:details, :kind)
+
+        r = a.execute(:export_data, class_name: "FieldPolicyDoc", order: "-status")
+        refute r[:success], r.inspect
+        assert_equal :field_denied, r.dig(:details, :kind), r.reject { |k, _| k == :data }.inspect
+      end
+    end
+  end
+
   def test_count_objects_refuses_where_on_hidden_fields
     a = agent(fields: { FPDoc => %i[title] })
     Parse::Agent::Tools.stub(:assert_class_accessible!, nil) do
@@ -296,6 +312,34 @@ class AgentFieldPolicyTest < Minitest::Test
     end
   end
 
+  def test_faceted_search_with_a_query_searches_only_the_readable_fields
+    a = agent(fields: { FPDoc => %i[title status] }, master_atlas: true)
+    Parse::Agent::Tools.stub(:assert_class_accessible!, nil) do
+      captured = nil
+      Parse::AtlasSearch.stub(:faceted_search, ->(_c, _q, _f, **opts) { captured = opts; raise "stop" }) do
+        a.execute(:atlas_faceted_search, class_name: "FieldPolicyDoc", query: "q",
+                                         facets: { s: { type: :string, path: :status } })
+      end
+      refute_nil captured, "faceted_search was never reached"
+      assert_equal %w[status title], Array(captured[:fields]).map(&:to_s).sort,
+                   "a non-empty query must search the readable set, never a wildcard"
+    end
+  end
+
+  def test_faceted_search_is_refused_when_no_text_field_is_readable
+    a = agent(fields: { FPDoc => [] }, master_atlas: true)
+    Parse::Agent::Tools.stub(:assert_class_accessible!, nil) do
+      called = false
+      Parse::AtlasSearch.stub(:faceted_search, ->(*_a, **_k) { called = true; raise "stop" }) do
+        r = a.execute(:atlas_faceted_search, class_name: "FieldPolicyDoc", query: "q",
+                                             facets: { c: { type: :date, path: :createdAt } })
+        refute r[:success], r.inspect
+        assert_equal :field_denied, r.dig(:details, :kind), r.inspect
+      end
+      refute called, "an empty readable set must not become a wildcard faceted search"
+    end
+  end
+
   def test_order_field_names_parses_rest_and_array_forms
     assert_equal %w[createdAt title], Parse::Agent::Tools.order_field_names("-createdAt, title")
     assert_equal %w[a b], Parse::Agent::Tools.order_field_names(["-a", "+b"])
@@ -326,4 +370,30 @@ class AgentFieldPolicyTest < Minitest::Test
     end
     assert_equal %w[objectId title], schema["fields"].keys.sort
   end
+
+  def test_related_to_key_is_checked_against_the_owning_class
+    a = agent(fields: { FPDoc => %i[title] })
+    Parse::Agent::Tools.stub(:assert_class_accessible!, nil) do
+      where = { "$relatedTo" => { "object" => { "__type" => "Pointer", "className" => "FieldPolicyDoc",
+                                                "objectId" => "x1" },
+                                  "key" => "internal_note" } }
+      r = a.execute(:count_objects, class_name: "_User", where: where)
+      refute r[:success], r.inspect
+      assert_equal :field_denied, r.dig(:details, :kind)
+    end
+  end
+
+
+  def test_threads_and_fibers_started_inside_a_tool_keep_the_narrowing
+    a = agent(fields: { FPDoc => %i[title] })
+    Parse::Agent::FieldPolicy.with(a) do
+      from_thread = Thread.new { Parse::Agent::MetadataRegistry.field_allowlist("FieldPolicyDoc") }.value
+      from_fiber = Fiber.new { Parse::Agent::MetadataRegistry.field_allowlist("FieldPolicyDoc") }.resume
+      [from_thread, from_fiber].each do |allowed|
+        assert_includes allowed.map(&:to_s), "title"
+        refute_includes allowed.map(&:to_s), "body"
+      end
+    end
+  end
+
 end

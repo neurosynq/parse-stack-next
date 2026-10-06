@@ -136,10 +136,33 @@ module Parse
     # the SDK (see Parse::ACLScope `@no_acl_warned`).
     @model_cache = {}
     @model_cache_mutex = Mutex.new
+    # Class names {find_class} looked up and did not find. A miss otherwise
+    # rescans every descendant on each call (a query on a class with no Ruby
+    # model hits this on every build). Cleared by {model_registry_changed!}.
+    @model_cache_misses = {}
+    MODEL_CACHE_MISSES_MAX = 10_000
+    # Bumped whenever the set of models, a model's `parse_class`, or a model's
+    # declared fields change, so derived per-class caches (such as the
+    # query field-alias cache) know to rebuild.
+    @model_generation = 0
 
     class << self
       # @!visibility private
-      attr_reader :model_cache, :model_cache_mutex
+      attr_reader :model_cache, :model_cache_mutex, :model_cache_misses
+      # @!visibility private
+      # @return [Integer] the current model registry generation.
+      attr_reader :model_generation
+
+      # @!visibility private
+      # Record that a model was defined, renamed with `parse_class`, or had a
+      # field declared. Clears the {find_class} miss cache and advances
+      # {model_generation}.
+      def model_registry_changed!
+        model_cache_mutex.synchronize do
+          @model_cache_misses = {}
+          @model_generation += 1
+        end
+      end
       # @!attribute self.raise_on_save_failure
       # By default, we return `true` or `false` for save and destroy operations.
       # If you prefer to have `Parse::Object` raise an exception instead, you
@@ -218,6 +241,8 @@ module Parse
       Parse::Model.model_cache_mutex.synchronize do
         cached = Parse::Model.model_cache[str]
         return cached if cached
+        misses = Parse::Model.model_cache_misses
+        return nil if misses.key?(str)
 
         result = Parse::Object.descendants.find do |f|
           begin
@@ -227,7 +252,12 @@ module Parse
           end
           cls == str || cls == "_#{str}"
         end
-        Parse::Model.model_cache[str] = result if result
+        if result
+          Parse::Model.model_cache[str] = result
+        else
+          misses.clear if misses.size >= MODEL_CACHE_MISSES_MAX
+          misses[str] = true
+        end
         result
       end
     end

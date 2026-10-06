@@ -335,6 +335,23 @@ class AtlasSearchACLInjectionTest < Minitest::Test
     Parse::CLPScope.__cache_put(class_name, clp: clp)
   end
 
+  def test_scoped_wildcard_search_is_refused_when_fields_are_protected
+    seed_clp("Song", {
+      "find" => { "*" => true },
+      "protectedFields" => { "*" => ["lyrics"] },
+    })
+    token = stub_session(user_id: "U1", role_names: [])
+    # A search over every field would let `lyrics` decide which rows match,
+    # even though its value is stripped from the output.
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::AtlasSearch.search("Song", "hi", session_token: token)
+    end
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::AtlasSearch.search("Song", "hi", session_token: token, fields: ["lyrics"])
+    end
+    assert_nil pipeline_for("Song"), "nothing runs before the refusal"
+  end
+
   def test_protected_fields_stripped_from_search_results
     seed_clp("Song", {
       "find" => { "*" => true },
@@ -350,7 +367,7 @@ class AtlasSearchACLInjectionTest < Minitest::Test
     Parse::AtlasSearch.allow_raw = true
     token = stub_session(user_id: "U1", role_names: [])
     result = Parse::AtlasSearch.search("Song", "hi", session_token: token, raw: true,
-                                                     class_name: "Song")
+                                                     class_name: "Song", fields: ["title"])
     rows = result.raw_results
     assert_equal 1, rows.length
     refute rows.first.key?("lyrics"),
@@ -396,7 +413,7 @@ class AtlasSearchACLInjectionTest < Minitest::Test
     })
     token = stub_session(user_id: "U1", role_names: [])
     # Highlighting on `title` is fine — only `lyrics` is protected.
-    Parse::AtlasSearch.search("Song", "hi",
+    Parse::AtlasSearch.search("Song", "hi", fields: ["title"],
                               session_token: token, highlight_field: "title")
     pipeline = pipeline_for("Song")
     refute_nil pipeline
@@ -436,7 +453,7 @@ class AtlasSearchACLInjectionTest < Minitest::Test
     ])
     Parse::AtlasSearch.allow_raw = true
     token = stub_session(user_id: "U1", role_names: [])
-    result = Parse::AtlasSearch.search("Song", "hi",
+    result = Parse::AtlasSearch.search("Song", "hi", fields: ["title"],
                                        session_token: token, raw: true, class_name: "Song")
     rows = result.raw_results
     highlights = rows.first["_highlights"]
@@ -525,7 +542,7 @@ class AtlasSearchACLInjectionTest < Minitest::Test
     })
     token = stub_session(user_id: "U1", role_names: [])
     # Referencing a NON-protected field via $expr is fine.
-    Parse::AtlasSearch.search("Song", "hi",
+    Parse::AtlasSearch.search("Song", "hi", fields: ["title"],
                               session_token: token,
                               filter: { "$expr" => { "$gt" => ["$plays", 10] } })
     pipeline = pipeline_for("Song")

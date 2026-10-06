@@ -878,6 +878,9 @@ module Parse
           # level, or have its elicitation capability recorded (owner-binding;
           # see SessionOwnerRegistry). A session id already owned by another
           # principal is refused outright rather than rebound.
+          if (limited = charge_session_op(agent, body))
+            return limited
+          end
           bound = @session_owners.bind(agent.correlation_id, principal_fingerprint(agent, env))
           if bound == :full
             @logger&.warn("[Parse::Agent::MCPRackApp] initialize refused: session registry full")
@@ -932,6 +935,38 @@ module Parse
             )
           end
           return [202, json_headers, [""]]
+        end
+
+        # 5d. Session ownership for every other request. A request carrying a
+        #     session id bound to another principal is refused, so knowing a
+        #     session id is not enough to unsubscribe its resources, fill its
+        #     subscription cap, or route an approval prompt to its stream.
+        #     An unbound id (stateless clients, or a cluster where initialize
+        #     landed on another worker) still works for ordinary calls.
+        if (cid = agent.respond_to?(:correlation_id) ? agent.correlation_id : nil) &&
+           body.is_a?(Hash) && body["method"] != "initialize"
+          fingerprint = principal_fingerprint(agent, env)
+          if @session_owners.claimed_by_other?(cid, fingerprint)
+            @logger&.warn("[Parse::Agent::MCPRackApp] request refused: session owned by another principal")
+            return [403, json_headers,
+                    [json_rpc_error(-32_600, "Mcp-Session-Id is owned by another principal", id: body["id"])]]
+          end
+          # Subscriptions hold server resources (LiveQuery sockets, global
+          # session slots), so they need a session this principal established
+          # (initialize, or a listening stream it attached). Without that, a
+          # caller could invent session ids to fill the global session limit.
+          if SESSION_BOUND_METHODS.include?(body["method"]) &&
+             @subscription_manager.respond_to?(:supported?) && @subscription_manager.supported?
+            unless @session_owners.owned_by?(cid, fingerprint)
+              return [403, json_headers,
+                      [json_rpc_error(-32_600,
+                                      "#{body["method"]} requires a session initialized by this principal",
+                                      id: body["id"])]]
+            end
+            if (limited = charge_session_op(agent, body))
+              return limited
+            end
+          end
         end
 
         # 6. Branch on streaming preference. Transport-level errors (steps 1-5)
@@ -1022,6 +1057,28 @@ module Parse
           listener_check: ->(cid) { mgr ? mgr.listener?(cid) : false },
           timeout: @approval_timeout,
         )
+      end
+
+      # Methods that act on server-held session state and so require a session
+      # bound to the caller (see step 5d in #call).
+      SESSION_BOUND_METHODS = %w[resources/subscribe].freeze
+
+      # Charge a session-creating operation (initialize, subscribe) against
+      # the agent's rate limiter, which these never reach through
+      # `agent.execute`. With a per-principal limiter (`user_scoped`,
+      # `master_analytics`) this bounds how fast one caller can create
+      # sessions or subscriptions.
+      #
+      # @return [Array, nil] a 429 Rack response when limited, else nil.
+      def charge_session_op(agent, body)
+        limiter = agent.respond_to?(:rate_limiter) ? agent.rate_limiter : nil
+        return nil unless limiter.respond_to?(:check!)
+        limiter.check!
+        nil
+      rescue StandardError => e
+        retry_after = e.respond_to?(:retry_after) ? e.retry_after.to_f.ceil : 1
+        headers = json_headers.merge("retry-after" => [retry_after, 1].max.to_s)
+        [429, headers, [json_rpc_error(-32_000, "Rate limit exceeded", id: body["id"])]]
       end
 
       # Whether this request's principal may send control messages
@@ -1888,6 +1945,7 @@ module Parse
           @closed = false
           @counted = false
           @close_mutex = Mutex.new
+          @close_signal = ConditionVariable.new
         end
 
         # Rack body interface — called once by the Rack server.
@@ -1924,13 +1982,18 @@ module Parse
           @close_mutex.synchronize do
             return if @closed
             @closed = true
+            # Wake the revalidator so it exits at once instead of after its
+            # next interval.
+            @close_signal.broadcast
           end
           # Balance the #each increment exactly once (close is idempotent via
           # @closed, and only #each sets @counted).
           MCPRackApp.adjust_listening_stream_count(-1) if @counted
           @heartbeat&.kill
           @heartbeat = nil
-          @revalidator_thread&.kill unless @revalidator_thread == Thread.current
+          # The revalidator is not killed: it may be inside a REST call, and
+          # killing it there can return a pooled connection mid-response. It
+          # was woken above and exits after any check in progress.
           @revalidator_thread = nil
           begin
             # Pass this stream's own callback so a reconnect that already
@@ -1990,18 +2053,32 @@ module Parse
           end
         end
 
+        # Consecutive revalidation errors (as opposed to a check that reports
+        # the identity invalid) tolerated before the stream is closed. One
+        # Parse Server blip should not drop every open stream at once; an
+        # outage that persists still closes them, since the identity can no
+        # longer be confirmed.
+        MAX_REVALIDATION_ERRORS = 3
+
         def revalidation_loop(check, interval)
+          errors = 0
           loop do
-            sleep interval
+            @close_mutex.synchronize do
+              @close_signal.wait(@close_mutex, interval) unless @closed
+            end
             break if closed?
             ok = begin
-                check.call
+                result = check.call
+                errors = 0
+                result
               rescue StandardError => e
+                errors += 1
                 line = "[Parse::Agent::MCPRackApp::ListeningStreamBody] revalidation error: #{e.class}"
                 @logger ? @logger.warn(line) : warn(line)
-                false
+                errors < MAX_REVALIDATION_ERRORS ? :retry : false
               end
             next if ok
+            break if closed?
             line = "[Parse::Agent::MCPRackApp::ListeningStreamBody] closing listening stream: " \
                    "caller identity no longer valid"
             @logger ? @logger.warn(line) : warn(line)
@@ -2078,16 +2155,26 @@ module Parse
       #   per-user impersonation) supplies a real identity.
       #
       # LRU-bounded so an initialize-without-DELETE stream of sessions can't
-      # grow it without limit; evicting an active owner just downgrades it to
-      # TOFU on the next attach.
+      # grow it without limit. Live sessions (an attached listening stream or a
+      # pending approval) are pinned and never evicted; an evicted idle id
+      # downgrades to TOFU on its next attach. Each principal may hold at most
+      # `max_per_principal` bindings: past that, its own least recently used
+      # idle binding is evicted, so one caller flooding `initialize` cannot
+      # push other principals' idle sessions out of the registry.
       class SessionOwnerRegistry
         DEFAULT_MAX_ENTRIES = 10_000
+        DEFAULT_MAX_PER_PRINCIPAL = 100
 
         # @param pinned [#call, nil] `->(session_id) { Boolean }`; a pinned
         #   session's binding is never evicted (see #evict_lru!).
-        def initialize(max_entries: DEFAULT_MAX_ENTRIES, pinned: nil)
+        # @param max_per_principal [Integer, nil] bindings one principal may
+        #   hold; nil disables the per-principal bound.
+        def initialize(max_entries: DEFAULT_MAX_ENTRIES, pinned: nil,
+                       max_per_principal: DEFAULT_MAX_PER_PRINCIPAL)
           @owners = {} # session_id => principal fingerprint (insertion-ordered for LRU)
+          @counts = Hash.new(0) # principal fingerprint => bindings held
           @max = max_entries
+          @max_per_principal = max_per_principal
           @pinned = pinned
           @mutex = Mutex.new
         end
@@ -2106,9 +2193,14 @@ module Parse
           @mutex.synchronize do
             owner = @owners[session_id]
             return false if owner && owner != fingerprint
-            @owners.delete(session_id)
-            @owners[session_id] = fingerprint
-            retain_or_reject!(session_id)
+            if owner
+              @owners.delete(session_id)
+              @owners[session_id] = fingerprint
+              true
+            else
+              store(session_id, fingerprint)
+              retain_or_reject!(session_id, fingerprint)
+            end
           end
         end
 
@@ -2121,8 +2213,8 @@ module Parse
           @mutex.synchronize do
             owner = @owners[session_id]
             if owner.nil?
-              @owners[session_id] = fingerprint
-              retain_or_reject!(session_id)
+              store(session_id, fingerprint)
+              retain_or_reject!(session_id, fingerprint)
             elsif owner == fingerprint
               @owners.delete(session_id)
               @owners[session_id] = owner
@@ -2167,7 +2259,7 @@ module Parse
         # and an attacker can't grab the id during a brief disconnect.
         def forget(session_id)
           return if blank?(session_id)
-          @mutex.synchronize { @owners.delete(session_id) }
+          @mutex.synchronize { remove(session_id) }
         end
 
         # @return [Integer] current number of bound sessions (tests/metrics).
@@ -2184,29 +2276,64 @@ module Parse
         # would make it unbound, and an unbound session accepts control
         # messages from anyone, so a flood of new sessions could otherwise
         # strip a victim's owner and let the flooder answer its approvals.
-        def evict_lru!(protect: nil)
-          return if @owners.size <= @max
+        #
+        # A pinned entry the scan passes over is moved to the tail, so the
+        # next eviction does not re-check the same live sessions from the head
+        # (which would make every bind at capacity O(live sessions) under the
+        # lock). With `principal:`, only that principal's bindings are
+        # candidates and the scan stops at its per-principal bound.
+        def evict_lru!(protect: nil, principal: nil)
+          over = lambda do
+            principal ? @counts[principal] > @max_per_principal : @owners.size > @max
+          end
+          return unless over.call
           @owners.keys.each do |sid|
-            break if @owners.size <= @max
+            break unless over.call
             next if sid == protect
-            next if @pinned && (@pinned.call(sid) rescue false)
-            @owners.delete(sid)
+            owner = @owners[sid]
+            next if principal && owner != principal
+            if @pinned && (@pinned.call(sid) rescue false)
+              @owners.delete(sid)
+              @owners[sid] = owner
+              next
+            end
+            remove(sid)
           end
         end
 
         # Make room for a binding just written for `session_id`, never by
-        # evicting that binding itself. When every other entry is pinned and
-        # the registry is full, the new binding cannot be kept: it is removed
-        # and :full returned so the caller refuses admission, rather than
-        # reporting success for a session that has no owner (which would let
-        # any caller attach to or control it).
+        # evicting that binding itself. The principal's own idle bindings go
+        # first (per-principal bound), then the global LRU. When the room
+        # cannot be made because every candidate is pinned, the new binding is
+        # removed and :full returned so the caller refuses admission, rather
+        # than reporting success for a session that has no owner (which would
+        # let any caller attach to or control it).
         #
         # @return [true, :full]
-        def retain_or_reject!(session_id)
+        def retain_or_reject!(session_id, fingerprint)
+          if @max_per_principal
+            evict_lru!(protect: session_id, principal: fingerprint)
+            if @counts[fingerprint] > @max_per_principal
+              remove(session_id)
+              return :full
+            end
+          end
           evict_lru!(protect: session_id)
           return true if @owners.size <= @max
-          @owners.delete(session_id)
+          remove(session_id)
           :full
+        end
+
+        def store(session_id, fingerprint)
+          @owners[session_id] = fingerprint
+          @counts[fingerprint] += 1
+        end
+
+        def remove(session_id)
+          owner = @owners.delete(session_id)
+          return unless owner
+          @counts[owner] -= 1
+          @counts.delete(owner) if @counts[owner] <= 0
         end
 
         def blank?(value)

@@ -256,8 +256,14 @@ module Parse
                    duration_ms: 0.0, fallback: false, fallback_reason: nil }
       end
 
+      # Longest query sent to a reranker. The query is paired with every
+      # document in the provider call, so an unbounded query multiplies the
+      # cost of every rerank.
+      MAX_QUERY_CHARS = 2_000
+
       def rerank(query:, documents:, top_n: nil)
         limit = @profile.rerank_max_document_chars
+        query = query.to_s[0, MAX_QUERY_CHARS]
         docs = Array(documents).map { |d| d.to_s[0, limit] }
         tokens = Parse::Embeddings::SpendCap.estimate_tokens(query) * [docs.length, 1].max +
                  docs.sum { |d| Parse::Embeddings::SpendCap.estimate_tokens(d) }

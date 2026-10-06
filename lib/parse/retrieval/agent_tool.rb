@@ -57,6 +57,12 @@ module Parse
       # truncation is never silent. Pass `max_total_tokens: 0` to disable.
       DEFAULT_MAX_TOTAL_TOKENS = 20_000
 
+      # Longest `query` accepted. A search query is a short natural-language
+      # request; the bound keeps one call from sending a body-sized string to
+      # the embedding provider and, under a reranking profile, pairing it
+      # with every candidate document.
+      MAX_QUERY_CHARS = 4_000
+
       # @param agent [Parse::Agent]
       # @param text_field [String, Symbol, nil] which embedded text source to
       #   chunk and return as `content`. Must name one of the class's declared
@@ -120,6 +126,10 @@ module Parse
 
         unless query.is_a?(String) && !query.strip.empty?
           raise Parse::Agent::ValidationError, "semantic_search: `query` must be a non-empty String."
+        end
+        if query.length > MAX_QUERY_CHARS
+          raise Parse::Agent::ValidationError,
+                "semantic_search: `query` is #{query.length} characters; the limit is #{MAX_QUERY_CHARS}."
         end
 
         resolved_text_field = normalize_text_field!(text_field, klass)
@@ -268,7 +278,18 @@ module Parse
       def hybrid_config_for(prof, klass)
         cfg = Marshal.load(Marshal.dump(prof.hybrid.to_h))
         allowlist = Parse::Agent::MetadataRegistry.field_allowlist(klass.parse_class)
-        return cfg if allowlist.nil? || allowlist.empty?
+        if allowlist.nil? || allowlist.empty?
+          # No allowlist: never fall back to `wildcard: "*"`, which would
+          # let every column (including CLP protectedFields) decide matches.
+          # Search the embedded text sources unless the profile names fields;
+          # Atlas search then refuses any named field protected for the caller.
+          lexical = (cfg[:lexical] || {}).dup
+          if Array(lexical[:fields]).empty?
+            lexical[:fields] = searchable_text_fields(klass).map { |f| Parse::Retrieval.send(:wire_name, klass, f) }
+            cfg[:lexical] = lexical
+          end
+          return cfg
+        end
         lexical = (cfg[:lexical] || {}).dup
         if lexical[:fields]
           # Server-configured lexical fields are kept when the agent may read
@@ -605,7 +626,7 @@ module Parse
         "type" => "object",
         "properties" => {
           "class_name" => { "type" => "string", "description" => "Parse class name (must be agent_searchable)." },
-          "query" => { "type" => "string", "description" => "Natural-language query." },
+          "query" => { "type" => "string", "description" => "Natural-language query.", "maxLength" => MAX_QUERY_CHARS },
           "k" => { "type" => "integer", "default" => DEFAULT_K, "minimum" => 1, "maximum" => MAX_K },
           "filter" => { "type" => "object", "description" => "Post-search field filter (allowlisted fields only)." },
           "vector_filter" => { "type" => "object", "description" => "Atlas pre-search filter (allowlisted fields only)." },

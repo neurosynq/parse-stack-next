@@ -18,6 +18,28 @@
   and is refused with 403 for a session owned by another principal.
   **Migration:** send the same credentials on `DELETE` as on the session's
   other requests.
+- **BREAKING**: Every MCP POST carrying an `Mcp-Session-Id` bound to another
+  principal is refused with 403, and `resources/subscribe` requires a session
+  the caller established (through `initialize` or by attaching its listening
+  stream). Previously a caller who knew a session id could unsubscribe its
+  resources, fill its subscription cap, or route an approval prompt to its
+  stream, and any signed-in caller could invent session ids to fill the
+  global subscription limit. **Migration:** clients that follow the MCP
+  lifecycle (initialize, then subscribe) need no change; send the same
+  credentials on every request of a session.
+- **BREAKING**: `Parse::AtlasSearch.search` (and the native hybrid
+  `$rankFusion` path) refuses a session-, user-, or role-scoped text search
+  that names a field in the caller's CLP `protectedFields`, or that names no
+  fields while the scope has protected fields. A protected field was stripped
+  from results but still decided which documents matched and how they ranked,
+  so a caller could test guesses against its value. Master scopes and classes
+  with nothing protected are unaffected. **Migration:** pass `fields:` listing
+  the fields to search.
+- **BREAKING**: `MCPRackApp.user_scoped` refuses `permissions: :admin`. The
+  admin tier skips the embedding spend cap and score quantization, so every
+  signed-in user of the endpoint inherited that exemption. **Migration:** use
+  `:readonly` or `:write`; build a custom `agent_factory:` for operator
+  endpoints that need the admin tier.
 
 #### MCP deployments can expose less than their users can read
 
@@ -30,8 +52,9 @@
   did: projection, `keys:`, include projections, aggregation pipelines, Atlas
   Search fields, `get_schema`, `completion/complete`, exports,
   `agent.describe`, and `semantic_search` chunk text, reranker input, and
-  filter fields. The policy is scoped fiber-locally to each tool call, so
-  concurrent agents never see each other's policy.
+  filter fields. The policy lives in fiber storage for the duration of each
+  tool call, so concurrent agents never see each other's policy, and threads
+  or fibers a custom tool starts inherit it.
 - **FIXED**: `query_class`, `count_objects`, and `export_data` accepted a
   caller `where:` or `order:` on a field outside `agent_fields`, so an agent
   could infer a hidden field's value from which rows matched or how they were
@@ -66,6 +89,27 @@
   lost. They now carry the structured details like every other refusal.
 
 #### Supported user-scoped and analytics deployment patterns
+
+- **FIXED**: A `$relatedTo` constraint's `key` was not checked against the
+  owning class's field policy, so `count_objects` on `_User` with
+  `$relatedTo: { object: Post#X, key: "flaggedBy" }` revealed a relation
+  hidden from `Post`'s allowlist. The key is now checked like `$select` keys.
+- **FIXED**: An `agent_method` returning aggregation rows
+  (`Parse::AggregationResult`) passed Parse Server's internal columns
+  (`_rperm`, `_hashed_password`, `_auth_data_*`) through to the caller. They
+  are now removed at every depth, as on every other aggregation path.
+- **IMPROVED**: Each principal may hold a bounded number of session bindings
+  (100 by default). Past that its own least recently used idle binding is
+  evicted, so one caller flooding `initialize` can no longer push other
+  principals' idle sessions out of the registry and then claim their ids.
+  `initialize` and `resources/subscribe` are charged against the principal's
+  rate limiter (429 when exhausted). A skipped live session moves to the back
+  of the eviction order, so a registry full of live sessions no longer makes
+  every new binding rescan them under the lock.
+- **IMPROVED**: A listening stream's revalidation thread is woken on close
+  rather than killed, so it can no longer be interrupted inside a REST call
+  and return a pooled connection mid-response. A transient revalidation error
+  no longer closes the stream; errors on three consecutive checks do.
 
 - **NEW**: `Parse::Agent::MCPRackApp.user_scoped(...)` builds an endpoint for
   signed-in application users. The session token comes from
@@ -140,11 +184,20 @@
   `ArgumentError`. It does not enable the REST aggregate `raw_field_names:`
   or `raw_values:` flags.
 - **FIXED**: `call_method` serialized a returned Parse object from its
-  field-type map, emitting `{"title" => :string}` instead of values; it now
+  field-type map, emitting `{"title" => "string"}` instead of values; it now
   serializes the object's data (still projected and redacted). A returned
   `AggregationResult` was emitted as its `inspect` string; it is now a hash.
 
 #### Retrieval profiles for `semantic_search`
+
+- **FIXED**: On a class without `agent_fields`, a hybrid profile's lexical
+  branch searched every column (`wildcard: "*"`), so CLP `protectedFields`
+  could decide which documents matched. It now searches the embedded text
+  sources unless the profile names fields.
+- **CHANGED**: `semantic_search` refuses a `query` longer than 4,000
+  characters, and a profile reranker receives at most 2,000 characters of
+  it. The query is paired with every candidate document in a rerank call, so
+  an unbounded query multiplied the provider cost of every call.
 
 - **NEW**: `Parse::Retrieval::Profiles.register(name, ...)` defines
   server-configured strategies (result counts, hybrid search, a reranker
@@ -224,6 +277,24 @@
   built-in system fields, and `Parse::Query.field_formatter` (including
   `nil`) behave exactly as before.
 
+- **FIXED**: A block passed to `results`, `first`, `results_direct`, and
+  other query methods now runs outside the query's field-alias scope.
+  Before, a `Pointer#fetch(keys:)`, a partial `fetch!`, or a cursor used
+  inside the block formatted another class's keys with the outer model's
+  declared `field:` names, sending `account_id` where the other class expects
+  `accountId`.
+- **FIXED**: Partial fetches (`Pointer#fetch`, `fetch!`, `fetch_json`),
+  `fetched_keys` tracking, and cursor pagination constraints use the fetched
+  class's own declared `field:` names, so `keys: [:account_id]` on a model
+  that declares `field: :account_id` requests the right column.
+- **IMPROVED**: Field-alias resolution is cached per class and refreshed when
+  a model, `parse_class`, or field is declared, and re-entering the scope for
+  the same class skips setup. `Parse::Model.find_class` caches lookups for
+  class names with no Ruby model, so queries on such classes are no slower
+  than in 5.7.
+- **CHANGED**: The query field-alias scope lives in inheritable fiber storage,
+  so threads and fibers started while a query compiles see the same names.
+
 #### Vector search uses the stored column for multi-word vector properties
 
 - **FIXED**: A `:vector` property is saved under its `field_map` name
@@ -235,6 +306,24 @@
   generator. Single-word properties such as `embedding` are unaffected. An
   index created with the Ruby name as its path must be recreated with the
   stored name; drift detection reports the mismatch.
+
+#### `protectedFields` resolution matches Parse Server
+
+- **FIXED**: `Parse::CLPScope.protected_fields_for` now resolves
+  `protectedFields` the way Parse Server does: it intersects only the groups
+  present in the map that apply to the caller (`*`, `authenticated`, each
+  `role:` claim, and the caller's user id). Previously a map with no `"*"`
+  entry started from an empty set and intersected every role and user entry
+  away, so `{ "role:Restricted" => ["secret"] }` stripped nothing for a member
+  of `Restricted`. Mongo-direct queries, Atlas Search, vector search, and
+  pipeline validation could therefore return fields the server would have
+  hidden. The `authenticated` group is now applied too.
+- **CHANGED**: The integration stack pins Parse Server 9.10.3 (was 9.10.0)
+  and enables `enableLiveQueryClassLevelPermissionRoles`. New integration
+  coverage checks empty versus omitted `username` and `password` on `_User`
+  updates, refusal of anonymous, cross-user, and redirected `_User` updates,
+  `_Session` create honoring the class's `create` and `addField`
+  permissions, and role-granted LiveQuery subscriptions.
 
 #### Release checks prove the intended coverage ran
 
@@ -285,10 +374,18 @@
 - `Parse::Authorization` resolves a session through `/users/me` with the
   response cache bypassed, adding one uncached round trip per identity-cache
   miss.
-- Field policies, field-name mode, and query field aliases are scoped
-  fiber-locally to each tool call or query. Work a tool hands to another
-  thread (for example a thread pool inside a custom tool) runs outside that
-  scope and is not narrowed.
+- Field policies, field-name mode, and query field aliases live in fiber
+  storage for each tool call or query, so a thread or fiber a custom tool starts inherits them. A thread
+  created before the call (a long-lived pool) does not, and runs unnarrowed.
+- Without a tenant scope, every `user_scoped` caller charges the shared
+  default `SpendCap` bucket, so one user can use up the embedding and
+  reranking budget for all. Configure `agent_tenant_scope` (or `tenant_from:`)
+  for per-tenant budgets.
+- Parse Server 9.10.3 honors `role:` entries in class-level permissions for
+  LiveQuery subscriptions only when `enableLiveQueryClassLevelPermissionRoles`
+  is set (default `false`). Without it, a role member is refused a
+  subscription the equivalent REST query would serve, which affects MCP
+  `resources/subscribe` on such classes.
 
 ### 5.7.6
 

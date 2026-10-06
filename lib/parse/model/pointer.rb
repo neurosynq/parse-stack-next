@@ -216,7 +216,9 @@ module Parse
       # Build query parameters for partial fetch
       query = {}
       if keys.present?
-        keys_array = Array(keys).map { |k| Parse::Query.format_field(k) }
+        keys_array = Parse::Query.with_field_aliases(parse_class) do
+          Array(keys).map { |k| Parse::Query.format_field(k) }
+        end
         query[:keys] = keys_array.join(",")
       end
       if includes.present?
@@ -246,7 +248,9 @@ module Parse
       # For partial fetch, build with fetched_keys tracking
       if keys.present?
         # Parse keys to get top-level field names and nested keys
-        top_level_keys = Array(keys).map { |k| Parse::Query.format_field(k).split(".").first.to_sym }
+        top_level_keys = Parse::Query.with_field_aliases(parse_class) do
+          Array(keys).map { |k| Parse::Query.format_field(k).split(".").first.to_sym }
+        end
         top_level_keys << :id unless top_level_keys.include?(:id)
         top_level_keys << :objectId unless top_level_keys.include?(:objectId)
         top_level_keys.uniq!
@@ -278,7 +282,9 @@ module Parse
     def fetch_json(keys: nil, includes: nil)
       query = {}
       if keys.present?
-        keys_array = Array(keys).map { |k| Parse::Query.format_field(k) }
+        keys_array = Parse::Query.with_field_aliases(parse_class) do
+          Array(keys).map { |k| Parse::Query.format_field(k) }
+        end
         query[:keys] = keys_array.join(",")
       end
       if includes.present?

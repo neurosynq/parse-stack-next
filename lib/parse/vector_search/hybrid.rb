@@ -463,6 +463,9 @@ module Parse
           protected_fields = Parse::CLPScope.protected_fields_for(
             collection_name, resolution.permission_strings,
           )
+          require_relative "../atlas_search" if defined?(Parse::AtlasSearch).nil?
+          Parse::AtlasSearch.send(:assert_search_fields_allowed!,
+                                  Array(lex[:fields]).map(&:to_s), protected_fields, resolution)
           Parse::VectorSearch.validate_query_vector!(vec[:query_vector])
           Parse::PipelineSecurity.validate_filter!(vec[:vector_filter]) if vec[:vector_filter]
           Parse::PipelineSecurity.validate_filter!(vec[:filter]) if vec[:filter]

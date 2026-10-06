@@ -152,24 +152,43 @@ class MCPOrphanSubscriptionsTest < Minitest::Test
   # alive, or reaped with its subscription torn down; never attached with its
   # subscription silently removed while the attach believed it kept it, and
   # never a subscription left running for a reaped session.
+  #
+  # Three groups force both outcomes so neither branch can pass vacuously:
+  # sessions inside their grace period must always be kept, sessions past it
+  # with no attach must always be reaped, and sessions past it that race an
+  # attach may land either way but must be consistent.
   def test_concurrent_attach_and_reap_leave_consistent_state
-    mgr = manager(ttl: 1)
-    sids = (1..50).map { |i| "race-#{i}" }
-    sids.each { |sid| subscribe(mgr, sid) }
-    @now += 2 # every session is past its grace period
+    mgr = manager(ttl: 10)
+    racing = (1..20).map { |i| "race-#{i}" }
+    abandoned = (1..20).map { |i| "gone-#{i}" }
+    fresh = (1..20).map { |i| "fresh-#{i}" }
+    (racing + abandoned).each { |sid| subscribe(mgr, sid) }
+    @now += 8
+    fresh.each { |sid| subscribe(mgr, sid) }
+    @now += 3 # racing/abandoned are 11s orphaned (past ttl); fresh only 3s
+    sub_for = (racing + abandoned + fresh).each_with_index.to_h { |sid, i| [sid, @lq.subs[i]] }
 
-    threads = sids.map { |sid| Thread.new { mgr.attach_listener(sid) { } } }
+    threads = (racing + fresh).map { |sid| Thread.new { mgr.attach_listener(sid) { } } }
     threads += Array.new(4) { Thread.new { mgr.reap_orphans! } }
     threads.each(&:join)
+    mgr.reap_orphans! # nothing attaches the abandoned group; make the reap certain
+    sessions = mgr.instance_variable_get(:@sessions)
 
-    sids.each_with_index do |sid, i|
-      sub = @lq.subs[i]
-      if sub.unsubscribed?
+    fresh.each do |sid|
+      refute sub_for[sid].unsubscribed?, "#{sid} was inside its grace period and must be kept"
+      assert sessions.key?(sid)
+    end
+    abandoned.each do |sid|
+      assert sub_for[sid].unsubscribed?, "#{sid} was past its grace period with no stream and must be reaped"
+      refute sessions.key?(sid)
+    end
+    racing.each do |sid|
+      if sub_for[sid].unsubscribed?
         # Reaped before the attach: the session holds no subscriptions now.
-        refute_includes mgr.instance_variable_get(:@sessions).keys, sid
+        refute sessions.key?(sid)
       else
         # Attached before the reap: kept, and no longer orphaned.
-        assert mgr.instance_variable_get(:@sessions).key?(sid)
+        assert sessions.key?(sid)
       end
     end
     assert_equal 0, mgr.orphaned_session_count

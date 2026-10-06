@@ -227,11 +227,21 @@ module Parse
 
     # Fiber-local scope used by {Parse::Query.format_field} to honor a
     # model's explicit `field:` names while a query compiles.
+    # Stored in inheritable fiber storage (`Fiber[]`), so a fiber or thread
+    # started while a query compiles sees the same names, and an assignment in
+    # the child never leaks back to the parent. The value is a frozen
+    # {FieldAliasScope} (or nil when no query is compiling).
     FIELD_ALIAS_SCOPE_KEY = :parse_query_field_alias_scope
     EMPTY_FIELD_ALIASES = {}.freeze
-    FIELD_ALIAS_CACHE = {}
     FIELD_ALIAS_CACHE_MAX = 1_000
     FIELD_ALIAS_CACHE_MUTEX = Mutex.new
+    # @!visibility private
+    # One cached alias map for a table, stamped with the model registry
+    # generation and the model's field_map size it was built from.
+    FieldAliasScope = Struct.new(:table, :aliases, :generation, :klass, :field_count)
+    # Per-table {FieldAliasScope} cache. Replaced (never mutated) under the
+    # mutex, so readers need no lock.
+    @field_alias_cache = {}.freeze
     # System fields with their own handling, never treated as aliases.
     FIELD_ALIAS_BUILTINS = %w[id created_at updated_at acl].freeze
 
@@ -319,8 +329,8 @@ module Parse
       #   declared, whether the caller used the Ruby name or the remote name.
       def format_field(str)
         res = str.to_s.strip
-        aliases = Thread.current[FIELD_ALIAS_SCOPE_KEY]
-        if aliases && (mapped = aliases[res])
+        scope = Fiber[FIELD_ALIAS_SCOPE_KEY]
+        if scope && (mapped = scope.aliases[res])
           return mapped
         end
         if field_formatter.present? && res.respond_to?(field_formatter)
@@ -332,16 +342,59 @@ module Parse
       # Run the block with `table`'s explicit field aliases in effect for
       # {format_field}. Always sets the scope (possibly to an empty map), so
       # a subquery on another class, compiled inside an outer query, uses its
-      # own model's names. Fiber-local, so concurrent queries are isolated.
+      # own model's names. Re-entering for the table already in scope just
+      # yields. The scope lives in inheritable fiber storage, so concurrent
+      # queries on other threads or fibers are isolated.
       #
       # @param table [String] the Parse class name.
       # @return the block's value
       def with_field_aliases(table)
-        previous = Thread.current[FIELD_ALIAS_SCOPE_KEY]
-        Thread.current[FIELD_ALIAS_SCOPE_KEY] = field_aliases_for(table)
-        yield
-      ensure
-        Thread.current[FIELD_ALIAS_SCOPE_KEY] = previous
+        table = table.to_s unless table.nil? || table.is_a?(String)
+        previous = Fiber[FIELD_ALIAS_SCOPE_KEY]
+        return yield if table == previous&.table
+        begin
+          Fiber[FIELD_ALIAS_SCOPE_KEY] = field_alias_scope_for(table)
+          yield
+        ensure
+          Fiber[FIELD_ALIAS_SCOPE_KEY] = previous
+        end
+      end
+
+      # @!visibility private
+      # The Parse class whose aliases are in scope, or nil.
+      # @return [String, nil]
+      def field_alias_table
+        Fiber[FIELD_ALIAS_SCOPE_KEY]&.table
+      end
+
+      # @!visibility private
+      # Wrap a caller's block so it runs with the alias scope that was active
+      # before the query method opened its own. Without this, a block passed
+      # to `results`, `first`, `each`, and similar would format another
+      # class's keys (a pointer `fetch(keys:)`, a cursor, a nested query
+      # helper) with the outer model's names.
+      #
+      # @param blk [Proc, nil] the caller's block.
+      # @param table [String, nil] the table the scope is about to be set to.
+      # @return [Proc, nil]
+      def block_outside_field_aliases(blk, table)
+        return blk if blk.nil?
+        outer = Fiber[FIELD_ALIAS_SCOPE_KEY]
+        table = table.to_s unless table.nil? || table.is_a?(String)
+        # Re-entrant call for the table already in scope: the block either
+        # belongs to the caller that opened it or is internal.
+        return blk if table == outer&.table
+        wrapped = proc do |*args, &inner|
+          scoped = Fiber[FIELD_ALIAS_SCOPE_KEY]
+          Fiber[FIELD_ALIAS_SCOPE_KEY] = outer
+          begin
+            blk.call(*args, &inner)
+          ensure
+            Fiber[FIELD_ALIAS_SCOPE_KEY] = scoped
+          end
+        end
+        wrapped.ruby2_keywords
+        wrapped
       end
 
       # The explicit remote names a model declares: every `field_map` entry
@@ -351,16 +404,46 @@ module Parse
       # both compile to the declared column. Names the model does not alias
       # are absent, so they keep the default formatting.
       #
+      # Cached per table. An entry is reused until a model is defined, a
+      # `parse_class` is set, or a field is declared (see
+      # {Parse::Model.model_generation}), or until the model's `field_map`
+      # grows (associations add entries there directly).
+      #
       # @param table [String]
       # @return [Hash{String => String}]
       def field_aliases_for(table)
-        klass = (Parse::Model.find_class(table.to_s) rescue nil)
-        return EMPTY_FIELD_ALIASES unless klass.respond_to?(:field_map)
-        fmap = klass.field_map
-        cache_key = [klass.object_id, fmap.hash]
-        cached = FIELD_ALIAS_CACHE_MUTEX.synchronize { FIELD_ALIAS_CACHE[cache_key] }
-        return cached if cached
+        field_alias_scope_for(table).aliases
+      end
 
+      # @!visibility private
+      # @param table [String, nil]
+      # @return [FieldAliasScope] the cached scope for `table`.
+      def field_alias_scope_for(table)
+        key = table.to_s
+        generation = Parse::Model.model_generation
+        entry = @field_alias_cache[key]
+        if entry && entry.generation == generation &&
+           (entry.klass.nil? || entry.klass.field_map.size == entry.field_count)
+          return entry
+        end
+
+        klass = (Parse::Model.find_class(key) rescue nil)
+        klass = nil unless klass.respond_to?(:field_map)
+        aliases = klass ? build_field_aliases(klass.field_map) : EMPTY_FIELD_ALIASES
+        entry = FieldAliasScope.new(table, aliases, generation, klass,
+                                    klass ? klass.field_map.size : 0).freeze
+        FIELD_ALIAS_CACHE_MUTEX.synchronize do
+          cache = @field_alias_cache
+          cache = {} if cache.size >= FIELD_ALIAS_CACHE_MAX
+          @field_alias_cache = cache.merge(key => entry).freeze
+        end
+        entry
+      end
+
+      # @!visibility private
+      # @param fmap [Hash{Symbol => Symbol}] a model's field_map.
+      # @return [Hash{String => String}] frozen alias map.
+      def build_field_aliases(fmap)
         ruby_aliases = {}
         wire_aliases = {}
         fmap.each do |ruby_name, remote|
@@ -377,14 +460,10 @@ module Parse
           ruby_aliases[ruby] = wire
           wire_aliases[wire] = wire
         end
+        return EMPTY_FIELD_ALIASES if ruby_aliases.empty?
         # An exact server name wins over a Ruby name that collides with it, so
         # a key that IS a declared column is never redirected elsewhere.
-        aliases = ruby_aliases.merge(wire_aliases).freeze
-        FIELD_ALIAS_CACHE_MUTEX.synchronize do
-          FIELD_ALIAS_CACHE.shift while FIELD_ALIAS_CACHE.size >= FIELD_ALIAS_CACHE_MAX
-          FIELD_ALIAS_CACHE[cache_key] = aliases
-        end
-        aliases
+        ruby_aliases.merge(wire_aliases).freeze
       end
 
       # Convert camelCase string to snake_case
@@ -8188,6 +8267,7 @@ module Parse
     module DirectMethods
       def results_direct(raw: false, max_time_ms: nil, session_token: nil, master: nil,
                          acl_user: nil, acl_role: nil, client: nil, &block)
+        block = Parse::Query.block_outside_field_aliases(block, @table)
         Parse::Query.with_field_aliases(@table) do
           super(raw: raw, max_time_ms: max_time_ms, session_token: session_token, master: master,
                 acl_user: acl_user, acl_role: acl_role, client: client, &block)
@@ -8218,29 +8298,40 @@ module Parse
       end
     end
 
-    def self.wrap(klass, methods, table_from)
+    # @param klass [Class] the class whose methods are wrapped.
+    # @param methods [Array<Symbol>]
+    # @param table_expr [String] a Ruby expression, evaluated on the
+    #   receiver, that yields its Parse class name.
+    def self.wrap(klass, methods, table_expr)
       private_methods = methods.select { |m| klass.private_method_defined?(m) }
       protected_methods = methods.select { |m| klass.protected_method_defined?(m) }
-      mod = Module.new do
-        methods.each do |m|
-          next unless klass.method_defined?(m) || klass.private_method_defined?(m)
-          define_method(m) do |*args, **kwargs, &blk|
-            table = instance_exec(&table_from)
+      mod = Module.new
+      methods.each do |m|
+        next unless klass.method_defined?(m) || klass.private_method_defined?(m)
+        # Generated with `def` (not define_method) to keep the per-call cost
+        # low: every query build passes through several of these. A call
+        # for the table already in scope goes straight to the original.
+        mod.module_eval <<~RUBY, __FILE__, __LINE__ + 1
+          def #{m}(*args, **kwargs, &blk)
+            table = #{table_expr}
+            scope = Fiber[Parse::Query::FIELD_ALIAS_SCOPE_KEY]
+            return super(*args, **kwargs, &blk) if scope && table == scope.table
+            blk = Parse::Query.block_outside_field_aliases(blk, table) if blk
             Parse::Query.with_field_aliases(table) { super(*args, **kwargs, &blk) }
           end
-        end
-        # Keep each wrapped method's original visibility.
-        private(*private_methods) unless private_methods.empty?
-        protected(*protected_methods) unless protected_methods.empty?
+        RUBY
       end
+      # Keep each wrapped method's original visibility.
+      mod.send(:private, *private_methods) unless private_methods.empty?
+      mod.send(:protected, *protected_methods) unless protected_methods.empty?
       klass.prepend(mod)
     end
   end
 
-  QueryFieldAliasScope.wrap(Query, QueryFieldAliasScope::QUERY_METHODS, -> { @table })
+  QueryFieldAliasScope.wrap(Query, QueryFieldAliasScope::QUERY_METHODS, "@table")
   Query.prepend(QueryFieldAliasScope::DirectMethods)
   [Aggregation, GroupBy, GroupByDate].each do |helper|
-    QueryFieldAliasScope.wrap(helper, QueryFieldAliasScope::HELPER_METHODS, -> { @query&.table })
+    QueryFieldAliasScope.wrap(helper, QueryFieldAliasScope::HELPER_METHODS, "@query&.table")
   end
 end
 

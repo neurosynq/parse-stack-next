@@ -261,6 +261,97 @@ class CLPScopeTest < Minitest::Test
     assert_equal Set.new, Parse::CLPScope.protected_fields_for("User", nil)
   end
 
+  # Parse Server intersects only the groups PRESENT in protectedFields.
+  # A map with no "*" entry must still protect fields for the matching
+  # role or user rather than collapsing to an empty strip set.
+  def test_protected_fields_role_only_entry_protects_role_member
+    Parse::CLPScope.__cache_put("Post", clp: {
+                                          "protectedFields" => { "role:Restricted" => ["secret"] },
+                                        })
+    assert_equal Set["secret"],
+                 Parse::CLPScope.protected_fields_for("Post", ["*", "u_alice", "role:Restricted"])
+    # Non-members see no protection from a role-only map.
+    assert_equal Set.new,
+                 Parse::CLPScope.protected_fields_for("Post", ["*", "u_bob", "role:Editor"])
+    assert_equal Set.new, Parse::CLPScope.protected_fields_for("Post", ["*"])
+  end
+
+  def test_protected_fields_user_only_entry_protects_that_user
+    Parse::CLPScope.__cache_put("Post", clp: {
+                                          "protectedFields" => { "u_alice" => ["salary", "ssn"] },
+                                        })
+    assert_equal Set["salary", "ssn"],
+                 Parse::CLPScope.protected_fields_for("Post", ["*", "u_alice"])
+    assert_equal Set.new,
+                 Parse::CLPScope.protected_fields_for("Post", ["*", "u_bob"])
+  end
+
+  def test_protected_fields_two_role_entries_intersect
+    Parse::CLPScope.__cache_put("Post", clp: {
+                                          "protectedFields" => {
+                                            "role:Restricted" => ["secret", "notes"],
+                                            "role:Auditor" => ["notes", "budget"],
+                                          },
+                                        })
+    perms = ["*", "u_alice", "role:Restricted", "role:Auditor"]
+    assert_equal Set["notes"], Parse::CLPScope.protected_fields_for("Post", perms)
+  end
+
+  def test_protected_fields_public_and_role_entries_intersect
+    Parse::CLPScope.__cache_put("Post", clp: {
+                                          "protectedFields" => {
+                                            "*" => ["secret", "notes"],
+                                            "role:Restricted" => ["notes", "budget"],
+                                          },
+                                        })
+    assert_equal Set["secret", "notes"],
+                 Parse::CLPScope.protected_fields_for("Post", ["*", "u_bob"])
+    assert_equal Set["notes"],
+                 Parse::CLPScope.protected_fields_for("Post", ["*", "u_alice", "role:Restricted"])
+  end
+
+  def test_protected_fields_authenticated_entry_applies_only_with_user
+    Parse::CLPScope.__cache_put("Post", clp: {
+                                          "protectedFields" => {
+                                            "*" => ["secret", "email"],
+                                            "authenticated" => ["secret"],
+                                          },
+                                        })
+    assert_equal Set["secret", "email"], Parse::CLPScope.protected_fields_for("Post", ["*"])
+    assert_equal Set["secret"], Parse::CLPScope.protected_fields_for("Post", ["*", "u_alice"])
+  end
+
+  def test_protected_fields_authenticated_only_entry
+    Parse::CLPScope.__cache_put("Post", clp: {
+                                          "protectedFields" => { "authenticated" => ["secret"] },
+                                        })
+    assert_equal Set["secret"], Parse::CLPScope.protected_fields_for("Post", ["*", "u_alice"])
+    assert_equal Set.new, Parse::CLPScope.protected_fields_for("Post", ["*"])
+  end
+
+  def test_protected_fields_user_and_role_entries_intersect
+    Parse::CLPScope.__cache_put("Post", clp: {
+                                          "protectedFields" => {
+                                            "u_alice" => ["secret", "budget"],
+                                            "role:Restricted" => ["secret"],
+                                          },
+                                        })
+    assert_equal Set["secret"],
+                 Parse::CLPScope.protected_fields_for("Post", ["*", "u_alice", "role:Restricted"])
+  end
+
+  def test_protected_fields_user_field_entries_are_ignored
+    Parse::CLPScope.__cache_put("Post", clp: {
+                                          "protectedFields" => {
+                                            "*" => ["secret"],
+                                            "userField:owner" => [],
+                                          },
+                                        })
+    # Pointer-scoped relaxations are per-row; the class-level set keeps
+    # the public protection.
+    assert_equal Set["secret"], Parse::CLPScope.protected_fields_for("Post", ["*", "u_alice"])
+  end
+
   def test_protected_fields_no_config_returns_empty
     Parse::CLPScope.__cache_put("Song", clp: { "find" => { "*" => true } })
     assert_equal Set.new, Parse::CLPScope.protected_fields_for("Song", ["*", "u_alice"])

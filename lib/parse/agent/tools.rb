@@ -4414,6 +4414,16 @@ module Parse
               assert_where_fields_in_allowlist!(target.to_s, query["where"] || query[:where])
               selected = value["key"] || value[:key]
               assert_fields_in_allowlist!(target.to_s, [selected]) if selected
+            when "$relatedTo"
+              # The relation column lives on the OWNING object's class, so
+              # `count_objects(_User, $relatedTo: {object: Post#X, key:
+              # "flaggedBy"})` would reveal a relation hidden from Post's
+              # allowlist unless the key is checked against that class.
+              next unless value.is_a?(Hash)
+              owner = value["object"] || value[:object]
+              owner_class = owner.is_a?(Hash) ? (owner["className"] || owner[:className]) : nil
+              relation_key = value["key"] || value[:key]
+              assert_fields_in_allowlist!(owner_class.to_s, [relation_key]) if owner_class && relation_key
             else
               assert_subquery_fields_in_allowlist!(value)
             end
@@ -5835,7 +5845,13 @@ module Parse
             project_object_to_allowlist(result.parse_class, ResultFormatter.simplify_object(result.as_json))
           when Parse::AggregationResult
             source = Parse::Agent::FieldNames.server? ? result.raw : result.to_h
-            source.each_with_object({}) { |(k, v), h| h[k.to_s] = serialize_result(v, agent: agent) }
+            row = source.each_with_object({}) { |(k, v), h| h[k.to_s] = serialize_result(v, agent: agent) }
+            # A row is a computed shape with no owning class, so it cannot be
+            # projected through an allowlist; Parse Server's internal columns
+            # (`_rperm`, `_hashed_password`, `_auth_data_*`, ...) are removed
+            # from it at every depth, as on every other aggregation path.
+            Parse::PipelineSecurity.redact_internal_fields_deep!(row)
+            row
           when Array
             result.map { |item| serialize_result(item, agent: agent) }
           when Hash

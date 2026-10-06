@@ -278,6 +278,56 @@ class VectorIndexDriftTest < Minitest::Test
     end
   end
 
+  # ---- multi-word vector properties use the storage (camelCase) path ------
+  # Atlas indexes the stored column, so discovery and drift checks must ask
+  # for "bodyEmbedding", not the Ruby name "body_embedding".
+
+  class MultiWordDriftItem < Parse::Object
+    parse_class "MultiWordDriftItem"
+    property :body_embedding, :vector, dimensions: 4, provider: :fx_drift, similarity: :cosine
+  end
+
+  def multi_word_index(dims: 4)
+    { "name" => "body_idx", "type" => "vectorSearch",
+      "latestDefinition" => { "fields" => [{ "type" => "vector", "path" => "bodyEmbedding",
+                                             "numDimensions" => dims, "similarity" => "cosine" }] } }
+  end
+
+  def test_index_discovery_queries_the_storage_path
+    require "parse/atlas_search"
+    Parse::VectorSearch.index_drift_policy = :ignore
+    asked = []
+    finder = ->(_cls, field:) { asked << field; multi_word_index }
+    Parse::AtlasSearch::IndexCatalog.stub(:find_vector_index, finder) do
+      assert_equal "body_idx", MultiWordDriftItem.send(:resolve_vector_index!, :body_embedding, nil)
+    end
+    assert_equal ["bodyEmbedding"], asked
+  ensure
+    MultiWordDriftItem.instance_variable_set(:@_verified_vector_indexes, nil)
+  end
+
+  def test_explicit_index_verification_queries_the_storage_path
+    require "parse/atlas_search"
+    Parse::VectorSearch.index_drift_policy = :raise
+    asked = []
+    finder = ->(_cls, field:) { asked << field; multi_word_index(dims: 99) }
+    Parse::AtlasSearch::IndexCatalog.stub(:find_vector_index, finder) do
+      assert_raises(Parse::Core::VectorSearchable::IndexDriftError) do
+        MultiWordDriftItem.send(:verify_explicit_vector_index, :body_embedding, "body_idx")
+      end
+    end
+    assert_equal ["bodyEmbedding"], asked
+  ensure
+    MultiWordDriftItem.instance_variable_set(:@_verified_vector_indexes, nil)
+  end
+
+  def test_drift_findings_match_the_index_entry_by_storage_path
+    findings = MultiWordDriftItem.send(:vector_index_drift_findings, :body_embedding, multi_word_index(dims: 99))
+    assert_equal 1, findings.length, "the bodyEmbedding index entry must be found and compared"
+    assert_includes findings.first, "numDimensions=99"
+    assert_empty MultiWordDriftItem.send(:vector_index_drift_findings, :body_embedding, multi_word_index)
+  end
+
   private
 
   def capture_warn

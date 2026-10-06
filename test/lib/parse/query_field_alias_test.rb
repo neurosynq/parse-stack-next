@@ -81,6 +81,7 @@ class QueryFieldAliasTest < Minitest::Test
     parse_class "FieldAliasStats"
     property :ext_id, :string, field: :ExternalID
     property :play_count, :integer
+    property :seen_at, :date, field: :Seen_At
   end
 
   class InternalDoc < Parse::Object
@@ -88,28 +89,240 @@ class QueryFieldAliasTest < Minitest::Test
     property :hash_ref, :string, field: :_hashed_password
   end
 
-  def test_group_by_aggregations_use_declared_names
-    group_pipeline = nil
-    sum_pipeline = nil
-    Parse::GroupBy.class_eval do
-      alias_method :__orig_execute_group_aggregation, :execute_group_aggregation
-    end
-    Parse::GroupBy.define_method(:execute_group_aggregation) do |_op, expr|
-      group_pipeline = @query.send(:build_aggregation_pipeline) rescue nil
-      sum_pipeline = expr
-      {}
-    end
-    StatsDoc.query.group_by(:ext_id).sum(:play_count)
-    assert_equal({ "$sum" => "$playCount" }, sum_pipeline)
-  ensure
-    Parse::GroupBy.class_eval do
-      alias_method :execute_group_aggregation, :__orig_execute_group_aggregation
-      remove_method :__orig_execute_group_aggregation
+  # Raised by stubbed aggregate/fetch entry points to hand the built request
+  # back to the test without touching the network.
+  class Captured < StandardError
+    attr_reader :value
+    def initialize(value)
+      @value = value
+      super("captured")
     end
   end
 
+  class AggregateClient
+    def aggregate_pipeline(_table, pipeline, **)
+      raise Captured.new(pipeline)
+    end
+  end
+
+  def capture_aggregate(query)
+    query.define_singleton_method(:aggregate) { |pipeline, **| raise Captured.new(pipeline) }
+    client = AggregateClient.new
+    query.define_singleton_method(:client) { client }
+    yield
+    flunk "aggregate was not called"
+  rescue Captured => e
+    e.value
+  end
+
+  def group_stage(pipeline)
+    pipeline.find { |stage| stage.key?("$group") }["$group"]
+  end
+
+  def test_group_by_aggregations_use_declared_names
+    group = StatsDoc.query.group_by(:ext_id)
+    pipeline = capture_aggregate(group.instance_variable_get(:@query)) { group.sum(:ext_id) }
+    assert_equal({ "_id" => "$ExternalID", "count" => { "$sum" => "$ExternalID" } }, group_stage(pipeline))
+
+    group = StatsDoc.query.group_by(:ext_id)
+    pipeline = capture_aggregate(group.instance_variable_get(:@query)) { group.sum(:play_count) }
+    assert_equal({ "_id" => "$ExternalID", "count" => { "$sum" => "$playCount" } }, group_stage(pipeline))
+
+    assert_equal "$ExternalID", group_stage(StatsDoc.query.group_by(:ext_id).pipeline)["_id"]
+  end
+
+  def test_group_by_date_uses_declared_names
+    group = StatsDoc.query(ext_id: "x").group_by_date(:seen_at, :day)
+    pipeline = group.pipeline
+    assert_equal({ "ExternalID" => "x" }, pipeline.first["$match"])
+    assert_equal({ "$year" => "$Seen_At" }, group_stage(pipeline)["_id"]["year"])
+
+    pipeline = capture_aggregate(group.instance_variable_get(:@query)) { group.sum(:ext_id) }
+    assert_equal({ "$sum" => "$ExternalID" }, group_stage(pipeline)["count"])
+    assert_equal({ "$dayOfMonth" => "$Seen_At" }, group_stage(pipeline)["_id"]["day"])
+  end
+
+  def test_aggregation_match_stage_uses_declared_names
+    pipeline = StatsDoc.query(ext_id: "x").aggregate([{ "$limit" => 1 }]).pipeline
+    assert_equal [{ "$match" => { "ExternalID" => "x" } }, { "$limit" => 1 }], pipeline
+  end
+
+  def test_direct_pipeline_uses_declared_names
+    pipeline = StatsDoc.query(ext_id: "x").order(:ext_id.desc).keys(:ext_id)
+                       .send(:build_direct_mongodb_pipeline)
+    assert_equal({ "ExternalID" => "x" }, pipeline.find { |s| s.key?("$match") }["$match"])
+    assert_equal({ "ExternalID" => -1 }, pipeline.find { |s| s.key?("$sort") }["$sort"])
+    assert_equal 1, pipeline.find { |s| s.key?("$project") }["$project"]["ExternalID"]
+  end
+
   def test_query_sum_formats_the_declared_name
-    assert_equal "ExternalID", Parse::Query.with_field_aliases("FieldAliasStats") { Parse::Query.format_field(:ext_id) }
+    query = StatsDoc.query
+    pipeline = capture_aggregate(query) { query.sum(:ext_id) }
+    assert_equal({ "_id" => nil, "total" => { "$sum" => "$ExternalID" } }, group_stage(pipeline))
+    assert_nil Parse::Query.field_alias_table, "the scope must be closed after the call"
+  end
+
+  # ---- user blocks and other classes' keys ---------------------------------
+
+  FakeResponse = Struct.new(:results, :error) do
+    def error?
+      !error.nil?
+    end
+  end
+
+  # Fetch client that records the query it was sent, then stops the fetch.
+  class RecordingClient
+    attr_reader :queries
+    def initialize
+      @queries = []
+    end
+
+    def fetch_object(_klass, _id, query: nil, **)
+      @queries << query
+      raise Captured.new(query)
+    end
+  end
+
+  def stub_single_page(query, rows)
+    pages = [rows]
+    query.define_singleton_method(:fetch!) { |_compiled| FakeResponse.new(pages.shift || [], nil) }
+    query
+  end
+
+  def test_results_block_runs_outside_the_query_scope
+    query = stub_single_page(ExtAccount.query.limit(1),
+                             [{ "objectId" => "a1", "className" => "FieldAliasExtAccount" }])
+    seen = []
+    query.results do |_obj|
+      seen << Parse::Query.format_field(:account_id)
+      seen << Parse::Query.field_alias_table
+    end
+    assert_equal ["accountId", nil], seen
+  end
+
+  def test_results_block_restores_an_enclosing_scope
+    query = stub_single_page(ExtAccount.query.limit(1),
+                             [{ "objectId" => "a1", "className" => "FieldAliasExtAccount" }])
+    seen = nil
+    Parse::Query.with_field_aliases("FieldAliasExtOwner") do
+      query.results { |_obj| seen = Parse::Query.field_alias_table }
+    end
+    assert_equal "FieldAliasExtOwner", seen
+  end
+
+  def test_pointer_fetch_inside_results_block_uses_its_own_class
+    query = stub_single_page(ExtAccount.query.limit(1),
+                             [{ "objectId" => "a1", "className" => "FieldAliasExtAccount" }])
+    client = RecordingClient.new
+    pointer = Parse::Pointer.new("FieldAliasExtOwner", "o1")
+    pointer.define_singleton_method(:client) { client }
+    query.results do |_obj|
+      begin
+        pointer.fetch(keys: [:account_id, :legacy_code])
+      rescue Captured
+      end
+      begin
+        pointer.fetch_json(keys: [:account_id])
+      rescue Captured
+      end
+    end
+    assert_equal ["accountId,legacy_code", "accountId"], client.queries.map { |q| q[:keys] }
+  end
+
+  def test_pointer_and_object_fetch_use_their_class_aliases_without_a_query
+    client = RecordingClient.new
+    pointer = Parse::Pointer.new("FieldAliasExtAccount", "a1")
+    pointer.define_singleton_method(:client) { client }
+    assert_raises(Captured) { pointer.fetch(keys: [:account_id, :auth_id_sub, :plain_name]) }
+
+    owner = ExtOwner.new
+    owner.instance_variable_set(:@id, "o1")
+    owner.define_singleton_method(:client) { client }
+    validate = Parse.validate_query_keys
+    Parse.validate_query_keys = false
+    begin
+      assert_raises(Captured) { owner.fetch!(keys: [:legacy_code, :account_id]) }
+    ensure
+      Parse.validate_query_keys = validate
+    end
+    assert_raises(Captured) { owner.fetch_json(keys: [:legacy_code]) }
+
+    assert_equal ["account_id,authId_sub,plainName", "legacy_code,accountId", "legacy_code"],
+                 client.queries.map { |q| q[:keys] }
+  end
+
+  def test_fetched_keys_use_the_object_class_aliases
+    owner = ExtOwner.new
+    owner.fetched_keys = [:legacy_code, :account_id]
+    assert_includes owner.fetched_keys, :legacy_code
+    assert_includes owner.fetched_keys, :accountId
+
+    built = Parse::Object.build({ "objectId" => "a1", "className" => "FieldAliasExtAccount" },
+                                "FieldAliasExtAccount", fetched_keys: [:account_id, :auth_id_sub])
+    assert_includes built.fetched_keys, :account_id
+    assert_includes built.fetched_keys, :authId_sub
+
+    # Inside another class's query scope the object's own names still win.
+    Parse::Query.with_field_aliases("FieldAliasExtAccount") do
+      owner.fetched_keys = [:account_id]
+    end
+    assert_includes owner.fetched_keys, :accountId
+  end
+
+  def test_cursor_constraint_uses_the_query_class_aliases
+    cursor = ExtAccount.query.cursor(limit: 10, order: :auth_id_sub.desc)
+    cursor.instance_variable_set(:@last_order_value, "v")
+    cursor.instance_variable_set(:@last_object_id, "a1")
+    constraint = Parse::Query.with_field_aliases("FieldAliasExtOwner") do
+      cursor.send(:build_cursor_constraint)
+    end
+    assert_includes constraint.inspect, "authId_sub"
+    refute_includes constraint.inspect, "authIdSub"
+  end
+
+  # ---- scope storage and caching -------------------------------------------
+
+  def test_scope_is_inherited_by_child_threads_and_fibers_without_leaking_back
+    seen = {}
+    Parse::Query.with_field_aliases("FieldAliasExtAccount") do
+      Thread.new do
+        seen[:thread] = Parse::Query.format_field("account_id")
+        Parse::Query.with_field_aliases("FieldAliasExtOwner") { seen[:inner] = Parse::Query.field_alias_table }
+      end.join
+      Fiber.new { seen[:fiber] = Parse::Query.format_field("account_id") }.resume
+      seen[:after] = Parse::Query.field_alias_table
+    end
+    assert_equal "account_id", seen[:thread]
+    assert_equal "account_id", seen[:fiber]
+    assert_equal "FieldAliasExtOwner", seen[:inner]
+    assert_equal "FieldAliasExtAccount", seen[:after]
+  end
+
+  def test_alias_cache_tracks_later_declarations
+    klass = Class.new(Parse::Object) do
+      def self.name
+        "QueryFieldAliasTest::LateDoc"
+      end
+      parse_class "FieldAliasLateDoc"
+    end
+    assert_equal({}, Parse::Query.field_aliases_for("FieldAliasLateDoc"))
+    klass.property :late_code, :string, field: :late_code
+    assert_equal "late_code", Parse::Query.field_aliases_for("FieldAliasLateDoc")["late_code"]
+    klass.belongs_to :late_owner, as: :field_alias_ext_owner, field: :late_owner
+    assert_equal "late_owner", Parse::Query.field_aliases_for("FieldAliasLateDoc")["late_owner"]
+  end
+
+  def test_find_class_miss_is_cached_until_a_model_is_defined
+    name = "FieldAliasNotYetDefined"
+    assert_nil Parse::Model.find_class(name)
+    assert Parse::Model.model_cache_misses.key?(name)
+    klass = Class.new(Parse::Object) do
+      def self.name
+        "QueryFieldAliasTest::NotYetDefined"
+      end
+    end
+    klass.parse_class name
+    assert_equal klass, Parse::Model.find_class(name)
   end
 
   def test_formatter_nil_users_see_no_change_for_default_names

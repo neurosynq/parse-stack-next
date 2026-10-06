@@ -129,8 +129,9 @@ class MCPLoggingTest < Minitest::Test
     app = build_app(streaming: true)
     post(app, "initialize", session_id: "s1", principal: "alice")
     post(app, "logging/setLevel", params: { "level" => "error" }, session_id: "s1", principal: "alice")
-    _, res = post(app, "logging/setLevel", params: { "level" => "debug" }, session_id: "s1", principal: "mallory")
-    assert_equal({}, res["result"], "no oracle: the refused call looks like success")
+    status, res = post(app, "logging/setLevel", params: { "level" => "debug" }, session_id: "s1", principal: "mallory")
+    assert_equal 403, status, "a session bound to another principal is refused"
+    assert res["error"]
     assert_equal "error", level(app, "s1")
   end
 

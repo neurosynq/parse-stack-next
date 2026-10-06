@@ -342,6 +342,8 @@ module Parse
         self.fields.merge!(key => data_type, parse_field => data_type)
         # This creates a mapping between the local field and the remote field name.
         self.field_map.merge!(key => parse_field)
+        # Derived per-class caches (query field aliases) rebuild on next use.
+        Parse::Model.model_registry_changed!
 
         # Store the property description for agent metadata if provided
         if opts[:_description].present?

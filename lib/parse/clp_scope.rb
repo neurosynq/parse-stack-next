@@ -292,18 +292,8 @@ module Parse
         protected_map = entry.clp["protectedFields"] || entry.clp[:protectedFields]
         return EMPTY_SET if protected_map.nil? || protected_map.empty?
 
-        strip = Set.new(Array(protected_map["*"] || protected_map[:"*"]).map(&:to_s))
-
         claim_set = permission_strings.is_a?(Set) ? permission_strings : permission_strings.to_set
-        claim_set.each do |claim|
-          next if claim == "*"
-          override = protected_map[claim.to_s] || protected_map[claim.to_sym]
-          next if override.nil?
-          override_set = Set.new(Array(override).map(&:to_s))
-          strip &= override_set
-        end
-
-        strip.freeze
+        protected_sets_for(protected_map, claim_set).reduce { |acc, set| acc & set }&.freeze || EMPTY_SET
       end
 
       def redact_protected_fields!(documents, strip_set)
@@ -372,6 +362,54 @@ module Parse
       end
 
       private
+
+      # Collect one field set per protectedFields group that applies to the
+      # caller, mirroring Parse Server's `DatabaseController.addProtectedFields`.
+      # Only groups PRESENT in the map participate. A missing `"*"` key does
+      # not mean "nothing protected": a map of `{ "role:Restricted" => ["secret"] }`
+      # still strips `secret` for a member of `Restricted`. The final strip set
+      # is the intersection of the applicable sets, so membership in a group
+      # with a narrower (or empty) list relaxes protection.
+      #
+      # Groups:
+      # - `"*"` applies to everyone.
+      # - `"authenticated"` applies when the claim set carries a concrete user id.
+      # - `"role:<name>"` applies for each role claim.
+      # - `"<userId>"` applies for the caller's own user id.
+      # - `"userField:<field>"` entries are per-object pointer rules that
+      #   Parse Server evaluates against each row. They are skipped here,
+      #   which can only over-protect, never under-protect.
+      #
+      # Role entries apply even when the claim set has no user id (an
+      # `acl_role:` scope). Parse Server has no REST equivalent of a
+      # role-only caller, and the SDK treats a granted role claim as held.
+      #
+      # @return [Array<Set<String>>]
+      def protected_sets_for(protected_map, claim_set)
+        lookup = lambda do |key|
+          value = protected_map[key]
+          value = protected_map[key.to_sym] if value.nil?
+          value.nil? ? nil : Set.new(Array(value).map(&:to_s))
+        end
+
+        sets = []
+        public_set = lookup.call("*")
+        sets << public_set if public_set
+
+        user_claims = claim_set.map(&:to_s).reject { |c| c == "*" || c.start_with?("role:") }
+        if user_claims.any?
+          auth_set = lookup.call("authenticated")
+          sets << auth_set if auth_set
+        end
+
+        claim_set.each do |claim|
+          key = claim.to_s
+          next if key == "*" || key == "authenticated" || key.start_with?("userField:")
+          set = lookup.call(key)
+          sets << set if set
+        end
+        sets
+      end
 
       # Always returns a {CacheEntry}. On schema-fetch failure (network
       # error, unsuccessful response, raised exception, missing client)

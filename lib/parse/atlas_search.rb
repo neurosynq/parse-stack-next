@@ -363,6 +363,7 @@ module Parse
 
         index_name = options[:index] || @default_index
         fields = normalize_fields(options[:fields])
+        assert_search_fields_allowed!(fields, protected_fields, resolution)
         limit = options[:limit] || 100
         skip_val = options[:skip] || 0
 
@@ -1023,6 +1024,34 @@ module Parse
           "Parse::AtlasSearch.search refused: highlight_field '#{path}' is in " \
           "protectedFields for the current scope; returning highlights would " \
           "leak the protected field's value.",
+        )
+      end
+
+      # Refuse a scoped text search whose paths include a protected field,
+      # or that searches every field (no `fields:`) while the scope has
+      # protected fields. Stripping a protected field from the RESULT does
+      # not stop it from deciding which documents MATCH and how they RANK,
+      # so a caller could test guesses against its value. Master scopes and
+      # scopes with nothing protected are unaffected.
+      #
+      # @raise [Parse::CLPScope::Denied]
+      def assert_search_fields_allowed!(fields, protected_fields, resolution)
+        return if resolution.nil? || resolution.master?
+        return if protected_fields.nil? || protected_fields.empty?
+        if fields.nil? || fields.empty?
+          raise Parse::CLPScope::Denied.new(
+            nil, :find,
+            "Parse::AtlasSearch.search refused: a search over every field would " \
+            "match on protectedFields for the current scope; pass fields: with " \
+            "the fields to search.",
+          )
+        end
+        hit = Array(fields).map(&:to_s).find { |f| protected_fields.include?(f.split(".").first) }
+        return unless hit
+        raise Parse::CLPScope::Denied.new(
+          nil, :find,
+          "Parse::AtlasSearch.search refused: field '#{hit}' is in protectedFields " \
+          "for the current scope; matching on it would reveal its value.",
         )
       end
 

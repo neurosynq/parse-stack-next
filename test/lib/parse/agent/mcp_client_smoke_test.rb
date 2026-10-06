@@ -83,9 +83,11 @@ class MCPClientSmokeTest < Minitest::Test
       SmokeAgent.new(env["HTTP_AUTHORIZATION"].to_s.sub(/\ABearer /, ""))
     end
     @host = "127.0.0.1"
-    @port = TCPServer.open(@host, 0) { |s| s.addr[1] }
     @puma = Puma::Server.new(app, Puma::Events.new)
-    @puma.add_tcp_listener(@host, @port)
+    # Bind port 0 and read the kernel-assigned port back, so no other process
+    # can take the port between choosing it and binding it.
+    @puma.add_tcp_listener(@host, 0)
+    @port = @puma.connected_ports.first
     @puma_thread = @puma.run
     wait_for_port
   end

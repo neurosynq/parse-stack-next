@@ -29,17 +29,17 @@ module Parse
 
       # Run the block with `agent`'s naming mode in effect.
       def with(agent)
-        previous = Thread.current[SCOPE_KEY]
-        Thread.current[SCOPE_KEY] = agent
+        previous = Fiber[SCOPE_KEY]
+        Fiber[SCOPE_KEY] = agent
         yield
       ensure
-        Thread.current[SCOPE_KEY] = previous
+        Fiber[SCOPE_KEY] = previous
       end
 
       # @return [Symbol] `:server` or `:default` for the agent whose tool is
       #   executing; `:default` outside a tool call.
       def current_mode
-        agent = Thread.current[SCOPE_KEY]
+        agent = Fiber[SCOPE_KEY]
         mode = agent.respond_to?(:field_names_mode) ? agent.field_names_mode : nil
         mode || :default
       end
