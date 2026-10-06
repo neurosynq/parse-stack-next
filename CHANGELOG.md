@@ -18,38 +18,94 @@
   and is refused with 403 for a session owned by another principal.
   **Migration:** send the same credentials on `DELETE` as on the session's
   other requests.
-- **BREAKING**: Every MCP POST carrying an `Mcp-Session-Id` bound to another
-  principal is refused with 403, and `resources/subscribe` requires a session
-  the caller established (through `initialize` or by attaching its listening
-  stream). Previously a caller who knew a session id could unsubscribe its
-  resources, fill its subscription cap, or route an approval prompt to its
-  stream, and any signed-in caller could invent session ids to fill the
-  global subscription limit. **Migration:** clients that follow the MCP
-  lifecycle (initialize, then subscribe) need no change; send the same
-  credentials on every request of a session.
-- **BREAKING**: `Parse::AtlasSearch.search` (and the native hybrid
-  `$rankFusion` path) refuses a session-, user-, or role-scoped text search
-  that names a field in the caller's CLP `protectedFields`, or that names no
-  fields while the scope has protected fields. A protected field was stripped
-  from results but still decided which documents matched and how they ranked,
-  so a caller could test guesses against its value. Master scopes and classes
-  with nothing protected are unaffected. **Migration:** pass `fields:` listing
-  the fields to search.
-- **BREAKING**: `property :name, :number` and a server `Number` column now
-  map to `:float` instead of `:integer`. Parse's Number type holds
-  floating-point values, and the integer cast silently truncated them:
-  `property :score, :number` set to 4.75 read back as 4, and a class built
-  from the server schema read 9.99 as 9. The same applies to
-  `Parse::Schema::TYPE_MAP["Number"]`, `auto_generate_models!`, the
-  `<field>_increment!` helper, and an `Increment` operation on a float
-  field. **Migration:** a whole-number value now reads back as a Float (`5.0`
-  rather than `5`); declare the property `:integer` where integer semantics
-  are wanted.
-- **BREAKING**: `MCPRackApp.user_scoped` refuses `permissions: :admin`. The
-  admin tier skips the embedding spend cap and score quantization, so every
-  signed-in user of the endpoint inherited that exemption. **Migration:** use
-  `:readonly` or `:write`; build a custom `agent_factory:` for operator
-  endpoints that need the admin tier.
+- **BREAKING**: An MCP request whose `Mcp-Session-Id` is bound to another
+  principal is refused with 403 (`notifications/cancelled` and elicitation
+  replies are instead ignored with a silent 202, so they reveal nothing).
+  `resources/subscribe` needs a session the caller established through
+  `initialize` or its listening stream; an unknown session id gets 404, the
+  MCP signal to re-initialize. Previously a caller who knew a session id
+  could unsubscribe its resources, fill its subscription cap, or route an
+  approval prompt to its stream, and any signed-in caller could invent
+  session ids to fill the global subscription limit. **Migration:** clients
+  that follow the MCP lifecycle need no change; send the same credentials on
+  every request of a session and re-initialize on 404.
+- **BREAKING**: Atlas Search and vector search refuse a session-, user-, or
+  role-scoped query that lets a CLP protected field decide which rows match,
+  how they rank, or how they are filtered. This covers `fields:`, builder
+  block and `search_with_stage` paths (nested operators, wildcard and `multi`
+  path objects, `queryString`), highlight and autocomplete fields, `sort:`
+  keys, filter keys (nested, dotted, and `_p_` forms), vector fields and
+  filters, the native `$rankFusion` path, and faceted search, and a search
+  that names no fields while the scope has protected fields. Before, the
+  field was only stripped from results, so its value could be probed through
+  matching. Master scopes and classes with nothing protected are unaffected.
+  **Migration:** pass `fields:` naming the fields to search, and drop
+  protected fields from filters, sorts, and highlights.
+- **BREAKING**: Several constraints on the same field now all apply.
+  `query(:plays => 5, :plays.gt => 1)` compiles to
+  `{"plays" => {"$eq" => 5, "$gt" => 1}}` instead of keeping only the last
+  one; conflicting constraints (the same operator twice with different
+  values, two equalities, two regexes) are combined in a top-level `$and`.
+  **Migration:** code that relied on a later `where` replacing an earlier
+  constraint on the same field should clear it with `query.clear(:where)` or
+  build a fresh query.
+- **BREAKING**: `limit(0)` (and a negative limit) returns no rows without a
+  request, and aggregate helpers on such a query return their empty result.
+  Before, the limit was omitted and the server default of 100 rows came back.
+  **Migration:** use `limit(nil)` to clear a limit.
+- **BREAKING**: `sum`, `average`, `min`, `max`, `count_distinct`, and
+  `group_by` apply the query's `order`, `skip`, and `limit` before grouping,
+  so `query.skip(10).sum(:plays)` sums the rows after the first ten instead of
+  returning nil, and `order(:plays.desc).limit(2).average(:plays)` averages
+  the top two rows. `distinct` and `group_by_date` are unchanged.
+  **Migration:** sort or trim grouped output in Ruby, or use `group_by`'s own
+  `.order(...)`.
+- **BREAKING**: The query DSL no longer defines `Symbol#id` or `Symbol#size`.
+  `Symbol#id` made every symbol look like a record to ActiveRecord, so
+  `where(status: :draft)` raised on Rails 8.1 (#83), and `Symbol#size`
+  replaced Ruby's own method, so `sort_by(&:size)` raised. **Migration:**
+  write `:tags.array_size => 2` for `:tags.size => 2` and
+  `:author.pointer_id => id` for `:author.id => id`.
+- **BREAKING**: Assigning a value a property cannot represent raises
+  `Parse::Properties::TypecastError` (an `ArgumentError`) instead of storing
+  a guess. Previously `true` on an `:integer` became a Delete that erased the
+  column, `""` became `0`, `"1.5"` became `1`, and NaN or Infinity were sent
+  as null. `:string` refuses Arrays and Hashes and stores `false` as
+  `"false"`, `:date` refuses Numerics, `:boolean` reads `"no"` and `"n"` as
+  false, and `Parse::GeoPoint` raises on non-numeric or non-finite
+  coordinates instead of becoming (0, 0). Blank strings clear the field, and
+  data loaded from the server never raises. **Migration:** convert untrusted
+  input before assigning it (for example `Integer(params[:n], exception:
+  false)`, `Time.at(epoch)`), or rescue `Parse::Properties::TypecastError`
+  where form input is assigned directly.
+- **BREAKING**: Unsaved objects (no objectId) compare equal only to
+  themselves and hash by identity, so `uniq`, `Set`, and Hash keys no longer
+  merge distinct new records. **Migration:** an object's hash changes when it
+  is saved; rebuild a Set or Hash keyed by unsaved objects after saving.
+- **BREAKING**: `destroy` keeps the objectId and sets `destroyed?`;
+  `persisted?` is then false, and `save` returns false (`save!` raises
+  `Parse::RecordNotSaved`) instead of recreating the record. **Migration:**
+  check `destroyed?` rather than `id.nil?` after `destroy`.
+- **BREAKING**: Saving a record that references an unsaved object in a
+  pointer, array, or relation field fails instead of storing a pointer with a
+  null objectId. Single saves return false with an error on the field; batch
+  and transaction saves raise `Parse::RecordNotSaved`. **Migration:** save the
+  referenced object first, or in a `before_save` callback.
+- **BREAKING**: An object built from a server row with no `ACL` key has a
+  nil `acl` (the row is public on the server) instead of the class default
+  ACL. **Migration:** handle a nil `acl` on such rows.
+- **BREAKING**: The `as:` owner option is honored only as a Symbol key and
+  only as a `Parse::User`, a pointer to `_User`, or a user objectId String. A
+  String `"as"` key (as in form or JSON params) is dropped, and `"*"`,
+  `role:` keys, and other objects raise `ArgumentError`, so request input can
+  no longer choose a record's ACL owner or make it public. **Migration:** pass
+  the owner as `as: user` from server code.
+- **BREAKING**: `Array#save` and `Array#destroy` raise `ArgumentError` on a
+  non-empty array that contains no Parse objects, instead of doing nothing and
+  returning a truthy `BatchOperation`. When one chunk of a batch raises, the
+  chunks that succeeded are still applied before the exception is re-raised,
+  and `responses` holds one entry per request. **Migration:** call them only
+  on arrays of `Parse::Object`, and read per-request responses.
 
 #### MCP deployments can expose less than their users can read
 
@@ -103,23 +159,54 @@
 - **FIXED**: A `$relatedTo` constraint's `key` was not checked against the
   owning class's field policy, so `count_objects` on `_User` with
   `$relatedTo: { object: Post#X, key: "flaggedBy" }` revealed a relation
-  hidden from `Post`'s allowlist. The key is now checked like `$select` keys.
+  hidden from `Post`'s allowlist. The key is now checked like `$select` keys,
+  with the owner resolved from a pointer hash, a `Parse::Pointer`, or a
+  `"Class$id"` string.
+- **FIXED**: Agent tools checked a `where:`, `order:`, or filter key under one
+  field name and queried another. A declared column such as `PublicText`
+  passed the check and was sent as `publicText`, and two properties whose
+  Ruby and remote names crossed could be checked under one and queried under
+  the other. Validation and execution now share one name rule (a Ruby
+  property name maps to its declared column first, then an exact declared
+  column is kept), and `order:` is sent under the checked names.
+- **FIXED**: Aggregation through agent tools could still read hidden fields:
+  a pipeline that never projects (`[{ "$limit" => 1 }]`) returned whole
+  documents, `$$ROOT.secret` and `$$CURRENT` references were not checked, and
+  `$lookup` / `$graphLookup` join keys (`localField`, `foreignField`, `let`,
+  `startWith`, `connectFromField`, `connectToField`,
+  `restrictSearchWithMatch`) were not checked. Rows whose source document
+  reaches the output are now projected to the allowlist, and every one of
+  those references is checked against the right class.
 - **FIXED**: An `agent_method` returning aggregation rows
   (`Parse::AggregationResult`) passed Parse Server's internal columns
   (`_rperm`, `_hashed_password`, `_auth_data_*`) through to the caller. They
   are now removed at every depth, as on every other aggregation path.
-- **IMPROVED**: Each principal may hold a bounded number of session bindings
-  (100 by default). Past that its own least recently used idle binding is
+- **IMPROVED**: Each principal may hold at most 100 session bindings (the
+  shared master-key principal of an endpoint without a `principal_resolver`
+  is bounded only by the registry). Past that its own least recently used
+  idle binding is
   evicted, so one caller flooding `initialize` can no longer push other
   principals' idle sessions out of the registry and then claim their ids.
   `initialize` and `resources/subscribe` are charged against the principal's
   rate limiter (429 when exhausted). A skipped live session moves to the back
   of the eviction order, so a registry full of live sessions no longer makes
-  every new binding rescan them under the lock.
+  every new binding rescan them under the lock. An owner's ordinary requests
+  refresh its session's position, sessions holding resource subscriptions are
+  never evicted, and a listening stream is rate-charged and capacity-checked
+  before it claims a session id.
 - **IMPROVED**: A listening stream's revalidation thread is woken on close
   rather than killed, so it can no longer be interrupted inside a REST call
-  and return a pooled connection mid-response. A transient revalidation error
-  no longer closes the stream; errors on three consecutive checks do.
+  and return a pooled connection mid-response. A revalidator that reports the
+  session invalid closes the stream at once; one that raises is retried, and
+  the third consecutive raise closes it. `user_scoped` now separates a
+  rejected session from a Parse Server outage: an outage (unreachable server,
+  5xx) fails the request with 401 but keeps the token cached and counts as a
+  transient stream error, instead of closing every open stream and evicting
+  the token.
+- **FIXED**: A listening-stream body closed before Rack iterated it detached
+  the session's active stream, and a close that raced the attach left a
+  listener registered with no stream. A body now detaches only a listener it
+  attached.
 
 - **NEW**: `Parse::Agent::MCPRackApp.user_scoped(...)` builds an endpoint for
   signed-in application users. The session token comes from
@@ -128,7 +215,14 @@
   any agent is built, and it never falls back to the master key. Identity and
   tenant are pinned server-side (`tenant_from:`), and `agent_options:` passes
   extra agent settings such as `fields:` while refusing identity or authority
-  keys.
+  keys (and `master_atlas` and `allow_mutations`). `permissions:` accepts
+  `:readonly` (default) or `:write`; `:admin` is refused because it skips the
+  spend cap and score quantization for every signed-in user. Sessions are
+  owned by the verified user id, so a refreshed token keeps its session.
+  `session_validation:` (`:per_request` or `:cached`) and
+  `session_revalidate_interval:` (default 60s) control revocation, and
+  `MCPRackApp.new` accepts the underlying `listening_stream_revalidator:` and
+  `listening_stream_revalidate_interval:`.
 - **NEW**: `Parse::Agent::MCPRackApp.master_analytics(principal_resolver:, ...)`
   builds a shared master-key endpoint (read-only by default) that refuses to
   construct without a callable `principal_resolver`: without one every
@@ -204,6 +298,14 @@
   branch searched every column (`wildcard: "*"`), so CLP `protectedFields`
   could decide which documents matched. It now searches the embedded text
   sources unless the profile names fields.
+- **FIXED**: `semantic_search` filters could use an `agent_searchable
+  filter_fields:` entry outside `agent_fields` unless a per-agent `fields:`
+  policy also applied. Filterable fields are now always bounded by the
+  readable fields. A profile's configured lexical field that is an exact
+  declared server name (`title_exact`) is kept as written instead of being
+  recased and refused. The strict profile budget counts chunk metadata and
+  per-chunk overhead, so many tiny chunks no longer return several times the
+  budget.
 - **CHANGED**: `semantic_search` refuses a `query` longer than 4,000
   characters, and a profile reranker receives at most 2,000 characters of
   it. The query is paired with every candidate document in a rerank call, so
@@ -317,19 +419,163 @@
   index created with the Ruby name as its path must be recreated with the
   stored name; drift detection reports the mismatch.
 
-#### Model and cache fixes
+#### Records keep their identity, values, and writes
 
-- **FIXED**: The cache middleware's rescue list named
-  `Redis::CannotConnectError` and the other Redis errors directly. With a
-  memory or other non-Redis Moneta store, Redis is not loaded, so a store
-  error not listed before those names (anything but `TypeError` or
-  `EINVAL`) was replaced by `NameError: uninitialized constant Redis`,
-  hiding the real error. The Redis and `connection_pool` classes are now
-  listed only when those libraries are loaded.
-- **IMPROVED**: `Parse::Object.new` accepts hash-like input such as Rails
-  `ActionController::Parameters`, which is not a Hash and was previously
-  ignored. Conversion goes through `to_h`, so unpermitted strong parameters
-  are still refused.
+- **NEW**: `:number` is a property type for Parse Number columns: integral
+  values read back as Integer and fractional values as Float, so `4.75` is no
+  longer truncated to `4` and `5` does not become `5.0`. Server `Number`
+  columns (`Parse::Schema`, `auto_generate_models!`) use it, and GraphQL
+  exposes it as `Float`. `:integer` and `:float` keep their casting.
+- **NEW**: `destroyed?`, `cache_key`, `cache_version`, and
+  `cache_key_with_version` (ActiveRecord-compatible, so fragment caches no
+  longer collide across classes or never expire), and `attribute_values`,
+  the value form of `attributes` (which stays the property type map that
+  ActiveModel serialization reads).
+- **FIXED**: Mass assignment (`attributes=`, `apply_attributes!`, ActiveModel
+  `assign_attributes`) could change an object's `id`, so a params hash with
+  `"id"` redirected the next save to another record, and `assign_attributes`
+  skipped the protected-key filter (`session_token`, timestamps). Both are
+  closed, and assigning `objectId` no longer triggers an autofetch.
+- **FIXED**: `persisted?` means the record exists on the server, as
+  ActiveModel expects. Before, an object with unsaved changes or missing
+  timestamps reported false, so a Rails edit form re-rendered after a failed
+  validation submitted to create. Reading `updated_at` or `created_at` after
+  `create` no longer marks the record dirty.
+- **FIXED**: In-place edits to `:object` hashes (`obj.meta["k"] = 1`) and to
+  hashes inside arrays are detected and saved; they were silently dropped.
+  `:array` keeps `nil` elements instead of shifting later positions, assigned
+  arrays and hashes are copied so the caller's data is not changed through
+  the property, array change history records the real previous value, and
+  `rollback!` restores arrays.
+- **FIXED**: Dates nested inside `:array` and `:object` values are saved as
+  Parse Dates rather than ISO strings. `Parse::GeoPoint.new(lat:, lng:)` (and
+  `latitude:`/`longitude:`, hashes, numeric strings) no longer becomes (0, 0).
+  Without phonelib, a US number entered without `+` was saved with a Swiss
+  country code; 10-digit North American numbers now get `+1`, results match
+  phonelib, and `Parse::Phone.default_country_code` (default `"1"`) controls
+  national numbers. `Parse::Bytes` encodes without newlines and
+  `attributes=` works, and a `Parse::File` from server data no longer guesses
+  `image/jpeg`.
+- **FIXED**: `<field>_increment!` and `_decrement!` applied the amount twice
+  to the local value, and `op_increment!` truncated fractional amounts.
+  Changes to array fields were never marked saved after a save, so the next
+  save resent the whole array.
+- **FIXED**: `Parse::Object.new` converts only strong parameters, Structs,
+  and OpenStructs through `to_h` (permitted `ActionController::Parameters`
+  now work; unpermitted ones still raise), and with
+  `strict_property_redefinition = false` the redeclaration warning reports
+  the existing type rather than the new one.
+- **FIXED**: The cache middleware's rescue named Redis error classes
+  directly, so with a non-Redis store any other store error became
+  `NameError: uninitialized constant Redis`. Redis and `connection_pool`
+  classes are listed only when loaded, and `Redis::BaseConnectionError`,
+  `Redis::ReadOnlyError`, `RedisClient::Error`, and `Errno::ECONNREFUSED` now
+  disable caching for the request instead of failing it.
+
+#### ACL edits and revocations are always saved
+
+- **FIXED**: Revoking an ACL grant after a save was not sent: a stale
+  pre-save snapshot made the revocation compare unchanged, and `save`
+  returned true without writing it.
+- **FIXED**: `rollback!` now undoes in-place ACL edits. Copying an ACL shared
+  its permissions table, so a rolled-back grant was still sent on the next
+  save and change history showed identical old and new ACLs.
+- **FIXED**: `acl.delete(:public)`, `acl.delete("*")`, and `acl.delete(role)`
+  remove the entry (only user ids matched before), and
+  `Permission#read!`/`#write!`/`#no_read!`/`#no_write!` mark the ACL changed,
+  so a revoke through a `Permission` on a fetched object is saved.
+- **FIXED**: Batch (`Array#save`) and transaction saves apply the
+  `acl_policy` owner ACL to new records; owner-only records were created
+  public.
+- **FIXED**: `apply_role("role:Admin")` no longer writes `role:role:Admin`,
+  the string `"false"` is a denial rather than a grant, and ACL `eql?`/`hash`
+  agree with `==`.
+
+#### Batches, transactions, and retries apply exactly what succeeded
+
+- **FIXED**: Transactions are sent as one `POST /batch` with
+  `transaction: true`. The flag was dropped and transactions over 50
+  operations were split into parallel batches, so a failure could leave a
+  partial commit while the SDK rolled local state back. The retry on
+  conflict code 251 now runs.
+- **FIXED**: A batch chunk that fails with an HTTP error or a malformed
+  response fails every request in that chunk; before, later responses
+  shifted onto the wrong objects, and a short or non-array response counted
+  as success with objects marked clean but missing ids. Identical requests
+  (two Increments) are no longer collapsed into one, an object whose
+  attribute write and relation write split keeps the failed part dirty, a
+  batch create sets `updated_at`, `Array#destroy` marks objects destroyed,
+  new objects' relation additions are sent in the create, and a success body
+  with a `code` or `error` column is no longer treated as a failure.
+- **FIXED**: `save_all` reports a failing last page, visits records the block
+  leaves unchanged instead of stopping early, no longer mutates the caller's
+  constraints, and a query-scoped `save_all` with a block no longer runs a
+  second forced save over every match.
+- **FIXED**: A 502 or 504 with a JSON body that has no Parse error (as from a
+  gateway or load balancer) raises `Parse::Error::ServiceUnavailableError`;
+  before, it counted as success and saves returned true with no id.
+- **FIXED**: With `assume_server_idempotency`, retries only replay routes
+  Parse Server deduplicates (object, user, and installation writes,
+  functions, jobs); `POST /batch`, files, push, login, schemas, and config
+  are never replayed. Automatic request ids are left off functions, jobs,
+  push, logout, sessions, events, and password reset (the exclusion never
+  matched). A retried DELETE that finds the object gone reports success,
+  bodies with `__op` at any depth are not retried, error 143 is no longer a
+  `TimeoutError`, `retry: 0` disables retries, and the caller's headers hash
+  is no longer modified.
+- **CHANGED**: The `first_or_create!(synchronize: true)` lock lease defaults
+  to the client's worst-case time for a find and a create with retries
+  (about 222s with default timeouts) instead of 3 seconds, so it no longer
+  expires mid-call and admits a duplicate. The maximum `ttl:` rises from 30 to
+  300 seconds.
+
+#### Queries return the rows they describe
+
+- **FIXED**: `or_where` and `|` keep constraints added next to an existing
+  `$or`, and `Parse::Query.and` keeps every `$or` it combines.
+- **FIXED**: Automatic paging (`limit(:max)`, `all`, `results { }`) appends
+  `objectId` as the final sort key, so rows that tie on the sort field are no
+  longer returned twice or skipped (live: 1,200 rows returned, 617 unique).
+- **FIXED**: `latest` and `last_updated` work on a query that already has an
+  order, and `first`, `latest`, and `last_updated` no longer change the query
+  they are called on.
+- **FIXED**: A bare objectId compared to a pointer field in aggregate and
+  mongo-direct queries is matched in pointer storage form (`$ne` matched every
+  row; equality matched none), and a `Set` or `Range` passed to `in`, `nin`,
+  `all`, or `contained_by` is expanded into its members.
+- **FIXED**: `Parse::Model.find_class` no longer returns a class left behind
+  by `remove_const` after a model is redefined (code reload, tests), so field
+  aliases and `_p_` pointer detection use the current class, and a class named
+  after an earlier lookup is found. `belongs_to` and `has_many` refresh the
+  cached aliases, and linked-pointer constraints use the linked class's
+  declared names.
+
+#### The gem coexists with Rails and other libraries
+
+- **FIXED**: The gem loads when `Rails` is defined without railties (for
+  example by rails-html-sanitizer).
+- **CHANGED**: Query DSL methods on `Symbol` (`:plays.gt`, `:name.desc`) live
+  in included modules, so a method Ruby or another library (Mongoid, Sequel
+  core extensions) defines on `Symbol` is never replaced, whichever loads
+  first. Skipped names are listed in `Parse::Operation.symbol_conflicts`, and
+  Mongoid query keys passed to a Parse query are translated.
+- **FIXED**: Automatic pluralized aliases are created only in the namespace
+  that defines the model (`::Posts` for `Post`), never in the module where
+  the lookup happened, and a frozen namespace no longer raises `FrozenError`.
+- **FIXED**: Schema migration no longer crashes on relation fields, creates
+  Pointer and Relation columns with their `targetClass`, creates `:vector`
+  columns as Array, and no longer reports `:vector`, `:timezone`, `:phone`,
+  or `:email` fields as mismatched.
+- **FIXED**: `Parse.auto_generate_models!` exposes a server column that
+  clashes with a Ruby method (`class`, `hash`, `send`) as `<name>_field`,
+  skips a second column that underscores to an existing name with a warning
+  instead of aborting, and generated classes query their real server class.
+- **FIXED**: Search index migrations, `describe(:atlas)`, and the agent's
+  Atlas tools load Atlas Search on first use instead of failing with
+  `NameError`. `enable_mcp!` no longer needs webrick (not a dependency), and
+  prompt-marker scrubbing works without the MCP client loaded.
+- **CHANGED**: `Parse::User.model_name` is relative to the `Parse`
+  namespace, so Rails forms and routes use `params[:user]` and `users_path`.
 
 #### `protectedFields` resolution matches Parse Server
 
@@ -403,8 +649,11 @@
   created before the call (a long-lived pool) does not, and runs unnarrowed.
 - Without a tenant scope, every `user_scoped` caller charges the shared
   default `SpendCap` bucket, so one user can use up the embedding and
-  reranking budget for all. Configure `agent_tenant_scope` (or `tenant_from:`)
-  for per-tenant budgets.
+  reranking budget for all. Declare `agent_tenant_scope` on the searched
+  classes and pass `tenant_from:` so each tenant has its own budget.
+- Mongo-direct, Atlas Search, and vector results for callers in a `role:` or
+  `authenticated` protectedFields group now omit those fields, matching
+  Parse Server.
 - Parse Server 9.10.3 honors `role:` entries in class-level permissions for
   LiveQuery subscriptions only when `enableLiveQueryClassLevelPermissionRoles`
   is set (default `false`). Without it, a role member is refused a
