@@ -56,18 +56,21 @@ class SemanticSearchFieldAllowlistTest < Minitest::Test
     a
   end
 
+  def setup
+    @search_calls = 0
+  end
+
   # Run semantic_search with find_similar returning one raw hit carrying
-  # every field, private ones included.
+  # every field, private ones included. Every search is counted in
+  # @search_calls, which stays readable even when the call raises.
   def run_search(klass, **args)
     hit = { "_id" => "d1", "title" => "Public title", "summary" => "Public summary",
             "body" => SECRET, "_vscore" => 0.9 }
-    called = false
-    klass.stub(:find_similar, ->(**_kw) { called = true; [hit] }) do
+    klass.stub(:find_similar, ->(**_kw) { @search_calls += 1; [hit] }) do
       Parse::Retrieval::AgentTool.stub(:convert_to_parse_form, ->(doc, _c) { doc.dup }) do
-        result = Parse::Retrieval::AgentTool.semantic_search(
+        Parse::Retrieval::AgentTool.semantic_search(
           fake_agent, class_name: klass.parse_class, query: "anything", **args,
         )
-        return [result, called]
       end
     end
   end
@@ -77,26 +80,31 @@ class SemanticSearchFieldAllowlistTest < Minitest::Test
     assert_equal :field_denied, err.kind
     assert_equal "body", err.denied_field
     refute_includes err.message, SECRET
+    assert_equal 0, @search_calls, "the search must not run for a refused text field"
   end
 
   def test_explicit_hidden_text_source_is_refused_before_search
-    called = nil
-    err = assert_raises(Parse::Agent::AccessDenied) do
-      _, called = run_search(MixedDoc, text_field: "body")
-    end
+    err = assert_raises(Parse::Agent::AccessDenied) { run_search(MixedDoc, text_field: "body") }
     assert_equal :field_denied, err.kind
-    assert_nil called, "the search must not run for a refused text field"
+    assert_equal 0, @search_calls, "the search must not run for a refused text field"
+  end
+
+  # Guards the counter itself: a successful search must register, or the
+  # zero-call assertions above would pass vacuously.
+  def test_search_counter_records_a_real_search
+    run_search(MixedDoc, text_field: "summary")
+    assert_equal 1, @search_calls
   end
 
   def test_inference_picks_the_only_readable_source
-    result, = run_search(MixedDoc)
+    result = run_search(MixedDoc)
     contents = result[:chunks].map { |c| c[:content] }
     assert_equal ["Public summary"], contents
     refute_includes JSON.generate(result), SECRET
   end
 
   def test_explicit_readable_source_still_works
-    result, = run_search(MixedDoc, text_field: "summary")
+    result = run_search(MixedDoc, text_field: "summary")
     assert_equal ["Public summary"], result[:chunks].map { |c| c[:content] }
     refute_includes JSON.generate(result), SECRET
   end
