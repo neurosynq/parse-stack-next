@@ -33,9 +33,6 @@ module Parse
       # Accepted values for `session_validation:`.
       SESSION_VALIDATION_MODES = %i[per_request cached].freeze
 
-      # Agent constructor options a factory owns. Passing them through
-      # `agent_options:` would let configuration override the identity or
-      # authority the factory pins, so they are refused at construction.
       # One rate limiter per principal, shared by every agent a deployment
       # factory builds for that principal. A factory builds a fresh agent per
       # request, and each agent would otherwise get a fresh limiter, so the
@@ -74,7 +71,9 @@ module Parse
       # The registry a factory uses, or nil when the caller injected its own
       # `rate_limiter:` (honored as-is, e.g. a shared Redis limiter).
       def self.principal_rate_limiters_for(agent_options)
-        return nil if agent_options.key?(:rate_limiter)
+        # Only a real injected limiter bypasses the registry; an explicit
+        # `rate_limiter: nil` would otherwise give every request a fresh one.
+        return nil unless agent_options[:rate_limiter].nil?
         PrincipalRateLimiters.new(
           limit: agent_options.fetch(:rate_limit, Parse::Agent::DEFAULT_RATE_LIMIT),
           window: agent_options.fetch(:rate_window, Parse::Agent::DEFAULT_RATE_WINDOW),
@@ -85,6 +84,9 @@ module Parse
       # session, refused by {MCPRackApp.user_scoped}.
       USER_SCOPED_REFUSED_AGENT_OPTIONS = %i[master_atlas allow_mutations].freeze
 
+      # Agent constructor options a factory owns. Passing them through
+      # `agent_options:` would let configuration override the identity or
+      # authority the factory pins, so they are refused at construction.
       FACTORY_OWNED_AGENT_OPTIONS = %i[
         session_token acl_user acl_role
         impersonate_user impersonation_user impersonate_mint impersonation_mint
@@ -230,7 +232,7 @@ module Parse
         # @return [MCPRackApp]
         # @raise [ArgumentError] without a callable `principal_resolver`, or on
         #   a factory-owned option.
-        def master_analytics(principal_resolver: nil, permissions: :readonly, client: nil,
+        def master_analytics(principal_resolver:, permissions: :readonly, client: nil,
                              tenant_from: nil, agent_options: {}, **rack_options, &block)
           raise ArgumentError, "MCPRackApp.master_analytics builds its own agent factory; do not pass a block" if block
           unless principal_resolver.respond_to?(:call)

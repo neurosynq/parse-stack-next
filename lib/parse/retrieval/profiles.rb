@@ -71,6 +71,8 @@ module Parse
       MAX_RERANK_DOCUMENT_CHARS = 32_000
 
       FAILURE_MODES = %i[fallback raise].freeze
+      # Options that only have an effect when the profile names a reranker.
+      RERANK_OPTIONS = %i[rerank_candidates rerank_top_n rerank_max_document_chars rerank_timeout on_rerank_failure].freeze
       HYBRID_KEYS = %i[lexical vector fusion].freeze
       NAME_RE = /\A[a-z][a-z0-9_]{0,39}\z/.freeze
 
@@ -143,7 +145,14 @@ module Parse
                   "Retrieval profile #{key.inspect}: unknown option(s) #{unknown.inspect}. " \
                   "Allowed: #{ALLOWED_OPTIONS.inspect}."
           end
-          opts = DEFAULTS.merge(options.transform_keys(&:to_sym))
+          given = options.transform_keys(&:to_sym)
+          rerank_only = given.keys & RERANK_OPTIONS
+          if given[:reranker].nil? && !rerank_only.empty?
+            raise ArgumentError,
+                  "Retrieval profile #{key.inspect}: #{rerank_only.inspect} only apply with a reranker:; " \
+                  "set reranker: or remove them."
+          end
+          opts = DEFAULTS.merge(given)
 
           k = positive_int!(key, :k, opts[:k])
           max_k = positive_int!(key, :max_k, opts[:max_k])

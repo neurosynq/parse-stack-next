@@ -284,6 +284,18 @@ class AgentFieldPolicyTest < Minitest::Test
     end
   end
 
+  def test_text_search_is_refused_when_no_text_field_is_readable
+    a = agent(fields: { FPDoc => [] })
+    Parse::Agent::Tools.stub(:assert_class_accessible!, nil) do
+      called = false
+      Parse::AtlasSearch.stub(:search, ->(*_a, **_k) { called = true; raise "stop" }) do
+        r = a.execute(:atlas_text_search, class_name: "FieldPolicyDoc", query: "q")
+        assert_equal :field_denied, r.dig(:details, :kind)
+      end
+      refute called, "an empty readable set must not become a wildcard search"
+    end
+  end
+
   def test_order_field_names_parses_rest_and_array_forms
     assert_equal %w[createdAt title], Parse::Agent::Tools.order_field_names("-createdAt, title")
     assert_equal %w[a b], Parse::Agent::Tools.order_field_names(["-a", "+b"])

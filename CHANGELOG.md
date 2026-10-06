@@ -2,6 +2,23 @@
 
 ### 5.8.0
 
+#### Breaking Changes
+
+- **BREAKING**: `query_class`, `count_objects`, `export_data`,
+  `explain_query`, and `atlas_text_search` refuse a caller `where:`,
+  `order:`, or `filter:` (including inside `$inQuery`/`$select` subqueries)
+  on a field outside the class's `agent_fields`, with `AccessDenied`
+  (`kind: :field_denied`). Before 5.8 these calls ran and let an agent infer a
+  hidden field's value from which rows matched or how they were ordered.
+  **Migration:** add the field to `agent_fields` if agents should filter or
+  sort on it, or drop the constraint. Classes without `agent_fields` are
+  unaffected.
+- **BREAKING**: Session termination (`DELETE` with `Mcp-Session-Id`) passes the
+  Origin policy, authenticates through the agent factory (401 when refused),
+  and is refused with 403 for a session owned by another principal.
+  **Migration:** send the same credentials on `DELETE` as on the session's
+  other requests.
+
 #### MCP deployments can expose less than their users can read
 
 - **NEW**: `Parse::Agent.new(fields: { Customer => %i[display_name timezone], default: [...] })`
@@ -29,8 +46,9 @@
   allowlist, and without `fields:` it (and a non-empty faceted search query)
   searched every field; `explain_query` never checked its `where:`. Each could
   reveal a hidden field's value. Filters are now checked, text search defaults
-  to the readable fields when an allowlist applies, hybrid retrieval profiles
-  restrict their lexical branch to the readable text sources, and
+  to the readable fields when an allowlist applies (and is refused when none
+  is readable, rather than falling back to a wildcard), hybrid retrieval
+  profiles restrict their lexical branch to readable fields, and
   `explain_query` refuses a hidden field in `where:`.
 - **FIXED**: Subqueries could reach fields a direct query would be refused:
   `$inQuery`, `$notInQuery`, `$select`, and `$dontSelect` predicates (and a
@@ -38,9 +56,10 @@
   allowlist, so an equivalent subquery is no longer an oracle for a hidden
   field.
 - **FIXED**: `call_method` results projected only the top-level object, so a
-  returned object's embedded children (or object JSON inside a returned Hash)
-  could carry fields outside their own class's allowlist. Every embedded
-  object is now projected through its own class's effective allowlist.
+  returned object's embedded children (or object JSON inside a returned Hash,
+  saved or unsaved) could carry fields outside their own class's allowlist.
+  Every embedded object is now projected through its own class's effective
+  allowlist.
 - **FIXED**: Field refusals from `group_by`, `group_by_date`, and `distinct`
   passed the refusal into `AccessDenied`'s class-name slot, so the message was
   a stringified Hash and `kind`, `denied_field`, and `allowed_fields` were
@@ -67,12 +86,12 @@
   stream or a pending approval prompt) is never evicted under LRU pressure,
   so flooding new sessions cannot strip a victim's owner. `user_scoped`
   refuses `master_atlas` and `allow_mutations` in `agent_options`.
-- **CHANGED**: Session termination (`DELETE` with `Mcp-Session-Id`) is now
-  gated like every other session operation: it passes the Origin policy,
-  authenticates through the agent factory (401 when refused), and is refused
-  with 403 when the session belongs to a different principal. Previously it
-  ran before authentication, so any caller who knew a session id could cancel
-  its requests and drop its approvals, subscriptions, and log level.
+- **FIXED**: Session termination ran before authentication, so any caller who
+  knew a session id could cancel its requests and drop its approvals,
+  subscriptions, and log level (see Breaking Changes).
+- **IMPROVED**: When the session registry is full of live sessions, a new
+  session or stream is refused with 503 rather than admitted without an
+  owner.
 - **FIXED**: `notifications/cancelled` and elicitation replies were bound only
   to the session id, so a caller who knew another principal's
   `Mcp-Session-Id` could cancel its requests or answer its approval prompts.
@@ -146,11 +165,14 @@
   the query, document text, field values, URLs, or credentials. A failed call
   emits one too, naming only the error class. Rerank token counts are SDK
   estimates, not provider-reported usage.
-- **IMPROVED**: The response token budget covers the whole response: each
-  returned parent document counts once, alongside chunk text. Under a profile
-  the budget is mandatory (the caller can lower it but not raise or disable
-  it), and a caller's `k` can never raise retrieval above the profile's
-  `rerank_candidates`.
+- **CHANGED**: The response token budget covers the whole response: each
+  returned parent document counts once, alongside chunk text, so a caller
+  passing `max_total_tokens:` may get fewer chunks than in 5.7. Under a
+  profile the budget is mandatory: the caller can lower it but not raise or
+  disable it, and it is never exceeded, even by an oversized first result. A
+  caller's `k` can never raise retrieval above the profile's
+  `rerank_candidates`, and rerank options set without a `reranker:` are
+  refused at registration.
 - **NEW**: `Parse::Retrieval::Benchmark` scores profiles on a labeled case set
   (recall@k, MRR, hit rate, mean and p95 latency, forbidden-id violations,
   estimated tokens), overall and per tag, through the real `semantic_search`
@@ -250,6 +272,23 @@
   pipelines addressed `owner` instead of `_p_owner` and pointer values were
   not converted to storage form. Models now resolve through
   `Parse::Model.find_class`.
+
+### Behavior Notes
+
+- An Atlas vector index whose path is the Ruby name of a multi-word
+  `:vector` property (`body_embedding`) must be recreated with the stored
+  column (`bodyEmbedding`); drift detection reports the mismatch. Such an
+  index never matched stored vectors, so search results do not get worse.
+- On a shared master-key endpoint without a `principal_resolver`, every
+  caller is the same principal, so owner binding does not separate them; use
+  `MCPRackApp.master_analytics`, which requires a resolver.
+- `Parse::Authorization` resolves a session through `/users/me` with the
+  response cache bypassed, adding one uncached round trip per identity-cache
+  miss.
+- Field policies, field-name mode, and query field aliases are scoped
+  fiber-locally to each tool call or query. Work a tool hands to another
+  thread (for example a thread pool inside a custom tool) runs outside that
+  scope and is not narrowed.
 
 ### 5.7.6
 

@@ -223,7 +223,7 @@ module Parse
         # Token budget (B4): trim the score-ordered chunk list before
         # building the envelope so `documents` only carries parents whose
         # chunks survived.
-        kept, dropped = apply_token_budget(chunks, resolve_token_budget(max_total_tokens))
+        kept, dropped = apply_token_budget(chunks, resolve_token_budget(max_total_tokens), strict: !prof.nil?)
 
         # Source dedup (A3): a document's (projected) source record is
         # identical across all its chunks. Hoist it into a `documents` map
@@ -267,13 +267,26 @@ module Parse
       # has an allowlist and no readable text source.
       def hybrid_config_for(prof, klass)
         cfg = Marshal.load(Marshal.dump(prof.hybrid.to_h))
-        readable = readable_text_fields(klass)
-        return cfg if readable.nil?
-        raise text_field_denied(klass, searchable_text_fields(klass).first) if readable.empty?
+        allowlist = Parse::Agent::MetadataRegistry.field_allowlist(klass.parse_class)
+        return cfg if allowlist.nil? || allowlist.empty?
         lexical = (cfg[:lexical] || {}).dup
-        wire = readable.map { |f| Parse::Retrieval.send(:wire_name, klass, f) }
-        lexical[:fields] = lexical[:fields] ? (Array(lexical[:fields]).map(&:to_s) & wire) : wire
-        raise text_field_denied(klass, Array(cfg.dig(:lexical, :fields)).first) if lexical[:fields].empty?
+        if lexical[:fields]
+          # Server-configured lexical fields are kept when the agent may read
+          # them (any readable field, not only embedding sources), and
+          # translated to their stored names.
+          readable_wire = allowlist.map(&:to_s) - Parse::Agent::MetadataRegistry::ALWAYS_KEEP_FIELDS
+          configured = Array(lexical[:fields]).map { |f| Parse::Retrieval.send(:wire_name, klass, f) }
+          lexical[:fields] = configured & readable_wire
+        else
+          # Unconfigured: search the readable embedded text sources.
+          readable = readable_text_fields(klass) || []
+          lexical[:fields] = readable.map { |f| Parse::Retrieval.send(:wire_name, klass, f) }
+        end
+        if lexical[:fields].empty?
+          # An empty list would mean `wildcard: "*"`, letting hidden fields
+          # decide matches; refuse instead.
+          raise text_field_denied(klass, Array(cfg.dig(:lexical, :fields)).first || searchable_text_fields(klass).first)
+        end
         cfg[:lexical] = lexical
         cfg
       end
@@ -388,7 +401,11 @@ module Parse
       # The estimate covers the whole response, not only chunk text: each
       # chunk's content plus, the first time a parent document appears, that
       # document's serialized source record (it is hoisted into `documents`).
-      def apply_token_budget(chunks, budget)
+      #
+      # `strict:` (a profile's mandatory budget) drops even the first chunk
+      # when it alone exceeds the budget; otherwise the first chunk is always
+      # kept so an oversized single result still returns something.
+      def apply_token_budget(chunks, budget, strict: false)
         return [chunks, 0] if budget.nil? || chunks.empty?
         total = 0
         kept = []
@@ -400,7 +417,7 @@ module Parse
             doc_est = (JSON.generate(chunk.source).length / 4.0).ceil rescue 0
             est += doc_est
           end
-          break unless kept.empty? || total + est <= budget
+          break unless (kept.empty? && !strict) || total + est <= budget
           kept << chunk
           seen_docs[oid] = true if oid
           total += est

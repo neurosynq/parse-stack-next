@@ -287,6 +287,18 @@ class MCPDeploymentsTest < Minitest::Test
     assert_same injected, @built.last.options[:rate_limiter]
   end
 
+  def test_explicit_nil_rate_limiter_still_shares_the_principal_limiter
+    client = FakeClient.new({ "tok-a" => "u_a" }, master_key: "mk")
+    app = user_app(client, agent_options: { rate_limiter: nil })
+    with_agent_double do
+      post(app, "tools/list", headers: bearer("tok-a"))
+      post(app, "tools/list", headers: bearer("tok-a"))
+    end
+    first, second = @built.map { |agent| agent.options[:rate_limiter] }
+    refute_nil first
+    assert_same first, second
+  end
+
   def test_master_analytics_shares_one_limiter_per_operator
     app = analytics_app
     with_agent_double do

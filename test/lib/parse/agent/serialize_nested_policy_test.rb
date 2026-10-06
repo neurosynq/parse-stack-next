@@ -65,4 +65,12 @@ class SerializeNestedPolicyTest < Minitest::Test
     out = serialize({ "item" => child_json }, Parse::Agent.new(permissions: :readonly))
     assert_equal "do-not-leak", out["item"]["secret"]
   end
+
+  def test_unsaved_embedded_object_without_an_id_is_projected
+    unsaved = { "__type" => "Object", "className" => "SerializeNestedChild",
+                "name" => "kid", "secret" => "do-not-leak" }
+    out = serialize({ "draft" => unsaved })
+    refute_includes JSON.generate(out), "do-not-leak"
+    assert_equal "kid", out["draft"]["name"]
+  end
 end

@@ -5854,14 +5854,15 @@ module Parse
       # the executing agent's `fields:` policy). A method may return an
       # object whose included children, or a plain Hash holding object JSON,
       # carry fields the caller may not read; projecting only the top-level
-      # class would leak them. An embedded object is a Hash with a
-      # `className` and an `objectId`.
+      # class would leak them. An embedded object is any Hash carrying a
+      # `className`, saved or not: an unsaved object has no `objectId` but
+      # still holds field values. A bare pointer keeps only its className,
+      # `__type`, and `objectId`, so projecting it is harmless.
       def project_embedded_objects(value)
         case value
         when Hash
           class_name = value["className"] || value[:className]
-          has_id = value.key?("objectId") || value.key?(:objectId)
-          projected = class_name && has_id ? project_object_to_allowlist(class_name.to_s, value) : value
+          projected = class_name ? project_object_to_allowlist(class_name.to_s, value) : value
           projected.each_with_object({}) { |(k, v), acc| acc[k] = project_embedded_objects(v) }
         when Array
           value.map { |item| project_embedded_objects(item) }
@@ -5972,6 +5973,9 @@ module Parse
         # neither which rows match nor their rank depends on a hidden field.
         assert_where_fields_in_allowlist!(class_name, filter) if filter.is_a?(Hash)
         fields_norm ||= readable_atlas_text_fields(class_name)
+        # An empty field list means `wildcard: "*"` to Atlas Search, which
+        # would let hidden fields decide matches; refuse instead.
+        refuse_empty_readable_text_fields!(class_name, fields_norm)
 
         # TRACK-AGENT-6 / TRACK-AGENT-7 fix: per-agent filter is
         # UNCONDITIONAL; canonical filter is LLM-controllable via
@@ -6088,7 +6092,10 @@ module Parse
           facet_opts = {}
           # A non-empty query searches only readable fields (never a
           # wildcard across hidden ones) when an allowlist applies.
-          facet_opts[:fields] = readable if readable && !query.to_s.strip.empty?
+          if readable && !query.to_s.strip.empty?
+            refuse_empty_readable_text_fields!(class_name, readable)
+            facet_opts[:fields] = readable
+          end
           result = Parse::AtlasSearch.faceted_search(
             class_name, query.to_s, facets,
             limit: limit, master: true, **facet_opts,
@@ -6382,6 +6389,17 @@ module Parse
         allowlist = Parse::Agent::MetadataRegistry.field_allowlist(class_name)
         return nil if allowlist.nil? || allowlist.empty?
         allowlist.map(&:to_s) - Parse::Agent::MetadataRegistry::ALWAYS_KEEP_FIELDS
+      end
+
+      # @api private
+      def refuse_empty_readable_text_fields!(class_name, fields)
+        return unless fields.is_a?(Array) && fields.empty?
+        raise Parse::Agent::AccessDenied.new(
+          class_name,
+          "No readable fields to text-search on class '#{class_name}' under this agent's field policy.",
+          kind: :field_denied,
+          allowed_fields: Parse::Agent::MetadataRegistry.field_allowlist(class_name)&.map(&:to_s),
+        )
       end
 
       def assert_atlas_field_allowed!(class_name, field_name, kind:)

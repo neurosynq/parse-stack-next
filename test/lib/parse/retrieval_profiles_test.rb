@@ -80,6 +80,7 @@ class RetrievalProfilesTest < Minitest::Test
     assert_raises(ArgumentError) { P.register(:bad, rerank_timeout: 0) }
     assert_raises(ArgumentError) { P.register("Not Valid", k: 1) }
     assert_raises(ArgumentError) { P.register(:wide, k: 30, max_k: 50) }
+    assert_raises(ArgumentError) { P.register(:norerank, rerank_top_n: 3) }
     assert_empty P.names
   end
 
@@ -150,6 +151,36 @@ class RetrievalProfilesTest < Minitest::Test
                                                               query: "q", profile: "balanced")
     end
     assert_equal ["body"], captured[:hybrid][:lexical][:fields], "never a wildcard over hidden fields"
+  end
+
+  def test_configured_lexical_fields_may_be_any_readable_field
+    P.register(:titled, k: 5, hybrid: { lexical: { fields: %w[title] } })
+    captured = {}
+    Parse::Retrieval.stub(:retrieve, ->(**kw) { captured.replace(kw); [] }) do
+      Parse::Retrieval::AgentTool.semantic_search(fake_agent, class_name: "RetrievalProfileHybridDoc",
+                                                              query: "q", profile: "titled")
+    end
+    assert_equal ["title"], captured[:hybrid][:lexical][:fields]
+    P.register(:secretive, k: 5, hybrid: { lexical: { fields: %w[secret] } })
+    assert_raises(Parse::Agent::AccessDenied) do
+      Parse::Retrieval.stub(:retrieve, ->(**_kw) { [] }) do
+        Parse::Retrieval::AgentTool.semantic_search(fake_agent, class_name: "RetrievalProfileHybridDoc",
+                                                                query: "q", profile: "secretive")
+      end
+    end
+  end
+
+  def test_profile_budget_drops_an_oversized_first_result
+    P.register(:tiny, k: 5, max_total_tokens: 40)
+    huge = [{ "_id" => "d1", "title" => "t", "body" => "z" * 100_000, "_vscore" => 0.9 }]
+    result = ProfDoc.stub(:find_similar, ->(**_kw) { huge }) do
+      Parse::Retrieval::AgentTool.stub(:convert_to_parse_form, ->(doc, _c) { doc.dup }) do
+        call(profile: "tiny")
+      end
+    end
+    assert_equal true, result[:budget_truncated]
+    total = result[:chunks].sum { |c| c[:content].to_s.length } / 4
+    assert_operator total, :<=, 40, "a mandatory profile budget is never exceeded"
   end
 
   def test_caller_k_cannot_exceed_the_rerank_candidate_budget

@@ -878,7 +878,12 @@ module Parse
           # level, or have its elicitation capability recorded (owner-binding;
           # see SessionOwnerRegistry). A session id already owned by another
           # principal is refused outright rather than rebound.
-          unless @session_owners.bind(agent.correlation_id, principal_fingerprint(agent, env))
+          bound = @session_owners.bind(agent.correlation_id, principal_fingerprint(agent, env))
+          if bound == :full
+            @logger&.warn("[Parse::Agent::MCPRackApp] initialize refused: session registry full")
+            return [503, json_headers, [json_rpc_error(-32_000, "Session capacity exhausted", id: body["id"])]]
+          end
+          unless bound
             @logger&.warn("[Parse::Agent::MCPRackApp] initialize refused: session owned by another principal")
             return [403, json_headers,
                     [json_rpc_error(-32_600, "Mcp-Session-Id is owned by another principal", id: body["id"])]]
@@ -1194,7 +1199,12 @@ module Parse
         # infeasible to enumerate. (Contrast the cancellation/elicitation
         # paths, which return a uniform 202 because their ids are
         # client-chosen and guessable.)
-        unless @session_owners.authorize_attach(session_id, principal_fingerprint(agent, env))
+        attach = @session_owners.authorize_attach(session_id, principal_fingerprint(agent, env))
+        if attach == :full
+          @logger&.warn("[Parse::Agent::MCPRackApp] Listening stream denied: session registry full")
+          return [503, json_headers, [json_rpc_error(-32_000, "Session capacity exhausted")]]
+        end
+        unless attach
           @logger&.warn("[Parse::Agent::MCPRackApp] Listening stream denied: session owned by another principal")
           return [403, json_headers, [json_rpc_error(-32_600, "Mcp-Session-Id is owned by another principal")]]
         end
@@ -2098,8 +2108,7 @@ module Parse
             return false if owner && owner != fingerprint
             @owners.delete(session_id)
             @owners[session_id] = fingerprint
-            evict_lru!
-            true
+            retain_or_reject!(session_id)
           end
         end
 
@@ -2113,8 +2122,7 @@ module Parse
             owner = @owners[session_id]
             if owner.nil?
               @owners[session_id] = fingerprint
-              evict_lru!
-              true
+              retain_or_reject!(session_id)
             elsif owner == fingerprint
               @owners.delete(session_id)
               @owners[session_id] = owner
@@ -2176,13 +2184,29 @@ module Parse
         # would make it unbound, and an unbound session accepts control
         # messages from anyone, so a flood of new sessions could otherwise
         # strip a victim's owner and let the flooder answer its approvals.
-        def evict_lru!
+        def evict_lru!(protect: nil)
           return if @owners.size <= @max
           @owners.keys.each do |sid|
             break if @owners.size <= @max
+            next if sid == protect
             next if @pinned && (@pinned.call(sid) rescue false)
             @owners.delete(sid)
           end
+        end
+
+        # Make room for a binding just written for `session_id`, never by
+        # evicting that binding itself. When every other entry is pinned and
+        # the registry is full, the new binding cannot be kept: it is removed
+        # and :full returned so the caller refuses admission, rather than
+        # reporting success for a session that has no owner (which would let
+        # any caller attach to or control it).
+        #
+        # @return [true, :full]
+        def retain_or_reject!(session_id)
+          evict_lru!(protect: session_id)
+          return true if @owners.size <= @max
+          @owners.delete(session_id)
+          :full
         end
 
         def blank?(value)

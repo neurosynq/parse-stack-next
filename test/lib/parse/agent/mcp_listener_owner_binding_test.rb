@@ -178,6 +178,15 @@ class MCPListenerOwnerBindingTest < Minitest::Test
     refute reg.owned_by?("s-a", "op:x"), "idle sessions are still evicted"
   end
 
+  def test_full_pinned_registry_refuses_admission_instead_of_dropping_ownership
+    reg = Parse::Agent::MCPRackApp::SessionOwnerRegistry.new(max_entries: 1, pinned: ->(_sid) { true })
+    assert_equal true, reg.bind("s-live", "op:alice")
+    assert_equal :full, reg.bind("s-new", "op:bob"), "cannot keep a new owner when every slot is live"
+    assert_equal :full, reg.authorize_attach("s-other", "op:eve")
+    refute reg.controllable_by?("s-live", "op:bob")
+    assert reg.owned_by?("s-live", "op:alice")
+  end
+
   def test_master_key_agents_share_one_principal_without_resolver
     # Documented limitation: with no principal_resolver, bare master-key agents
     # are indistinguishable, so owner-binding is a no-op among them.
