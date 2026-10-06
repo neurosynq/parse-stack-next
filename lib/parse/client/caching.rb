@@ -6,6 +6,7 @@ require "moneta"
 require "connection_pool"
 require "digest"
 require "securerandom"
+require "json"
 require_relative "protocol"
 
 module Parse
@@ -44,9 +45,24 @@ module Parse
       # revoked token resolving to its user until the entry expires. The
       # credential endpoints carry a password and must never be stored.
       UNCACHEABLE_PATH_RE = %r{/(?:users/me|sessions/me|login|verifyPassword|logout)/?\z}.freeze
-      # Prefix of the per-resource version keys used by the default (legacy)
-      # key layout. See {#legacy_version_key}.
+      # Prefix of the per-resource version keys. See {#version_keys}.
       LEGACY_VERSION_PREFIX = "rv"
+      # Prefix of the per-class version keys folded into collection reads
+      # (queries, aggregates). See {#version_keys}.
+      CLASS_VERSION_PREFIX = "cv"
+      # Request header BodyBuilder sets when it re-sends a long GET as a POST.
+      METHOD_OVERRIDE = "X-Http-Method-Override"
+      # Paths that name a Parse class, optionally followed by an object id.
+      CLASS_PATH_RE = %r{(?:\A|/)(?:classes|aggregate|purge|schemas)/([^/]+)(?:/([^/]+))?/?\z}.freeze
+      # Built-in class endpoints, optionally followed by an object id.
+      SYSTEM_CLASS_PATH_RE = %r{(?:\A|/)(users|roles|installations|sessions)(?:/([^/]+))?/?\z}.freeze
+      # Class names for the built-in class endpoints.
+      SYSTEM_CLASSES = {
+        "users" => "_User", "roles" => "_Role",
+        "installations" => "_Installation", "sessions" => "_Session",
+      }.freeze
+      # Path of the batch endpoint, whose body names the resources it writes.
+      BATCH_PATH_RE = %r{(?:\A|/)batch/?\z}.freeze
 
       class << self
         # @!attribute enabled
@@ -164,6 +180,12 @@ module Parse
         # stored. See UNCACHEABLE_PATH_RE.
         return @app.call(env) if url.path.to_s.match?(UNCACHEABLE_PATH_RE)
 
+        # A long query that BodyBuilder re-sent as a POST with a GET method
+        # override is a read. It is never cached (only GETs are), and treating
+        # it as a write would retire every cached query of its class each
+        # time a long query ran.
+        return @app.call(env) if method != :get && @request_headers[METHOD_OVERRIDE].to_s.casecmp?("GET")
+
         @cache_key = url.to_s
 
         # Auth discriminator. A master-key request bypasses ACL, CLP and
@@ -173,11 +195,11 @@ module Parse
         # cache entry or the cache would hand privileged fields to an
         # unprivileged caller.
         #
-        # The default (legacy) layout also binds every key to the application
-        # id and the credential that produced it (`@legacy_auth`). Without
-        # that, a client configured with a different application id or a
-        # wrong master/REST key, sharing the same store, was served another
-        # application's cached private rows: the URL alone matched.
+        # Both layouts also bind every key to the application id and the
+        # credential that produced it (`@legacy_auth`, see {#versioned_key}).
+        # Without that, a client configured with a different application id
+        # or a wrong master/REST key, sharing the same store, was served
+        # another application's cached private rows: the URL alone matched.
         # `@old_shape_key` is the pre-credential key shape, kept only so a
         # write still evicts entries written by older SDK versions during a
         # rolling deploy.
@@ -223,25 +245,23 @@ module Parse
           @old_shape_key = "#{@namespace}:#{@old_shape_key}"
         end
 
-        # Keep the legacy key base for versioning below, then switch the
-        # live key to the keyspace form when one is configured.
+        # Keep the legacy key base for versioning below. The live key is
+        # built by {#versioned_key} once the versions are known, in the
+        # keyspace form when one is configured.
         @legacy_cache_key = @cache_key
-        if @keyspace
-          @cache_key = @keyspace.cache_key(url, auth: @cache_auth, tenant: @cache_tenant)
-        end
+        @cache_key = nil
 
         url_path = url.path
 
         begin
-          # Default layout: resolve the resource's current version and fold
-          # it into the key. A write replaces the version, which makes every
-          # auth variant of the resource unreachable at once (see
-          # {#legacy_version_key}). `nil` means no version exists yet, so no
-          # entry for this resource can be live and the read is skipped.
-          unless @keyspace
-            @legacy_version = read_legacy_version(url)
-            @cache_key = @legacy_version ? versioned_legacy_key(@legacy_version) : nil
-          end
+          # Resolve the current versions and fold them into the key, in both
+          # layouts. The resource version retires every credential variant
+          # of a resource on a write to it; collection reads also carry the
+          # class version, which any write to the class replaces (see
+          # {#version_keys}). `nil` means a version does not exist yet, so
+          # no entry bound to it can be live and the read is skipped.
+          @versions = read_versions(url)
+          @cache_key = @versions ? versioned_key(url, @versions) : nil
           # Skip cache read if write_only mode is enabled
           if method == :get && @cache_key.present? && !@write_only && @store.key?(@cache_key)
             # Debug-log the URL **path only** — `url.to_s` would include the
@@ -308,6 +328,7 @@ module Parse
             #non GET requets should clear the cache for that same resource path.
             #ex. a POST to /1/classes/Artist/<objectId> should delete the cache for a GET
             # request for the same '/1/classes/Artist/<objectId>' where objectId are equivalent
+            @write_targets = write_targets(env, url)
             delete_cache_variants(url, resource: true)
             instrument_cache(:delete, method: method, url_path: url_path)
           end
@@ -334,11 +355,11 @@ module Parse
              response_env.body.present? && response_env.response_headers[CONTENT_LENGTH_KEY].to_i.between?(20, 1_250_000)
             store_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
             begin
-              # Default layout with no version yet: create one so this entry
-              # is bound to it. A later write replaces it.
-              if @keyspace.nil? && @legacy_version.nil?
-                @legacy_version = write_legacy_version(url)
-                @cache_key = versioned_legacy_key(@legacy_version)
+              # No version yet: create the missing ones so this entry is
+              # bound to them. A later write replaces them.
+              if @versions.nil?
+                @versions = ensure_versions(url)
+                @cache_key = versioned_key(url, @versions)
               end
               # Store with string keys (and a plain Hash of headers) so the
               # value round-trips losslessly through the Redis cache wrapper's
@@ -354,8 +375,21 @@ module Parse
               instrument_cache(:error, method: method, url_path: url_path, error: e.class.name)
             end
           end # if
-          # do something with the response
-          # response_env[:response_headers].merge!(...)
+
+          # Retire the written resources again once the server has applied
+          # the write. The retirement before the request leaves a window in
+          # which a concurrent reader can fetch the pre-write state and cache
+          # it under the fresh versions; a row whose ACL was just revoked
+          # would then stay readable until the entry expired. Bumping again
+          # after the response closes that window.
+          if @write_targets
+            begin
+              bump_versions(url, @write_targets)
+            rescue => e
+              puts "[Parse::Cache] Error: #{e.class.name}"
+              instrument_cache(:error, method: method, url_path: url_path, error: e.class.name)
+            end
+          end
         end
       end
 
@@ -437,15 +471,14 @@ module Parse
       #   sessions' perfectly valid entries on every single cache miss.
       def delete_cache_variants(url, resource: false)
         delete_keyspace_variants(url) if resource && @keyspace
-        if legacy_variants?
-          delete_legacy_variants(url)
-          # A write replaces the resource version, which retires every auth
-          # variant of the default layout: other sessions' entries included,
-          # which the old delete could not name. This is what stops a user
-          # whose read access was just revoked from reading the cached copy.
-          write_legacy_version(url) if resource && @keyspace.nil?
-        end
+        delete_legacy_variants(url) if legacy_variants?
         @store.delete @cache_key if @cache_key # final key
+        # A write replaces the versions of everything it touched, which
+        # retires every credential variant in either layout: other sessions'
+        # entries included, which a delete cannot name. This is what stops a
+        # user whose read access was just revoked from reading the cached
+        # copy, directly or through a cached query over the class.
+        bump_versions(url, @write_targets || [url.path]) if resource
       end
 
       # Digest binding a legacy cache key to the application and the
@@ -456,36 +489,136 @@ module Parse
         Digest::SHA256.hexdigest("#{app_id}\x00#{credential}")[0, 32]
       end
 
-      # Store key holding the current version of one resource in the default
-      # layout. Keyed by application and URL path (no query string), and NOT
-      # by credential or tenant, so a write through any caller retires the
-      # entries of every caller. Using the path means a write to
-      # `classes/Post/abc` also retires `classes/Post/abc?include=...`, and a
-      # create (`POST classes/Post`) retires cached `classes/Post` queries.
+      # Version keys a read of this URL is bound to: the resource version
+      # for its path and, for a collection read (a query, an aggregate, or a
+      # list of a built-in class), the version of the class.
+      #
+      # The resource version is keyed by application and URL path (no query
+      # string), and NOT by credential or tenant, so a write through any
+      # caller retires the entries of every caller. Using the path means a
+      # write to `classes/Post/abc` also retires `classes/Post/abc?include=...`.
+      #
+      # The class version is what retires cached queries. A query result for
+      # `classes/Post?where=...` can contain any Post, so a write to one
+      # (an update, an ACL change, a delete, a create, or a batch touching
+      # the class) replaces the class version and every cached Post query
+      # becomes unreachable. Single-object reads do not carry it, so a write
+      # to one object leaves other objects' cached reads alone.
       # @!visibility private
-      def legacy_version_key(url)
-        digest = Digest::SHA256.hexdigest("#{@app_id}\x00#{url.scheme}://#{url.host}:#{url.port}#{url.path}")[0, 32]
-        key = "#{LEGACY_VERSION_PREFIX}:#{digest}"
+      # @return [Array<String>]
+      def version_keys(url)
+        keys = [version_key(LEGACY_VERSION_PREFIX, "#{url_origin(url)}#{url.path}")]
+        class_name, object_id = class_scope(url.path)
+        if class_name && object_id.nil?
+          keys << version_key(CLASS_VERSION_PREFIX, "#{url_origin(url)}\x00#{class_name}")
+        end
+        keys
+      end
+
+      # Store key for one version. Truncated SHA-256 of the application id
+      # and the material, so no path or class name appears in the key. In
+      # the keyspace layout it sits in the cache family, outside any tenant,
+      # so a write under one tenant retires every tenant's entries and a
+      # whole-keyspace clear still removes it.
+      # @!visibility private
+      def version_key(prefix, material)
+        digest = Digest::SHA256.hexdigest("#{@app_id}\x00#{material}")[0, 32]
+        return "#{@keyspace.family_prefix(:cache)}:#{prefix}:#{digest}" if @keyspace
+        key = "#{prefix}:#{digest}"
         @namespace ? "#{@namespace}:#{key}" : key
       end
 
       # @!visibility private
-      # @return [String, nil] the resource's current version, or nil.
-      def read_legacy_version(url)
-        value = @store[legacy_version_key(url)]
-        value.is_a?(String) && !value.empty? ? value : nil
+      def url_origin(url)
+        "#{url.scheme}://#{url.host}:#{url.port}"
       end
 
-      # Replace the resource version with a fresh random one. A random value
-      # rather than a counter: if the version key expires and is recreated,
-      # a counter could return to a value that older entries still carry and
+      # The class a path addresses and the object id, if any.
+      # @!visibility private
+      # @return [Array(String, String), nil] `[class_name, object_id_or_nil]`.
+      def class_scope(path)
+        path = path.to_s
+        if (m = path.match(CLASS_PATH_RE))
+          [m[1], m[2]]
+        elsif (m = path.match(SYSTEM_CLASS_PATH_RE))
+          [SYSTEM_CLASSES[m[1]], m[2]]
+        end
+      end
+
+      # @!visibility private
+      # @return [Array<String>, nil] the current versions, or nil when any
+      #   of them does not exist yet.
+      def read_versions(url)
+        versions = version_keys(url).map do |key|
+          value = @store[key]
+          value.is_a?(String) && !value.empty? ? value : nil
+        end
+        versions.include?(nil) ? nil : versions
+      end
+
+      # The current versions, creating any that do not exist yet.
+      # @!visibility private
+      # @return [Array<String>]
+      def ensure_versions(url)
+        version_keys(url).map do |key|
+          value = @store[key]
+          value.is_a?(String) && !value.empty? ? value : write_version(key)
+        end
+      end
+
+      # Replace a version with a fresh random one. A random value rather
+      # than a counter: if the version key expires and is recreated, a
+      # counter could return to a value that older entries still carry and
       # bring them back. A fresh nonce never matches an old entry.
       # @!visibility private
       # @return [String] the new version.
-      def write_legacy_version(url)
+      def write_version(key)
         version = SecureRandom.hex(8)
-        @store.store(legacy_version_key(url), version, expires: legacy_version_ttl)
+        @store.store(key, version, expires: legacy_version_ttl)
         version
+      end
+
+      # Replace the resource version of every written path and the class
+      # version of every class those paths belong to.
+      # @!visibility private
+      def bump_versions(url, paths)
+        origin = url_origin(url)
+        keys = []
+        paths.each do |path|
+          keys << version_key(LEGACY_VERSION_PREFIX, "#{origin}#{path}")
+          class_name, = class_scope(path)
+          keys << version_key(CLASS_VERSION_PREFIX, "#{origin}\x00#{class_name}") if class_name
+        end
+        keys.uniq.each { |key| write_version(key) }
+      end
+
+      # Paths a write touches: the request path, plus every non-GET sub-request
+      # of a batch. A batch body that cannot be read contributes nothing
+      # beyond the batch path itself.
+      # @!visibility private
+      # @return [Array<String>]
+      def write_targets(env, url)
+        targets = [url.path]
+        return targets unless url.path.to_s.match?(BATCH_PATH_RE)
+        mount = url.path.to_s.sub(BATCH_PATH_RE, "")
+        batch_requests(env.body).each do |sub|
+          next unless sub.is_a?(Hash)
+          next if (sub["method"] || sub[:method]).to_s.casecmp?("GET")
+          path = (sub["path"] || sub[:path]).to_s
+          next if path.empty?
+          path = path.start_with?("/") ? path : "#{mount}/#{path}"
+          targets << path.split("?", 2).first
+        end
+        targets.uniq
+      end
+
+      # @!visibility private
+      def batch_requests(body)
+        body = JSON.parse(body) if body.is_a?(String)
+        list = body.is_a?(Hash) ? (body["requests"] || body[:requests]) : nil
+        list.is_a?(Array) ? list : []
+      rescue JSON::ParserError
+        []
       end
 
       # The version key only needs to outlive the entries bound to it. When it
@@ -495,9 +628,25 @@ module Parse
         [@expires.to_i * 2, 60].max
       end
 
+      # The live cache key for a read bound to `versions`. Both layouts bind
+      # the key to the credential that produced the body (`@legacy_auth`: a
+      # digest of the application id with the session token, master key or
+      # REST key actually sent), so a wrong master key or another REST key
+      # cannot read an entry cached under the right one.
+      #
+      # In the keyspace layout the credential digest and the versions are
+      # folded into the auth segment, after the URL digest, so
+      # {Parse::Cache::Keyspace#resource_pattern} still matches every
+      # credential and version variant of a resource.
       # @!visibility private
-      def versioned_legacy_key(version)
-        "#{@legacy_cache_key}#v=#{version}"
+      def versioned_key(url, versions)
+        tag = versions.join(".")
+        if @keyspace
+          auth = Digest::SHA256.hexdigest("#{@legacy_auth}\x00#{tag}")[0, 32]
+          @keyspace.cache_key(url, auth: auth, tenant: @cache_tenant)
+        else
+          "#{@legacy_cache_key}#v=#{tag}"
+        end
       end
 
       # Whether to also evict the pre-keyspace key shape. Always true before a
@@ -520,8 +669,13 @@ module Parse
         if @store.respond_to?(:delete_matching)
           @store.delete_matching(pattern)
         else
+          # Pre-credential key shapes, from before entries were bound to the
+          # credential and versions. A store that cannot match a pattern has
+          # no way to name the current variants of other callers; the
+          # version bump in {#delete_cache_variants} retires those instead.
           @store.delete @keyspace.cache_key(url, auth: :anon, tenant: @cache_tenant)
           @store.delete @keyspace.cache_key(url, auth: :master, tenant: @cache_tenant)
+          @store.delete @keyspace.cache_key(url, auth: @cache_auth, tenant: @cache_tenant)
         end
       end
 

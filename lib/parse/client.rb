@@ -1235,6 +1235,15 @@ module Parse
       _retry_count = nil
       _retry_delay = nil
       _request = nil
+      # A Parse::Request carries its own per-request options (session_token,
+      # use_master_key, cache, retry, ...). Merge them in before anything
+      # below reads `opts`, or the auth resolution never sees them and a
+      # request built for a session with `use_master_key: false` still goes
+      # out with the configured master key. Options passed to this call
+      # directly win over the request's own.
+      if method.is_a?(Request) && method.opts.is_a?(Hash) && !method.opts.empty?
+        opts = method.opts.merge(opts.is_a?(Hash) ? opts : {})
+      end
       # Kwarg-absorption guard. The `**opts` splat in API helper methods
       # (lib/parse/api/*.rb) absorbs a caller-passed `opts: { ... }`
       # keyword as a key named `:opts` rather than as the request options
@@ -1765,7 +1774,11 @@ module Parse
     # @return (see #request)
     def send_request(req) #Parse::Request object
       raise ArgumentError, "Object not of Parse::Request type." unless req.is_a?(Parse::Request)
-      request req
+      # Forward the request's own options so its session token, master-key
+      # opt-out, cache directive and retry budget reach the auth resolution.
+      # {#request} also merges them; passing them here keeps the contract
+      # explicit at the public entry point.
+      request req, opts: (req.opts || {})
     end
 
     # The connectable  module adds methods to objects so that they can get a default
