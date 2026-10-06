@@ -1,0 +1,10 @@
+# Compatibility lane: ActiveModel / ActiveSupport 8.0.
+# Run with: BUNDLE_GEMFILE=gemfiles/activemodel_8_0.gemfile bundle exec rake test:unit
+eval_gemfile File.expand_path("../Gemfile", __dir__)
+
+gem "activemodel", "~> 8.0.0"
+gem "activesupport", "~> 8.0.0"
+# ActiveSupport 8.0 still passes `quirks_mode:` to JSON.generate, which json
+# 3.x rejects ("unknown keyword: quirks_mode"); only ActiveSupport 8.1+ works
+# with json 3. Applications on 8.0 run json 2.x; match that.
+gem "json", "< 3"

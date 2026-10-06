@@ -109,5 +109,99 @@ module.exports = function buildTestRedisCacheAdapter() {
       "ms)"
   );
 
-  return new RedisCacheAdapter({ url: url }, ttl);
+  const ResilientAdapter = makeResilient(RedisCacheAdapter);
+  return new ResilientAdapter({ url: url }, ttl);
 };
+
+// parse-server's RedisCacheAdapter catches errors in get() only. put(), del()
+// and clear() return the redis client's promise directly, and its callers
+// often do not await them. When the client is not open, which happens when an
+// adapter instance is used before connect() (the LiveQuery server builds its
+// own cache controller) or after the connection drops, those promises reject
+// with "The client is closed". An unawaited rejection is an uncaught exception
+// in Node, and it took the whole Parse Server down mid-suite during the 5.7.5
+// integration run.
+//
+// The cache is an optimization, so a cache failure must never be fatal. This
+// subclass (1) opens the client lazily before any command, sharing one
+// in-flight connect() between concurrent callers, and (2) catches and logs
+// every command failure, returning what a cache miss would. The db-1 guard
+// above is unaffected: the URL is still validated before construction.
+const CONNECT_TIMEOUT_MS = Number(process.env.PARSE_CACHE_REDIS_CONNECT_TIMEOUT_MS || 2000);
+
+function makeResilient(RedisCacheAdapter) {
+  return class ResilientRedisCacheAdapter extends RedisCacheAdapter {
+    // Resolve once the client can serve commands. `isReady`, not `isOpen`:
+    // while node-redis is reconnecting the client is already "open", and a
+    // command sent then waits in the offline queue until the connection
+    // returns, which against a dead Redis is forever.
+    async ensureOpen() {
+      if (this.client.isReady) {
+        return;
+      }
+      if (!this.client.isOpen && !this.connecting) {
+        this.connecting = Promise.resolve()
+          .then(() => (this.client.isOpen ? undefined : this.client.connect()))
+          .catch(() => undefined) // surfaced through the ready wait below
+          .finally(() => {
+            this.connecting = null;
+          });
+      }
+      // Bound the wait and fall back to a cache miss. The connect keeps
+      // retrying in the background, and later calls succeed once Redis is
+      // back.
+      let timer;
+      let onReady;
+      const ready = new Promise((resolve) => {
+        onReady = resolve;
+        this.client.once("ready", onReady);
+      });
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("redis not ready after " + CONNECT_TIMEOUT_MS + "ms")),
+          CONNECT_TIMEOUT_MS
+        );
+      });
+      try {
+        if (this.client.isReady) {
+          return;
+        }
+        await Promise.race([ready, timeout]);
+      } finally {
+        clearTimeout(timer);
+        this.client.removeListener("ready", onReady);
+      }
+    }
+
+    async guarded(op, fallback, fn) {
+      try {
+        await this.ensureOpen();
+        return await fn();
+      } catch (err) {
+        console.error(
+          "[test-redis-cache-adapter] " + op + " failed; treating as a cache miss: " +
+            (err && err.message ? err.message : String(err))
+        );
+        return fallback;
+      }
+    }
+
+    async get(key) {
+      return this.guarded("get", null, () => super.get(key));
+    }
+
+    async put(key, value, ttl) {
+      return this.guarded("put", undefined, () =>
+        ttl === undefined ? super.put(key, value) : super.put(key, value, ttl)
+      );
+    }
+
+    async del(key) {
+      return this.guarded("del", undefined, () => super.del(key));
+    }
+
+    async clear() {
+      return this.guarded("clear", undefined, () => super.clear());
+    }
+  };
+}
