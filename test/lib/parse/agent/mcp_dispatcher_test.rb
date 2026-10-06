@@ -631,11 +631,11 @@ class MCPDispatcherTest < Minitest::Test
     # test output. The class+message belong in operator logs, not on the wire.
     original_stderr = $stderr
     $stderr = StringIO.new
-    begin
-      result = D.call(body: body, agent: StandardErrorAgent.new)
-    ensure
-      $stderr = original_stderr
-    end
+    result = begin
+        D.call(body: body, agent: StandardErrorAgent.new)
+      ensure
+        $stderr = original_stderr
+      end
 
     assert_equal 200, result[:status]
     err = result[:body]["error"]

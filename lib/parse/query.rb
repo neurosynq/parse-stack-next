@@ -2439,11 +2439,11 @@ module Parse
       original_limit = @limit
       @limit = count
 
-      begin
-        items = results_direct
-      ensure
-        @limit = original_limit
-      end
+      items = begin
+          results_direct
+        ensure
+          @limit = original_limit
+        end
 
       count == 1 ? items.first : items.first(count)
     end

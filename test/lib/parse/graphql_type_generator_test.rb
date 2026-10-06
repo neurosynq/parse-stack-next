@@ -189,11 +189,11 @@ class GraphQLTypeGeneratorTest < Minitest::Test
     _stderr_was = $stderr
     captured = StringIO.new
     $stderr = captured
-    begin
-      type = Parse::GraphQL::TypeGenerator.generate_all(MODELS)["GqlGenArtist"]
-    ensure
-      $stderr = _stderr_was
-    end
+    type = begin
+        Parse::GraphQL::TypeGenerator.generate_all(MODELS)["GqlGenArtist"]
+      ensure
+        $stderr = _stderr_was
+      end
     assert_equal Parse::GraphQL::Types::JSON, type.fields["tags"].type.unwrap
     assert_match(/tags.*emitting as JSON scalar/, captured.string,
                  "weakly-typed :array column should warn the author")

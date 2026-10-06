@@ -508,12 +508,13 @@ class AgentInternalErrorSanitizationTest < Minitest::Test
       # legitimate operator-side leak path we want to keep.
       original_stderr = $stderr
       $stderr = StringIO.new
-      begin
-        result = @agent.execute(:get_all_schemas)
-      ensure
-        operator_log = $stderr.string
-        $stderr = original_stderr
-      end
+      operator_log = nil
+      result = begin
+          @agent.execute(:get_all_schemas)
+        ensure
+          operator_log = $stderr.string
+          $stderr = original_stderr
+        end
 
       refute result[:success], "tool dispatch must fail when handler raises"
       assert_equal :internal_error, result[:error_code]
