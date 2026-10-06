@@ -4,6 +4,7 @@
 require "json"
 require_relative "errors"
 require_relative "prompts"
+require_relative "log_levels"
 
 module Parse
   class Agent
@@ -43,7 +44,14 @@ module Parse
       # still interpret the `initialize` capability shape and supported
       # methods correctly; the wire-level differences only matter for the
       # additive fields above.
-      PROTOCOL_VERSION = "2025-06-18"
+      #
+      # Bumped to 2025-11-25 in 5.7.5. The changes that touch this server
+      # are additive: `serverInfo` may carry `description`, input
+      # validation failures are reported as tool results with
+      # `isError: true` rather than protocol errors, and elicitation gains
+      # URL mode and titled enums (the approval prompt uses neither). Tasks,
+      # icons, and tool-calling sampling are optional and not offered.
+      PROTOCOL_VERSION = "2025-11-25"
 
       # Protocol versions the dispatcher is willing to negotiate. Per the
       # MCP lifecycle spec the server MUST echo the client's requested
@@ -52,7 +60,7 @@ module Parse
       # method set are compatible with the handlers below — additions
       # from 2024-11-05 → 2025-06-18 are all additive and forward-
       # compatible no-ops for older clients.
-      SUPPORTED_PROTOCOL_VERSIONS = %w[2025-06-18 2025-03-26 2024-11-05].freeze
+      SUPPORTED_PROTOCOL_VERSIONS = %w[2025-11-25 2025-06-18 2025-03-26 2024-11-05].freeze
 
       # Server capability advertisement (mirrors MCPServer::CAPABILITIES).
       #
@@ -67,11 +75,72 @@ module Parse
       # callers (WEBrick, no streaming) cannot receive notifications;
       # they still see the latest registry state on the next
       # `tools/list` / `prompts/list` poll.
+      #
+      # `completions` backs `completion/complete` (class names and field
+      # names for prompt arguments and resource-template variables).
+      # `logging` backs `logging/setLevel`. It is advertised only when the
+      # transport can deliver log messages (see {capabilities_for}), and
+      # messages flow only after a client sets a level.
       CAPABILITIES = {
         "tools" => { "listChanged" => true },
         "resources" => { "subscribe" => false, "listChanged" => false },
         "prompts" => { "listChanged" => true },
+        "completions" => {},
+        "logging" => {},
       }.freeze
+
+      # RFC 5424 severities accepted by `logging/setLevel`, least to most
+      # severe. A session at a given level receives that level and above.
+      LOG_LEVELS = Parse::Agent::LOG_LEVELS
+
+      # Prompt-argument and resource-template-variable names completed
+      # with the class names visible to the agent. `classes` is a
+      # comma-separated list, so only its last segment is completed.
+      CLASS_COMPLETION_ARGUMENTS = %w[class_name parent_class child_class classes className].freeze
+
+      # Argument names completed with field names of the class named by a
+      # sibling argument (`class_name` or `child_class`) in the request's
+      # `context.arguments`.
+      FIELD_COMPLETION_ARGUMENTS = %w[group_by pointer_field].freeze
+
+      # The MCP spec caps a completion response at 100 values.
+      MAX_COMPLETION_VALUES = 100
+
+      # Per-session minimum log level, keyed by the MCP session id
+      # (the agent's correlation id). LRU-bounded so a stream of sessions
+      # that never terminate cannot grow it without limit.
+      class LogLevelRegistry
+        DEFAULT_MAX_ENTRIES = 10_000
+
+        def initialize(max_entries: DEFAULT_MAX_ENTRIES)
+          @levels = {}
+          @max = max_entries
+          @mutex = Mutex.new
+        end
+
+        # @param session_id [String]
+        # @param level [String] one of {LOG_LEVELS}.
+        def set(session_id, level)
+          return if session_id.nil? || session_id.to_s.empty?
+          @mutex.synchronize do
+            @levels.delete(session_id.to_s)
+            @levels[session_id.to_s] = level
+            @levels.shift while @levels.size > @max
+          end
+        end
+
+        # @return [String, nil] the level the session asked for, or nil
+        #   when it never sent `logging/setLevel`.
+        def get(session_id)
+          return nil if session_id.nil?
+          @mutex.synchronize { @levels[session_id.to_s] }
+        end
+
+        def forget(session_id)
+          return if session_id.nil?
+          @mutex.synchronize { @levels.delete(session_id.to_s) }
+        end
+      end
 
       # Parse class-name identifier regex — used to validate resource URIs.
       # Matches Parse's class-name convention: letter/underscore start, up to 128
@@ -140,8 +209,16 @@ module Parse
       #   nil (the default, and the only option on non-streaming transports like
       #   the WEBrick MCPServer) leaves the capability unadvertised and those
       #   methods returning a "not supported" error.
+      # @param log_callback [#call, nil] installed on the agent for the
+      #   duration of the request so tools (and the dispatcher) can emit
+      #   MCP `notifications/message` events via `agent.log(...)`. Set by
+      #   Parse::Agent::MCPRackApp on the SSE path; the transport filters by
+      #   the session's level. nil leaves `agent.log` a no-op.
+      # @param log_levels [LogLevelRegistry, nil] where `logging/setLevel`
+      #   records the session's level. nil (non-streaming transports, which
+      #   cannot deliver log messages) still accepts and validates the call.
       def self.call(body:, agent:, logger: nil, progress_callback: nil, cancellation_token: nil,
-                    subscription_manager: nil, approval_gate: nil)
+                    subscription_manager: nil, approval_gate: nil, log_callback: nil, log_levels: nil)
         # Snapshot any prior callback/token already on the agent (e.g. a
         # token a parent dispatcher installed before a tool handler
         # invoked us recursively, or values pre-set by the application).
@@ -153,6 +230,7 @@ module Parse
         prev_progress_callback = agent.progress_callback if agent.respond_to?(:progress_callback)
         prev_cancellation_token = agent.cancellation_token if agent.respond_to?(:cancellation_token)
         prev_approval_gate = agent.approval_gate if agent.respond_to?(:approval_gate)
+        prev_log_callback = agent.log_callback if agent.respond_to?(:log_callback)
 
         # Install the progress callback and cancellation token on the
         # agent for the duration of the dispatch. Cleared in the ensure
@@ -170,6 +248,7 @@ module Parse
         # agent.execute can request human approval for destructive tools.
         # Restored in the ensure block like the other per-request state.
         agent.approval_gate = approval_gate if approval_gate && agent.respond_to?(:approval_gate=)
+        agent.log_callback = log_callback if log_callback && agent.respond_to?(:log_callback=)
 
         # Guard: body must be a Hash with a "method" key.
         unless body.is_a?(Hash) && body.key?("method")
@@ -189,7 +268,7 @@ module Parse
           return { status: 200, body: jsonrpc_error(id, -32600, "Invalid Request: notifications must not carry an id") }
         end
 
-        result_hash = dispatch(method, params, agent, id, logger, subscription_manager)
+        result_hash = dispatch(method, params, agent, id, logger, subscription_manager, log_levels)
         { status: result_hash[:status], body: result_hash[:body] }
       rescue Parse::Agent::Unauthorized
         { status: 401, body: jsonrpc_error(body.is_a?(Hash) ? body["id"] : nil, -32001, "Unauthorized") }
@@ -213,6 +292,9 @@ module Parse
         if agent.respond_to?(:approval_gate=)
           agent.approval_gate = prev_approval_gate
         end
+        if agent.respond_to?(:log_callback=)
+          agent.log_callback = prev_log_callback
+        end
       end
 
       # Emit an internal-error diagnostic. The class+message are operator-only;
@@ -235,10 +317,10 @@ module Parse
       # envelope, and return { status:, body: }.
       #
       # @api private
-      def self.dispatch(method, params, agent, id, logger = nil, subscription_manager = nil)
+      def self.dispatch(method, params, agent, id, logger = nil, subscription_manager = nil, log_levels = nil)
         result = case method
           when "initialize"
-            handle_initialize(params, subscription_manager)
+            handle_initialize(params, subscription_manager, log_levels)
           when "tools/list"
             handle_tools_list(params, agent)
           when "tools/call"
@@ -257,6 +339,10 @@ module Parse
             handle_prompts_list(params)
           when "prompts/get"
             handle_prompts_get(params)
+          when "completion/complete"
+            handle_completion_complete(params, agent)
+          when "logging/setLevel"
+            handle_logging_set_level(params, agent, log_levels)
           when "ping"
             {}
           when "notifications/cancelled"
@@ -336,7 +422,7 @@ module Parse
       #   when supported, flips the advertised `resources.subscribe` capability
       #   to true. See {#capabilities_for}.
       # @return [Hash] protocol version, capabilities, and server info.
-      def self.handle_initialize(params, subscription_manager = nil)
+      def self.handle_initialize(params, subscription_manager = nil, log_levels = nil)
         requested = params.is_a?(Hash) ? params["protocolVersion"] : nil
         negotiated = if requested.is_a?(String) && SUPPORTED_PROTOCOL_VERSIONS.include?(requested)
             requested
@@ -345,10 +431,13 @@ module Parse
           end
         {
           "protocolVersion" => negotiated,
-          "capabilities" => capabilities_for(subscription_manager),
+          "capabilities" => capabilities_for(subscription_manager, logging: !log_levels.nil?),
           "serverInfo" => {
             "name" => "parse-stack-mcp",
+            "title" => "Parse Stack MCP",
             "version" => Parse::Stack::VERSION,
+            "description" => "Schema introspection, queries, and aggregations over a Parse Server " \
+                             "application, scoped to the connecting agent's permissions.",
           },
         }
       end
@@ -367,11 +456,17 @@ module Parse
       #
       # @param manager [Parse::Agent::MCPSubscriptions::Manager, nil]
       # @return [Hash]
-      def self.capabilities_for(manager)
-        return CAPABILITIES unless manager.respond_to?(:supported?) && manager.supported?
-        CAPABILITIES.merge(
-          "resources" => CAPABILITIES["resources"].merge("subscribe" => true),
-        )
+      # `logging` is dropped when the transport cannot deliver
+      # `notifications/message` (the WEBrick MCPServer, or MCPRackApp with
+      # streaming off), so a client is never told to expect log messages
+      # that cannot arrive.
+      def self.capabilities_for(manager, logging: true)
+        caps = CAPABILITIES
+        if manager.respond_to?(:supported?) && manager.supported?
+          caps = caps.merge("resources" => caps["resources"].merge("subscribe" => true))
+        end
+        caps = caps.reject { |k, _| k == "logging" } unless logging
+        caps
       end
       private_class_method :capabilities_for
 
@@ -409,6 +504,17 @@ module Parse
 
         unless tool_name
           return { error: { "code" => -32602, "message" => "Missing tool name" } }
+        end
+
+        # Input validation failures are tool results, not protocol errors
+        # (MCP 2025-11-25), so the model can see the problem and correct
+        # its call. agent.execute already reports bad argument values this
+        # way; a non-object `arguments` never reaches it.
+        unless arguments.is_a?(Hash)
+          return {
+                   "content" => [{ "type" => "text", "text" => "Invalid arguments: `arguments` must be a JSON object." }],
+                   "isError" => true,
+                 }
         end
 
         sym_args = arguments.transform_keys(&:to_sym)
@@ -502,10 +608,141 @@ module Parse
           meta["parse.retry_after"] = result[:retry_after] if result[:retry_after]
           meta["parse.details"] = result[:details] if result[:details].is_a?(Hash) && result[:details].any?
           envelope["_meta"] = meta unless meta.empty?
+          if agent.respond_to?(:log)
+            agent.log(:warning, { "tool" => tool_name.to_s, "error_code" => result[:error_code]&.to_s },
+                      logger: "parse.agent.tools")
+          end
           envelope
         end
       end
       private_class_method :handle_tools_call
+
+      # Handle `completion/complete`.
+      #
+      # Completes class names for any prompt argument named in
+      # {CLASS_COMPLETION_ARGUMENTS} and for the `{className}` variable of
+      # this server's resource templates, and field names for arguments in
+      # {FIELD_COMPLETION_ARGUMENTS}. Candidates come from the same agent
+      # tools that back `resources/list` and `get_schema`, so a class or
+      # field the agent may not see is never offered. Any other argument
+      # completes to an empty list.
+      #
+      # @return [Hash] `{ "completion" => { "values", "total", "hasMore" } }`
+      #   or an error hash for a malformed or unknown reference.
+      #
+      # Each request runs the schema tools through `agent.execute`, so it is
+      # subject to the agent's tool allowlist and audit trail and counts
+      # against its rate limiter like any tool call. Clients that complete
+      # on every keystroke should debounce.
+      def self.handle_completion_complete(params, agent)
+        return { error: { "code" => -32602, "message" => "Invalid params" } } unless params.is_a?(Hash)
+        ref = params["ref"]
+        argument = params["argument"]
+        unless ref.is_a?(Hash) && argument.is_a?(Hash) && argument["name"].is_a?(String)
+          return { error: { "code" => -32602, "message" => "completion/complete requires ref and argument.name" } }
+        end
+        unless argument["value"].nil? || argument["value"].is_a?(String)
+          return { error: { "code" => -32602, "message" => "argument.value must be a string" } }
+        end
+        context = params["context"]
+        unless context.nil? || (context.is_a?(Hash) && (context["arguments"].nil? || context["arguments"].is_a?(Hash)))
+          return { error: { "code" => -32602, "message" => "context.arguments must be an object" } }
+        end
+        name = argument["name"]
+        value = argument["value"].to_s
+
+        case ref["type"]
+        when "ref/prompt"
+          prompt = Parse::Agent::Prompts.list.find { |p| p["name"] == ref["name"] }
+          return { error: { "code" => -32602, "message" => "Unknown prompt: #{ref["name"]}" } } unless prompt
+          unless Array(prompt["arguments"]).any? { |a| a["name"] == name }
+            return { error: { "code" => -32602, "message" => "Unknown argument: #{name}" } }
+          end
+        when "ref/resource"
+          templates = handle_resources_templates_list(nil, agent)["resourceTemplates"].map { |t| t["uriTemplate"] }
+          unless templates.include?(ref["uri"])
+            return { error: { "code" => -32602, "message" => "Unknown resource template: #{ref["uri"]}" } }
+          end
+        else
+          return { error: { "code" => -32602, "message" => "Unsupported ref type: #{ref["type"]}" } }
+        end
+
+        context_args = (context && context["arguments"]) || {}
+        values = if CLASS_COMPLETION_ARGUMENTS.include?(name)
+            complete_class_names(agent, value, list: name == "classes")
+          elsif FIELD_COMPLETION_ARGUMENTS.include?(name)
+            complete_field_names(agent, context_args["class_name"] || context_args["child_class"], value)
+          else
+            []
+          end
+
+        {
+          "completion" => {
+            "values" => values.first(MAX_COMPLETION_VALUES),
+            "total" => values.size,
+            "hasMore" => values.size > MAX_COMPLETION_VALUES,
+          },
+        }
+      end
+      private_class_method :handle_completion_complete
+
+      # Class names visible to the agent that start with `value`
+      # (case-insensitive). With `list: true`, `value` is a comma-separated
+      # list and only its last segment is matched; each candidate is
+      # returned with the earlier segments prefixed so the client can
+      # replace the whole value.
+      def self.complete_class_names(agent, value, list: false)
+        head, sep, partial = list ? value.rpartition(",") : ["", "", value]
+        # Keep any spacing the caller typed after the comma.
+        spacing = partial[/\A\s*/]
+        partial = partial.lstrip
+        prefix = "#{head}#{sep}#{spacing}"
+        result = agent.execute(:get_all_schemas)
+        return [] unless result[:success]
+        data = result[:data] || {}
+        # Same envelope handling as {handle_resources_list}, including the
+        # legacy `classes` key.
+        classes = (data[:custom] || []) + (data[:built_in] || [])
+        classes = data[:classes] || [] if classes.empty? && data[:classes]
+        names = classes.map { |c| c[:name].to_s }
+        names.select { |n| n.downcase.start_with?(partial.downcase) }.sort.map { |n| "#{prefix}#{n}" }
+      end
+      private_class_method :complete_class_names
+
+      # Field names of `class_name` (as the agent sees them) that start
+      # with `value`. Empty when the class is missing, invalid, or hidden.
+      def self.complete_field_names(agent, class_name, value)
+        return [] unless class_name.is_a?(String) && class_name.match?(IDENTIFIER_RE)
+        result = agent.execute(:get_schema, class_name: class_name)
+        return [] unless result[:success]
+        fields = (result[:data] || {})[:fields]
+        return [] unless fields.is_a?(Array)
+        fields.map { |f| f[:name].to_s }.select { |n| n.downcase.start_with?(value.downcase) }.sort
+      end
+      private_class_method :complete_field_names
+
+      # Handle `logging/setLevel`. Records the session's minimum level in
+      # `log_levels` (when the transport supplies one) so the streaming
+      # transport sends that level and above as `notifications/message`.
+      # Until a client sets a level, no log messages are sent.
+      #
+      # The call is a silent no-op (still `{}`) when there is nowhere to
+      # record the level: no `log_levels` (the transport cannot deliver
+      # logs, or the request's session is not owned by the caller), or no
+      # session id on the agent.
+      #
+      # @return [Hash] `{}` or an error hash for an unknown level.
+      def self.handle_logging_set_level(params, agent, log_levels)
+        return { error: { "code" => -32602, "message" => "Invalid params" } } unless params.is_a?(Hash)
+        level = params["level"]
+        unless level.is_a?(String) && LOG_LEVELS.include?(level)
+          return { error: { "code" => -32602, "message" => "Invalid log level: #{level.inspect}. Expected one of #{LOG_LEVELS.join(", ")}." } }
+        end
+        session_id = agent.respond_to?(:correlation_id) ? agent.correlation_id : nil
+        log_levels&.set(session_id, level)
+        {}
+      end
+      private_class_method :handle_logging_set_level
 
       # Sample the tool's result envelope and produce a one-line diagnostic
       # naming the fields that contribute the most bytes per record. Returns

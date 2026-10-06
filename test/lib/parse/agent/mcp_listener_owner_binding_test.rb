@@ -134,6 +134,36 @@ class MCPListenerOwnerBindingTest < Minitest::Test
     b3.close
   end
 
+  def test_initialize_cannot_rebind_a_session_owned_by_another_principal
+    app = build_app
+    s1, = app.call(post_initialize_env(session_id: "sess-own", principal: "r:alice"))
+    assert_equal 200, s1
+    s2, = app.call(post_initialize_env(session_id: "sess-own", principal: "r:mallory"))
+    assert_equal 403, s2, "re-initializing another principal's session must be refused"
+    # Ownership is unchanged: alice can still attach, mallory still cannot.
+    s3, _h, b3 = app.call(get_env(session_id: "sess-own", principal: "r:alice"))
+    assert_equal 200, s3
+    b3.close
+    s4, = app.call(get_env(session_id: "sess-own", principal: "r:mallory"))
+    assert_equal 403, s4
+  end
+
+  def test_owner_may_reinitialize_its_own_session
+    app = build_app
+    s1, = app.call(post_initialize_env(session_id: "sess-re", principal: "r:alice"))
+    s2, = app.call(post_initialize_env(session_id: "sess-re", principal: "r:alice"))
+    assert_equal [200, 200], [s1, s2]
+  end
+
+  def test_initialize_cannot_take_over_a_stream_claimed_session
+    app = build_app
+    s1, _h, b1 = app.call(get_env(session_id: "sess-tofu", principal: "r:alice"))
+    assert_equal 200, s1
+    b1.close
+    s2, = app.call(post_initialize_env(session_id: "sess-tofu", principal: "r:mallory"))
+    assert_equal 403, s2
+  end
+
   def test_master_key_agents_share_one_principal_without_resolver
     # Documented limitation: with no principal_resolver, bare master-key agents
     # are indistinguishable, so owner-binding is a no-op among them.

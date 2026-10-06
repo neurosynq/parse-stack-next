@@ -8,7 +8,7 @@ require "json"
 module Parse
   module Embeddings
     # Process-local embedding cache keyed by
-    # `(provider, model, input_type, input_hash)`.
+    # `(provider, model, dimensions, input_type, deployment, input_hash)`.
     #
     # Query-side embedding is the hot repeat path: the same natural-
     # language query (an agent retrying a tool call, a user paging
@@ -32,7 +32,10 @@ module Parse
     #
     # == Key derivation
     #
-    # `provider.class.name | model_name | input_type | SHA-256(input)`.
+    # `provider.class.name | model_name | dimensions | input_type |
+    # cache_identity | SHA-256(input)`. `cache_identity` (the provider's
+    # endpoint without credentials, see {Provider#cache_identity}) is
+    # omitted for providers that have none.
     # The full input text never becomes part of the key, so a shared
     # external store does not accumulate plaintext queries.
     #
@@ -305,8 +308,8 @@ module Parse
         # @!visibility private
         # Composite cache key. The input is hashed so plaintext never
         # lands in a shared store; provider identity + model + dimensions
-        # + input_type namespace the hash (two models' vectors are never
-        # confused). Dimensions matter independently of the model name:
+        # + input_type + deployment namespace the hash (two models' or two
+        # deployments' vectors are never confused). Dimensions matter independently of the model name:
         # Matryoshka-capable providers (OpenAI text-embedding-3-*, Cohere
         # embed-v4, Voyage, Jina, Qwen) can register the same model at
         # different output widths, and serving one width's cached vector
@@ -322,7 +325,16 @@ module Parse
             rescue NotImplementedError
               "unknown"
             end
-          "#{provider.class.name}|#{model}|#{dims}|#{input_type}|#{Digest::SHA256.hexdigest(input.to_s)}"
+          # Deployment identity (endpoint, never credentials) separates two
+          # deployments of the same model. Omitted when the provider has
+          # none, so such providers keep their existing keys.
+          identity = begin
+              provider.respond_to?(:cache_identity) ? provider.cache_identity : nil
+            rescue StandardError
+              nil
+            end
+          deployment = identity.nil? || identity.to_s.empty? ? "" : "#{identity}|"
+          "#{provider.class.name}|#{model}|#{dims}|#{input_type}|#{deployment}#{Digest::SHA256.hexdigest(input.to_s)}"
         end
 
         # @!visibility private

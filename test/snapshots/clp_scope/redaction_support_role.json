@@ -1,0 +1,12 @@
+[
+  {
+    "_id": "c1",
+    "account": {
+      "_id": "a1",
+      "email": "nested@x.test",
+      "plan": "pro"
+    },
+    "email": "a@x.test",
+    "name": "Ada"
+  }
+]

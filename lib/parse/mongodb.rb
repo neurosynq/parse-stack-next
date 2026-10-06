@@ -69,6 +69,9 @@ module Parse
   #
   # @note Requires the 'mongo' gem to be installed. Add to your Gemfile:
   #   gem 'mongo', '~> 2.18'
+  #   Use 2.26 or newer against MongoDB 9.0, which is the first driver
+  #   release that handles 9.0's overload (Intelligent Workload
+  #   Management) errors.
   module MongoDB
     # Error raised when mongo gem is not available
     class GemNotAvailable < StandardError; end
@@ -190,6 +193,17 @@ module Parse
       listIndexes listCollections collStats
       find listDatabases connPoolStats serverStatus
     ].freeze
+
+    # MongoDB error code for QueryPlanKilled. MongoDB 9.0 kills a running
+    # query with it when an indexed field the query references becomes
+    # multikey (an insert or update stores an array there) mid-flight.
+    MONGO_QUERY_PLAN_KILLED_CODE = 175
+
+    # How many times a read killed by {MONGO_QUERY_PLAN_KILLED_CODE} is
+    # re-run before the error propagates. MongoDB's guidance is to re-run
+    # once the write that changed the index completes, so a small budget
+    # is enough; a persistent kill is a real failure the caller sees.
+    QUERY_KILLED_RETRIES = 2
 
     class << self
       # @!attribute [rw] enabled
@@ -1862,7 +1876,7 @@ module Parse
           if (mode = normalize_read_preference(read_preference))
             coll = coll.with(read: { mode: mode })
           end
-          results = coll.aggregate(pipeline, agg_opts).to_a
+          results = with_query_killed_retry(collection_name) { coll.aggregate(pipeline, agg_opts).to_a }
           Parse::ACLScope.redact_results!(results, resolution)
 
           # Post-fetch pointerFields filter: drop rows where none of the
@@ -2145,7 +2159,7 @@ module Parse
           cursor = cursor.projection(options[:projection]) if options[:projection]
           cursor = cursor.hint(options[:hint]) unless options[:hint].nil?
           cursor = cursor.max_time_ms(max_time_ms) if max_time_ms
-          results = cursor.to_a
+          results = with_query_killed_retry(collection_name) { cursor.to_a }
 
           if applied_default_limit && results.size > DEFAULT_FIND_LIMIT
             # Trim the sentinel row and warn — the caller asked for everything
@@ -2450,6 +2464,39 @@ module Parse
 
       # MongoDB error code for MaxTimeMSExpired
       MONGO_MAX_TIME_MS_EXPIRED_CODE = 50
+
+      # Run a read and re-run it when the server killed its plan (see
+      # {MONGO_QUERY_PLAN_KILLED_CODE}). Only wraps reads: re-running a
+      # find or aggregate that returned nothing has no side effects. Each
+      # retry emits `parse.mongodb.query_killed_retry`.
+      #
+      # @param collection_name [String] for the notification payload.
+      # @yieldreturn [Object] the read's result.
+      def with_query_killed_retry(collection_name)
+        attempts = 0
+        begin
+          yield
+        rescue StandardError => e
+          raise unless query_plan_killed?(e) && attempts < QUERY_KILLED_RETRIES
+          attempts += 1
+          ActiveSupport::Notifications.instrument(
+            "parse.mongodb.query_killed_retry",
+            collection: collection_name.to_s, attempt: attempts,
+          )
+          retry
+        end
+      end
+
+      # @return [Boolean] true when `err` is the driver's report of a
+      #   killed query plan. Matches the numeric code first and the code
+      #   name second, since older response-parsing paths have surfaced
+      #   only one of the two.
+      def query_plan_killed?(err)
+        return false unless defined?(::Mongo::Error::OperationFailure)
+        return false unless err.is_a?(::Mongo::Error::OperationFailure)
+        return true if err.respond_to?(:code) && err.code == MONGO_QUERY_PLAN_KILLED_CODE
+        err.respond_to?(:code_name) && err.code_name == "QueryPlanKilled"
+      end
 
       # Inspect a driver exception and raise {ExecutionTimeout} if it carries
       # error code 50 (MaxTimeMSExpired). Otherwise, the original exception is

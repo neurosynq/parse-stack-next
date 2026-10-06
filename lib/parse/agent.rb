@@ -21,6 +21,7 @@ require_relative "agent/result_formatter"
 require_relative "agent/pipeline_validator"
 require_relative "agent/rate_limiter"
 require_relative "agent/cancellation_token"
+require_relative "agent/log_levels"
 require_relative "agent/approval_gate"
 require_relative "agent/prompt_hardening"
 require_relative "agent/describe"
@@ -1002,6 +1003,15 @@ module Parse
     #   Numeric. `total` and `message` are optional.
     attr_accessor :progress_callback
 
+    # @return [#call, nil] callback that emits MCP `notifications/message`
+    #   log events. Installed per request by Parse::Agent::MCPDispatcher on
+    #   streaming transports, which drop messages below the level the
+    #   client set with `logging/setLevel`. When nil, {#log} is a no-op.
+    #   Application code should log through {#log}, not this accessor.
+    #
+    #   The callback signature is `call(level:, data:, logger:)`.
+    attr_accessor :log_callback
+
     # @return [Parse::Agent::CancellationToken, nil] cooperative
     #   cancellation token installed by Parse::Agent::MCPDispatcher around
     #   tool dispatch when the transport supports cancellation
@@ -1316,6 +1326,35 @@ module Parse
       return if cb.nil?
 
       cb.call(progress: progress, total: total, message: message)
+      nil
+    end
+
+    # Emit an MCP log message to the connected client. Tools (built-in or
+    # registered through `Parse::Agent::Tools.register`) call this to
+    # surface diagnostics without failing the call. The message reaches
+    # the client only on a streaming transport and only when the client
+    # asked for this level or a lower one via `logging/setLevel`;
+    # otherwise this is a no-op.
+    #
+    # @param level [Symbol, String] an RFC 5424 severity: `:debug`,
+    #   `:info`, `:notice`, `:warning`, `:error`, `:critical`, `:alert`,
+    #   or `:emergency`.
+    # @param data [Object] any JSON-serializable value. Do not include
+    #   secrets or data the agent's scope may not see.
+    # @param logger [String, nil] optional logger name shown by the client.
+    # @return [void]
+    # @raise [ArgumentError] for an unknown level.
+    def log(level, data, logger: nil)
+      # Validate before the no-callback return so a bad level fails the
+      # same way on every transport, not only on a streaming request.
+      level = level.to_s
+      unless LOG_LEVELS.include?(level)
+        raise ArgumentError, "log level must be one of #{LOG_LEVELS.join(", ")} (got #{level.inspect})"
+      end
+      cb = @log_callback
+      return if cb.nil?
+
+      cb.call(level: level, data: data, logger: logger)
       nil
     end
 
@@ -1719,6 +1758,7 @@ module Parse
         # client is observing.
         @cancellation_token = parent.cancellation_token
         @progress_callback = parent.progress_callback
+        @log_callback = parent.log_callback
 
         # Clamp the sub-agent's permission tier at the parent's. The
         # default :readonly is always ≤ any parent tier, so this fires

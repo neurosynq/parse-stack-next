@@ -120,8 +120,11 @@ providers:
   `{ type: "image_url", image_url: { url: ... } }` content rows.
 * `Parse::Embeddings::Voyage` — voyage-4 family (`voyage-4-large` 2048,
   Matryoshka; `voyage-4` 1024; `voyage-4-lite` 512; `voyage-4-nano` 256),
-  voyage-3 family, domain models (`voyage-code-3`, `voyage-finance-2`,
-  `voyage-law-2`), and `voyage-multimodal-3` (1024-dim, 32k token
+  voyage-3 family, domain models (`voyage-code-4`, `voyage-code-3`,
+  `voyage-finance-2`, `voyage-law-2`), contextualized chunk models
+  (`voyage-context-4`, `voyage-context-3`; route to
+  `/v1/contextualizedembeddings`, with whole chunked documents embedded
+  through `embed_chunks`), and `voyage-multimodal-3` (1024-dim, 32k token
   context, routes to `/v1/multimodalembeddings` with the wrapped
   `{inputs: [{content: [{type: "text", text: ...}]}]}` envelope for
   text and `{type: "image_url", image_url: <url>}` content rows for
@@ -330,7 +333,8 @@ Every `text:`-overload query funnels through one embed path
 ```ruby
 # Opt-in query-embed cache: repeated identical queries skip the
 # provider round-trip. Keyed by (provider, model, dimensions,
-# input_type, SHA-256(input)) — plaintext never lands in the store.
+# input_type, deployment endpoint, SHA-256(input)); plaintext and
+# credentials never land in the store.
 Parse::Embeddings::Cache.enable!(max_entries: 2048, ttl: 600)
 Parse::Embeddings::Cache.stats   # => { enabled:, hits:, misses:, size: }
 
@@ -451,6 +455,69 @@ embed-time chunking), use one of these patterns:
    similarity search against the chunk collection, then hydrate
    parents as needed.
 
+### Contextualized chunk embeddings (`voyage-context-4`)
+
+An ordinary embedding of a chunk sees only that chunk. "It ships Friday."
+embeds the same no matter which product the surrounding document is
+about. Voyage's contextualized models (`voyage-context-4`,
+`voyage-context-3`) embed every chunk together with the rest of its
+document, so each chunk vector also carries what the document is about.
+
+To get that, send a document's chunks together with `embed_chunks`:
+
+```ruby
+voyage = Parse::Embeddings::Voyage.new(
+  api_key: ENV.fetch("VOYAGE_API_KEY"),
+  model:   "voyage-context-4",           # 1024 dims; 256/512/2048 via dimensions:
+)
+
+documents = [
+  ["The Atlas release slipped a week.", "It ships Friday."],   # one document, two chunks
+  ["Billing moves to the new provider.", "It ships Friday."],
+]
+vectors = voyage.embed_chunks(documents, input_type: :search_document)
+# => [[vec_a1, vec_a2], [vec_b1, vec_b2]]  one Array per document, aligned with its chunks
+# vec_a2 != vec_b2: the same sentence, embedded with different documents.
+
+# Store each chunk vector on its own record. The chunk class declares the
+# vector property but NOT the `embed` macro: `embed :content` would
+# recompute the vector from `content` alone on save, silently replacing the
+# contextual vector with an ordinary one.
+class PostChunk < Parse::Object
+  belongs_to :post
+  property :content, :string
+  property :embedding, :vector, dimensions: 1024
+end
+
+documents.zip(vectors).each do |chunks, chunk_vectors|
+  chunks.zip(chunk_vectors).each { |text, vec| PostChunk.create!(content: text, embedding: vec) }
+end
+
+# Queries are single strings: embed_text sends each as a one-chunk document.
+query_vec = voyage.embed_text(["when does it ship?"], input_type: :search_query).first
+PostChunk.find_similar(vector: query_vec, k: 5)
+```
+
+Two things to know:
+
+* **The `embed` macro does not contextualize.** It sends each record's
+  source text through `embed_text`, which treats every input as its own
+  one-chunk document. Registering a context model as an `embed` provider
+  works, but the stored vectors carry no surrounding-document context.
+  Use `embed_chunks` when chunk-level context is the point.
+* **Request sizing is partly handled for you.** Voyage caps one request
+  at 1,000 documents, 16,000 chunks, and 120k tokens. `embed_chunks`
+  checks the document and chunk caps before sending, and splits large
+  inputs across several requests by whole document (a document's chunks
+  always travel together) so that each **response** stays under the
+  SDK's response-size cap. That split is sized by the vectors coming
+  back, not by tokens going out, so it does **not** guarantee a request
+  stays under the 120k input-token cap. The SDK has no tokenizer to
+  check that; keep long documents to a few per call, and expect a
+  `BadRequestError` from Voyage if a request exceeds it. Context models
+  default to `embed_batch_size: 32` to keep `embed_text` batches clear of
+  the token cap for typical inputs, which is a heuristic, not a check.
+
 ---
 
 ## Retrieval (RAG)
@@ -541,6 +608,19 @@ when the cluster does not support it; the default `:rrf` always fuses
 client-side, which is the fully-enforced, deterministic path. `$rankFusion`
 is admitted to `PipelineSecurity::ALLOWED_STAGES` for the native path.
 
+*Status:* the native path is shipped and its pipeline shape is pinned by
+unit and snapshot tests. Unlike the client-side path, where each branch
+enforces ACL and CLP before fusion, the native path applies the ACL
+`$match` **after** `$rankFusion`: the stage fuses the unfiltered candidate
+sets, then rows the caller cannot read are dropped. To keep a scoped caller
+from being underfilled by those drops, the branches request a wider
+candidate window and the final `$limit` runs after the ACL match; a caller
+who can read only a small fraction of the collection can still receive
+fewer than `k` results. Fused scores are recomputed from surviving rows so
+an unreadable row's rank does not leak through. It has not yet been
+validated end to end against a live Atlas cluster, which is why it stays
+opt-in rather than the default.
+
 `Parse::Retrieval.retrieve(hybrid: true, ...)` routes through
 `hybrid_search` and chunks the fused results; pass `hybrid: { lexical:,
 vector:, fusion: }` to configure the branches. Tenant scope is folded into
@@ -563,6 +643,27 @@ chunks = Parse::Retrieval.retrieve(
   rerank: reranker, rerank_top_n: 5,    # keep the 5 most relevant docs
 )
 # Reranked chunks' score is the cross-encoder relevance_score.
+```
+
+Voyage's rerankers plug in the same way. `rerank-3` is the default and
+`rerank-3-lite` is the cheaper option. An Atlas model API key (`al-`
+prefix) routes to MongoDB's Atlas Embedding and Reranking API
+automatically, exactly like the Voyage embeddings provider:
+
+```ruby
+reranker = Parse::Retrieval::Reranker::Voyage.new(
+  api_key: ENV.fetch("VOYAGE_API_KEY"),   # or an Atlas "al-..." key
+  model:   "rerank-3-lite",
+  truncation: false,                      # over-length input raises instead of truncating
+)
+chunks = Parse::Retrieval.retrieve(
+  query: "reset my password", klass: Article, k: 30,
+  rerank: reranker, rerank_top_n: 5,
+)
+
+# Or directly, outside retrieve:
+reranker.rerank(query: "capital of France", documents: docs, top_n: 3)
+# => [#<struct Result index=1, relevance_score=0.91>, ...]
 ```
 
 `Reranker::Fixture` is a deterministic, zero-network reranker (lexical
@@ -655,8 +756,9 @@ envelope. See the [MCP guide's Token Economy section](./mcp_guide.md#token-econo
 
 `embed_image` is the image-source counterpart to `embed`. The source
 property must be `:file`-typed; the target must be a `:vector` property
-whose declared `provider:` supports multimodal input (currently
-`:voyage` with `voyage-multimodal-3`, or `:cohere` with `embed-v4.0`).
+whose declared `provider:` supports multimodal input (`:voyage` with
+`voyage-multimodal-3.5` or `voyage-multimodal-3`, or `:cohere` with
+`embed-v4.0`).
 
 Two fetch modes, selected per declaration with `source:`:
 
@@ -782,7 +884,17 @@ Direct provider calls accept the same shape:
 
 ### Save-side semantics
 
-* Digest is the **SHA-256 of the URL String**, not the file bytes.
+* **Private buckets.** When the file adapter returns signed URLs (S3 or GCS
+  with `presignedUrl: true`), `file.url` holds the canonical URL with the
+  signature stripped and the signed form is kept in `file.presigned_url`.
+  Recompute fetches through `file.presigned_url` while it is still valid
+  (for both `source: :url` and `source: :bytes`) and falls back to the bare
+  URL otherwise, so a private object is reachable without making the
+  bucket public. Make sure the URL's lifetime outlasts the save: an expired
+  signature falls back to the bare URL, which a private bucket refuses.
+* Digest is the **SHA-256 of the canonical URL String** (signature
+  stripped), not the file bytes, so a save that only rotates the
+  signature does not re-embed.
   Replacing the `Parse::File` with one pointing at a different URL
   re-embeds; resaving the same URL is a no-op (zero provider calls).
   Parse-managed file URLs are stable unless overwritten in place — if
@@ -841,9 +953,12 @@ each row's digest sibling (so the save-path recompute cannot elide the
 provider call), and saves. Unlike `embed_pending!` — which only fills
 NULL vectors — `reembed!` recomputes populated rows too. Run it with a
 master-key client (or pass `save_opts:` with a session token that can
-write every row). Each row's save makes one provider call; pace bulk
-runs against provider rate limits (see `BatchEmbedder` below for the
-pattern, or just throttle the loop).
+write every row). `batch_size:` is the query page size: it controls how
+many records are fetched per round, not how many inputs go into a provider
+request. Each row's save makes its own provider call; pace bulk runs
+against provider rate limits (see `BatchEmbedder` below for the pattern,
+or just throttle the loop). `embed_pending!(batch_size:)` pages the same
+way.
 
 ### Changed-width migrations: dual-field workflow
 
@@ -932,7 +1047,7 @@ Payload contract (keys always present; values may be nil):
 | `:input_count` | `Integer`     | batch size                                                              |
 | `:input_type`  | `Symbol`      | `:search_query` / `:search_document`                                    |
 | `:total_tokens`| `Integer`/nil | provider-reported usage; nil for Fixture and providers without usage    |
-| `:cached`      | `Boolean`     | always false in v5.0; reserved for v5.1 embed cache                     |
+| `:cached`      | `Boolean`     | true when `Parse::Embeddings::Cache` served the vector (no provider call) |
 | `:error`       | `String`/nil  | `exception.class.name` when the block raised — class name only         |
 
 Notes:

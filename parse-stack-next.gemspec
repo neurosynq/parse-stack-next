@@ -71,6 +71,7 @@ Gem::Specification.new do |spec|
   # Required for: Parse::MongoDB, Parse::AtlasSearch, mongo_direct query methods
   # Users can add this to their Gemfile for direct MongoDB access:
   #   gem 'mongo', '~> 2.18'
+  # Use mongo 2.26 or newer against MongoDB 9.0 servers.
   # Note: The gem is loaded at runtime only when MongoDB features are used
 
   # Optional dependency for GraphQL schema type generation

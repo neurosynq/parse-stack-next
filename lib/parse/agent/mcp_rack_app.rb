@@ -405,6 +405,10 @@ module Parse
         # and always present; they only do work when
         # Parse::Agent.require_approval_for opts a tier in.
         @elicitation_capabilities = Parse::Agent::ClientCapabilityRegistry.new
+        # Per-session minimum log level set by `logging/setLevel`. Log
+        # messages ride the response stream of an SSE request, so a session
+        # that never sets a level (or never streams) receives none.
+        @log_levels = Parse::Agent::MCPDispatcher::LogLevelRegistry.new
         @pending_elicitations = Parse::Agent::PendingElicitationRegistry.new
         @approval_timeout = approval_timeout
 
@@ -627,6 +631,7 @@ module Parse
           # session's cached elicitation capability.
           @pending_elicitations.abort_all_for(clean_sid, :session_terminated)
           @elicitation_capabilities.forget(clean_sid)
+          @log_levels.forget(clean_sid)
           # Tear down any resource subscriptions and the listening stream
           # bound to this session so a terminated session leaves no LiveQuery
           # sockets behind.
@@ -733,7 +738,13 @@ module Parse
         #     may be sent by a client that has not (yet) completed
         #     initialize against this transport instance (e.g. a
         #     reconnecting client cancelling a pre-disconnect request).
+        #     `server/discover` is exempt too. Newer clients send it before
+        #     initialize, stamped with their own (newer) protocol version.
+        #     A 400 here makes the client treat the server as broken. Letting
+        #     it through yields -32601 from the dispatcher, and the client
+        #     falls back to initialize, which negotiates a supported version.
         unless body["method"] == "initialize" ||
+               body["method"] == "server/discover" ||
                body["method"] == "notifications/cancelled" ||
                elicitation_reply?(body)
           requested = env["HTTP_MCP_PROTOCOL_VERSION"]
@@ -808,12 +819,18 @@ module Parse
         #     per session before attempting a server→client prompt.
         if body.is_a?(Hash) && body["method"] == "initialize" &&
            agent.respond_to?(:correlation_id) && agent.correlation_id
-          supported = !!(body.dig("params", "capabilities", "elicitation"))
+          # Bind this session to the initializing principal FIRST, so only the
+          # same principal can later attach a listening stream, set its log
+          # level, or have its elicitation capability recorded (owner-binding;
+          # see SessionOwnerRegistry). A session id already owned by another
+          # principal is refused outright rather than rebound.
+          unless @session_owners.bind(agent.correlation_id, principal_fingerprint(agent, env))
+            @logger&.warn("[Parse::Agent::MCPRackApp] initialize refused: session owned by another principal")
+            return [403, json_headers,
+                    [json_rpc_error(-32_600, "Mcp-Session-Id is owned by another principal", id: body["id"])]]
+          end
+          supported = elicitation_form_supported?(body.dig("params", "capabilities", "elicitation"))
           @elicitation_capabilities.set(agent.correlation_id, supported)
-          # Authoritatively bind this session to the initializing principal so
-          # only the same principal can later attach a listening stream for it
-          # (owner-binding; see SessionOwnerRegistry).
-          @session_owners.bind(agent.correlation_id, principal_fingerprint(agent, env))
         end
 
         # 5b-iii. Elicitation reply ingress. A method-less JSON-RPC
@@ -854,10 +871,11 @@ module Parse
 
         # 6. Branch on streaming preference. Transport-level errors (steps 1-5)
         #    always return plain JSON regardless of the Accept header.
+        log_levels = session_log_levels(agent, env)
         if @streaming && env["HTTP_ACCEPT"].to_s.include?("text/event-stream")
-          serve_sse(body, agent)
+          serve_sse(body, agent, log_levels)
         else
-          serve_json(body, agent)
+          serve_json(body, agent, log_levels)
         end
       end
 
@@ -872,6 +890,17 @@ module Parse
       # @param body  [Hash] parsed JSON-RPC request body.
       # @param agent [Parse::Agent] authenticated agent.
       # @return [Array] Rack triple with Array<String> body.
+      # Whether a client's `capabilities.elicitation` admits form-mode
+      # requests, which is what the approval prompt sends. Since 2025-11-25
+      # a client declares its modes (`{ form: {} }`, `{ url: {} }`, or
+      # both); an empty object is the pre-2025-11-25 shape and means form.
+      # A URL-only client must not be sent a form, or the approval is
+      # refused as if the user had cancelled it.
+      def elicitation_form_supported?(capability)
+        return false unless capability.is_a?(Hash)
+        capability.empty? || capability.key?("form")
+      end
+
       # True when `body` is a JSON-RPC RESPONSE (no "method"; carries an
       # "id" plus "result" or "error") — the client's reply to a
       # server-issued elicitation/create request.
@@ -930,11 +959,26 @@ module Parse
         )
       end
 
-      def serve_json(body, agent)
+      # The log-level registry this request may read and write, or nil.
+      #
+      # nil when the app does not stream (log messages could never be
+      # delivered) or when the request's session id is not bound to this
+      # request's principal. The owner check keeps one caller from setting
+      # another session's level, and because only `initialize` binds a
+      # session, a caller cannot fill the registry with invented ids.
+      def session_log_levels(agent, env)
+        return nil unless @streaming
+        cid = agent.respond_to?(:correlation_id) ? agent.correlation_id : nil
+        return nil unless @session_owners.owned_by?(cid, principal_fingerprint(agent, env))
+        @log_levels
+      end
+
+      def serve_json(body, agent, log_levels = nil)
         result = Parse::Agent::MCPDispatcher.call(
           body: body, agent: agent, logger: @logger,
           subscription_manager: @subscription_manager,
           approval_gate: build_approval_gate(agent),
+          log_levels: log_levels,
         )
         headers = json_headers
         merge_session_header!(headers, body, agent)
@@ -967,7 +1011,7 @@ module Parse
       # @param body  [Hash] parsed JSON-RPC request body.
       # @param agent [Parse::Agent] authenticated agent.
       # @return [Array] Rack triple with SSEBody or a 503 JSON error as the body.
-      def serve_sse(body, agent)
+      def serve_sse(body, agent, log_levels = nil)
         # NOTE: this check is not mutex-protected, so two concurrent requests
         # arriving within the same scheduling quantum can both pass the check
         # and each spawn a dispatcher_thread, briefly exceeding the limit by
@@ -1010,7 +1054,8 @@ module Parse
           progress_token, req_id, interval, logger,
           cancellation_token: cancellation_token,
           on_close: -> { registry.deregister(correlation_id, req_id, registry_entry_id) if registry_entry_id },
-        ) do |progress_callback|
+          log_level_lookup: log_levels && -> { log_levels.get(correlation_id) },
+        ) do |progress_callback, log_callback|
           Parse::Agent::MCPDispatcher.call(
             body: body,
             agent: agent,
@@ -1019,6 +1064,8 @@ module Parse
             cancellation_token: cancellation_token,
             subscription_manager: @subscription_manager,
             approval_gate: build_approval_gate(agent),
+            log_callback: log_callback,
+            log_levels: log_levels,
           )
         end
 
@@ -1211,6 +1258,14 @@ module Parse
         # @return [Proc]
         attr_reader :progress_callback
 
+        # Callback exposed to the dispatcher block as the agent's
+        # `log_callback`. Pushes a `notifications/message` event when the
+        # message's level is at or above the session's level, and drops it
+        # otherwise. nil when no level lookup was supplied.
+        #
+        # @return [Proc, nil]
+        attr_reader :log_callback
+
         # @param progress_token [String] MCP progressToken value.
         # @param req_id         [Object] JSON-RPC request id (may be nil).
         # @param interval       [Numeric] heartbeat period in seconds.
@@ -1222,8 +1277,11 @@ module Parse
         # @param on_close [Proc, nil] callback invoked from {#close} after
         #   the worker has been terminated. Used by MCPRackApp to
         #   deregister the cancellation token from the per-app registry.
-        # @param dispatcher_blk [Proc] called with one argument (the
-        #   {#progress_callback} Proc); must return the same
+        # @param log_level_lookup [Proc, nil] returns the session's
+        #   minimum log level (a String) or nil when the client never set
+        #   one. nil disables {#log_callback} entirely.
+        # @param dispatcher_blk [Proc] called with the {#progress_callback}
+        #   and {#log_callback} Procs; must return the same
         #   `{ status:, body: }` hash that MCPDispatcher.call returns.
         # @param heartbeat_waiter [Proc, nil] test hook. Called as
         #   `waiter.call(dispatcher_thread, interval)` once per heartbeat
@@ -1234,7 +1292,7 @@ module Parse
         #   to OS scheduler jitter.
         def initialize(progress_token, req_id, interval, logger,
                        cancellation_token: nil, on_close: nil,
-                       heartbeat_waiter: nil, &dispatcher_blk)
+                       heartbeat_waiter: nil, log_level_lookup: nil, &dispatcher_blk)
           @progress_token = progress_token
           # Heartbeats use a dedicated server-generated progressToken so
           # the elapsed-seconds scale of heartbeats never appears on the
@@ -1271,6 +1329,7 @@ module Parse
           # actively reporting, time-based heartbeats are noise.
           @tool_progress_reported = false
           @progress_callback = build_progress_callback
+          @log_callback = build_log_callback(log_level_lookup)
           # Deregistration callbacks for the Tools/Prompts subscribe
           # bindings. Set when the worker starts (so a request that is
           # never driven via #each does not register a stale entry) and
@@ -1494,7 +1553,7 @@ module Parse
                     # tools running inside MCPDispatcher.call can emit
                     # notifications/progress events without coupling to
                     # SSEBody internals.
-                    result = @dispatcher_blk.call(@progress_callback)
+                    result = @dispatcher_blk.call(@progress_callback, @log_callback)
                   rescue StandardError => e
                     # Log the unexpected failure (MCPDispatcher.call normally catches
                     # StandardError internally; anything reaching here is unusual).
@@ -1638,6 +1697,33 @@ module Parse
               else
                 warn line
               end
+            end
+            nil
+          end
+        end
+
+        # Build the callback behind {#log_callback}. The session's level is
+        # read on every message, so a `logging/setLevel` sent mid-request
+        # takes effect for later messages. Encoder or queue failures are
+        # logged and swallowed, like {#build_progress_callback}.
+        def build_log_callback(lookup)
+          return nil if lookup.nil?
+          diag = @logger
+          levels = Parse::Agent::MCPDispatcher::LOG_LEVELS
+          lambda do |level:, data:, logger: nil|
+            begin
+              min = lookup.call
+              rank = levels.index(level.to_s)
+              min_rank = min && levels.index(min)
+              if rank && min_rank && rank >= min_rank
+                params = { "level" => level.to_s, "data" => data }
+                params["logger"] = logger.to_s if logger
+                payload = JSON.generate({ "jsonrpc" => "2.0", "method" => "notifications/message", "params" => params })
+                @queue << "event: message\ndata: #{payload}\n\n"
+              end
+            rescue StandardError => e
+              line = "[Parse::Agent::MCPRackApp::SSEBody] log_callback error: #{e.class}: #{e.message}"
+              diag ? diag.warn(line) : warn(line)
             end
             nil
           end
@@ -1851,14 +1937,24 @@ module Parse
           @mutex = Mutex.new
         end
 
-        # Authoritatively bind a session to a principal (initialize). A
-        # re-initialize by the same caller refreshes the binding.
+        # Bind a session to a principal at initialize. An unclaimed session
+        # is claimed; a re-initialize by the owning principal refreshes the
+        # binding. A session already owned by a different principal is NOT
+        # rebound, so knowing another caller's session id is not enough to
+        # take it over (and with it, its log level, elicitation capability,
+        # and listening stream).
+        #
+        # @return [Boolean] true when bound to `fingerprint`; false on a
+        #   principal mismatch or blank input.
         def bind(session_id, fingerprint)
-          return if blank?(session_id) || blank?(fingerprint)
+          return false if blank?(session_id) || blank?(fingerprint)
           @mutex.synchronize do
+            owner = @owners[session_id]
+            return false if owner && owner != fingerprint
             @owners.delete(session_id)
             @owners[session_id] = fingerprint
             evict_lru!
+            true
           end
         end
 
@@ -1882,6 +1978,13 @@ module Parse
               false
             end
           end
+        end
+
+        # True when `session_id` is bound to exactly this principal. Never
+        # claims an unbound session (unlike {#authorize_attach}).
+        def owned_by?(session_id, fingerprint)
+          return false if blank?(session_id) || blank?(fingerprint)
+          @mutex.synchronize { @owners[session_id] == fingerprint }
         end
 
         # Drop a session's owner binding (explicit DELETE termination). Not

@@ -155,7 +155,177 @@ class MCPDispatcherTest < Minitest::Test
   end
 
   def test_protocol_version_constant_matches_mcp_server
-    assert_equal "2025-06-18", Parse::Agent::MCPDispatcher::PROTOCOL_VERSION
+    assert_equal "2025-11-25", Parse::Agent::MCPDispatcher::PROTOCOL_VERSION
+    require "parse/agent/mcp_server"
+    assert_equal Parse::Agent::MCPDispatcher::PROTOCOL_VERSION, Parse::Agent::MCPServer::PROTOCOL_VERSION
+  end
+
+  # ---------- 2025-11-25 ----------------------------------------------------
+
+  def test_initialize_negotiates_2025_11_25_and_advertises_new_capabilities
+    body = { "jsonrpc" => "2.0", "id" => 1, "method" => "initialize",
+             "params" => { "protocolVersion" => "2025-11-25" } }
+    result = D.call(body: body, agent: @agent)[:body]["result"]
+    assert_equal "2025-11-25", result["protocolVersion"]
+    assert_equal({}, result["capabilities"]["completions"])
+    refute result["capabilities"].key?("logging"), "no log_levels: the transport cannot deliver logs"
+    assert_equal "Parse Stack MCP", result["serverInfo"]["title"]
+    assert_kind_of String, result["serverInfo"]["description"]
+
+    with_logs = D.call(body: body, agent: @agent,
+                       log_levels: Parse::Agent::MCPDispatcher::LogLevelRegistry.new)[:body]["result"]
+    assert_equal({}, with_logs["capabilities"]["logging"])
+  end
+
+  def test_tools_call_non_object_arguments_is_a_tool_error
+    body = { "jsonrpc" => "2.0", "id" => 2, "method" => "tools/call",
+             "params" => { "name" => "query_class", "arguments" => [1, 2] } }
+    result = D.call(body: body, agent: @agent)[:body]
+    assert_nil result["error"]
+    assert_equal true, result["result"]["isError"]
+    assert_match(/must be a JSON object/, result["result"]["content"][0]["text"])
+  end
+
+  # ---------- completion/complete ------------------------------------------
+
+  def complete(ref, name, value, context: nil)
+    params = { "ref" => ref, "argument" => { "name" => name, "value" => value } }
+    params["context"] = { "arguments" => context } if context
+    D.call(body: { "jsonrpc" => "2.0", "id" => 3, "method" => "completion/complete", "params" => params },
+           agent: @agent)[:body]
+  end
+
+  def test_completion_completes_class_names_for_prompt_arguments
+    body = complete({ "type" => "ref/prompt", "name" => "class_overview" }, "class_name", "s")
+    assert_equal({ "values" => ["Song"], "total" => 1, "hasMore" => false }, body["result"]["completion"])
+  end
+
+  def test_completion_completes_last_segment_of_class_list
+    body = complete({ "type" => "ref/prompt", "name" => "parse_relations" }, "classes", "Song,_u")
+    assert_equal ["Song,_User"], body["result"]["completion"]["values"]
+  end
+
+  def test_completion_completes_resource_template_class_name
+    body = complete({ "type" => "ref/resource", "uri" => "parse://{className}/schema" }, "className", "")
+    assert_equal %w[Song _User], body["result"]["completion"]["values"]
+  end
+
+  def test_completion_completes_field_names_from_context_class
+    agent = StubAgent.new
+    def agent.execute(tool_name, **kwargs)
+      return super unless tool_name == :get_schema
+      { success: true, data: { class_name: kwargs[:class_name],
+                               fields: [{ name: "genre" }, { name: "title" }, { name: "group" }] } }
+    end
+    body = D.call(body: { "jsonrpc" => "2.0", "id" => 4, "method" => "completion/complete",
+                          "params" => { "ref" => { "type" => "ref/prompt", "name" => "count_by" },
+                                        "argument" => { "name" => "group_by", "value" => "g" },
+                                        "context" => { "arguments" => { "class_name" => "Song" } } } },
+                  agent: agent)[:body]
+    assert_equal %w[genre group], body["result"]["completion"]["values"]
+  end
+
+  def test_completion_keeps_spacing_in_class_list
+    body = complete({ "type" => "ref/prompt", "name" => "parse_relations" }, "classes", "Song, _U")
+    assert_equal ["Song, _User"], body["result"]["completion"]["values"]
+  end
+
+  def test_completion_caps_values_at_100_and_reports_has_more
+    agent = StubAgent.new
+    def agent.execute(tool_name, **kwargs)
+      return super unless tool_name == :get_all_schemas
+      { success: true, data: { custom: (1..150).map { |i| { name: format("C%03d", i) } }, built_in: [] } }
+    end
+    body = D.call(body: { "jsonrpc" => "2.0", "id" => 8, "method" => "completion/complete",
+                          "params" => { "ref" => { "type" => "ref/prompt", "name" => "class_overview" },
+                                        "argument" => { "name" => "class_name", "value" => "C" } } },
+                  agent: agent)[:body]["result"]["completion"]
+    assert_equal 100, body["values"].size
+    assert_equal 150, body["total"]
+    assert_equal true, body["hasMore"]
+  end
+
+  def test_completion_field_names_fall_back_to_child_class_and_reject_bad_names
+    agent = StubAgent.new
+    seen = []
+    agent.define_singleton_method(:execute) do |tool_name, **kwargs|
+      seen << kwargs[:class_name] if tool_name == :get_schema
+      { success: true, data: { fields: [{ name: "workspace" }] } }
+    end
+    ref = { "type" => "ref/prompt", "name" => "find_relationship" }
+    call = lambda do |ctx|
+      D.call(body: { "jsonrpc" => "2.0", "id" => 9, "method" => "completion/complete",
+                     "params" => { "ref" => ref, "argument" => { "name" => "pointer_field", "value" => "" },
+                                   "context" => { "arguments" => ctx } } },
+             agent: agent)[:body]["result"]["completion"]["values"]
+    end
+    assert_equal ["workspace"], call.({ "child_class" => "Post" })
+    assert_equal [], call.({ "child_class" => "bad name!" })
+    assert_equal [], call.({})
+    assert_equal ["Post"], seen, "invalid or missing class names never reach get_schema"
+  end
+
+  def test_new_methods_reject_non_object_params
+    %w[completion/complete logging/setLevel].each do |m|
+      body = D.call(body: { "jsonrpc" => "2.0", "id" => 10, "method" => m, "params" => [] }, agent: @agent)[:body]
+      assert_equal(-32602, body["error"]["code"], m)
+    end
+  end
+
+  def test_completion_rejects_malformed_context_and_value
+    ref = { "type" => "ref/prompt", "name" => "class_overview" }
+    bad = [
+      { "ref" => ref, "argument" => { "name" => "class_name", "value" => 7 } },
+      { "ref" => ref, "argument" => { "name" => "class_name", "value" => "S" }, "context" => "x" },
+      { "ref" => ref, "argument" => { "name" => "class_name", "value" => "S" }, "context" => { "arguments" => [1] } },
+    ]
+    bad.each do |params|
+      body = D.call(body: { "jsonrpc" => "2.0", "id" => 11, "method" => "completion/complete", "params" => params },
+                    agent: @agent)[:body]
+      assert_equal(-32602, body.dig("error", "code"), params.inspect)
+    end
+  end
+
+  def test_completion_unrelated_argument_is_empty
+    body = complete({ "type" => "ref/prompt", "name" => "recent_activity" }, "limit", "1")
+    assert_equal [], body["result"]["completion"]["values"]
+  end
+
+  def test_completion_rejects_unknown_refs
+    assert_equal(-32602, complete({ "type" => "ref/prompt", "name" => "nope" }, "x", "")["error"]["code"])
+    assert_equal(-32602, complete({ "type" => "ref/prompt", "name" => "class_overview" }, "nope", "")["error"]["code"])
+    assert_equal(-32602, complete({ "type" => "ref/resource", "uri" => "parse://x" }, "className", "")["error"]["code"])
+    assert_equal(-32602, complete({ "type" => "ref/other" }, "x", "")["error"]["code"])
+  end
+
+  # ---------- logging/setLevel ---------------------------------------------
+
+  def test_logging_set_level_records_session_level
+    agent = StubAgent.new
+    def agent.correlation_id = "sess-1"
+    levels = Parse::Agent::MCPDispatcher::LogLevelRegistry.new
+    body = { "jsonrpc" => "2.0", "id" => 5, "method" => "logging/setLevel", "params" => { "level" => "warning" } }
+    result = D.call(body: body, agent: agent, log_levels: levels)[:body]
+    assert_equal({}, result["result"])
+    assert_equal "warning", levels.get("sess-1")
+  end
+
+  def test_logging_set_level_rejects_unknown_level
+    body = { "jsonrpc" => "2.0", "id" => 6, "method" => "logging/setLevel", "params" => { "level" => "loud" } }
+    assert_equal(-32602, D.call(body: body, agent: @agent)[:body]["error"]["code"])
+  end
+
+  def test_tool_failure_is_logged_through_the_log_callback
+    agent = StubAgent.new
+    class << agent
+      attr_accessor :log_callback
+      def log(level, data, logger: nil) = log_callback&.call(level: level.to_s, data: data, logger: logger)
+    end
+    seen = []
+    body = { "jsonrpc" => "2.0", "id" => 7, "method" => "tools/call", "params" => { "name" => "fail_tool" } }
+    D.call(body: body, agent: agent, log_callback: ->(**kw) { seen << kw })
+    assert_equal [{ level: "warning", data: { "tool" => "fail_tool", "error_code" => nil }, logger: "parse.agent.tools" }], seen
+    assert_nil agent.log_callback, "dispatcher must restore the prior log_callback"
   end
 
   def test_initialize_echoes_supported_client_protocol_version
@@ -387,6 +557,15 @@ class MCPDispatcherTest < Minitest::Test
     assert_includes err["message"], "no_such_method/v99"
   end
 
+  def test_server_discover_returns_32601_so_clients_fall_back_to_initialize
+    body = { "jsonrpc" => "2.0", "id" => 1, "method" => "server/discover" }
+    result = D.call(body: body, agent: @agent)
+
+    assert_equal 200, result[:status]
+    assert_equal(-32601, result[:body]["error"]["code"])
+    assert_equal 1, result[:body]["id"]
+  end
+
   # ---------- malformed body → -32700 ---------------------------------------
 
   def test_missing_method_key_returns_32700
@@ -452,11 +631,11 @@ class MCPDispatcherTest < Minitest::Test
     # test output. The class+message belong in operator logs, not on the wire.
     original_stderr = $stderr
     $stderr = StringIO.new
-    begin
-      result = D.call(body: body, agent: StandardErrorAgent.new)
-    ensure
-      $stderr = original_stderr
-    end
+    result = begin
+        D.call(body: body, agent: StandardErrorAgent.new)
+      ensure
+        $stderr = original_stderr
+      end
 
     assert_equal 200, result[:status]
     err = result[:body]["error"]

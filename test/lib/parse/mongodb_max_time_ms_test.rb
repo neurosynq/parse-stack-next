@@ -226,6 +226,92 @@ class MongoDBMaxTimeMsTest < Minitest::Test
     Parse::MongoDB.reset!
   end
 
+  # ============================================================
+  # QueryPlanKilled (MongoDB 9.0 multikey kill) is retried
+  # ============================================================
+
+  def test_aggregate_retries_a_killed_query_plan
+    calls = 0
+    killed = operation_failure_for(code: Parse::MongoDB::MONGO_QUERY_PLAN_KILLED_CODE)
+    mock_view = Object.new
+    mock_view.define_singleton_method(:to_a) do
+      calls += 1
+      raise killed if calls == 1
+      [{ "_id" => "a" }]
+    end
+    mock_collection = Object.new
+    mock_collection.define_singleton_method(:aggregate) { |_p, _o = {}| mock_view }
+    configure_with_mock_client(mock_collection)
+
+    events = []
+    sub = ActiveSupport::Notifications.subscribe("parse.mongodb.query_killed_retry") { |*a| events << a.last }
+    results = begin
+        Parse::MongoDB.aggregate("Song", [{ "$match" => {} }], master: true)
+      ensure
+        ActiveSupport::Notifications.unsubscribe(sub)
+      end
+
+    assert_equal 2, calls
+    assert_equal 1, results.size
+    assert_equal [{ collection: "Song", attempt: 1 }], events
+  ensure
+    Parse::MongoDB.reset!
+  end
+
+  def test_find_retries_a_killed_query_plan_by_code_name
+    calls = 0
+    killed = operation_failure_for(code: nil)
+    killed.define_singleton_method(:code_name) { "QueryPlanKilled" }
+    cursor = build_mock_cursor(results: [])
+    cursor.define_singleton_method(:to_a) do
+      calls += 1
+      raise killed if calls == 1
+      [{ "_id" => "a" }]
+    end
+    mock_collection = Object.new
+    mock_collection.define_singleton_method(:find) { |_f| cursor }
+    configure_with_mock_client(mock_collection)
+
+    assert_equal 1, Parse::MongoDB.find("Song", {}, limit: 10).size
+    assert_equal 2, calls
+  ensure
+    Parse::MongoDB.reset!
+  end
+
+  def test_killed_query_plan_propagates_after_retry_budget
+    calls = 0
+    killed = operation_failure_for(code: Parse::MongoDB::MONGO_QUERY_PLAN_KILLED_CODE)
+    mock_view = Object.new
+    mock_view.define_singleton_method(:to_a) { calls += 1; raise killed }
+    mock_collection = Object.new
+    mock_collection.define_singleton_method(:aggregate) { |_p, _o = {}| mock_view }
+    configure_with_mock_client(mock_collection)
+
+    assert_raises(::Mongo::Error::OperationFailure) do
+      Parse::MongoDB.aggregate("Song", [{ "$match" => {} }], master: true)
+    end
+    assert_equal Parse::MongoDB::QUERY_KILLED_RETRIES + 1, calls
+  ensure
+    Parse::MongoDB.reset!
+  end
+
+  def test_other_operation_failures_are_not_retried
+    calls = 0
+    other = operation_failure_for(code: 2)
+    mock_view = Object.new
+    mock_view.define_singleton_method(:to_a) { calls += 1; raise other }
+    mock_collection = Object.new
+    mock_collection.define_singleton_method(:aggregate) { |_p, _o = {}| mock_view }
+    configure_with_mock_client(mock_collection)
+
+    assert_raises(::Mongo::Error::OperationFailure) do
+      Parse::MongoDB.aggregate("Song", [{ "$match" => {} }], master: true)
+    end
+    assert_equal 1, calls
+  ensure
+    Parse::MongoDB.reset!
+  end
+
   private
 
   # Configure Parse::MongoDB with a mock client double that returns

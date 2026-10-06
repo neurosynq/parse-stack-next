@@ -6,7 +6,7 @@ require "parse/retrieval/reranker"
 
 # Unit tests for Parse::Retrieval::Reranker — the Base protocol
 # (validation + normalization), the deterministic Fixture, and the
-# Cohere adapter's response parsing (HTTP stubbed).
+# Cohere and Voyage adapters' response parsing (HTTP stubbed).
 class RetrievalRerankerTest < Minitest::Test
   R = Parse::Retrieval::Reranker
 
@@ -150,5 +150,100 @@ class RetrievalRerankerTest < Minitest::Test
 
   def test_cohere_allows_https_remote
     R::Cohere.new(api_key: "k", base_url: "https://api.cohere.com/v2")
+  end
+  # ----- Voyage adapter (HTTP stubbed) -----
+
+  class CapturingConn
+    attr_reader :body
+
+    def initialize(resp) = (@resp = resp)
+
+    def post(_path)
+      req = Struct.new(:body).new
+      yield req if block_given?
+      @body = JSON.parse(req.body)
+      @resp
+    end
+  end
+
+  def build_voyage_with_response(status:, body:, **opts)
+    rr = R::Voyage.new(api_key: "pa-k", **opts)
+    conn = CapturingConn.new(FakeResp.new(status, body))
+    rr.instance_variable_set(:@connection, conn)
+    [rr, conn]
+  end
+
+  def test_voyage_sends_top_k_and_parses_data
+    body = { "object" => "list",
+             "data" => [{ "index" => 1, "relevance_score" => 0.8 },
+                        { "index" => 2, "relevance_score" => 0.3 }],
+             "model" => "rerank-3", "usage" => { "total_tokens" => 9 } }.to_json
+    rr, conn = build_voyage_with_response(status: 200, body: body)
+    out = rr.rerank(query: "q", documents: %w[a b c], top_n: 2)
+
+    assert_equal [1, 2], out.map(&:index)
+    assert_in_delta 0.8, out.first.relevance_score, 1e-9
+    assert_equal({ "model" => "rerank-3", "query" => "q", "documents" => %w[a b c],
+                   "top_k" => 2, "truncation" => true }, conn.body)
+  end
+
+  def test_voyage_truncation_false_is_forwarded
+    rr, conn = build_voyage_with_response(status: 200, body: { "data" => [] }.to_json, truncation: false)
+    rr.rerank(query: "q", documents: %w[a])
+    assert_equal false, conn.body["truncation"]
+  end
+
+  def test_voyage_errors
+    rr, = build_voyage_with_response(status: 401, body: "{}")
+    assert_raises(R::Voyage::AuthenticationError) { rr.rerank(query: "q", documents: %w[a]) }
+    rr, = build_voyage_with_response(status: 400, body: "{}")
+    assert_raises(R::Voyage::BadRequestError) { rr.rerank(query: "q", documents: %w[a]) }
+    rr, = build_voyage_with_response(status: 200, body: { "results" => [] }.to_json)
+    assert_raises(R::InvalidResponseError) { rr.rerank(query: "q", documents: %w[a]) }
+  end
+
+  def test_voyage_403_explains_key_and_host_mismatch
+    rr, = build_voyage_with_response(status: 403, body: "{}")
+    err = assert_raises(R::Voyage::AuthenticationError) { rr.rerank(query: "q", documents: %w[a]) }
+    assert_match(/base_url matches the key/, err.message)
+  end
+
+  def test_voyage_sends_top_k_for_every_document_when_top_n_is_nil
+    rr, conn = build_voyage_with_response(status: 200, body: { "data" => [] }.to_json)
+    rr.rerank(query: "q", documents: %w[a b c])
+    assert_equal 3, conn.body["top_k"]
+  end
+
+  def test_voyage_retries_429_then_raises
+    calls = 0
+    resp = FakeResp.new(429, "{}")
+    conn = Object.new
+    conn.define_singleton_method(:post) { |_p, &_b| calls += 1; resp }
+    rr = R::Voyage.new(api_key: "pa-k", max_retries: 2)
+    rr.instance_variable_set(:@connection, conn)
+    rr.define_singleton_method(:backoff_seconds) { |_| 0 }
+    assert_raises(R::Voyage::RateLimitError) { rr.rerank(query: "q", documents: %w[a]) }
+    assert_equal 3, calls
+  end
+
+  def test_voyage_endpoint_follows_key_prefix
+    refute R::Voyage.new(api_key: "pa-k").atlas?
+    assert R::Voyage.new(api_key: "al-k").atlas?
+    refute R::Voyage.new(api_key: "al-k", base_url: "https://api.voyageai.com/v1").atlas?
+  end
+
+  def test_voyage_constructor_validates
+    assert_raises(ArgumentError) { R::Voyage.new(api_key: "") }
+    assert_raises(ArgumentError) { R::Voyage.new(api_key: "k", model: "") }
+    assert_raises(ArgumentError) { R::Voyage.new(api_key: "k", truncation: "yes") }
+    assert_raises(ArgumentError) { R::Voyage.new(api_key: "k", base_url: "http://api.voyageai.com/v1") }
+    assert_raises(ArgumentError) { R::Voyage.new(api_key: "k", base_url: "https://evil@api.voyageai.com/v1") }
+    R::Voyage.new(api_key: "k", base_url: "http://localhost:8080/v1")
+  end
+
+  def test_voyage_inspect_redacts_api_key
+    rr = R::Voyage.new(api_key: "pa-secret")
+    refute_includes rr.inspect, "pa-secret"
+    assert_match(/REDACTED/, rr.inspect)
   end
 end

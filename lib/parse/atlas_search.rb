@@ -1067,7 +1067,11 @@ module Parse
         if (mode = Parse::MongoDB.send(:normalize_read_preference, read_preference))
           coll = coll.with(read: { mode: mode })
         end
-        coll.aggregate(pipeline, agg_opts).to_a
+        # Same QueryPlanKilled re-run as Parse::MongoDB.aggregate (private
+        # there too, hence `send`).
+        Parse::MongoDB.send(:with_query_killed_retry, collection_name) do
+          coll.aggregate(pipeline, agg_opts).to_a
+        end
       rescue => e
         # `raise_if_timeout!` is module-private on Parse::MongoDB; use
         # `send` so we can reuse the timeout-translation logic without

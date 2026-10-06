@@ -31,7 +31,11 @@ services:
     command: ["sh", "/preflight.sh"]
 
   mongo:
-    image: mongo:8
+    # MongoDB 9 by default. Set MONGO_VERSION=8 to run the suite against
+    # the previous major. A data volume written by one major is not
+    # guaranteed to start under another, so switch with `down -v` or a
+    # separate PSNEXT_PREFIX.
+    image: mongo:${MONGO_VERSION:-9}
     container_name: ${PSNEXT_PREFIX:-psnext-it}-mongo
     depends_on:
       preflight:

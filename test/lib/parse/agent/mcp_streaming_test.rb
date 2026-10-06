@@ -1134,19 +1134,21 @@ class MCPStreamingTest < Minitest::Test
 
     # Heartbeats are distinguished by their dedicated `parse-stack:heartbeat:*`
     # progressToken; tool reports use the request progressToken.
-    heartbeats = progress_events.select { |e|
+    heartbeat = lambda do |e|
       JSON.parse(e[:data]).dig("params", "progressToken").to_s.start_with?("parse-stack:heartbeat:")
-    }
-    tool_reports = progress_events - heartbeats
+    end
+    first_report = progress_events.index { |e| !heartbeat.call(e) }
 
-    assert tool_reports.size >= 1,
-           "Expected at least 1 tool-progress event, got #{tool_reports.size}"
-    # At most one heartbeat should have fired (the one BEFORE the tool
-    # reported). After the tool report, the suppression flag stops all
-    # further heartbeats even though the dispatcher continues for ~0.5s.
-    assert heartbeats.size <= 1,
-           "Expected at most 1 heartbeat before tool progress took over, got #{heartbeats.size}. " \
-           "Events: #{progress_events.map { |e| JSON.parse(e[:data]).dig("params") }.inspect}"
+    refute_nil first_report, "Expected at least 1 tool-progress event"
+    # The property under test: once the tool reports, the suppression flag
+    # stops all further heartbeats even though the dispatcher keeps running
+    # for ~0.5s (room for ~5 more). How many heartbeats fire BEFORE the
+    # report depends on scheduler jitter (a slow CI runner can fit two into
+    # the 0.15s pre-progress delay), so that count is not asserted.
+    late = progress_events[(first_report + 1)..].select(&heartbeat)
+    assert_empty late,
+                 "Heartbeats continued after tool progress took over. " \
+                 "Events: #{progress_events.map { |e| JSON.parse(e[:data]).dig("params") }.inspect}"
   end
 
   def test_tool_progress_uses_request_progress_token
@@ -1695,5 +1697,42 @@ class MCPStreamingTest < Minitest::Test
     refute token.cancelled?, "Normal completion must NOT trip cancellation token"
     sse_body.close  # idempotent
     refute token.cancelled?
+  end
+  # ---- notifications/message (logging/setLevel) --------------------------
+
+  def test_log_callback_emits_messages_at_or_above_session_level
+    level = "warning"
+    sse_body = Parse::Agent::MCPRackApp::SSEBody.new(
+      "tok", 1, 5, nil, log_level_lookup: -> { level },
+    ) do |_pc, lc|
+      lc.call(level: "info", data: "quiet", logger: nil)
+      lc.call(level: "error", data: { "tool" => "x" }, logger: "parse.agent.tools")
+      { status: 200, body: { "jsonrpc" => "2.0", "id" => 1, "result" => {} } }
+    end
+    messages = drain_body(sse_body).filter_map do |chunk|
+      line = chunk[/^data: (.*)$/, 1]
+      line && JSON.parse(line)
+    end.select { |m| m["method"] == "notifications/message" }
+
+    assert_equal 1, messages.size
+    assert_equal({ "level" => "error", "data" => { "tool" => "x" }, "logger" => "parse.agent.tools" },
+                 messages.first["params"])
+  end
+
+  def test_log_callback_sends_nothing_before_set_level
+    sse_body = Parse::Agent::MCPRackApp::SSEBody.new(
+      "tok", 1, 5, nil, log_level_lookup: -> { nil },
+    ) do |_pc, lc|
+      lc.call(level: "emergency", data: "x", logger: nil)
+      { status: 200, body: { "jsonrpc" => "2.0", "id" => 1, "result" => {} } }
+    end
+    refute drain_body(sse_body).any? { |c| c.include?("notifications/message") }
+  end
+
+  def test_log_callback_is_nil_without_lookup
+    sse_body = Parse::Agent::MCPRackApp::SSEBody.new("tok", 1, 5, nil) do |_pc, lc|
+      { status: 200, body: { "jsonrpc" => "2.0", "id" => 1, "result" => { "lc" => lc.nil? } } }
+    end
+    assert drain_body(sse_body).any? { |c| c.include?('"lc":true') }
   end
 end
