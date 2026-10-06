@@ -366,15 +366,20 @@ class CLPScopeTest < Minitest::Test
     assert_equal "hi", docs.first["title"]
   end
 
-  def test_redact_protected_fields_strips_nested_subdocs
+  def test_redact_protected_fields_leaves_nested_subdocs
+    # Parse Server protects top-level columns only: it deletes object[key]
+    # and does not descend into `:object` / array values. Included objects
+    # of another class are stripped with that class's own set.
     docs = [{
       "objectId" => "1",
+      "ssn" => "777",
       "nested" => { "ssn" => "999", "ok" => "y" },
       "list" => [{ "ssn" => "888", "n" => 1 }],
     }]
     Parse::CLPScope.redact_protected_fields!(docs, Set.new(["ssn"]))
-    refute_includes docs.first["nested"].keys, "ssn"
-    refute_includes docs.first["list"].first.keys, "ssn"
+    refute_includes docs.first.keys, "ssn"
+    assert_equal "999", docs.first["nested"]["ssn"]
+    assert_equal "888", docs.first["list"].first["ssn"]
   end
 
   def test_redact_protected_fields_noop_for_empty_set

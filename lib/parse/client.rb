@@ -446,12 +446,10 @@ module Parse
     #
     #   total = Parse::User.login(u, p).with_session { Post.count }   # readable Posts only
     #
-    # Scopes REST-routed operations (`find` / `get` / `count` / `save`). It does
-    # NOT scope mongo-direct queries (`results_direct`, `aggregate`, Atlas
-    # search): those resolve auth from the query's own `session_token:` /
-    # `acl_user:` and, absent that, run in MASTER mode — so a mongo-direct read
-    # inside this block is a full master read, not anonymous. Scope mongo-direct
-    # explicitly with a per-query `session_token:` or a scoped {Parse::Agent}.
+    # Scopes REST-routed operations (`find` / `get` / `count` / `save`) and
+    # mongo-direct reads (`results_direct`, `count_direct`, Atlas Search), which
+    # resolve the same ambient token when the query carries no explicit
+    # `session_token:`, `acl_user:`, or `use_master_key: true`.
     #
     # @raise [ArgumentError] if this client has no bound session token (scoping
     #   would be a no-op and almost certainly a mistake).
@@ -1366,7 +1364,15 @@ module Parse
         # nested inside a `with_session(user)` block (or on a token-bound client)
         # would silently downgrade. The ambient wins over the bound token so a
         # `with_session` override inside a user-scoped client still takes effect.
-        if token.nil? && !explicit_blank_token && !(explicit_master && opts[:use_master_key] == true)
+        # Inside `Parse.with_session(nil)` (or a token-less user) the block is
+        # anonymous: no ambient, no bound token, and no master key, unless
+        # this call passed a token or `use_master_key: true` itself.
+        anonymous_block = token.nil? && !explicit_blank_token &&
+                          !(explicit_master && opts[:use_master_key] == true) &&
+                          Parse.respond_to?(:anonymous_session?) && Parse.anonymous_session?
+        if anonymous_block
+          headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
+        elsif token.nil? && !explicit_blank_token && !(explicit_master && opts[:use_master_key] == true)
           ambient = Parse.current_session_token
           # A whitespace-only ambient must not count as present: otherwise it
           # blocks the bound-token fallback below and then fails the later

@@ -345,6 +345,16 @@ module Parse
 
           response = begin
               parse_client.current_user(token, cache: false)
+            rescue Parse::Error::InvalidSessionTokenError
+              # Parse Server 9.x answers `/users/me` for a revoked, expired or
+              # unknown token with HTTP 400 and code 209, which the client
+              # raises as InvalidSessionTokenError. That is a definitive
+              # rejection of the session, not an outage: evict the token and
+              # refuse it. Treating it as an outage left a logged-out token
+              # in the identity cache and answered the caller with a retryable
+              # error instead of a 401.
+              evict_session!(parse_client, token)
+              raise Parse::Agent::Unauthorized.new("Invalid session", reason: :invalid_session)
             rescue StandardError => e
               raise SessionCheckUnavailable, "session check failed: #{e.class}"
             end
@@ -360,15 +370,21 @@ module Parse
           result = response.error? ? nil : response.result
           user_id = result.is_a?(Hash) ? (result["objectId"] || result[:objectId]) : nil
           if user_id.to_s.empty?
-            if parse_client.respond_to?(:authorization) && parse_client.authorization.respond_to?(:invalidate)
-              parse_client.authorization.invalidate(token)
-            end
+            evict_session!(parse_client, token)
             raise Parse::Agent::Unauthorized.new("Invalid session", reason: :invalid_session)
           end
           user_id.to_s
         end
 
         private
+
+        # Forget a rejected token in the client's identity plane so
+        # mongo-direct paths stop trusting it too.
+        def evict_session!(parse_client, token)
+          if parse_client.respond_to?(:authorization) && parse_client.authorization.respond_to?(:invalidate)
+            parse_client.authorization.invalidate(token)
+          end
+        end
 
         # True when Parse Server rejected the session itself (invalid or
         # expired token, or an auth failure), as opposed to failing to answer.

@@ -50,8 +50,14 @@ module Parse
         def login_with_mfa(username, password, mfa_token)
           raise MFA::RequiredError, "MFA token is required" if mfa_token.blank?
 
+          # `client.login_with_mfa` always goes out without the master key
+          # (see Parse::API::Users#login_with_mfa): with it, Parse Server
+          # would skip this verification and overwrite the enrolled secret.
           response = client.login_with_mfa(username, password, mfa_token)
-          return nil unless response.success?
+          unless response.success?
+            raise MFA::VerificationError, response.error.to_s if MFA.invalid_token_response?(response)
+            return nil
+          end
 
           # Self-fetch trust: an MFA login returns the authenticating
           # user's own row, so authData here is legitimately theirs.
@@ -447,8 +453,14 @@ module Parse
       #   user = Parse::User.first
       #   user.login_with_mfa!("password123", "123456")
       def login_with_mfa!(password, mfa_token = nil)
+        raise MFA::RequiredError, "MFA token is required for this account" if mfa_token.blank?
         response = client.login_with_mfa(username.to_s, password.to_s, mfa_token)
-        apply_attributes!(response.result)
+        unless response.success?
+          raise MFA::VerificationError, response.error.to_s if MFA.invalid_token_response?(response)
+          return false
+        end
+        # Self-fetch trust: the login response is this user's own row.
+        self.class.with_authdata_trust { apply_attributes!(response.result) }
         session_token.present?
       rescue Parse::Client::ResponseError => e
         if e.message.include?("Missing additional authData")

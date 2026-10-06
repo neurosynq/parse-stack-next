@@ -273,7 +273,7 @@ class VectorSearchUnderfillTest < Minitest::Test
                 res
               }) do
                 Parse::CLPScope.stub(:protected_fields_for, ->(*) { [] }) do
-                  Parse::CLPScope.stub(:pointer_fields_for, ->(*) { nil }) do
+                  Parse::CLPScope.stub(:row_constraint_for!, ->(*, **) { nil }) do
                     Parse::CLPScope.stub(:permits?, ->(*) { true }) do
                       Parse::VectorSearch.search(
                         "Doc", field: "embedding", query_vector: [0.1, 0.2, 0.3],

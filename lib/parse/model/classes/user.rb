@@ -1210,6 +1210,8 @@ module Parse
     # @param username [String] the user's username
     # @param password [String] the user's password
     # @return [User] a logged in user for the provided username. Returns nil otherwise.
+    # @raise [Parse::MFA::RequiredError] when the account has MFA enabled; use
+    #   {.login_with_mfa} with the user's code.
     # @see .login!
     def self.login(username, password)
       response = client.login(username.to_s, password.to_s)

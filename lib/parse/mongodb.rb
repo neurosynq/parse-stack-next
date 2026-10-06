@@ -4,6 +4,7 @@
 require "date"
 require "set"
 require "time"
+require "erb"
 require_relative "pipeline_security"
 require_relative "clp_scope"
 require_relative "acl_scope"
@@ -1166,6 +1167,9 @@ module Parse
       DENIED_OPERATORS = Parse::PipelineSecurity::DENIED_OPERATORS
 
       # @!visibility private
+      EMPTY_COLUMN_SET = Set.new.freeze
+
+      # @!visibility private
       # Default BFS depth for role-graph expansion. Real-world role graphs
       # are 2-4 deep; 10 leaves headroom for unusual hierarchies without
       # encouraging runaway $graphLookup fan-out on pathological inputs.
@@ -1824,42 +1828,38 @@ module Parse
           # pipeline above; the injected stages reference `_rperm` but
           # are SDK-generated (not attacker-controlled), so no
           # re-validation is needed before they're handed to MongoDB.
-          if (acl_stage = Parse::ACLScope.match_stage_for(resolution))
-            pipeline = prepend_or_fold_acl_match(pipeline, acl_stage)
-          end
-          pipeline = Parse::ACLScope.rewrite_pipeline(pipeline, resolution)
-
           # Class-Level Permissions boundary check. Parse Server's REST
           # aggregate endpoint runs master-key-only and does NOT enforce
           # CLP; the mongo-direct path bypasses Parse Server entirely so
-          # the SDK is the only enforcement layer. Refuse the call when
-          # the resolved scope can't `find` on the collection. Master-
-          # key (resolution.master? / nil permission_strings) bypasses.
+          # the SDK is the only enforcement layer. Evaluate the `find` CLP
+          # with Parse Server's branch semantics: a public / user / role
+          # grant permits every row, otherwise a pointerFields or
+          # readUserFields grant permits only the rows whose named pointer
+          # references the requesting user. Raises when the scope cannot
+          # find at all. Master-key (resolution.master?) bypasses.
           perms_for_clp = resolution&.permission_strings
-          unless resolution.nil? || resolution.master?
-            unless Parse::CLPScope.permits?(collection_name, :find, perms_for_clp)
-              raise Parse::CLPScope::Denied.new(
-                collection_name, :find,
-                "CLP refuses find on '#{collection_name}' for the current scope.",
-              )
-            end
-          end
+          pointer_fields = Parse::CLPScope.row_constraint_for!(
+            collection_name, :find, resolution, client: clp_client_for(resolution),
+          )
 
-          # Resolve the pointerFields constraint (if any) BEFORE running
-          # the query — we apply the filter post-fetch but want to fail
-          # loudly when the scope can't satisfy the constraint at all
-          # (acl_role-only / public agents have no user_id to match).
-          pointer_fields = nil
-          unless resolution.nil? || resolution.master?
-            pointer_fields = Parse::CLPScope.pointer_fields_for(collection_name, :find)
-            if pointer_fields && resolution.user_id.nil?
-              raise Parse::CLPScope::Denied.new(
-                collection_name, :find,
-                "CLP requires user identity (pointerFields=#{pointer_fields.inspect}) " \
-                "but the current scope has no user_id.",
-              )
-            end
+          # The pointer-permission constraint is applied IN the pipeline,
+          # folded into the leading ACL `$match`, so it runs before any
+          # caller `$skip` / `$limit` / `$count` / `$group`. Filtering the
+          # fetched rows afterwards made `count_direct` return 0 (the
+          # `$count` row has no pointer column) and returned short or
+          # empty pages.
+          front_predicates = []
+          if (acl_stage = Parse::ACLScope.match_stage_for(resolution))
+            front_predicates << (acl_stage["$match"] || acl_stage[:$match])
           end
+          if pointer_fields
+            front_predicates << Parse::CLPScope.pointer_fields_predicate(pointer_fields, resolution.user_id)
+          end
+          unless front_predicates.empty?
+            front = front_predicates.size == 1 ? front_predicates.first : { "$and" => front_predicates }
+            pipeline = prepend_or_fold_acl_match(pipeline, { "$match" => front })
+          end
+          pipeline = Parse::ACLScope.rewrite_pipeline(pipeline, resolution)
 
           agg_opts = {}
           agg_opts[:max_time_ms] = max_time_ms if max_time_ms
@@ -1879,25 +1879,21 @@ module Parse
           results = with_query_killed_retry(collection_name) { coll.aggregate(pipeline, agg_opts).to_a }
           Parse::ACLScope.redact_results!(results, resolution)
 
-          # Post-fetch pointerFields filter: drop rows where none of the
-          # named pointer fields references the requesting user. Skipped
-          # for master-key and when the CLP has no pointerFields entry.
-          if pointer_fields
-            results = Parse::CLPScope.filter_by_pointer_fields(
-              results, pointer_fields, resolution.user_id,
-            )
-          end
-
-          # Protected fields stripping. Resolve the field set per the
-          # session's claim composition and walk-delete from every
-          # row + embedded sub-document. Top-level $project would also
-          # work but doesn't reach inside `$lookup`-included sub-docs,
-          # so the post-walker is the defense-in-depth layer.
+          # Protected fields stripping, top-level keys only (Parse Server
+          # deletes `object[key]` and does not descend). The queried class's
+          # set applies to each row; every `$lookup` in the executed pipeline
+          # pulls rows of another class under its `as` key, and those rows get
+          # THAT class's set, the same as Parse Server's include sub-query
+          # does. `_User` rows that are the requesting user keep their own
+          # protected fields, as on REST.
           unless resolution.nil? || resolution.master?
             strip_set = Parse::CLPScope.protected_fields_for(
-              collection_name, perms_for_clp,
+              collection_name, perms_for_clp, client: clp_client_for(resolution),
             )
-            Parse::CLPScope.redact_protected_fields!(results, strip_set) if strip_set.any?
+            Parse::CLPScope.redact_protected_fields!(
+              results, strip_set, class_name: collection_name, user_id: resolution.user_id,
+            ) if strip_set.any?
+            redact_joined_protected_fields!(results, pipeline, resolution)
 
             # Process-level floor: recursively strip Parse-internal credential
             # columns (_hashed_password, _session_token, _auth_data_*, _rperm,
@@ -1918,6 +1914,53 @@ module Parse
       rescue => e
         raise_if_timeout!(e, collection_name, max_time_ms)
         raise
+      end
+
+      # The client whose schema decides CLP for a resolution. A user-scoped
+      # client (from `become` / `session_client`) holds no master key and
+      # cannot read `/schemas`, so it falls back to the default client (nil
+      # here), which is what every CLP lookup used before resolutions
+      # carried a client.
+      # @!visibility private
+      def clp_client_for(resolution)
+        c = Parse::ACLScope.client_of(resolution)
+        return nil if c.nil?
+        return nil unless c.respond_to?(:master_key) && !c.master_key.to_s.empty?
+        c
+      end
+
+      # Strip each joined class's protectedFields from the rows a top-level
+      # `$lookup` pulled in. Mirrors Parse Server's include, which fetches the
+      # included objects with a sub-query on their own class and therefore
+      # applies that class's protectedFields (plus the server default
+      # `_User.email` protection) to them.
+      # @!visibility private
+      def redact_joined_protected_fields!(results, pipeline, resolution)
+        return if results.nil? || results.empty? || !pipeline.is_a?(Array)
+        perms = resolution.permission_strings
+        return if perms.nil?
+        pipeline.each do |stage|
+          next unless stage.is_a?(Hash)
+          spec = stage["$lookup"] || stage[:$lookup]
+          next unless spec.is_a?(Hash)
+          from = spec["from"] || spec[:from]
+          as = spec["as"] || spec[:as]
+          next if from.to_s.empty? || as.to_s.empty?
+          set = Parse::CLPScope.protected_fields_for(from.to_s, perms, client: clp_client_for(resolution))
+          next if set.empty?
+          path = as.to_s.split(".")
+          results.each do |row|
+            value = path.reduce(row) { |node, seg| node.is_a?(Hash) ? (node[seg] || node[seg.to_sym]) : nil }
+            docs = case value
+              when Hash then [value]
+              when Array then value.select { |v| v.is_a?(Hash) }
+              else []
+              end
+            next if docs.empty?
+            Parse::CLPScope.redact_protected_fields!(docs, set, class_name: from.to_s, user_id: resolution.user_id)
+          end
+        end
+        nil
       end
 
       # Inject the scoped ACL `$match` at the front of a pipeline — UNLESS
@@ -2279,6 +2322,8 @@ module Parse
         return nil unless doc.is_a?(Hash)
 
         result = {}
+        included = {}
+        file_fields = file_columns_for(class_name)
 
         doc.each do |key, value|
           key_str = key.to_s
@@ -2306,18 +2351,10 @@ module Parse
             # Convert MongoDB ACL format (r/w) to Parse format (read/write)
             result["ACL"] = convert_acl_to_parse(value)
           when /^_included_(.+)$/
-            # Included/resolved pointer field from $lookup - convert embedded document
-            # This handles eager loading: _included_artist -> artist (as full object)
-            field_name = $1
-            if value.is_a?(Hash)
-              # Recursively convert the embedded document to Parse format
-              result[field_name] = convert_document_to_parse(value)
-            elsif value.nil?
-              # Preserve nil for unresolved optional relationships
-              result[field_name] = nil
-            else
-              result[field_name] = value
-            end
+            # Included/resolved pointer field from $lookup. Resolved after
+            # the loop, once the sibling `_p_<field>` pointer (which names
+            # the included object's class) has been seen.
+            included[$1] = value
           when /^_include_id_/
             # Skip temporary lookup ID fields (used internally for $lookup)
             next
@@ -2330,8 +2367,33 @@ module Parse
             # Skip other internal fields starting with underscore
             next
           else
-            # Regular fields - recursively convert nested documents
-            result[key_str] = convert_value_to_parse(value)
+            # Regular fields - recursively convert nested documents. Parse
+            # Server stores a File column as the bare file name; REST returns
+            # it as a `File` object, so rebuild that shape.
+            result[key_str] = if value.is_a?(String) && file_fields.include?(key_str)
+                file_to_parse(value)
+              else
+                convert_value_to_parse(value)
+              end
+          end
+        end
+
+        included.each do |field_name, value|
+          if value.is_a?(Hash)
+            # REST returns an included object as a full `Object` carrying
+            # its `__type` and `className`. The class comes from the stored
+            # pointer (`Class$objectId`); without it the object decoded as nil.
+            pointer = doc["_p_#{field_name}"] || doc[:"_p_#{field_name}"]
+            target = pointer.is_a?(String) && pointer.include?("$") ? pointer.split("$", 2).first : nil
+            converted = convert_document_to_parse(value, target)
+            converted["__type"] = Parse::Model::TYPE_OBJECT if target
+            result[field_name] = converted
+          elsif value.nil?
+            # The include resolved to nothing: a dangling pointer, or a row
+            # the scope cannot read. REST omits the field in that case.
+            result.delete(field_name)
+          else
+            result[field_name] = value
           end
         end
 
@@ -2339,6 +2401,41 @@ module Parse
         result["className"] = class_name if class_name
 
         result
+      end
+
+      # Mongo column names of the `:file` properties declared on the model
+      # registered for `class_name`.
+      # @return [Set<String>]
+      # @!visibility private
+      def file_columns_for(class_name)
+        return EMPTY_COLUMN_SET if class_name.nil?
+        klass = Parse::Model.find_class(class_name.to_s) rescue nil
+        return EMPTY_COLUMN_SET unless klass.respond_to?(:fields)
+        map = klass.respond_to?(:field_map) ? klass.field_map : {}
+        klass.fields.each_with_object(Set.new) do |(local, type), set|
+          next unless type == :file
+          set << (map[local] || local).to_s
+        end
+      rescue StandardError
+        EMPTY_COLUMN_SET
+      end
+
+      # Parse Server's REST shape for a stored file name. The URL follows
+      # Parse Server's default files route (`<serverURL>/files/<appId>/<name>`),
+      # used by the GridFS and filesystem adapters and by adapters without
+      # direct access. An adapter with direct access (for example S3 with
+      # `directAccess: true`) serves a different URL; there REST is the
+      # authoritative source.
+      # @!visibility private
+      def file_to_parse(name)
+        out = { "__type" => Parse::Model::TYPE_FILE, "name" => name }
+        client = Parse::Client.client? ? (Parse::Client.client rescue nil) : nil
+        if client && client.respond_to?(:server_url) && client.respond_to?(:application_id) &&
+           !client.server_url.to_s.empty? && !client.application_id.to_s.empty?
+          base = client.server_url.to_s.chomp("/")
+          out["url"] = "#{base}/files/#{client.application_id}/#{ERB::Util.url_encode(name)}"
+        end
+        out
       end
 
       # Convert multiple MongoDB documents to Parse format

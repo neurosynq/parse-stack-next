@@ -732,8 +732,8 @@ class MongoDBDirectQueryTest < Minitest::Test
 
     assert_equal "song123", result["objectId"]
     assert_equal "Test Song", result["title"]
-    assert result.key?("artist"), "Should have artist field even if nil"
-    assert_nil result["artist"], "artist should be nil"
+    # An include that resolved to nothing is omitted, as REST omits it.
+    refute result.key?("artist"), "an unresolved include is omitted like REST"
   end
 
   def test_convert_document_skips_include_id_fields

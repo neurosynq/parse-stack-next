@@ -97,6 +97,19 @@ module Parse
         @mutex.synchronize { @data.delete(key) }
       end
 
+      # Drop every entry whose value equals `value`. Lets the identity plane
+      # forget every token of one user after a revocation, since it is keyed
+      # by token and holds the user id as the value.
+      # @param value [Object]
+      # @return [Integer] number of entries removed.
+      def invalidate_value(value)
+        @mutex.synchronize do
+          before = @data.size
+          @data.delete_if { |_key, entry| entry[:value] == value }
+          before - @data.size
+        end
+      end
+
       # Drop every entry.
       def clear
         @mutex.synchronize { @data.clear }
@@ -236,12 +249,47 @@ module Parse
         @identity_cache.invalidate(session_token.to_s)
       end
 
+      # Forget every cached identity entry that resolves to `user_id`. Call
+      # after an event that revokes the user's sessions: a password change,
+      # account deletion, a session destroy, or "log out everywhere". The SDK
+      # calls it itself on those paths.
+      #
+      # The identity plane is keyed by token, so there is no direct way to
+      # name a user's entries. A generation-capable plane (the keyspaced
+      # Redis identity plane) bumps the user's generation, which rejects
+      # every entry for that user, including tokens this process never
+      # resolved. The default {MemoryCache} drops the matching values. A
+      # custom plane that supports neither is left to its TTL.
+      #
+      # The role entry is dropped too: it is cheap to rebuild and a deleted
+      # user should not keep a role closure around.
+      # @param user_id [String]
+      # @return [void]
+      def invalidate_user(user_id)
+        return if user_id.nil? || user_id.to_s.empty?
+        uid = user_id.to_s
+        cache = @identity_cache
+        if generation_capable?(cache) && cache.respond_to?(:bump_generation)
+          cache.bump_generation(uid)
+        elsif cache.respond_to?(:invalidate_value)
+          cache.invalidate_value(uid)
+        end
+        @role_cache.invalidate(uid)
+        nil
+      end
+
       # Forget one user's cached role closure. Call after any `_Role.users`
       # mutation affecting them.
       # @param user_id [String]
       def invalidate_user_roles(user_id)
         return if user_id.nil?
         @role_cache.invalidate(user_id.to_s)
+      end
+
+      # Forget every cached role closure. Call after a `_Role.roles` hierarchy
+      # change, which can affect any user holding a role in that hierarchy.
+      def invalidate_all_roles
+        @role_cache.clear if @role_cache.respond_to?(:clear)
       end
 
       # Drop every entry in both planes.

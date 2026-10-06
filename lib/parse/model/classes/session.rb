@@ -204,5 +204,48 @@ module Parse
     def revoke!
       destroy
     end
+
+    # Deletes the session and, on success, forgets it in the client's
+    # identity plane so mongo-direct and Atlas Search reads stop resolving
+    # the token at once instead of when the cached entry expires. The token
+    # is dropped when this instance carries it; the owning user's entries
+    # are dropped as well, since a session fetched without the master key
+    # does not carry its token.
+    # @param session [String] (see Parse::Object#destroy)
+    # @return [Boolean] whether the operation was successful.
+    def destroy(session: nil)
+      token = @session_token
+      # Read the association ivar directly: calling `user` on a partially
+      # fetched session could trigger an autofetch just to learn the owner.
+      owner = @user
+      owner_id = owner.respond_to?(:id) ? owner.id : nil
+      success = super
+      if success
+        cl = client
+        cl.invalidate_session_identity(token) if token.is_a?(String) && cl.respond_to?(:invalidate_session_identity)
+        cl.invalidate_user_identity(owner_id) if owner_id && cl.respond_to?(:invalidate_user_identity)
+      end
+      success
+    end
+
+    # Serialization omits `sessionToken` unless `include_session_token: true`
+    # is passed. A session token is a bearer credential, and `as_json` is the
+    # surface that reaches logs, API responses and agent tool output.
+    # @param opts [Hash] see Parse::Object#as_json.
+    # @option opts [Boolean] :include_session_token include the token.
+    # @return [Hash]
+    def as_json(opts = nil)
+      opts = (opts || {}).dup
+      include_token = opts.delete(:include_session_token) == true
+      json = super(opts)
+      return json if include_token || !json.is_a?(Hash)
+      json.except("session_token", "sessionToken", :session_token, :sessionToken)
+    end
+
+    # Redacts the session token from the default inspect output.
+    # @return [String]
+    def inspect
+      Parse::User.redact_session_token(super, @session_token)
+    end
   end
 end

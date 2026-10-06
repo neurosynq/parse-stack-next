@@ -439,14 +439,139 @@ module Parse
       # caller hasn't otherwise needed it.
       require_relative "clp_scope" unless defined?(Parse::CLPScope)
 
+      require_relative "atlas_search/protected_paths" unless defined?(Parse::AtlasSearch::ProtectedPaths)
+
       protected_set = Parse::CLPScope.protected_fields_for(collection_name, perms)
-      return if protected_set.nil? || protected_set.empty?
+      sets = Hash.new do |memo, klass|
+        memo[klass] = Parse::CLPScope.protected_fields_for(klass, perms)
+      end
+      sets[collection_name.to_s] = protected_set || Set.new
 
       pipeline.each_with_index do |stage, idx|
-        walk_for_protected_ref!(stage, protected_set, collection_name, "pipeline[#{idx}]")
+        if protected_set && !protected_set.empty?
+          walk_for_protected_ref!(stage, protected_set, collection_name, "pipeline[#{idx}]")
+        end
+        refuse_protected_stage_keys!(stage, collection_name.to_s, sets, "pipeline[#{idx}]")
       end
       nil
     end
+
+    # Refuse a stage that filters, sorts, or joins on a protected field by
+    # naming it as a KEY rather than through a `$<field>` value reference.
+    #
+    # Parse Server refuses a REST find whose `where` names a protected field
+    # (at any depth of `$and` / `$or` / `$nor`, dotted or not) with error 119,
+    # because which rows match, and in what order, reveals the field's
+    # value even though the output strips it. The mongo-direct path must do
+    # the same. Checked here:
+    #
+    # * `$match` predicate keys, including under `$and` / `$or` / `$nor` /
+    #   `$not`, dotted paths (`secret.sub`), and the `_p_<field>` storage
+    #   form of a pointer;
+    # * `$sort` keys (a `$meta` sort is not a field);
+    # * `$geoNear.query` keys and `$geoNear.key`;
+    # * `$facet` branches, against the same class;
+    # * `$lookup` `localField` (this class) and `foreignField` plus the
+    #   sub-pipeline (the joined class, with ITS protected set), and the
+    #   same for `$unionWith` and `$graphLookup`, so an `$inQuery` style
+    #   join cannot probe the joined class's protected fields either.
+    #
+    # @!visibility private
+    def refuse_protected_stage_keys!(stage, class_name, sets, path)
+      return unless stage.is_a?(Hash)
+      paths = Parse::AtlasSearch::ProtectedPaths
+      own = sets[class_name]
+      stage.each do |op, body|
+        case op.to_s
+        when "$match"
+          paths.each_filter_reference(body) do |ref|
+            raise_protected_key!(class_name, ref, "#{path}.$match") if paths.touches?(ref, own)
+          end
+        when "$sort"
+          next unless body.is_a?(Hash)
+          body.each do |key, dir|
+            next if dir.is_a?(Hash) && (dir.key?("$meta") || dir.key?(:$meta))
+            raise_protected_key!(class_name, key, "#{path}.$sort") if paths.touches?(key.to_s, own)
+          end
+        when "$geoNear"
+          next unless body.is_a?(Hash)
+          query = body["query"] || body[:query]
+          paths.each_filter_reference(query) do |ref|
+            raise_protected_key!(class_name, ref, "#{path}.$geoNear.query") if paths.touches?(ref, own)
+          end
+          key = body["key"] || body[:key]
+          raise_protected_key!(class_name, key, "#{path}.$geoNear.key") if key && paths.touches?(key.to_s, own)
+        when "$facet"
+          next unless body.is_a?(Hash)
+          body.each do |name, branch|
+            Array(branch).each_with_index do |sub, i|
+              refuse_protected_stage_keys!(sub, class_name, sets, "#{path}.$facet.#{name}[#{i}]")
+            end
+          end
+        when "$lookup", "$graphLookup", "$unionWith"
+          refuse_protected_join_keys!(op.to_s, body, class_name, sets, path)
+        end
+      end
+      nil
+    end
+
+    private_class_method :refuse_protected_stage_keys!
+
+    # @!visibility private
+    def refuse_protected_join_keys!(op, body, class_name, sets, path)
+      paths = Parse::AtlasSearch::ProtectedPaths
+      spec = body
+      spec = { "coll" => body } if op == "$unionWith" && body.is_a?(String)
+      return unless spec.is_a?(Hash)
+      foreign = (spec["from"] || spec[:from] || spec["coll"] || spec[:coll]).to_s
+      foreign_set = foreign.empty? ? Set.new : sets[foreign]
+      own = sets[class_name]
+
+      local_keys = case op
+        when "$lookup" then [spec["localField"] || spec[:localField]]
+        else []
+        end
+      local_keys.compact.each do |k|
+        raise_protected_key!(class_name, k, "#{path}.#{op}.localField") if paths.touches?(k.to_s, own)
+      end
+
+      foreign_keys = case op
+        when "$lookup" then [spec["foreignField"] || spec[:foreignField]]
+        when "$graphLookup"
+          [spec["connectToField"] || spec[:connectToField],
+           spec["connectFromField"] || spec[:connectFromField]]
+        else []
+        end
+      foreign_keys.compact.each do |k|
+        raise_protected_key!(foreign, k, "#{path}.#{op}") if paths.touches?(k.to_s, foreign_set)
+      end
+
+      restrict = spec["restrictSearchWithMatch"] || spec[:restrictSearchWithMatch]
+      paths.each_filter_reference(restrict) do |ref|
+        raise_protected_key!(foreign, ref, "#{path}.#{op}.restrictSearchWithMatch") if paths.touches?(ref, foreign_set)
+      end
+
+      sub = spec["pipeline"] || spec[:pipeline]
+      return if foreign.empty? || !sub.is_a?(Array)
+      sub.each_with_index do |sub_stage, i|
+        refuse_protected_stage_keys!(sub_stage, foreign, sets, "#{path}.#{op}.pipeline[#{i}]")
+      end
+    end
+
+    private_class_method :refuse_protected_join_keys!
+
+    # @!visibility private
+    def raise_protected_key!(class_name, ref, path)
+      field = Parse::AtlasSearch::ProtectedPaths.root_field(ref)
+      raise Parse::CLPScope::Denied.new(
+        class_name, :find,
+        "This user is not allowed to query #{field} on class #{class_name}: " \
+        "#{path} filters, sorts, or joins on protected field '#{ref}', which " \
+        "would reveal its value through which rows match or how they order.",
+      )
+    end
+
+    private_class_method :raise_protected_key!
 
     # @!visibility private
     def walk_for_protected_ref!(node, protected_set, class_name, path)

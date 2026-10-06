@@ -5,6 +5,7 @@ require "faraday"
 require "moneta"
 require "connection_pool"
 require "digest"
+require "securerandom"
 require_relative "protocol"
 
 module Parse
@@ -38,6 +39,14 @@ module Parse
       CACHE_EXPIRES_DURATION = "X-Parse-Stack-Cache-Expires"
       # Header in request to enable write-only cache mode (skip read, still write)
       CACHE_WRITE_ONLY = "X-Parse-Stack-Cache-Write-Only"
+      # Paths whose responses are never cached. `users/me` and `sessions/me`
+      # answer "who owns this token", so a cached copy keeps a logged-out or
+      # revoked token resolving to its user until the entry expires. The
+      # credential endpoints carry a password and must never be stored.
+      UNCACHEABLE_PATH_RE = %r{/(?:users/me|sessions/me|login|verifyPassword|logout)/?\z}.freeze
+      # Prefix of the per-resource version keys used by the default (legacy)
+      # key layout. See {#legacy_version_key}.
+      LEGACY_VERSION_PREFIX = "rv"
 
       class << self
         # @!attribute enabled
@@ -150,6 +159,11 @@ module Parse
 
         url = env.url
         method = env.method
+
+        # Identity and credential endpoints are passthrough: never read, never
+        # stored. See UNCACHEABLE_PATH_RE.
+        return @app.call(env) if url.path.to_s.match?(UNCACHEABLE_PATH_RE)
+
         @cache_key = url.to_s
 
         # Auth discriminator. A master-key request bypasses ACL, CLP and
@@ -158,16 +172,33 @@ module Parse
         # protectedFields entity rules and row ACLs. These must never share a
         # cache entry or the cache would hand privileged fields to an
         # unprivileged caller.
+        #
+        # The default (legacy) layout also binds every key to the application
+        # id and the credential that produced it (`@legacy_auth`). Without
+        # that, a client configured with a different application id or a
+        # wrong master/REST key, sharing the same store, was served another
+        # application's cached private rows: the URL alone matched.
+        # `@old_shape_key` is the pre-credential key shape, kept only so a
+        # write still evicts entries written by older SDK versions during a
+        # rolling deploy.
         @cache_auth = :anon
+        app_id = @request_headers[APP_ID].to_s
         if @request_headers.key?(SESSION_TOKEN)
           @session_token = @request_headers[SESSION_TOKEN]
           hashed_token = Digest::SHA256.hexdigest(@session_token.to_s)[0, 32]
           @cache_auth = hashed_token
-          @cache_key = "#{hashed_token}:#{@cache_key}" # prefix with hashed token
+          @old_shape_key = "#{hashed_token}:#{@cache_key}" # prefix with hashed token
+          @legacy_auth = "s:#{credential_digest(app_id, @session_token)}"
         elsif @request_headers.key?(MASTER_KEY)
           @cache_auth = :master
-          @cache_key = "mk:#{@cache_key}" # prefix for master key requests
+          @old_shape_key = "mk:#{@cache_key}" # prefix for master key requests
+          @legacy_auth = "mk:#{credential_digest(app_id, @request_headers[MASTER_KEY])}"
+        else
+          @old_shape_key = @cache_key
+          @legacy_auth = "an:#{credential_digest(app_id, @request_headers[API_KEY])}"
         end
+        @cache_key = "#{@legacy_auth}:#{@cache_key}"
+        @app_id = app_id
 
         # Optional ambient cache-tenant scope from `Parse.with_cache_tenant`.
         # When present, composes between the configured namespace and the
@@ -180,13 +211,19 @@ module Parse
         # tenant feature don't accidentally re-hydrate into a tenanted
         # request and vice versa.
         @cache_tenant = Parse.respond_to?(:current_cache_tenant) ? Parse.current_cache_tenant : nil
-        @cache_key = "T:#{@cache_tenant}:#{@cache_key}" if @cache_tenant
+        if @cache_tenant
+          @cache_key = "T:#{@cache_tenant}:#{@cache_key}"
+          @old_shape_key = "T:#{@cache_tenant}:#{@old_shape_key}"
+        end
 
         # Namespace outermost so a SCAN over `<namespace>:*` evicts a whole
         # tenant/app cleanly without touching another app's entries.
-        @cache_key = "#{@namespace}:#{@cache_key}" if @namespace
+        if @namespace
+          @cache_key = "#{@namespace}:#{@cache_key}"
+          @old_shape_key = "#{@namespace}:#{@old_shape_key}"
+        end
 
-        # Keep the legacy key for dual-delete on invalidation, then switch the
+        # Keep the legacy key base for versioning below, then switch the
         # live key to the keyspace form when one is configured.
         @legacy_cache_key = @cache_key
         if @keyspace
@@ -196,6 +233,15 @@ module Parse
         url_path = url.path
 
         begin
+          # Default layout: resolve the resource's current version and fold
+          # it into the key. A write replaces the version, which makes every
+          # auth variant of the resource unreachable at once (see
+          # {#legacy_version_key}). `nil` means no version exists yet, so no
+          # entry for this resource can be live and the read is skipped.
+          unless @keyspace
+            @legacy_version = read_legacy_version(url)
+            @cache_key = @legacy_version ? versioned_legacy_key(@legacy_version) : nil
+          end
           # Skip cache read if write_only mode is enabled
           if method == :get && @cache_key.present? && !@write_only && @store.key?(@cache_key)
             # Debug-log the URL **path only** — `url.to_s` would include the
@@ -241,7 +287,7 @@ module Parse
               delete_cache_variants(url)
               instrument_cache(:miss, method: method, url_path: url_path, reason: :empty_payload)
             end
-          elsif method == :get && @cache_key.present? && !@write_only
+          elsif method == :get && !@write_only
             # GET miss: opportunistically clear any sibling variants of the
             # current namespace (anonymous `<url>` and master-key `mk:<url>`
             # under the same namespace) so a stale variant from a prior
@@ -255,10 +301,10 @@ module Parse
             # should evict those once at upgrade time via SCAN.
             delete_cache_variants(url)
             instrument_cache(:miss, method: method, url_path: url_path)
-          elsif method == :get && @cache_key.present? && @write_only
+          elsif method == :get && @write_only
             delete_cache_variants(url)
             instrument_cache(:miss, method: method, url_path: url_path, reason: :write_only)
-          elsif @cache_key.present?
+          elsif method != :get
             #non GET requets should clear the cache for that same resource path.
             #ex. a POST to /1/classes/Artist/<objectId> should delete the cache for a GET
             # request for the same '/1/classes/Artist/<objectId>' where objectId are equivalent
@@ -288,6 +334,12 @@ module Parse
              response_env.body.present? && response_env.response_headers[CONTENT_LENGTH_KEY].to_i.between?(20, 1_250_000)
             store_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
             begin
+              # Default layout with no version yet: create one so this entry
+              # is bound to it. A later write replaces it.
+              if @keyspace.nil? && @legacy_version.nil?
+                @legacy_version = write_legacy_version(url)
+                @cache_key = versioned_legacy_key(@legacy_version)
+              end
               # Store with string keys (and a plain Hash of headers) so the
               # value round-trips losslessly through the Redis cache wrapper's
               # JSON serialization. The read path above reads string keys first
@@ -385,8 +437,67 @@ module Parse
       #   sessions' perfectly valid entries on every single cache miss.
       def delete_cache_variants(url, resource: false)
         delete_keyspace_variants(url) if resource && @keyspace
-        delete_legacy_variants(url) if legacy_variants?
-        @store.delete @cache_key # final key
+        if legacy_variants?
+          delete_legacy_variants(url)
+          # A write replaces the resource version, which retires every auth
+          # variant of the default layout: other sessions' entries included,
+          # which the old delete could not name. This is what stops a user
+          # whose read access was just revoked from reading the cached copy.
+          write_legacy_version(url) if resource && @keyspace.nil?
+        end
+        @store.delete @cache_key if @cache_key # final key
+      end
+
+      # Digest binding a legacy cache key to the application and the
+      # credential that authorized the request. Truncated SHA-256: the key is
+      # never a credential, only a discriminator.
+      # @!visibility private
+      def credential_digest(app_id, credential)
+        Digest::SHA256.hexdigest("#{app_id}\x00#{credential}")[0, 32]
+      end
+
+      # Store key holding the current version of one resource in the default
+      # layout. Keyed by application and URL path (no query string), and NOT
+      # by credential or tenant, so a write through any caller retires the
+      # entries of every caller. Using the path means a write to
+      # `classes/Post/abc` also retires `classes/Post/abc?include=...`, and a
+      # create (`POST classes/Post`) retires cached `classes/Post` queries.
+      # @!visibility private
+      def legacy_version_key(url)
+        digest = Digest::SHA256.hexdigest("#{@app_id}\x00#{url.scheme}://#{url.host}:#{url.port}#{url.path}")[0, 32]
+        key = "#{LEGACY_VERSION_PREFIX}:#{digest}"
+        @namespace ? "#{@namespace}:#{key}" : key
+      end
+
+      # @!visibility private
+      # @return [String, nil] the resource's current version, or nil.
+      def read_legacy_version(url)
+        value = @store[legacy_version_key(url)]
+        value.is_a?(String) && !value.empty? ? value : nil
+      end
+
+      # Replace the resource version with a fresh random one. A random value
+      # rather than a counter: if the version key expires and is recreated,
+      # a counter could return to a value that older entries still carry and
+      # bring them back. A fresh nonce never matches an old entry.
+      # @!visibility private
+      # @return [String] the new version.
+      def write_legacy_version(url)
+        version = SecureRandom.hex(8)
+        @store.store(legacy_version_key(url), version, expires: legacy_version_ttl)
+        version
+      end
+
+      # The version key only needs to outlive the entries bound to it. When it
+      # expires first, those entries become unreachable (a miss), never stale.
+      # @!visibility private
+      def legacy_version_ttl
+        [@expires.to_i * 2, 60].max
+      end
+
+      # @!visibility private
+      def versioned_legacy_key(version)
+        "#{@legacy_cache_key}#v=#{version}"
       end
 
       # Whether to also evict the pre-keyspace key shape. Always true before a
@@ -427,7 +538,8 @@ module Parse
           @store.delete url.to_s # regular
           @store.delete "mk:#{url.to_s}" # master key cache-key
         end
-        @store.delete @legacy_cache_key if @legacy_cache_key
+        # The caller's own entry in the pre-credential shape.
+        @store.delete @old_shape_key if @old_shape_key
       end
     end #Caching
   end #Middleware

@@ -46,8 +46,8 @@ module Parse
     #     puts "[#{event}] #{obj.title} (#{obj.id})"
     #   end
     #
-    # @example Admin-style with master key (no ambient session)
-    #   Parse.with_session(nil) { Parse.watch(JobRun) }
+    # @example Outside any session block (master key on a server client)
+    #   Parse.watch(JobRun)
     #
     # @param klass [Class] a Parse::Object subclass.
     # @param where [Hash] optional query constraints.

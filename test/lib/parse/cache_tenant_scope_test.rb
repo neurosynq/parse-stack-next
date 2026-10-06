@@ -206,7 +206,7 @@ class CacheTenantScopeTest < Minitest::Test
     body = make_request("/classes/Post", store: @store)
     refute_empty body
     # Key for an anonymous GET is the bare URL string.
-    keys = @store.each_key.to_a
+    keys = @store.each_key.reject { |k| k.include?("rv:") }
     assert_equal 1, keys.length, "expected one cache entry, got #{keys.inspect}"
     assert keys.first.include?("/classes/Post"), "key should include the URL path: #{keys.first}"
     refute keys.first.start_with?("T:"), "no tenant set should not prefix T:"
@@ -216,7 +216,7 @@ class CacheTenantScopeTest < Minitest::Test
     Parse.with_cache_tenant("tenant_x") do
       make_request("/classes/Post", store: @store)
     end
-    key = @store.each_key.to_a.first
+    key = @store.each_key.reject { |k| k.include?("rv:") }.first
     assert key.start_with?("T:tenant_x:"), "expected T:tenant_x: prefix, got #{key.inspect}"
   end
 
@@ -224,7 +224,7 @@ class CacheTenantScopeTest < Minitest::Test
     Parse.with_cache_tenant("tenant_x") do
       make_request("/classes/Post", store: @store, namespace: "app_a")
     end
-    key = @store.each_key.to_a.first
+    key = @store.each_key.reject { |k| k.include?("rv:") }.first
     # Final shape: <namespace>:T:<tenant>:<url> — namespace outermost
     # so a SCAN over <namespace>:* still evicts the whole app cleanly.
     assert key.start_with?("app_a:T:tenant_x:"), key.inspect
@@ -240,7 +240,7 @@ class CacheTenantScopeTest < Minitest::Test
       body = make_request("/classes/Post", store: @store, fixture_body: '{"results":["B"]}')
       assert_includes body, '"B"', "tenant_b must not see tenant_a's cached response"
     end
-    keys = @store.each_key.to_a
+    keys = @store.each_key.reject { |k| k.include?("rv:") }
     assert_equal 2, keys.length, "expected two distinct cache entries (one per tenant), got #{keys}"
     assert keys.any? { |k| k.start_with?("T:tenant_a:") }
     assert keys.any? { |k| k.start_with?("T:tenant_b:") }

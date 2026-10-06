@@ -115,9 +115,12 @@ module Parse
   #
   # The `token` argument may be a String, a {Parse::User} (its
   # `session_token` is read), a {Parse::Session} (its `session_token` is
-  # read), or `nil`. Passing `nil` clears the ambient inside the block —
-  # useful for performing one anonymous call inside an otherwise
-  # session-scoped region.
+  # read), or `nil`. Passing `nil`, or a user or session that carries no
+  # token, runs the block ANONYMOUSLY: requests inside it send neither a
+  # session token nor the master key, and a client's bound token is not
+  # used either. This is useful for performing one anonymous call inside an
+  # otherwise session-scoped region. A call inside the block can still opt
+  # out with an explicit `session_token:` or `use_master_key: true`.
   #
   # Fiber-local, not thread-local: concurrent fibers (and threads, since
   # each thread starts with its own root fiber) do not share state.
@@ -156,17 +159,37 @@ module Parse
         "token is refused so the block cannot silently execute with master-key " \
         "authority — pass a valid session token, or `nil` for no ambient session."
     end
-    Fiber[SESSION_TOKEN_STATE_KEY] = resolved
+    # `nil` (no token, or a user/session without one) installs the
+    # anonymous sentinel rather than clearing the slot. A cleared slot meant
+    # "no ambient", which the request layer resolves to the master key on a
+    # master-keyed client: the opposite of the documented anonymous block.
+    Fiber[SESSION_TOKEN_STATE_KEY] = resolved.nil? ? ANONYMOUS_SESSION : resolved
     yield
   ensure
     Fiber[SESSION_TOKEN_STATE_KEY] = previous
   end
 
+  # Fiber-state sentinel installed by `Parse.with_session(nil)`. The request
+  # layer treats it as "anonymous": no session token and no master key.
+  # @!visibility private
+  ANONYMOUS_SESSION = :__parse_anonymous_session__
+
   # The ambient session token set by {.with_session} for the current
-  # fiber, or `nil` when not inside such a block.
+  # fiber, or `nil` when not inside such a block or inside an anonymous
+  # `with_session(nil)` block (see {.anonymous_session?}).
   # @return [String, nil]
   def self.current_session_token
-    Fiber[SESSION_TOKEN_STATE_KEY]
+    value = Fiber[SESSION_TOKEN_STATE_KEY]
+    value == ANONYMOUS_SESSION ? nil : value
+  end
+
+  # Whether the current fiber is inside an anonymous `Parse.with_session(nil)`
+  # block (directly, or nested without a token-bearing block inside it).
+  # Requests there carry no session token and no master key unless the call
+  # passes `session_token:` or `use_master_key: true` explicitly.
+  # @return [Boolean]
+  def self.anonymous_session?
+    Fiber[SESSION_TOKEN_STATE_KEY] == ANONYMOUS_SESSION
   end
 
   # @!visibility private

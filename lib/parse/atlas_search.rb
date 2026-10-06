@@ -1015,13 +1015,12 @@ module Parse
       # does inline (we can't reuse that path because of the $search-
       # at-stage-0 invariant).
       def assert_clp_find!(collection_name, resolution)
-        return if resolution.nil? || resolution.master?
-        unless Parse::CLPScope.permits?(collection_name, :find, resolution.permission_strings)
-          raise Parse::CLPScope::Denied.new(
-            collection_name, :find,
-            "CLP refuses find on '#{collection_name}' for the current Atlas Search scope.",
-          )
-        end
+        # Same CLP branch evaluation as Parse::MongoDB.aggregate (public,
+        # user, and role grants first; then pointerFields / readUserFields).
+        # Raises Parse::CLPScope::Denied when the scope cannot find at all.
+        Parse::CLPScope.row_constraint_for!(collection_name, :find, resolution,
+                                            label: "Atlas Search")
+        nil
       end
 
       # Resolve and return pointerFields for `find` on the collection.
@@ -1029,17 +1028,13 @@ module Parse
       # current scope has no user_id (acl_role-only / public agents).
       # Returns nil when master-mode or no pointerFields entry exists.
       def resolve_pointer_fields!(collection_name, resolution)
-        return nil if resolution.nil? || resolution.master?
-        pointer_fields = Parse::CLPScope.pointer_fields_for(collection_name, :find)
-        return nil if pointer_fields.nil?
-        if resolution.user_id.nil?
-          raise Parse::CLPScope::Denied.new(
-            collection_name, :find,
-            "CLP requires user identity (pointerFields=#{pointer_fields.inspect}) " \
-            "but the current Atlas Search scope has no user_id.",
-          )
-        end
-        pointer_fields
+        # nil when a public, user, or role grant already permits every row
+        # (Parse Server ignores pointer permissions then); otherwise the
+        # pointerFields plus readUserFields the rows must match. The older
+        # permits? / pointer_fields_for pair missed readUserFields entirely
+        # and over-restricted a public grant that also listed pointerFields.
+        Parse::CLPScope.row_constraint_for!(collection_name, :find, resolution,
+                                            label: "Atlas Search")
       end
 
       # ATLAS-4: refuse `highlight_field:` when the field is in the

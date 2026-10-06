@@ -62,6 +62,17 @@ module Parse
       end
     end
 
+    # Whether a failed login response is Parse Server rejecting the MFA code
+    # (as opposed to wrong credentials). Parse Server's MFA adapter throws a
+    # bare string, which reaches the client as code 141 with the adapter's
+    # message, e.g. "Invalid MFA token".
+    # @!visibility private
+    # @param response [Parse::Response]
+    # @return [Boolean]
+    def self.invalid_token_response?(response)
+      response.respond_to?(:error) && response.error.to_s.start_with?("Invalid MFA token", "Please enter the token")
+    end
+
     # Error raised when MFA is required but not provided
     class RequiredError < Parse::Error
       def initialize(message = "MFA token is required for this account")

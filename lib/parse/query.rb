@@ -2225,6 +2225,9 @@ module Parse
       unless use_master_key == true
         ambient = ambient_session_token
         return true if ambient.is_a?(String) && !ambient.empty?
+        # A client bound to a user's session (`become`, `session_client`,
+        # a webhook `user_client`) is scoped the same way.
+        return true if client_bound_session_token
       end
       false
     end
@@ -2387,7 +2390,7 @@ module Parse
       # query would raise instead of running scoped — and on a master
       # client the ambient is what `mongo_direct_auth_kwargs` forwards so
       # the read is scoped rather than silently master.
-      has_ambient_session = !ambient_session_token.nil?
+      has_ambient_session = !ambient_session_token.nil? || !client_bound_session_token.nil?
       # Mirror the request-layer auth resolution in Parse::Client#request:
       # when the process is in "server mode" — Parse.client_mode == false
       # AND the resolved Parse::Client has a master_key — and the caller
@@ -2493,9 +2496,59 @@ module Parse
         # deliberate admin call and skips the ambient, exactly as the REST
         # path does.
         { session_token: ambient }
-      else
+      elsif use_master_key != true && anonymous_session_block?
+        # Inside `Parse.with_session(nil)`: REST sends neither a token nor
+        # the master key, so the direct read runs in the public scope too.
+        {}
+      elsif use_master_key != true && (bound = client_bound_session_token)
+        # The query's client carries its own session token (a client from
+        # `Parse::Client#become`, `Parse::User#session_client`, or a webhook
+        # payload's `user_client`). REST sends that token on every request
+        # from the client, so the direct read is scoped to the same user.
+        { session_token: bound }
+      elsif mongo_direct_master_posture?
         { master: true }
+      else
+        # A client with no master key, `Parse.client_mode`, or an explicit
+        # `use_master_key = false`, and no session anywhere: REST would run
+        # this read anonymously. Return no auth so Parse::ACLScope resolves
+        # the public scope (or raises ACLRequired when
+        # `require_session_token` is on) instead of reading as master.
+        {}
       end
+    end
+
+    # The session token bound to this query's client, or nil.
+    # @return [String, nil]
+    # @!visibility private
+    def client_bound_session_token
+      c = begin
+          client
+        rescue StandardError
+          nil
+        end
+      return nil unless c.respond_to?(:session_token)
+      token = c.session_token
+      token = token.session_token if token.respond_to?(:session_token)
+      token.is_a?(String) && !token.strip.empty? ? token : nil
+    end
+
+    # Whether REST would send the master key for this query: the client
+    # holds one and the caller either asked for it explicitly or left the
+    # choice to the server-mode default (`Parse.client_mode` off and no
+    # `use_master_key = false`). Mirrors Parse::Client#request.
+    # @return [Boolean]
+    # @!visibility private
+    def mongo_direct_master_posture?
+      c = begin
+          client
+        rescue StandardError
+          nil
+        end
+      has_key = c.respond_to?(:master_key) && !c.master_key.to_s.empty?
+      return false unless has_key
+      return true if use_master_key == true
+      use_master_key != false && !Parse.client_mode
     end
 
     # Auth kwargs for the Atlas Search bridge (`#atlas_search` builder
@@ -2546,9 +2599,20 @@ module Parse
         { master: true }
       elsif (ambient = ambient_session_token)
         { session_token: ambient }
+      elsif anonymous_session_block?
+        {}
+      elsif (bound = client_bound_session_token)
+        { session_token: bound }
       else
         {}
       end
+    end
+
+    # @return [Boolean] true inside an anonymous `Parse.with_session(nil)`
+    #   block, where requests carry neither a session token nor the master key.
+    # @!visibility private
+    def anonymous_session_block?
+      Parse.respond_to?(:anonymous_session?) && Parse.anonymous_session?
     end
 
     # The fiber-local ambient session token set by `Parse.with_session`,
@@ -2561,6 +2625,18 @@ module Parse
       return nil unless Parse.respond_to?(:current_session_token)
       ambient = Parse.current_session_token
       ambient if ambient.is_a?(String) && !ambient.strip.empty?
+    end
+
+    # Like the default `inspect`, but never prints the session token, which
+    # would otherwise reach logs and error reports.
+    # @return [String]
+    def inspect
+      ivars = instance_variables.map do |ivar|
+        value = instance_variable_get(ivar)
+        shown = ivar == :@session_token && value ? "[FILTERED]" : value.inspect
+        "#{ivar}=#{shown}"
+      end
+      "#<#{self.class.name} #{ivars.join(", ")}>"
     end
 
     # Check if this query contains constraints that require aggregation pipeline processing
@@ -3251,9 +3327,13 @@ module Parse
       if compiled_where.present?
         # Convert field names and values for direct MongoDB access.
         # `compiled_where` is already marker-free, so no further
-        # reject pass is required.
-        mongo_constraints = convert_constraints_for_direct_mongodb(compiled_where)
+        # reject pass is required. Subquery constraints (`$inQuery`,
+        # `$notInQuery`, `$select`, `$dontSelect`) have no MongoDB
+        # equivalent and are compiled into `$lookup` joins plus a
+        # post-join `$match`; see #direct_subquery_stages.
+        mongo_constraints, subquery_stages = direct_subquery_stages(compiled_where)
         pipeline << { "$match" => mongo_constraints } if mongo_constraints.any?
+        pipeline.concat(subquery_stages)
       end
 
       # Handle aggregation pipeline stages (from empty_or_nil, set_equals, etc.)
@@ -3308,8 +3388,22 @@ module Parse
           "_acl" => 1,
         }
         @keys.each do |key|
-          mongo_field = convert_field_for_direct_mongodb(key.to_s)
+          # A dotted key (`meta.k`, `owner.name`) selects its top-level
+          # column on REST: Parse Server keeps the whole `meta` object, or
+          # the whole `owner` pointer. Projecting the dotted path would
+          # return a partial sub-document REST never produces.
+          top = key.to_s.split(".", 2).first
+          next if top.nil? || top.empty?
+          mongo_field = convert_field_for_direct_mongodb(top)
           project_stage[mongo_field] = 1
+        end
+        # Keep each include's `$lookup` output. Without it the joined
+        # document was projected away and the field decoded as a bare
+        # pointer even though the caller asked for it to be included.
+        @includes.each do |inc|
+          base = inc.to_s.split(".", 2).first
+          next if base.nil? || base.empty?
+          project_stage["_included_#{base}"] = 1 if get_pointer_target_class(base.to_sym)
         end
         pipeline << { "$project" => project_stage }
       end
@@ -3365,11 +3459,16 @@ module Parse
           },
         }
 
-        # Stage 3: Unwind the array (since $lookup returns array, but we want single object)
+        # Stage 3: Collapse the `$lookup` array to its single document.
+        # An include that resolves to nothing (dangling pointer, or a row the
+        # scope cannot read, which the ACL rewriter filters out of the
+        # join) becomes an explicit null, so the row converter can drop the
+        # field the way REST does instead of leaving a bare pointer.
         stages << {
-          "$unwind" => {
-            "path" => "$#{lookup_result_field}",
-            "preserveNullAndEmptyArrays" => true,
+          "$addFields" => {
+            lookup_result_field => {
+              "$ifNull" => [{ "$arrayElemAt" => ["$#{lookup_result_field}", 0] }, nil],
+            },
           },
         }
 
@@ -3411,6 +3510,134 @@ module Parse
         target
       rescue NameError, StandardError
         nil
+      end
+    end
+
+    # Subquery operators the mongo-direct path compiles into `$lookup`
+    # joins. MongoDB has no equivalent; passed through verbatim they fail
+    # with "unknown operator".
+    DIRECT_SUBQUERY_OPERATORS = %w[$inQuery $notInQuery $select $dontSelect].freeze
+
+    # Split compiled constraints into a MongoDB `$match` and the extra
+    # stages that implement subquery operators.
+    #
+    # * `$inQuery` / `$notInQuery`: `$lookup` the pointed-to row in the
+    #   subquery's class, filtered by the subquery's `where`, then keep rows
+    #   whose join is non-empty (or empty).
+    # * `$select` / `$dontSelect`: `$lookup` rows of the subquery's class
+    #   matching its `where` whose `key` equals this row's field, then keep
+    #   rows whose join is non-empty (or empty).
+    #
+    # The joins run through Parse::MongoDB.aggregate, so the ACL rewriter
+    # filters the joined rows by `_rperm`, the joined class's CLP is
+    # checked, and a `where` on the joined class's protectedFields is
+    # refused, as Parse Server does for its subqueries. Temporary join
+    # columns are removed with `$unset`.
+    #
+    # @param constraints [Hash] compiled where constraints.
+    # @return [Array(Hash, Array<Hash>)] the `$match` body and the stages.
+    # @api private
+    def direct_subquery_stages(constraints)
+      return [convert_constraints_for_direct_mongodb(constraints), []] unless direct_subquery_present?(constraints)
+
+      remaining = {}
+      lookups = []
+      post = {}
+      temps = []
+      constraints.each do |field, value|
+        ops = value.is_a?(Hash) ? value.keys.map(&:to_s) & DIRECT_SUBQUERY_OPERATORS : []
+        if ops.empty?
+          remaining[field] = value
+          next
+        end
+        others = value.reject { |k, _| DIRECT_SUBQUERY_OPERATORS.include?(k.to_s) }
+        remaining[field] = others if others.any?
+        ops.each do |op|
+          spec = value[op] || value[op.to_sym]
+          temp = "_subquery_#{temps.size}_#{field.to_s.gsub(/[^A-Za-z0-9_]/, "_")}"
+          temps << temp
+          lookups << direct_subquery_lookup(field.to_s, op, spec, temp)
+          post[temp] = %w[$inQuery $select].include?(op) ? { "$ne" => [] } : { "$eq" => [] }
+        end
+      end
+
+      stages = lookups
+      stages << { "$match" => post }
+      stages << { "$unset" => temps }
+      [convert_constraints_for_direct_mongodb(remaining), stages]
+    end
+
+    # @return [Boolean] true when a top-level constraint uses a subquery operator.
+    # @api private
+    def direct_subquery_present?(constraints)
+      return false unless constraints.is_a?(Hash)
+      constraints.any? do |_field, value|
+        value.is_a?(Hash) && value.keys.any? { |k| DIRECT_SUBQUERY_OPERATORS.include?(k.to_s) }
+      end
+    end
+
+    # Build the `$lookup` stage for one subquery operator.
+    # @api private
+    def direct_subquery_lookup(field, op, spec, temp)
+      spec = (spec || {}).transform_keys(&:to_s)
+      if op == "$select" || op == "$dontSelect"
+        query = (spec["query"] || {})
+        query = query.transform_keys(&:to_s) if query.is_a?(Hash)
+        class_name = query["className"].to_s
+        where = query["where"] || {}
+        key = (spec["key"] || field).to_s
+      else
+        class_name = spec["className"].to_s
+        where = spec["where"] || {}
+        key = nil
+      end
+      if class_name.empty?
+        raise ArgumentError, "[Parse::Query] #{op} on '#{field}' is missing the subquery className."
+      end
+
+      sub = Parse::Query.new(class_name)
+      sub_match, sub_stages = Parse::Query.with_field_aliases(class_name) do
+        sub.send(:direct_subquery_stages, where.is_a?(Hash) ? where : {})
+      end
+      local = convert_field_for_direct_mongodb(field)
+
+      if key.nil?
+        # `$inQuery` / `$notInQuery` compare a pointer column, stored as
+        # `Class$objectId`, with the subquery row's `_id`.
+        local = "_p_#{Query.format_field(field)}" unless local.start_with?("_p_")
+        pipeline = [
+          { "$match" => { "$expr" => { "$eq" => ["$_id", "$$subquery_id"] } } },
+        ]
+        pipeline << { "$match" => sub_match } if sub_match.any?
+        pipeline.concat(sub_stages)
+        pipeline << { "$limit" => 1 }
+        {
+          "$lookup" => {
+            "from" => class_name,
+            "let" => {
+              "subquery_id" => {
+                "$arrayElemAt" => [{ "$split" => ["$#{local}", { "$literal" => "$" }] }, 1],
+              },
+            },
+            "pipeline" => pipeline,
+            "as" => temp,
+          },
+        }
+      else
+        foreign = Parse::Query.with_field_aliases(class_name) { sub.send(:convert_field_for_direct_mongodb, key) }
+        pipeline = []
+        pipeline << { "$match" => sub_match } if sub_match.any?
+        pipeline.concat(sub_stages)
+        pipeline << { "$match" => { "$expr" => { "$eq" => ["$#{foreign}", "$$subquery_value"] } } }
+        pipeline << { "$limit" => 1 }
+        {
+          "$lookup" => {
+            "from" => class_name,
+            "let" => { "subquery_value" => "$#{local}" },
+            "pipeline" => pipeline,
+            "as" => temp,
+          },
+        }
       end
     end
 
@@ -3460,12 +3687,26 @@ module Parse
         mongo_field = convert_field_for_direct_mongodb(field_str)
         # Bare objectIds against a pointer column use the storage form.
         value = coerce_bare_pointer_ids(field_str, value, arrays: true)
+        # `$containedBy` (every array element is in the list) has no MongoDB
+        # operator. Parse Server's equivalent is "no element outside the
+        # list".
+        value = rewrite_contained_by_for_direct(value)
 
         # Convert value
         result[mongo_field] = convert_value_for_direct_mongodb(field_str, value)
       end
 
       result
+    end
+
+    # @api private
+    def rewrite_contained_by_for_direct(value)
+      return value unless value.is_a?(Hash)
+      key = value.key?("$containedBy") ? "$containedBy" : (value.key?(:$containedBy) ? :$containedBy : nil)
+      return value if key.nil?
+      list = value[key]
+      rest = value.reject { |k, _| k == key }
+      rest.merge("$not" => { "$elemMatch" => { "$nin" => Array(list) } })
     end
 
     # Convert a field name for direct MongoDB access.
