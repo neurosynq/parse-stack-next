@@ -74,4 +74,67 @@ class QueryFieldAliasTest < Minitest::Test
     assert_equal "account_id", seen[:aliased]
     assert_equal "accountId", seen[:plain]
   end
+
+  # ---- review hardening ----------------------------------------------------
+
+  class StatsDoc < Parse::Object
+    parse_class "FieldAliasStats"
+    property :ext_id, :string, field: :ExternalID
+    property :play_count, :integer
+  end
+
+  class InternalDoc < Parse::Object
+    parse_class "FieldAliasInternal"
+    property :hash_ref, :string, field: :_hashed_password
+  end
+
+  def test_group_by_aggregations_use_declared_names
+    group_pipeline = nil
+    sum_pipeline = nil
+    Parse::GroupBy.class_eval do
+      alias_method :__orig_execute_group_aggregation, :execute_group_aggregation
+    end
+    Parse::GroupBy.define_method(:execute_group_aggregation) do |_op, expr|
+      group_pipeline = @query.send(:build_aggregation_pipeline) rescue nil
+      sum_pipeline = expr
+      {}
+    end
+    StatsDoc.query.group_by(:ext_id).sum(:play_count)
+    assert_equal({ "$sum" => "$playCount" }, sum_pipeline)
+  ensure
+    Parse::GroupBy.class_eval do
+      alias_method :execute_group_aggregation, :__orig_execute_group_aggregation
+      remove_method :__orig_execute_group_aggregation
+    end
+  end
+
+  def test_query_sum_formats_the_declared_name
+    assert_equal "ExternalID", Parse::Query.with_field_aliases("FieldAliasStats") { Parse::Query.format_field(:ext_id) }
+  end
+
+  def test_formatter_nil_users_see_no_change_for_default_names
+    previous = Parse::Query.field_formatter
+    Parse::Query.field_formatter = nil
+    q = StatsDoc.query(play_count: 1, ext_id: "x")
+    assert_equal({ "play_count" => 1, "ExternalID" => "x" }, q.compile_where)
+  ensure
+    Parse::Query.field_formatter = previous
+  end
+
+  def test_builtin_acl_key_is_unchanged
+    assert_equal({ "acl" => 1 }.keys, StatsDoc.query(acl: 1).compile_where.keys)
+  end
+
+  def test_declared_column_name_passes_verbatim
+    assert_equal({ "ExternalID" => "x" }, StatsDoc.query("ExternalID" => "x").compile_where)
+  end
+
+  def test_alias_never_targets_an_internal_column
+    refute_includes Parse::Query.field_aliases_for("FieldAliasInternal").values, "_hashed_password"
+  end
+
+  def test_wrapped_private_methods_stay_private
+    assert Parse::Query.private_method_defined?(:build_query_aggregate_pipeline),
+           "wrapping must not make a private builder public"
+  end
 end

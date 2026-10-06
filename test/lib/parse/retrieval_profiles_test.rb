@@ -79,6 +79,7 @@ class RetrievalProfilesTest < Minitest::Test
     assert_raises(ArgumentError) { P.register(:bad, hybrid: { endpoint: "https://evil" }) }
     assert_raises(ArgumentError) { P.register(:bad, rerank_timeout: 0) }
     assert_raises(ArgumentError) { P.register("Not Valid", k: 1) }
+    assert_raises(ArgumentError) { P.register(:wide, k: 30, max_k: 50) }
     assert_empty P.names
   end
 
@@ -128,6 +129,27 @@ class RetrievalProfilesTest < Minitest::Test
       assert_equal({}, c[:hybrid])
       assert_equal "precise", result[:profile]
     end
+  end
+
+  class HybridDoc < Parse::Object
+    parse_class "RetrievalProfileHybridDoc"
+    property :title, :string
+    property :body, :string
+    property :secret, :string
+    property :embedding, :vector, dimensions: 8, provider: :fixture
+    embed :body, into: :embedding
+    agent_searchable field: :embedding
+    agent_fields :title, :body
+  end
+
+  def test_hybrid_profile_lexical_branch_searches_only_readable_text
+    P.register(:balanced, k: 5, hybrid: true)
+    captured = {}
+    Parse::Retrieval.stub(:retrieve, ->(**kw) { captured.replace(kw); [] }) do
+      Parse::Retrieval::AgentTool.semantic_search(fake_agent, class_name: "RetrievalProfileHybridDoc",
+                                                              query: "q", profile: "balanced")
+    end
+    assert_equal ["body"], captured[:hybrid][:lexical][:fields], "never a wildcard over hidden fields"
   end
 
   def test_caller_k_cannot_exceed_the_rerank_candidate_budget

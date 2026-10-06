@@ -3464,9 +3464,29 @@ module Parse
           raise ArgumentError,
                 "fields[#{key.inspect}]: value must be an Array of field names, got #{names.inspect}"
         end
-        canonical_filter_key(key).each { |canon| result[canon] = names.map(&:to_s).freeze }
+        field_policy_keys(key).each { |canon| result[canon] = names.map(&:to_s).freeze }
       end
       result.freeze
+    end
+
+    # Canonical lookup names for a `fields:` key. Tools look policies up by
+    # the class's Parse name (`_User`, or a custom `parse_class`), so a
+    # String or Symbol key is resolved through Parse::Model.find_class to
+    # that name as well as kept verbatim; otherwise `fields: { "User" => ... }`
+    # would silently fail to narrow `_User`.
+    def field_policy_keys(key)
+      keys = canonical_filter_key(key)
+      if key.is_a?(String) || key.is_a?(Symbol)
+        klass = (Parse::Model.find_class(key.to_s) rescue nil)
+        if klass.respond_to?(:parse_class)
+          keys |= [klass.parse_class.to_s]
+          if defined?(Parse::Agent::MetadataRegistry) &&
+             Parse::Agent::MetadataRegistry.respond_to?(:hidden_name_variants_for)
+            keys |= Parse::Agent::MetadataRegistry.hidden_name_variants_for(klass)
+          end
+        end
+      end
+      keys
     end
 
     def normalize_query_filters(filters)

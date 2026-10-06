@@ -34,6 +34,18 @@ module Parse
         /Connection refused|ECONNREFUSED/i,
       ].freeze
 
+      # Unambiguous infrastructure failures: always missing coverage in a
+      # Docker run, checked BEFORE the legitimate-skip patterns so a message
+      # that also mentions credentials or keys is not excused.
+      CORE_INFRA_SKIP_PATTERNS = [
+        /Parse Server (is )?(not available|unavailable|not reachable|unreachable)/i,
+        /Could not connect to Parse Server/i,
+        /Docker containers not running/i,
+        /Unable to start Docker containers/i,
+        /container cannot reach (the )?host/i,
+        /needs Parse::MongoDB/i,
+      ].freeze
+
       # Skip reasons that are legitimate even in a full Docker run: the
       # assertion needs a service or credential the standard stack does not
       # provide. Checked first, so "Atlas Search not reachable" stays a
@@ -52,6 +64,7 @@ module Parse
       #   unreachable.
       def infra_skip?(reason)
         text = reason.to_s
+        return true if CORE_INFRA_SKIP_PATTERNS.any? { |re| re.match?(text) }
         return false if LEGIT_SKIP_PATTERNS.any? { |re| re.match?(text) }
         INFRA_SKIP_PATTERNS.any? { |re| re.match?(text) }
       end

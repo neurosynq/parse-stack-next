@@ -65,6 +65,9 @@ module Parse
       # Hard ceilings no profile may exceed, so a misconfigured profile still
       # cannot fan out unbounded provider work.
       MAX_RERANK_CANDIDATES = 100
+      # semantic_search returns at most this many documents, so a larger
+      # max_k could never take effect; it is refused rather than clamped.
+      MAX_K = 20
       MAX_RERANK_DOCUMENT_CHARS = 32_000
 
       FAILURE_MODES = %i[fallback raise].freeze
@@ -145,6 +148,10 @@ module Parse
           k = positive_int!(key, :k, opts[:k])
           max_k = positive_int!(key, :max_k, opts[:max_k])
           raise ArgumentError, "Retrieval profile #{key.inspect}: k (#{k}) exceeds max_k (#{max_k})." if k > max_k
+          if max_k > MAX_K
+            raise ArgumentError,
+                  "Retrieval profile #{key.inspect}: max_k #{max_k} exceeds the semantic_search maximum (#{MAX_K})."
+          end
 
           reranker = nil
           unless opts[:reranker].nil?

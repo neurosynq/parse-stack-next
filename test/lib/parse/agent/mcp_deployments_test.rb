@@ -245,6 +245,14 @@ class MCPDeploymentsTest < Minitest::Test
     assert_equal 1, calls
   end
 
+  def test_user_scoped_refuses_elevating_agent_options
+    client = FakeClient.new({ "tok-a" => "u_a" }, master_key: "mk")
+    %i[master_atlas allow_mutations].each do |opt|
+      err = assert_raises(ArgumentError) { user_app(client, agent_options: { opt => true }) }
+      assert_match(/#{opt}/, err.message)
+    end
+  end
+
   # ---- per-principal rate limiting ------------------------------------------
 
   def test_user_scoped_shares_one_limiter_per_user_across_requests

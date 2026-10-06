@@ -77,8 +77,13 @@ module Parse
       def semantic_search_runner(agent, class_name:, **options)
         lambda do |bench_case, profile|
           tokens = 0
+          # Notifications are delivered on the instrumenting thread, so only
+          # events from THIS thread belong to this case; other threads'
+          # searches are ignored.
+          runner_thread = Thread.current
           sub = if defined?(ActiveSupport::Notifications)
               ActiveSupport::Notifications.subscribe("parse.retrieval.search") do |*args|
+                next unless Thread.current.equal?(runner_thread)
                 payload = args.last
                 tokens += payload.dig(:rerank, :tokens_estimated).to_i if payload.is_a?(Hash)
               end
@@ -107,7 +112,9 @@ module Parse
         top = ids.first(k)
         relevant = bench_case.relevant
         found = relevant & top
-        first_rank = ids.index { |id| relevant.include?(id) }
+        # MRR is cut off at k, like recall: a relevant hit below the cutoff
+        # scores 0.
+        first_rank = top.index { |id| relevant.include?(id) }
         {
           tags: bench_case.tags,
           recall: relevant.empty? ? (top.empty? ? 1.0 : 0.0) : found.size.to_f / relevant.size,

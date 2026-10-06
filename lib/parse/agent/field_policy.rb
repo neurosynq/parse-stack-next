@@ -33,17 +33,21 @@ module Parse
       #
       # @param agent [Parse::Agent, nil]
       # @return the block's value
+      #
+      # Scopes nest: a tool that builds another agent and invokes it (even one
+      # constructed without `parent:`) runs under BOTH policies, so the inner
+      # call can only narrow further, never escape the outer agent's policy.
       def with(agent)
         previous = Thread.current[SCOPE_KEY]
-        Thread.current[SCOPE_KEY] = agent
+        Thread.current[SCOPE_KEY] = (previous || []) + [agent]
         yield
       ensure
         Thread.current[SCOPE_KEY] = previous
       end
 
-      # @return [Parse::Agent, nil] the agent whose tool is executing.
+      # @return [Parse::Agent, nil] the innermost agent whose tool is executing.
       def current_agent
-        Thread.current[SCOPE_KEY]
+        Thread.current[SCOPE_KEY]&.last
       end
 
       # Wire-format field names the current agent narrows `class_name` to, or
@@ -53,9 +57,16 @@ module Parse
       # @param class_name [String]
       # @return [Array<String>, nil]
       def narrowing_for(class_name)
-        agent = current_agent
-        return nil unless agent.respond_to?(:field_narrowing_for)
-        agent.field_narrowing_for(class_name)
+        stack = Thread.current[SCOPE_KEY]
+        return nil if stack.nil? || stack.empty?
+        result = nil
+        stack.uniq.each do |agent|
+          next unless agent.respond_to?(:field_narrowing_for)
+          names = agent.field_narrowing_for(class_name)
+          next if names.nil?
+          result = result ? (result & names) : names
+        end
+        result
       end
     end
   end

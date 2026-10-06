@@ -167,6 +167,17 @@ class MCPListenerOwnerBindingTest < Minitest::Test
     assert_equal 403, s2
   end
 
+  def test_live_session_binding_survives_lru_pressure
+    live = %w[s-live]
+    reg = Parse::Agent::MCPRackApp::SessionOwnerRegistry.new(max_entries: 2, pinned: ->(sid) { live.include?(sid) })
+    reg.bind("s-live", "op:alice")
+    reg.bind("s-a", "op:x")
+    reg.bind("s-b", "op:y")
+    reg.bind("s-c", "op:z")
+    assert reg.owned_by?("s-live", "op:alice"), "a live session keeps its owner under eviction pressure"
+    refute reg.owned_by?("s-a", "op:x"), "idle sessions are still evicted"
+  end
+
   def test_master_key_agents_share_one_principal_without_resolver
     # Documented limitation: with no principal_resolver, bare master-key agents
     # are indistinguishable, so owner-binding is a no-op among them.

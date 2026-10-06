@@ -230,7 +230,10 @@ module Parse
     FIELD_ALIAS_SCOPE_KEY = :parse_query_field_alias_scope
     EMPTY_FIELD_ALIASES = {}.freeze
     FIELD_ALIAS_CACHE = {}
+    FIELD_ALIAS_CACHE_MAX = 1_000
     FIELD_ALIAS_CACHE_MUTEX = Mutex.new
+    # System fields with their own handling, never treated as aliases.
+    FIELD_ALIAS_BUILTINS = %w[id created_at updated_at acl].freeze
 
     # The set of symbol keys that {#conditions} treats as query-shape
     # options (cache TTL, ordering, limits, ACL convenience helpers,
@@ -354,25 +357,33 @@ module Parse
         klass = (Parse::Model.find_class(table.to_s) rescue nil)
         return EMPTY_FIELD_ALIASES unless klass.respond_to?(:field_map)
         fmap = klass.field_map
-        cache_key = [klass.object_id, fmap.size, field_formatter]
+        cache_key = [klass.object_id, fmap.hash]
         cached = FIELD_ALIAS_CACHE_MUTEX.synchronize { FIELD_ALIAS_CACHE[cache_key] }
         return cached if cached
 
-        aliases = {}
+        ruby_aliases = {}
+        wire_aliases = {}
         fmap.each do |ruby_name, remote|
           ruby = ruby_name.to_s
           wire = remote.to_s
-          default = if field_formatter.present? && ruby.respond_to?(field_formatter)
-              ruby.send(field_formatter)
-            else
-              ruby
-            end
-          next if wire == default
-          aliases[ruby] = wire
-          aliases[wire] = wire
+          # Only explicit `field:` names: an entry equal to the default
+          # lowerCamelCase form is not an alias, so field_formatter (including
+          # nil) keeps governing it exactly as before. Built-in system fields
+          # keep their existing handling.
+          next if wire == ruby.columnize
+          next if FIELD_ALIAS_BUILTINS.include?(ruby)
+          # Never let an alias address an internal Parse Server column.
+          next if wire.start_with?("_")
+          ruby_aliases[ruby] = wire
+          wire_aliases[wire] = wire
         end
-        aliases.freeze
-        FIELD_ALIAS_CACHE_MUTEX.synchronize { FIELD_ALIAS_CACHE[cache_key] = aliases }
+        # An exact server name wins over a Ruby name that collides with it, so
+        # a key that IS a declared column is never redirected elsewhere.
+        aliases = ruby_aliases.merge(wire_aliases).freeze
+        FIELD_ALIAS_CACHE_MUTEX.synchronize do
+          FIELD_ALIAS_CACHE.shift while FIELD_ALIAS_CACHE.size >= FIELD_ALIAS_CACHE_MAX
+          FIELD_ALIAS_CACHE[cache_key] = aliases
+        end
         aliases
       end
 
@@ -8165,8 +8176,11 @@ module Parse
       add_constraint keys exclude_keys order includes pluck count_distinct
       compile compile_where prepared pipeline count results distinct first first_direct
       build_direct_mongodb_pipeline build_query_aggregate_pipeline build_aggregation_pipeline
-      aggregate group_by group_by_date explain
+      aggregate group_by group_by_date explain sum average min max
     ].freeze
+
+    # Aggregation helper methods that format field names while running.
+    HELPER_METHODS = %i[pipeline results count execute! sum average min max list raw].freeze
 
     # The mongo-direct entry points are wrapped with their exact signatures
     # (not `*args, **kwargs`), so `Method#parameters` still reports the
@@ -8205,6 +8219,8 @@ module Parse
     end
 
     def self.wrap(klass, methods, table_from)
+      private_methods = methods.select { |m| klass.private_method_defined?(m) }
+      protected_methods = methods.select { |m| klass.protected_method_defined?(m) }
       mod = Module.new do
         methods.each do |m|
           next unless klass.method_defined?(m) || klass.private_method_defined?(m)
@@ -8213,6 +8229,9 @@ module Parse
             Parse::Query.with_field_aliases(table) { super(*args, **kwargs, &blk) }
           end
         end
+        # Keep each wrapped method's original visibility.
+        private(*private_methods) unless private_methods.empty?
+        protected(*protected_methods) unless protected_methods.empty?
       end
       klass.prepend(mod)
     end
@@ -8221,7 +8240,7 @@ module Parse
   QueryFieldAliasScope.wrap(Query, QueryFieldAliasScope::QUERY_METHODS, -> { @table })
   Query.prepend(QueryFieldAliasScope::DirectMethods)
   [Aggregation, GroupBy, GroupByDate].each do |helper|
-    QueryFieldAliasScope.wrap(helper, %i[pipeline results count execute!], -> { @query&.table })
+    QueryFieldAliasScope.wrap(helper, QueryFieldAliasScope::HELPER_METHODS, -> { @query&.table })
   end
 end
 

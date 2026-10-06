@@ -531,6 +531,20 @@ its stream within the grace period keeps its subscriptions.
 
 ---
 
+
+### Operational notes for deployment factories
+
+* **Validation load.** `user_scoped` with the default
+  `session_validation: :per_request` asks Parse Server (`GET /users/me`) on
+  every request, including requests carrying a random bearer string. Put a
+  `pre_auth_rate_limiter:` in front of a public endpoint, or use
+  `session_validation: :cached` and rely on the identity cache's TTL and
+  invalidation hooks.
+* **Outages fail closed.** A Parse Server error while validating a session is
+  treated as an invalid session: the request gets 401 and a listening stream
+  is closed at its next revalidation. Clients reconnect once Parse Server is
+  back.
+
 ## Connecting Claude Desktop (stdio bridge)
 
 Parse Stack speaks MCP over **HTTP** (the standalone server and the
@@ -1786,6 +1800,16 @@ analytics = Parse::Agent.new(permissions: :readonly,
 
 The policy is applied for the duration of each tool call (fiber-local), so
 agents serving concurrent requests never see each other's policy.
+
+**Known limits.**
+
+* `call_method` projects returned objects (anything carrying `className` and
+  `objectId`) through their class policy, but rows a method returns from its
+  own aggregation (`$group` output, `$lookup` documents) are the method
+  author's responsibility: the SDK cannot tell which class such a row came
+  from.
+* `get_schema` lists index keys and class-level permission entries that may
+  name fields outside the agent's policy (names only, never values).
 
 ---
 

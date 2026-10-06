@@ -428,7 +428,14 @@ module Parse
         # Binds each MCP session id to the principal that established it so a
         # listening stream can't be hijacked by another authenticated caller.
         # Same per-instance / single-process scope as @cancellation_registry.
-        @session_owners = SessionOwnerRegistry.new
+        # Live sessions (an attached listening stream or a pending approval)
+        # keep their owner binding under LRU pressure.
+        @session_owners = SessionOwnerRegistry.new(
+          pinned: lambda do |sid|
+            @pending_elicitations.pending_for?(sid) ||
+              (@subscription_manager.respond_to?(:listener?) && @subscription_manager.listener?(sid))
+          end,
+        )
         if principal_resolver && !principal_resolver.respond_to?(:call)
           raise ArgumentError, "principal_resolver must respond to #call"
         end
@@ -2066,9 +2073,12 @@ module Parse
       class SessionOwnerRegistry
         DEFAULT_MAX_ENTRIES = 10_000
 
-        def initialize(max_entries: DEFAULT_MAX_ENTRIES)
+        # @param pinned [#call, nil] `->(session_id) { Boolean }`; a pinned
+        #   session's binding is never evicted (see #evict_lru!).
+        def initialize(max_entries: DEFAULT_MAX_ENTRIES, pinned: nil)
           @owners = {} # session_id => principal fingerprint (insertion-ordered for LRU)
           @max = max_entries
+          @pinned = pinned
           @mutex = Mutex.new
         end
 
@@ -2125,8 +2135,6 @@ module Parse
           end
         end
 
-        # True when `session_id` is bound to exactly this principal. Never
-        # claims an unbound session (unlike {#authorize_attach}).
         # True when the session is unbound (never initialized or attached) or
         # bound to this principal. Used to gate per-session control messages
         # (cancellation, elicitation replies): an unbound session has no owner
@@ -2139,6 +2147,8 @@ module Parse
           end
         end
 
+        # True when `session_id` is bound to exactly this principal. Never
+        # claims an unbound session (unlike {#authorize_attach}).
         def owned_by?(session_id, fingerprint)
           return false if blank?(session_id) || blank?(fingerprint)
           @mutex.synchronize { @owners[session_id] == fingerprint }
@@ -2160,8 +2170,19 @@ module Parse
         private
 
         # Hash preserves insertion order; #shift drops the oldest (LRU) entry.
+        # Evict least recently used bindings past the cap, skipping sessions
+        # the `pinned` predicate reports as live (an attached listening stream
+        # or a pending approval prompt). Evicting a live session's binding
+        # would make it unbound, and an unbound session accepts control
+        # messages from anyone, so a flood of new sessions could otherwise
+        # strip a victim's owner and let the flooder answer its approvals.
         def evict_lru!
-          @owners.shift while @owners.size > @max
+          return if @owners.size <= @max
+          @owners.keys.each do |sid|
+            break if @owners.size <= @max
+            next if @pinned && (@pinned.call(sid) rescue false)
+            @owners.delete(sid)
+          end
         end
 
         def blank?(value)

@@ -67,4 +67,13 @@ class IntegrationGateTest < Minitest::Test
     thread&.join(2)
     server&.close
   end
+
+  def test_core_infrastructure_failures_win_over_legitimate_wording
+    gate = Parse::Test::IntegrationGate rescue IntegrationGate
+    assert gate.infra_skip?("Parse Server not available: check credentials")
+    assert gate.infra_skip?("Unable to start Docker containers")
+    assert gate.infra_skip?("This test needs Parse::MongoDB configured")
+    refute gate.infra_skip?("Atlas Search not reachable")
+    refute gate.infra_skip?("set VOYAGE_CONTRACT_KEY to run")
+  end
 end

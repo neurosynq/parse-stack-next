@@ -3204,7 +3204,7 @@ module Parse
         # constraints, before the server-owned tenant / per-agent /
         # canonical constraints are merged in.
         assert_where_fields_in_allowlist!(class_name, where)
-        assert_fields_in_allowlist!(class_name, order_field_names(order))
+        assert_fields_in_allowlist!(class_name, order_field_names(order).map { |f| wire_field_path(class_name, f) })
         limit = [limit || Agent::DEFAULT_LIMIT, Agent::MAX_LIMIT].min
 
         # Tenant scope enforcement: resolve before any query building so that
@@ -4336,7 +4336,10 @@ module Parse
         allowlist = MetadataRegistry.field_allowlist(class_name)
         if allowlist && allowlist.any?
           permitted = allowlist.map(&:to_s) | MetadataRegistry::ALWAYS_KEEP_FIELDS
-          check_match_keys_for_restricted_fields!(where, permitted)
+          # Compare the names ConstraintTranslator will actually send:
+          # `play_count` and `created_at` are permitted as `playCount` and
+          # `createdAt`, and a `_p_` storage prefix is stripped.
+          check_match_keys_for_restricted_fields!(normalize_where_keys(class_name, where), permitted)
         end
         # Embedded subqueries are validated against their OWN target class,
         # whether or not the outer class declares an allowlist.
@@ -4344,6 +4347,46 @@ module Parse
       end
 
       module_function :assert_where_fields_in_allowlist!
+
+      # @api private
+      # A copy of `where` whose field keys (top level and inside
+      # `$and`/`$or`/`$nor`/`$not`) are rewritten to their wire names, the way
+      # ConstraintTranslator resolves them: the class's `field_map` entry or
+      # an exact declared server name, else lowerCamelCase. A `_p_` storage
+      # prefix is stripped. Operator keys and values are left alone; this is
+      # used only to compare against the allowlist.
+      def normalize_where_keys(class_name, where)
+        case where
+        when Hash
+          where.each_with_object({}) do |(key, value), out|
+            ks = key.to_s
+            if %w[$and $or $nor].include?(ks)
+              out[ks] = Array(value).map { |sub| normalize_where_keys(class_name, sub) }
+            elsif ks == "$not"
+              out[ks] = normalize_where_keys(class_name, value)
+            elsif ks.start_with?("$")
+              out[ks] = value
+            else
+              out[wire_field_path(class_name, ks)] = value
+            end
+          end
+        else
+          where
+        end
+      end
+
+      module_function :normalize_where_keys
+
+      # @api private
+      # Wire form of a (possibly dotted) field path: the root segment is
+      # resolved like a property name, the rest is kept.
+      def wire_field_path(class_name, path)
+        root, rest = path.to_s.sub(/\A_p_/, "").split(".", 2)
+        wire = MetadataRegistry.wire_field_names(class_name, [root]).first || root
+        rest ? "#{wire}.#{rest}" : wire
+      end
+
+      module_function :wire_field_path
 
       # @api private
       # Walk a where: Hash for embedded subqueries (`$inQuery`, `$notInQuery`,
@@ -4857,7 +4900,7 @@ module Parse
         # constraints, before the server-owned tenant / per-agent /
         # canonical constraints are merged in.
         assert_where_fields_in_allowlist!(class_name, where)
-        assert_fields_in_allowlist!(class_name, order_field_names(order))
+        assert_fields_in_allowlist!(class_name, order_field_names(order).map { |f| wire_field_path(class_name, f) })
         # Reuse query_class's gates by routing through it directly.
         # query_class returns a ResultFormatter-wrapped hash; we want the raw rows.
         query = {}
@@ -5161,6 +5204,9 @@ module Parse
       # @return [Hash] query explanation
       def explain_query(agent, class_name:, where: nil, **_kwargs)
         assert_class_accessible!(class_name, agent: agent, op: :find)
+        # Explain stats (nReturned) answer yes/no for any predicate, so a
+        # hidden field must not be addressable here either.
+        assert_where_fields_in_allowlist!(class_name, where)
         # No direct-MongoDB equivalent of Parse Server's REST explain
         # plan exists today, and routing this through master-key REST
         # under an acl_user/acl_role agent would silently bypass the
@@ -5920,6 +5966,12 @@ module Parse
         limit = clamp_atlas_limit(limit)
         auth = atlas_auth_options!(agent, tool: :atlas_text_search)
         fields_norm = normalize_atlas_fields_with_allowlist!(class_name, fields)
+        # Hidden-field inference: the caller's filter may only address
+        # readable fields, and with no `fields:` the text search defaults to
+        # the readable fields rather than every field (`wildcard: "*"`), so
+        # neither which rows match nor their rank depends on a hidden field.
+        assert_where_fields_in_allowlist!(class_name, filter) if filter.is_a?(Hash)
+        fields_norm ||= readable_atlas_text_fields(class_name)
 
         # TRACK-AGENT-6 / TRACK-AGENT-7 fix: per-agent filter is
         # UNCONDITIONAL; canonical filter is LLM-controllable via
@@ -6032,9 +6084,14 @@ module Parse
           # Parse::AtlasSearch::FacetedSearchNotACLSafe); pass master:
           # true unconditionally here, since the agent-level gate
           # above already enforced master_atlas?.
+          readable = readable_atlas_text_fields(class_name)
+          facet_opts = {}
+          # A non-empty query searches only readable fields (never a
+          # wildcard across hidden ones) when an allowlist applies.
+          facet_opts[:fields] = readable if readable && !query.to_s.strip.empty?
           result = Parse::AtlasSearch.faceted_search(
             class_name, query.to_s, facets,
-            limit: limit, master: true,
+            limit: limit, master: true, **facet_opts,
             # Master mode still has to name its application: the binding
             # guard compares the client, not the posture, and an unnamed
             # caller is refused once two applications are in play.
@@ -6317,6 +6374,16 @@ module Parse
       module_function :compose_atlas_filter
 
       # @api private
+      # @api private
+      # The fields an Atlas text search may run over when the caller named
+      # none: the effective allowlist minus the always-keep system fields,
+      # or nil when no allowlist applies (the wildcard is then harmless).
+      def readable_atlas_text_fields(class_name)
+        allowlist = Parse::Agent::MetadataRegistry.field_allowlist(class_name)
+        return nil if allowlist.nil? || allowlist.empty?
+        allowlist.map(&:to_s) - Parse::Agent::MetadataRegistry::ALWAYS_KEEP_FIELDS
+      end
+
       def assert_atlas_field_allowed!(class_name, field_name, kind:)
         name = field_name.to_s
         allowlist = Parse::Agent::MetadataRegistry.field_allowlist(class_name)

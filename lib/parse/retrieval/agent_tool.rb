@@ -207,7 +207,7 @@ module Parse
             field: vector_field,
             text_field: resolved_text_field,
             k: retrieve_k,
-            hybrid: prof&.hybrid ? prof.hybrid : nil,
+            hybrid: prof&.hybrid ? hybrid_config_for(prof, klass) : nil,
             rerank: reranker,
             rerank_top_n: rerank_top_n,
             filter: filter,
@@ -257,6 +257,25 @@ module Parse
         end
         emit_search_event(cname, prof, effective_k, retrieve_k, reranker, envelope, dropped, started)
         envelope
+      end
+
+      # @!visibility private
+      # A profile's hybrid settings with the lexical branch restricted to the
+      # text sources the agent may read. Without this the lexical search runs
+      # over every field (`wildcard: "*"`), so which documents match, and
+      # their rank, could depend on a hidden field. Refused when the class
+      # has an allowlist and no readable text source.
+      def hybrid_config_for(prof, klass)
+        cfg = Marshal.load(Marshal.dump(prof.hybrid.to_h))
+        readable = readable_text_fields(klass)
+        return cfg if readable.nil?
+        raise text_field_denied(klass, searchable_text_fields(klass).first) if readable.empty?
+        lexical = (cfg[:lexical] || {}).dup
+        wire = readable.map { |f| Parse::Retrieval.send(:wire_name, klass, f) }
+        lexical[:fields] = lexical[:fields] ? (Array(lexical[:fields]).map(&:to_s) & wire) : wire
+        raise text_field_denied(klass, Array(cfg.dig(:lexical, :fields)).first) if lexical[:fields].empty?
+        cfg[:lexical] = lexical
+        cfg
       end
 
       # @!visibility private

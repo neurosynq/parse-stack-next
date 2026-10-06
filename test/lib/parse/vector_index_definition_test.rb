@@ -205,4 +205,17 @@ class VectorIndexDefinitionTest < Minitest::Test
     assert_equal "bodyEmbedding", build.build(StoredNameDoc, field: :body_embedding)["fields"].first["path"]
     assert_equal "vec", build.build(StoredNameDoc, field: :aliased_vec)["fields"].first["path"]
   end
+
+  def test_diff_matches_the_vector_entry_by_path_and_tolerates_bad_values
+    declared = { "fields" => [{ "type" => "vector", "path" => "b", "numDimensions" => 4, "similarity" => "cosine" }] }
+    live = { "fields" => [
+      { "type" => "vector", "path" => "a", "numDimensions" => 8, "similarity" => "dotProduct" },
+      { "type" => "vector", "path" => "b", "numDimensions" => 4, "similarity" => "cosine" },
+    ] }
+    assert Parse::VectorSearch::IndexDefinition.diff(declared, live)[:in_sync]
+    bad = { "fields" => [{ "type" => "vector", "path" => "b", "numDimensions" => "lots", "similarity" => "cosine" }] }
+    result = Parse::VectorSearch::IndexDefinition.diff(declared, bad)
+    refute result[:in_sync]
+    assert_equal "lots", result[:vector]["numDimensions"][:live]
+  end
 end

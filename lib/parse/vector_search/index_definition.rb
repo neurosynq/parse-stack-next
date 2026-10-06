@@ -99,7 +99,9 @@ module Parse
         live_defn = definition_of(live)
 
         d_vec = vector_entry(declared_defn)
-        l_vec = vector_entry(live_defn)
+        # Compare against the live vector entry for the SAME path, so an
+        # index with several vector fields does not report false drift.
+        l_vec = vector_entry(live_defn, path: d_vec["path"])
         vector_changes = {}
         (VECTOR_KEY_ORDER - %w[type]).each do |key|
           dv = normalize_vector_value(key, d_vec[key])
@@ -192,8 +194,9 @@ module Parse
       end
 
       # @!visibility private
-      def vector_entry(defn)
-        entry = fields_of(defn).find { |f| (f["type"] || f[:type]).to_s == "vector" } || {}
+      def vector_entry(defn, path: nil)
+        vectors = fields_of(defn).select { |f| (f["type"] || f[:type]).to_s == "vector" }
+        entry = (path && vectors.find { |f| (f["path"] || f[:path]).to_s == path.to_s }) || vectors.first || {}
         entry.each_with_object({}) { |(k, v), h| h[k.to_s] = v }
       end
 
@@ -211,7 +214,8 @@ module Parse
         when "quantization"
           value.nil? || value.to_s.empty? ? "none" : value.to_s
         when "numDimensions"
-          value.nil? ? nil : Integer(value)
+          # A malformed live value is reported as drift, not raised.
+          value.nil? ? nil : (Integer(value) rescue value.to_s)
         else
           value&.to_s
         end

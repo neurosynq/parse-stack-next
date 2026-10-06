@@ -19,8 +19,19 @@
   caller `where:` or `order:` on a field outside `agent_fields`, so an agent
   could infer a hidden field's value from which rows matched or how they were
   ordered. They now refuse with `AccessDenied` (`kind: :field_denied`), as
-  `group_by`, `distinct`, and aggregation already did. Server-owned tenant,
-  per-agent, and canonical filters are not affected.
+  `group_by`, `distinct`, and aggregation already did. Keys are resolved the
+  way queries send them, so `play_count` is checked as `playCount` and a
+  `_p_` prefix is ignored. Server-owned tenant, per-agent, and canonical
+  filters are not affected. A `fields:` String key such as `"User"` resolves
+  to the class's Parse name (`_User`), and a tool that invokes another agent
+  runs under both agents' policies.
+- **FIXED**: `atlas_text_search` accepted a `filter:` on a field outside the
+  allowlist, and without `fields:` it (and a non-empty faceted search query)
+  searched every field; `explain_query` never checked its `where:`. Each could
+  reveal a hidden field's value. Filters are now checked, text search defaults
+  to the readable fields when an allowlist applies, hybrid retrieval profiles
+  restrict their lexical branch to the readable text sources, and
+  `explain_query` refuses a hidden field in `where:`.
 - **FIXED**: Subqueries could reach fields a direct query would be refused:
   `$inQuery`, `$notInQuery`, `$select`, and `$dontSelect` predicates (and a
   `$select` key) are now checked against their target class's effective
@@ -52,6 +63,10 @@
   approval, and cancellation ownership. An unresolved operator gets 401.
   Direct `MCPRackApp.new` construction and single-operator master-key use are
   unchanged.
+- **IMPROVED**: The owner binding of a live session (an attached listening
+  stream or a pending approval prompt) is never evicted under LRU pressure,
+  so flooding new sessions cannot strip a victim's owner. `user_scoped`
+  refuses `master_atlas` and `allow_mutations` in `agent_options`.
 - **CHANGED**: Session termination (`DELETE` with `Mcp-Session-Id`) is now
   gated like every other session operation: it passes the Origin policy,
   authenticates through the agent factory (401 when refused), and is refused
@@ -74,9 +89,11 @@
   instead of resetting with each request's fresh agent. An injected
   `rate_limiter:` in `agent_options` is used as-is.
 - **NEW**: Orphaned subscription sessions (subscribed but never streamed, or
-  whose stream closed without `DELETE`) are reaped after `orphan_ttl` (default
-  300 seconds, `nil` disables), releasing their LiveQuery subscriptions.
-  `MCPSubscriptions::Manager#reap_orphans!` reaps on demand.
+  whose stream closed without `DELETE`) become eligible for reaping after
+  `orphan_ttl` (default 300 seconds, `nil` disables), releasing their
+  LiveQuery subscriptions. Reaping runs on the next `subscribe` or stream
+  attach; on an otherwise idle server, call
+  `MCPSubscriptions::Manager#reap_orphans!` on a timer.
 - **FIXED**: A client that reconnected a listening stream before the old one
   closed lost its subscriptions: the old stream's close detached the session,
   unregistering the new stream's delivery and tearing down its LiveQuery
@@ -179,9 +196,11 @@
   Queries now send a declared `field:` name exactly as declared, for both the
   Ruby name and the remote name, across `where`, operators, `order`, `keys`,
   `include`, subqueries (each with its own class's names), aggregation
-  helpers, and the mongo-direct entry points. Names a model does not declare
-  keep the default camelCase formatting, and `Parse::Query.field_formatter`
-  still applies to them.
+  helpers (`sum`, `average`, `min`, `max`, group-by), and the mongo-direct
+  entry points. Only explicit `field:` names that differ from the default
+  camelCase are aliased, never an internal `_` column; other names, the
+  built-in system fields, and `Parse::Query.field_formatter` (including
+  `nil`) behave exactly as before.
 
 #### Vector search uses the stored column for multi-word vector properties
 
@@ -216,8 +235,8 @@
   and 8.0 (`gemfiles/`), and an MCP client smoke test drives the Rack app
   over real HTTP through initialize, tool and prompt listing, completion,
   logging, a streamed tool call, and session termination.
-- **NEW**: `docs/mongodb_direct_guide.md` documents MongoDB 9.0 `null`
-  semantics on dotted paths. The SDK never compares a dotted path to `null`
+- **NEW**: The MongoDB direct guide documents MongoDB 9.0 `null` semantics on
+  dotted paths. The SDK never compares a dotted path to `null`
   on its own; only caller-supplied constraints are affected, and those
   shapes are pinned by tests.
 

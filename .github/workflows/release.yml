@@ -33,19 +33,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ github.sha }}
         run: |
-          # The Gem Tests workflow (ruby.yml) must have a completed, successful
-          # run for this SHA. No run, a failed run, or a run still in progress
-          # all fail the release.
-          conclusions=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ruby.yml/runs?head_sha=${SHA}&per_page=20" \
-            --jq '[.workflow_runs[] | select(.status == "completed") | .conclusion] | join(",")')
-          echo "Gem Tests conclusions for ${SHA}: ${conclusions:-none}"
-          case ",${conclusions}," in
-            *,success,*) ;;
-            *)
-              echo "::error::No successful Gem Tests run found for ${SHA}. Wait for CI on this commit, or fix it, before releasing."
-              exit 1
-              ;;
-          esac
+          # The LATEST completed Gem Tests (ruby.yml) run for this SHA must have
+          # succeeded. No run, a run still in progress, or a latest run (or
+          # rerun) that failed all fail the release; an older success does not
+          # outweigh a newer failure.
+          latest=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ruby.yml/runs?head_sha=${SHA}&per_page=50" \
+            --jq '[.workflow_runs[] | select(.status == "completed")] | sort_by(.updated_at) | last | .conclusion // "none"')
+          echo "Latest completed Gem Tests conclusion for ${SHA}: ${latest}"
+          if [ "${latest}" != "success" ]; then
+            echo "::error::The latest Gem Tests run for ${SHA} did not succeed (${latest}). Wait for CI on this commit, or fix it, before releasing."
+            exit 1
+          fi
 
       - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
         with:

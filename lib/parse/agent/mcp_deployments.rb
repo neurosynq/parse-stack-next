@@ -81,6 +81,10 @@ module Parse
         )
       end
 
+      # Options that would give a user-scoped agent authority beyond its
+      # session, refused by {MCPRackApp.user_scoped}.
+      USER_SCOPED_REFUSED_AGENT_OPTIONS = %i[master_atlas allow_mutations].freeze
+
       FACTORY_OWNED_AGENT_OPTIONS = %i[
         session_token acl_user acl_role
         impersonate_user impersonation_user impersonate_mint impersonation_mint
@@ -330,6 +334,17 @@ module Parse
             raise ArgumentError,
                   "#{factory_name}: agent_options may not set #{owned.inspect}; the factory owns " \
                   "identity and authority (use the factory's own keyword where one exists)"
+          end
+          if factory_name == :user_scoped
+            # A signed-in user's agent must not be handed authority beyond
+            # its session: master Atlas reach (unscoped $searchMeta counts)
+            # or the mutation override.
+            elevated = agent_options.keys.map(&:to_sym) & USER_SCOPED_REFUSED_AGENT_OPTIONS
+            unless elevated.empty?
+              raise ArgumentError,
+                    "user_scoped: agent_options may not set #{elevated.inspect}; a user-scoped " \
+                    "agent never receives authority beyond its session"
+            end
           end
           owned_app = rack_options.keys.map(&:to_sym) & FACTORY_OWNED_APP_OPTIONS
           unless owned_app.empty?
