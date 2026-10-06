@@ -63,6 +63,22 @@ class ElicitationIngressTest < Minitest::Test
     assert_equal false, @caps.get(sid)
   end
 
+  def test_initialize_records_form_support_per_2025_11_25_modes
+    {
+      { "form" => {} } => true,
+      { "form" => {}, "url" => {} } => true,
+      { "url" => {} } => false,
+      true => false,
+    }.each_with_index do |(capability, expected), i|
+      sid = "sess-mode-#{i}"
+      post({
+        "jsonrpc" => "2.0", "id" => 1, "method" => "initialize",
+        "params" => { "protocolVersion" => "2025-11-25", "capabilities" => { "elicitation" => capability } },
+      }, session_id: sid)
+      assert_equal expected, @caps.get(sid), "elicitation capability #{capability.inspect}"
+    end
+  end
+
   # ----- reply ingress -----
 
   def test_reply_routes_into_pending_registry

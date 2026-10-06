@@ -168,9 +168,13 @@ class MCPDispatcherTest < Minitest::Test
     result = D.call(body: body, agent: @agent)[:body]["result"]
     assert_equal "2025-11-25", result["protocolVersion"]
     assert_equal({}, result["capabilities"]["completions"])
-    assert_equal({}, result["capabilities"]["logging"])
+    refute result["capabilities"].key?("logging"), "no log_levels: the transport cannot deliver logs"
     assert_equal "Parse Stack MCP", result["serverInfo"]["title"]
     assert_kind_of String, result["serverInfo"]["description"]
+
+    with_logs = D.call(body: body, agent: @agent,
+                       log_levels: Parse::Agent::MCPDispatcher::LogLevelRegistry.new)[:body]["result"]
+    assert_equal({}, with_logs["capabilities"]["logging"])
   end
 
   def test_tools_call_non_object_arguments_is_a_tool_error
@@ -219,6 +223,67 @@ class MCPDispatcherTest < Minitest::Test
                                         "context" => { "arguments" => { "class_name" => "Song" } } } },
                   agent: agent)[:body]
     assert_equal %w[genre group], body["result"]["completion"]["values"]
+  end
+
+  def test_completion_keeps_spacing_in_class_list
+    body = complete({ "type" => "ref/prompt", "name" => "parse_relations" }, "classes", "Song, _U")
+    assert_equal ["Song, _User"], body["result"]["completion"]["values"]
+  end
+
+  def test_completion_caps_values_at_100_and_reports_has_more
+    agent = StubAgent.new
+    def agent.execute(tool_name, **kwargs)
+      return super unless tool_name == :get_all_schemas
+      { success: true, data: { custom: (1..150).map { |i| { name: format("C%03d", i) } }, built_in: [] } }
+    end
+    body = D.call(body: { "jsonrpc" => "2.0", "id" => 8, "method" => "completion/complete",
+                          "params" => { "ref" => { "type" => "ref/prompt", "name" => "class_overview" },
+                                        "argument" => { "name" => "class_name", "value" => "C" } } },
+                  agent: agent)[:body]["result"]["completion"]
+    assert_equal 100, body["values"].size
+    assert_equal 150, body["total"]
+    assert_equal true, body["hasMore"]
+  end
+
+  def test_completion_field_names_fall_back_to_child_class_and_reject_bad_names
+    agent = StubAgent.new
+    seen = []
+    agent.define_singleton_method(:execute) do |tool_name, **kwargs|
+      seen << kwargs[:class_name] if tool_name == :get_schema
+      { success: true, data: { fields: [{ name: "workspace" }] } }
+    end
+    ref = { "type" => "ref/prompt", "name" => "find_relationship" }
+    call = lambda do |ctx|
+      D.call(body: { "jsonrpc" => "2.0", "id" => 9, "method" => "completion/complete",
+                     "params" => { "ref" => ref, "argument" => { "name" => "pointer_field", "value" => "" },
+                                   "context" => { "arguments" => ctx } } },
+             agent: agent)[:body]["result"]["completion"]["values"]
+    end
+    assert_equal ["workspace"], call.({ "child_class" => "Post" })
+    assert_equal [], call.({ "child_class" => "bad name!" })
+    assert_equal [], call.({})
+    assert_equal ["Post"], seen, "invalid or missing class names never reach get_schema"
+  end
+
+  def test_new_methods_reject_non_object_params
+    %w[completion/complete logging/setLevel].each do |m|
+      body = D.call(body: { "jsonrpc" => "2.0", "id" => 10, "method" => m, "params" => [] }, agent: @agent)[:body]
+      assert_equal(-32602, body["error"]["code"], m)
+    end
+  end
+
+  def test_completion_rejects_malformed_context_and_value
+    ref = { "type" => "ref/prompt", "name" => "class_overview" }
+    bad = [
+      { "ref" => ref, "argument" => { "name" => "class_name", "value" => 7 } },
+      { "ref" => ref, "argument" => { "name" => "class_name", "value" => "S" }, "context" => "x" },
+      { "ref" => ref, "argument" => { "name" => "class_name", "value" => "S" }, "context" => { "arguments" => [1] } },
+    ]
+    bad.each do |params|
+      body = D.call(body: { "jsonrpc" => "2.0", "id" => 11, "method" => "completion/complete", "params" => params },
+                    agent: @agent)[:body]
+      assert_equal(-32602, body.dig("error", "code"), params.inspect)
+    end
   end
 
   def test_completion_unrelated_argument_is_empty

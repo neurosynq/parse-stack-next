@@ -23,8 +23,8 @@ module Parse
     #   llama.cpp).
     # * **v3 family** — `voyage-3-large`, `voyage-3.5`,
     #   `voyage-3.5-lite`, `voyage-3`, `voyage-3-lite`.
-    # * **code models**: `voyage-code-4`, `voyage-code-3`,
-    #   `voyage-code-2` (1536-dim).
+    # * **code models**: `voyage-code-4`, `voyage-code-3`, and
+    #   `voyage-code-2` (the only 1536-dim one).
     # * **domain models** — `voyage-finance-2`, `voyage-law-2`.
     # * **multimodal** — `voyage-multimodal-3` (text+image) and
     #   `voyage-multimodal-3.5` (text+image+video). Unified vector
@@ -38,7 +38,10 @@ module Parse
     #   `voyage-context-3`. Each chunk's vector also encodes the
     #   document it came from, so chunks are embedded a document at a
     #   time through {#embed_chunks}. {#embed_text} sends every string
-    #   as a one-chunk document, which is the right shape for queries.
+    #   as a one-chunk document. That is the right shape for queries, and it
+    #   is also what the `embed` macro and {BatchEmbedder} send for stored
+    #   fields, so those vectors carry no surrounding-document context;
+    #   call {#embed_chunks} directly for chunk-level context.
     #
     # Audio is not offered by any Voyage model, and neither PDF nor
     # DOCX is accepted as a content type — render document pages to
@@ -134,6 +137,13 @@ module Parse
       # Voyage's documented per-request cap is 128 inputs.
       DEFAULT_BATCH_SIZE = 128
       MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+      # Upper bounds on the JSON size of one returned vector, used to plan
+      # contextualized requests: a float such as `-1.2345678901234567e-05,`
+      # is under 32 bytes, and the `{"object":"embedding","embedding":[],
+      # "index":N}` wrapper is under 256.
+      RESPONSE_BYTES_PER_VALUE = 32
+      RESPONSE_BYTES_PER_VECTOR_ENVELOPE = 256
 
       # Default (native) vector width per model — the width returned
       # when `output_dimension` is omitted from the request.
@@ -255,8 +265,16 @@ module Parse
       # Voyage's per-request limits for the contextualized endpoint:
       # at most this many documents, and this many chunks summed
       # across them.
+      # The endpoint also caps a request at 120k tokens summed across
+      # every document, which the SDK cannot check without a tokenizer.
       MAX_CONTEXT_DOCUMENTS = 1_000
       MAX_CONTEXT_CHUNKS = 16_000
+
+      # Default `embed_batch_size` for {CONTEXTUALIZED_MODELS}. Each
+      # string is a whole document there, so 128 paragraph-sized inputs
+      # would overrun the 120k-token request cap; 32 leaves room for
+      # documents averaging under about 3,700 tokens.
+      CONTEXT_DEFAULT_BATCH_SIZE = 32
 
       # Models Voyage's hosted API serves but the Atlas Embedding and
       # Reranking API does not. Verified against both endpoints.
@@ -303,11 +321,13 @@ module Parse
       # @param timeout [Integer] read timeout, seconds.
       # @param open_timeout [Integer] connect timeout, seconds.
       # @param max_retries [Integer] retry attempts on 429/5xx/timeouts.
-      # @param embed_batch_size [Integer] inputs per request (max 128).
+      # @param embed_batch_size [Integer, nil] inputs per request (max 128).
+      #   Defaults to {DEFAULT_BATCH_SIZE}, or {CONTEXT_DEFAULT_BATCH_SIZE}
+      #   for a contextualized model.
       # @param dimensions [Integer, nil] override output width via
-      #   Voyage's `output_dimension` Matryoshka parameter. Only
-      #   `voyage-4-large` accepts the field; for every other model the
-      #   override must equal the native width or be omitted.
+      #   Voyage's `output_dimension` Matryoshka parameter. Must be one of
+      #   the model's {MODEL_SUPPORTED_DIMENSIONS}; a model with a single
+      #   supported width accepts only that width (or nil).
       # @param truncation [Boolean] forward Voyage's `truncation:` field.
       #   Defaults `true` to match Voyage's API default. Set `false` to
       #   force the API to reject over-length inputs rather than silently
@@ -324,7 +344,7 @@ module Parse
         timeout: DEFAULT_TIMEOUT,
         open_timeout: DEFAULT_OPEN_TIMEOUT,
         max_retries: DEFAULT_MAX_RETRIES,
-        embed_batch_size: DEFAULT_BATCH_SIZE,
+        embed_batch_size: nil,
         dimensions: nil,
         truncation: true,
         allow_faraday_proxy: false,
@@ -340,6 +360,7 @@ module Parse
         validate_positive_integer!(:timeout, timeout)
         validate_positive_integer!(:open_timeout, open_timeout)
         validate_non_negative_integer!(:max_retries, max_retries)
+        embed_batch_size ||= CONTEXTUALIZED_MODELS.include?(model) ? CONTEXT_DEFAULT_BATCH_SIZE : DEFAULT_BATCH_SIZE
         validate_positive_integer!(:embed_batch_size, embed_batch_size)
         if embed_batch_size > 128
           raise ArgumentError,
@@ -428,15 +449,21 @@ module Parse
         end
         wire_input_type = INPUT_TYPE_WIRE_VALUES[input_type]
 
-        # Multimodal models route to a different endpoint with a
-        # different request envelope. The response envelope shape is
-        # the same (`{ data: [{ embedding, index }], usage: {...} }`)
-        # so `extract_vectors!` is reused as-is.
         if CONTEXTUALIZED_MODELS.include?(@model)
+          if strings.length > MAX_CONTEXT_DOCUMENTS
+            raise ArgumentError,
+                  "Parse::Embeddings::Voyage#embed_text: #{strings.length} inputs exceeds Voyage's " \
+                  "per-request cap for #{@model} (#{MAX_CONTEXT_DOCUMENTS}). Split the input."
+          end
           # Each string is its own one-chunk document, so the response
           # carries exactly one vector per document.
           return embed_contextualized(strings.map { |s| [s] }, input_type, wire_input_type).map(&:first)
         end
+
+        # Multimodal models route to a different endpoint with a
+        # different request envelope. The response envelope shape is
+        # the same (`{ data: [{ embedding, index }], usage: {...} }`)
+        # so `extract_vectors!` is reused as-is.
 
         body = if MULTIMODAL_MODELS.include?(@model)
             build_multimodal_body(strings, wire_input_type)
@@ -674,13 +701,44 @@ module Parse
         body
       end
 
+      # Embed documents through the contextualized endpoint and return one
+      # Array of chunk vectors per document, in input order.
+      #
+      # Voyage accepts up to {MAX_CONTEXT_CHUNKS} chunks per request, but
+      # that many vectors serialize to far more than {MAX_RESPONSE_BYTES}.
+      # Whole documents are therefore grouped so each response's estimated
+      # size stays within the cap, and the groups are sent in turn. A
+      # single document too large for the cap on its own is sent alone
+      # with a response allowance sized to its chunk count.
+      def embed_contextualized(documents, input_type, wire_input_type)
+        per_vector = response_bytes_per_vector
+        chunks_per_request = [MAX_RESPONSE_BYTES / per_vector, 1].max
+        groups = []
+        documents.each do |doc|
+          last = groups.last
+          if last && last.sum(&:length) + doc.length <= chunks_per_request
+            last << doc
+          else
+            groups << [doc]
+          end
+        end
+        groups.flat_map { |group| embed_contextualized_request(group, input_type, wire_input_type) }
+      end
+
+      # @return [Integer] the planning estimate for one vector's JSON size.
+      def response_bytes_per_vector
+        (@dimensions * RESPONSE_BYTES_PER_VALUE) + RESPONSE_BYTES_PER_VECTOR_ENVELOPE
+      end
+
       # Issue one contextualized request and return one Array of chunk
       # vectors per document.
-      def embed_contextualized(documents, input_type, wire_input_type)
+      def embed_contextualized_request(documents, input_type, wire_input_type)
         body = build_contextualized_body(documents, wire_input_type)
+        chunk_count = documents.sum(&:length)
+        allowance = [MAX_RESPONSE_BYTES, (chunk_count * response_bytes_per_vector) + 65_536].max
 
-        instrument_embed(documents.sum(&:length), input_type) do |emit_payload|
-          payload = post_embeddings(body, path: "contextualizedembeddings")
+        instrument_embed(chunk_count, input_type) do |emit_payload|
+          payload = post_embeddings(body, path: "contextualizedembeddings", max_response_bytes: allowance)
           if payload.is_a?(Hash) && payload["usage"].is_a?(Hash)
             tt = payload["usage"]["total_tokens"]
             emit_payload[:total_tokens] = tt if tt.is_a?(Integer) && tt >= 0
@@ -927,7 +985,9 @@ module Parse
         encoded[0...-1]
       end
 
-      def post_embeddings(body, path: "embeddings")
+      # @param max_response_bytes [Integer] refuse a success body larger than
+      #   this. Defaults to {MAX_RESPONSE_BYTES}.
+      def post_embeddings(body, path: "embeddings", max_response_bytes: MAX_RESPONSE_BYTES)
         attempts = 0
         loop do
           attempts += 1
@@ -955,7 +1015,7 @@ module Parse
           end
 
           status = response.status
-          return parse_json_body!(response.body) if status >= 200 && status < 300
+          return parse_json_body!(response.body, max_response_bytes) if status >= 200 && status < 300
 
           if status == 401
             raise AuthenticationError,
@@ -982,11 +1042,11 @@ module Parse
         end
       end
 
-      def parse_json_body!(body)
+      def parse_json_body!(body, max_bytes = MAX_RESPONSE_BYTES)
         s = body.to_s
-        if s.bytesize > MAX_RESPONSE_BYTES
+        if s.bytesize > max_bytes
           raise InvalidResponseError,
-                "Parse::Embeddings::Voyage: response body exceeds #{MAX_RESPONSE_BYTES} bytes " \
+                "Parse::Embeddings::Voyage: response body exceeds #{max_bytes} bytes " \
                 "(#{s.bytesize}). Refusing to parse."
         end
         JSON.parse(s, max_nesting: 32)

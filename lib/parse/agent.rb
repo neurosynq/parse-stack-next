@@ -21,6 +21,7 @@ require_relative "agent/result_formatter"
 require_relative "agent/pipeline_validator"
 require_relative "agent/rate_limiter"
 require_relative "agent/cancellation_token"
+require_relative "agent/log_levels"
 require_relative "agent/approval_gate"
 require_relative "agent/prompt_hardening"
 require_relative "agent/describe"
@@ -1344,14 +1345,15 @@ module Parse
     # @return [void]
     # @raise [ArgumentError] for an unknown level.
     def log(level, data, logger: nil)
+      # Validate before the no-callback return so a bad level fails the
+      # same way on every transport, not only on a streaming request.
+      level = level.to_s
+      unless LOG_LEVELS.include?(level)
+        raise ArgumentError, "log level must be one of #{LOG_LEVELS.join(", ")} (got #{level.inspect})"
+      end
       cb = @log_callback
       return if cb.nil?
 
-      level = level.to_s
-      levels = defined?(Parse::Agent::MCPDispatcher::LOG_LEVELS) ? Parse::Agent::MCPDispatcher::LOG_LEVELS : nil
-      if levels && !levels.include?(level)
-        raise ArgumentError, "log level must be one of #{levels.join(", ")} (got #{level.inspect})"
-      end
       cb.call(level: level, data: data, logger: logger)
       nil
     end

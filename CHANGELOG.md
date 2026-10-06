@@ -40,14 +40,20 @@ callers.
 - **NEW**: `voyage-context-4` and `voyage-context-3` are supported. These
   models embed each chunk together with the document it came from, through
   Voyage's `/v1/contextualizedembeddings` endpoint. `embed_text` sends each
-  string as a one-chunk document, which is the right shape for queries and
-  for the `embed` class macro.
+  string as a one-chunk document, which is the right shape for queries. The
+  `embed` class macro uses the same path, so stored fields are embedded
+  without surrounding-document context; call `embed_chunks` for that. These
+  models default to `embed_batch_size: 32` rather than 128, since every input
+  is a whole document and Voyage caps a request at 120k tokens.
 - **NEW**: `Voyage#embed_chunks(documents, input_type:)` takes one Array of
   chunk Strings per document and returns one Array of chunk vectors per
   document, aligned with the input. It enforces Voyage's per-request limits
   (1,000 documents and 16,000 chunks) before any network call, and raises
   `BadRequestError` on a model that is not contextualized. The endpoint has
-  no `truncation` field, so none is sent for these models.
+  no `truncation` field, so none is sent for these models. Large inputs are
+  sent as several requests, grouping whole documents so each response stays
+  within the provider's response-size cap; a document is never split across
+  requests.
 - **NEW**: `Parse::Retrieval::Reranker::Voyage` wraps Voyage's `/v1/rerank`
   and plugs into `Parse::Retrieval.retrieve(rerank:)` like the Cohere
   reranker. It defaults to `rerank-3` and accepts `rerank-3-lite` and the
@@ -68,13 +74,24 @@ callers.
   complete to field names of the class given in the request's
   `context.arguments`. Candidates come from the same tools that back
   `resources/list` and `get_schema`, so hidden classes and fields are never
-  offered.
-- **NEW**: `logging/setLevel` is implemented and the `logging` capability
-  advertised. On a streaming request, `notifications/message` events at or
-  above the session's level are sent on that request's response stream.
-  Nothing is sent until the client sets a level. Tools emit messages with
+  offered. Each completion runs those tools through `agent.execute`, so it
+  counts against the agent's rate limiter; clients should debounce.
+- **NEW**: `logging/setLevel` is implemented. On a streaming request,
+  `notifications/message` events at or above the session's level are sent
+  on that request's response stream. Nothing is sent until the client sets a
+  level. The `logging` capability is advertised only by `MCPRackApp` with
+  streaming on, since no other transport can deliver the messages. A level
+  can be set only for a session that was initialized by the same principal,
+  so one caller cannot change another session's level. Tools emit messages with
   `agent.log(level, data, logger:)`, and failed tool calls are logged at
   `warning` with the tool name and error code.
+- **FIXED**: Approval prompts are sent only to clients that accept form-mode
+  elicitation. Under `2025-11-25` a client declares its modes, and one that
+  declares only `url` would reject the form; the approval was then refused
+  and reported as a user cancellation. Such a client is now treated like one
+  without elicitation, so the destructive call is refused up front with
+  that reason. An empty `elicitation: {}` (the earlier shape) still means
+  form support.
 - **CHANGED**: A `tools/call` whose `arguments` is not a JSON object now
   returns a tool result with `isError: true` instead of an internal error,
   as `2025-11-25` requires for input validation failures.

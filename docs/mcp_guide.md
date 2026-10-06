@@ -766,6 +766,87 @@ out-of-band / clustered publisher that needs the lower-level `publish` seam.
 
 ---
 
+## Argument Completion (`completion/complete`)
+
+The server advertises the `completions` capability, so clients that support
+it (MCP Inspector, IDE integrations) can autocomplete prompt arguments and
+resource-template variables:
+
+| Argument | Completes to |
+|---|---|
+| `class_name`, `parent_class`, `child_class` on any prompt; `{className}` in `parse://{className}/...` | Class names the connecting agent can see |
+| `classes` (comma-separated) | The last segment of the list |
+| `group_by`, `pointer_field` | Field names of the class named by `class_name` (or `child_class`) in the request's `context.arguments` |
+
+```json
+{"jsonrpc":"2.0","id":7,"method":"completion/complete","params":{
+  "ref":{"type":"ref/prompt","name":"count_by"},
+  "argument":{"name":"group_by","value":"st"},
+  "context":{"arguments":{"class_name":"Post"}}}}
+```
+
+```json
+{"jsonrpc":"2.0","id":7,"result":{"completion":{"values":["status","state"],"total":2,"hasMore":false}}}
+```
+
+Candidates come from the same `get_all_schemas` / `get_schema` tools that back
+`resources/list`, so `agent_hidden` classes, the `classes:` allowlist, and
+`agent_fields` all apply: a completion never offers a name the agent could not
+already see. Each completion is a tool call for rate-limiting and audit
+purposes, so clients that complete on every keystroke should debounce. Custom
+prompts get class-name completion automatically by naming an argument
+`class_name`, `parent_class`, `child_class`, or `classes`.
+
+---
+
+## Logging (`logging/setLevel`)
+
+On `MCPRackApp` with streaming on, the server advertises the `logging`
+capability. A client opts in by setting a minimum level for its session; from
+then on, log messages at or above that level ride the response stream of each
+streamed request as `notifications/message`, ahead of the final response.
+Nothing is sent before the client sets a level, and the WEBrick `MCPServer`
+and non-streaming Rack mounts do not advertise the capability at all.
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"logging/setLevel","params":{"level":"warning"}}
+```
+
+Built-in behavior: a failed `tools/call` logs at `warning` with the tool name
+and error code. Custom tools log through the agent:
+
+```ruby
+Parse::Agent::Tools.register(
+  name:        :reindex_posts,
+  description: "Rebuild the Post search index",
+  parameters:  { type: "object", properties: {} },
+  permission:  :readonly,
+  handler: lambda do |agent, **_args|
+    agent.log(:info, { "step" => "scanning", "rows" => 1200 }, logger: "reindex")
+    # ...
+    agent.log(:warning, "3 rows skipped: missing title")
+    { reindexed: 1197 }
+  end,
+)
+```
+
+`agent.log` takes an RFC 5424 level (`:debug`, `:info`, `:notice`,
+`:warning`, `:error`, `:critical`, `:alert`, `:emergency`; anything else
+raises `ArgumentError` on every transport) and any JSON-serializable data.
+It is a no-op when no client is listening. Do not log secrets or rows the
+agent's scope cannot read; the message goes to whoever holds the session.
+
+A level is stored per `Mcp-Session-Id` and can be set only by the principal
+that initialized that session, so one caller cannot silence or flood another
+session's logs. `DELETE` on the session forgets it.
+
+> **Spec note.** MCP `2026-07-28` removes `logging/setLevel` in favor of a
+> per-request log level in `_meta` and deprecates the logging feature. This
+> server targets `2025-11-25` and earlier, where `logging/setLevel` is the
+> mechanism. `agent.log` is the stable API either way.
+
+---
+
 ## Built-in Agent Hardening & Telemetry
 
 5.2 adds several agent-side controls, all configured on `Parse::Agent`:

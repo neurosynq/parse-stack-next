@@ -142,6 +142,13 @@ module Parse
             case status
             when 401
               raise AuthenticationError, "Reranker::Voyage: 401 Unauthorized. Check api_key."
+            when 403
+              # Voyage and Atlas keys are not interchangeable; a key sent to
+              # the other host is refused with a 403.
+              raise AuthenticationError,
+                    "Reranker::Voyage: 403 Forbidden from #{safe_base_host}. Atlas model API keys " \
+                    "(#{ATLAS_KEY_PREFIX}...) work only against #{ATLAS_BASE_URL}, and Voyage keys only " \
+                    "against #{DEFAULT_BASE_URL}; check that base_url matches the key."
             when 429
               raise RateLimitError, "Reranker::Voyage: 429 rate limited after #{attempts} attempt(s)." if attempts > @max_retries
               sleep(retry_after_seconds(response) || backoff_seconds(attempts))

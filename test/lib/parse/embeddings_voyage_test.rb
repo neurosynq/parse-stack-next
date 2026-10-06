@@ -512,6 +512,60 @@ class EmbeddingsVoyageTest < Minitest::Test
     assert_equal [[0.0, 1.0, 2.0], [100.0]], result.map { |doc| doc.map(&:first) }
   end
 
+  def test_contextualized_models_default_to_a_smaller_batch
+    assert_equal 32, build(model: "voyage-context-4").embed_batch_size
+    assert_equal 128, build(model: "voyage-4").embed_batch_size
+    assert_equal 64, build(model: "voyage-context-4", embed_batch_size: 64).embed_batch_size
+  end
+
+  def test_contextualized_embed_text_enforces_document_cap
+    provider = build(model: "voyage-context-4", connection: stubbed_conn(empty_stubs))
+    too_many = Array.new(Parse::Embeddings::Voyage::MAX_CONTEXT_DOCUMENTS + 1, "x")
+    assert_match(/per-request cap/, assert_raises(ArgumentError) { provider.embed_text(too_many) }.message)
+  end
+
+  def test_new_models_are_allowed_on_the_atlas_endpoint
+    %w[voyage-code-4 voyage-context-4 voyage-context-3].each do |m|
+      assert_equal :atlas, build(model: m, endpoint: :atlas).endpoint
+    end
+  end
+
+  def test_embed_chunks_splits_large_batches_across_requests_by_document
+    requests = []
+    stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+      stub.post("/v1/contextualizedembeddings") do |env|
+        inputs = JSON.parse(env.request_body)["inputs"]
+        requests << inputs.map(&:length)
+        [200, { "Content-Type" => "application/json" }, fake_contextualized_response(inputs.map(&:length), 256)]
+      end
+    end
+    provider = build(model: "voyage-context-4", dimensions: 256, connection: stubbed_conn(stubs))
+    per_request = Parse::Embeddings::Voyage::MAX_RESPONSE_BYTES / provider.send(:response_bytes_per_vector)
+    docs = [Array.new(per_request - 10, "a"), Array.new(20, "b"), Array.new(5, "c")]
+
+    result = provider.embed_chunks(docs)
+
+    assert_equal [[per_request - 10], [20, 5]], requests, "documents are never split across requests"
+    assert_equal docs.map(&:length), result.map(&:length)
+    # fake_contextualized_response tags vector[0] with doc * 100 + chunk,
+    # where doc is the index within its own request.
+    assert_equal [0.0, 0.0, 100.0], result.map { |d| d.first.first }
+  end
+
+  def test_oversized_single_document_gets_a_scaled_response_allowance
+    seen = nil
+    provider = build(model: "voyage-context-4", connection: stubbed_conn(empty_stubs))
+    provider.define_singleton_method(:post_embeddings) do |_body, path:, max_response_bytes:|
+      seen = max_response_bytes
+      raise Parse::Embeddings::Voyage::TransientError, "stop"
+    end
+    per_request = Parse::Embeddings::Voyage::MAX_RESPONSE_BYTES / provider.send(:response_bytes_per_vector)
+    assert_raises(Parse::Embeddings::Voyage::TransientError) do
+      provider.embed_chunks([Array.new(per_request * 2, "x")])
+    end
+    assert_operator seen, :>, Parse::Embeddings::Voyage::MAX_RESPONSE_BYTES
+  end
+
   def test_embed_chunks_rejects_non_contextualized_model
     err = assert_raises(Parse::Embeddings::Voyage::BadRequestError) do
       build(model: "voyage-4", connection: stubbed_conn(empty_stubs)).embed_chunks([["x"]])

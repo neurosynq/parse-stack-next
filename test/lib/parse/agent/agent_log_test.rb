@@ -31,4 +31,8 @@ class AgentLogTest < Minitest::Test
     @agent.log_callback = ->(**) {}
     assert_raises(ArgumentError) { @agent.log(:loud, "x") }
   end
+
+  def test_log_rejects_unknown_level_even_without_a_callback
+    assert_raises(ArgumentError) { @agent.log(:warn, "x") }
+  end
 end

@@ -3,6 +3,7 @@
 
 require_relative "../../test_helper"
 require "parse/embeddings"
+require "parse/retrieval/reranker"
 require "base64"
 require "tmpdir"
 
@@ -134,6 +135,52 @@ class EmbeddingsVoyageContractTest < Minitest::Test
     q = probe("voyage-3.5", "input-type probe (query)") { provider.embed_text(["a query"], input_type: :search_query).first }
     d = probe("voyage-3.5", "input-type probe (document)") { provider.embed_text(["a document"], input_type: :search_document).first }
     assert_equal q.length, d.length
+  end
+
+  # ---- contextualized chunk embeddings ----------------------------------
+
+  # The nested `/v1/contextualizedembeddings` envelope: one inner list per
+  # document, aligned with its chunks, at the declared width. A chunk
+  # embedded with its document must differ from the same text embedded
+  # alone, or the endpoint is not contextualizing.
+  def test_contextualized_response_shape_and_alignment
+    model = "voyage-context-4"
+    provider = build(model: model)
+    docs = [["The launch slipped a week.", "It ships Friday."], ["It ships Friday."]]
+    result = probe(model, "contextualized probe") { provider.embed_chunks(docs) }
+
+    assert_equal [2, 1], result.map(&:length)
+    assert result.flatten(1).all? { |v| v.length == provider.dimensions && v.all?(Float) }
+    refute_equal result[0][1], result[1][0], "the same chunk in different documents should embed differently"
+  end
+
+  def test_contextualized_matryoshka_width_is_honored
+    model = "voyage-context-4"
+    vector = probe(model, "contextualized width probe") { build(model: model, dimensions: 256).embed_text(["w"]).first }
+    assert_equal 256, vector.length
+  end
+
+  # ---- reranking --------------------------------------------------------
+
+  # `/v1/rerank` returns `data[].{index, relevance_score}`; the index must
+  # map back to the input position, and the obviously relevant document
+  # must rank first.
+  def test_rerank_index_mapping_and_ordering
+    model = "rerank-3-lite"
+    opts = MIN_INTERVAL.zero? ? {} : { max_retries: 0 }
+    reranker = Parse::Retrieval::Reranker::Voyage.new(api_key: KEY, model: model, **opts)
+    docs = ["Bananas are yellow fruit.", "The capital of France is Paris.", "Cats sleep a lot."]
+    pace!(model)
+    results = begin
+        reranker.rerank(query: "What is the capital of France?", documents: docs, top_n: 2)
+      rescue Parse::Retrieval::Reranker::Voyage::RateLimitError, Parse::Retrieval::Reranker::Voyage::TransientError => e
+        skip "rerank probe: #{e.class}; contract not determined. #{e.message}"
+      end
+
+    assert_equal 2, results.length
+    assert_equal 1, results.first.index
+    assert results.all? { |r| r.relevance_score.is_a?(Float) }
+    assert_operator results[0].relevance_score, :>=, results[1].relevance_score
   end
 
   # ---- accepted media ---------------------------------------------------
@@ -291,7 +338,7 @@ class EmbeddingsVoyageContractTest < Minitest::Test
   # One representative per contract-relevant family, kept small so a
   # nightly run stays cheap.
   def contract_models
-    %w[voyage-3.5 voyage-4 voyage-code-3 voyage-multimodal-3]
+    %w[voyage-3.5 voyage-4 voyage-code-3 voyage-code-4 voyage-multimodal-3 voyage-context-4]
   end
 
   # `max_retries: 0` when pacing is configured: the provider's backoff

@@ -819,7 +819,7 @@ module Parse
         #     per session before attempting a server→client prompt.
         if body.is_a?(Hash) && body["method"] == "initialize" &&
            agent.respond_to?(:correlation_id) && agent.correlation_id
-          supported = !!(body.dig("params", "capabilities", "elicitation"))
+          supported = elicitation_form_supported?(body.dig("params", "capabilities", "elicitation"))
           @elicitation_capabilities.set(agent.correlation_id, supported)
           # Authoritatively bind this session to the initializing principal so
           # only the same principal can later attach a listening stream for it
@@ -865,10 +865,11 @@ module Parse
 
         # 6. Branch on streaming preference. Transport-level errors (steps 1-5)
         #    always return plain JSON regardless of the Accept header.
+        log_levels = session_log_levels(agent, env)
         if @streaming && env["HTTP_ACCEPT"].to_s.include?("text/event-stream")
-          serve_sse(body, agent)
+          serve_sse(body, agent, log_levels)
         else
-          serve_json(body, agent)
+          serve_json(body, agent, log_levels)
         end
       end
 
@@ -883,6 +884,17 @@ module Parse
       # @param body  [Hash] parsed JSON-RPC request body.
       # @param agent [Parse::Agent] authenticated agent.
       # @return [Array] Rack triple with Array<String> body.
+      # Whether a client's `capabilities.elicitation` admits form-mode
+      # requests, which is what the approval prompt sends. Since 2025-11-25
+      # a client declares its modes (`{ form: {} }`, `{ url: {} }`, or
+      # both); an empty object is the pre-2025-11-25 shape and means form.
+      # A URL-only client must not be sent a form, or the approval is
+      # refused as if the user had cancelled it.
+      def elicitation_form_supported?(capability)
+        return false unless capability.is_a?(Hash)
+        capability.empty? || capability.key?("form")
+      end
+
       # True when `body` is a JSON-RPC RESPONSE (no "method"; carries an
       # "id" plus "result" or "error") — the client's reply to a
       # server-issued elicitation/create request.
@@ -941,12 +953,26 @@ module Parse
         )
       end
 
-      def serve_json(body, agent)
+      # The log-level registry this request may read and write, or nil.
+      #
+      # nil when the app does not stream (log messages could never be
+      # delivered) or when the request's session id is not bound to this
+      # request's principal. The owner check keeps one caller from setting
+      # another session's level, and because only `initialize` binds a
+      # session, a caller cannot fill the registry with invented ids.
+      def session_log_levels(agent, env)
+        return nil unless @streaming
+        cid = agent.respond_to?(:correlation_id) ? agent.correlation_id : nil
+        return nil unless @session_owners.owned_by?(cid, principal_fingerprint(agent, env))
+        @log_levels
+      end
+
+      def serve_json(body, agent, log_levels = nil)
         result = Parse::Agent::MCPDispatcher.call(
           body: body, agent: agent, logger: @logger,
           subscription_manager: @subscription_manager,
           approval_gate: build_approval_gate(agent),
-          log_levels: @log_levels,
+          log_levels: log_levels,
         )
         headers = json_headers
         merge_session_header!(headers, body, agent)
@@ -979,7 +1005,7 @@ module Parse
       # @param body  [Hash] parsed JSON-RPC request body.
       # @param agent [Parse::Agent] authenticated agent.
       # @return [Array] Rack triple with SSEBody or a 503 JSON error as the body.
-      def serve_sse(body, agent)
+      def serve_sse(body, agent, log_levels = nil)
         # NOTE: this check is not mutex-protected, so two concurrent requests
         # arriving within the same scheduling quantum can both pass the check
         # and each spawn a dispatcher_thread, briefly exceeding the limit by
@@ -1013,7 +1039,6 @@ module Parse
         correlation_id = agent.respond_to?(:correlation_id) ? agent.correlation_id : nil
         registry_entry_id = @cancellation_registry.register(correlation_id, req_id, cancellation_token)
         registry = @cancellation_registry
-        log_levels = @log_levels
 
         # The block receives the SSEBody's progress_callback so tools can
         # emit `notifications/progress` events through it. The callback is
@@ -1023,7 +1048,7 @@ module Parse
           progress_token, req_id, interval, logger,
           cancellation_token: cancellation_token,
           on_close: -> { registry.deregister(correlation_id, req_id, registry_entry_id) if registry_entry_id },
-          log_level_lookup: -> { log_levels.get(correlation_id) },
+          log_level_lookup: log_levels && -> { log_levels.get(correlation_id) },
         ) do |progress_callback, log_callback|
           Parse::Agent::MCPDispatcher.call(
             body: body,
@@ -1937,6 +1962,13 @@ module Parse
               false
             end
           end
+        end
+
+        # True when `session_id` is bound to exactly this principal. Never
+        # claims an unbound session (unlike {#authorize_attach}).
+        def owned_by?(session_id, fingerprint)
+          return false if blank?(session_id) || blank?(fingerprint)
+          @mutex.synchronize { @owners[session_id] == fingerprint }
         end
 
         # Drop a session's owner binding (explicit DELETE termination). Not

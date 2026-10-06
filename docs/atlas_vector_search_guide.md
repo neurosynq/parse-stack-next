@@ -454,6 +454,55 @@ embed-time chunking), use one of these patterns:
    similarity search against the chunk collection, then hydrate
    parents as needed.
 
+### Contextualized chunk embeddings (`voyage-context-4`)
+
+An ordinary embedding of a chunk sees only that chunk. "It ships Friday."
+embeds the same no matter which product the surrounding document is
+about. Voyage's contextualized models (`voyage-context-4`,
+`voyage-context-3`) embed every chunk together with the rest of its
+document, so each chunk vector also carries what the document is about.
+
+To get that, send a document's chunks together with `embed_chunks`:
+
+```ruby
+voyage = Parse::Embeddings::Voyage.new(
+  api_key: ENV.fetch("VOYAGE_API_KEY"),
+  model:   "voyage-context-4",           # 1024 dims; 256/512/2048 via dimensions:
+)
+
+documents = [
+  ["The Atlas release slipped a week.", "It ships Friday."],   # one document, two chunks
+  ["Billing moves to the new provider.", "It ships Friday."],
+]
+vectors = voyage.embed_chunks(documents, input_type: :search_document)
+# => [[vec_a1, vec_a2], [vec_b1, vec_b2]]  one Array per document, aligned with its chunks
+# vec_a2 != vec_b2: the same sentence, embedded with different documents.
+
+# Write each chunk vector onto its own chunk record (pattern 2 above).
+documents.zip(vectors).each do |chunks, chunk_vectors|
+  chunks.zip(chunk_vectors).each { |text, vec| PostChunk.create!(content: text, embedding: vec) }
+end
+
+# Queries are single strings: embed_text sends each as a one-chunk document.
+query_vec = voyage.embed_text(["when does it ship?"], input_type: :search_query).first
+PostChunk.find_similar(vector: query_vec, k: 5)
+```
+
+Two things to know:
+
+* **The `embed` macro does not contextualize.** It sends each record's
+  source text through `embed_text`, which treats every input as its own
+  one-chunk document. Registering a context model as an `embed` provider
+  works, but the stored vectors carry no surrounding-document context.
+  Use `embed_chunks` when chunk-level context is the point.
+* **Request sizing is handled for you.** Voyage caps one request at 1,000
+  documents, 16,000 chunks, and 120k tokens. `embed_chunks` checks the
+  document and chunk caps before sending and splits large inputs across
+  several requests by whole document, so a document's chunks always
+  travel together. The token cap cannot be checked locally; keep very
+  long documents to a few per call. Context models default to
+  `embed_batch_size: 32` for the same reason.
+
 ---
 
 ## Retrieval (RAG)
@@ -544,6 +593,11 @@ when the cluster does not support it; the default `:rrf` always fuses
 client-side, which is the fully-enforced, deterministic path. `$rankFusion`
 is admitted to `PipelineSecurity::ALLOWED_STAGES` for the native path.
 
+*Status:* the native path is shipped and its pipeline shape, including the
+ACL and CLP enforcement inside each branch, is pinned by unit and snapshot
+tests. It has not yet been validated end to end against a live Atlas
+cluster, which is why it stays opt-in rather than the default.
+
 `Parse::Retrieval.retrieve(hybrid: true, ...)` routes through
 `hybrid_search` and chunks the fused results; pass `hybrid: { lexical:,
 vector:, fusion: }` to configure the branches. Tenant scope is folded into
@@ -566,6 +620,27 @@ chunks = Parse::Retrieval.retrieve(
   rerank: reranker, rerank_top_n: 5,    # keep the 5 most relevant docs
 )
 # Reranked chunks' score is the cross-encoder relevance_score.
+```
+
+Voyage's rerankers plug in the same way. `rerank-3` is the default and
+`rerank-3-lite` is the cheaper option. An Atlas model API key (`al-`
+prefix) routes to MongoDB's Atlas Embedding and Reranking API
+automatically, exactly like the Voyage embeddings provider:
+
+```ruby
+reranker = Parse::Retrieval::Reranker::Voyage.new(
+  api_key: ENV.fetch("VOYAGE_API_KEY"),   # or an Atlas "al-..." key
+  model:   "rerank-3-lite",
+  truncation: false,                      # over-length input raises instead of truncating
+)
+chunks = Parse::Retrieval.retrieve(
+  query: "reset my password", klass: Article, k: 30,
+  rerank: reranker, rerank_top_n: 5,
+)
+
+# Or directly, outside retrieve:
+reranker.rerank(query: "capital of France", documents: docs, top_n: 3)
+# => [#<struct Result index=1, relevance_score=0.91>, ...]
 ```
 
 `Reranker::Fixture` is a deterministic, zero-network reranker (lexical
@@ -658,8 +733,9 @@ envelope. See the [MCP guide's Token Economy section](./mcp_guide.md#token-econo
 
 `embed_image` is the image-source counterpart to `embed`. The source
 property must be `:file`-typed; the target must be a `:vector` property
-whose declared `provider:` supports multimodal input (currently
-`:voyage` with `voyage-multimodal-3`, or `:cohere` with `embed-v4.0`).
+whose declared `provider:` supports multimodal input (`:voyage` with
+`voyage-multimodal-3.5` or `voyage-multimodal-3`, or `:cohere` with
+`embed-v4.0`).
 
 Two fetch modes, selected per declaration with `source:`:
 
@@ -785,7 +861,17 @@ Direct provider calls accept the same shape:
 
 ### Save-side semantics
 
-* Digest is the **SHA-256 of the URL String**, not the file bytes.
+* **Private buckets.** When the file adapter returns signed URLs (S3 or GCS
+  with `presignedUrl: true`), `file.url` holds the canonical URL with the
+  signature stripped and the signed form is kept in `file.presigned_url`.
+  Recompute fetches through `file.presigned_url` while it is still valid
+  (for both `source: :url` and `source: :bytes`) and falls back to the bare
+  URL otherwise, so a private object is reachable without making the
+  bucket public. Make sure the URL's lifetime outlasts the save: an expired
+  signature falls back to the bare URL, which a private bucket refuses.
+* Digest is the **SHA-256 of the canonical URL String** (signature
+  stripped), not the file bytes, so a save that only rotates the
+  signature does not re-embed.
   Replacing the `Parse::File` with one pointing at a different URL
   re-embeds; resaving the same URL is a no-op (zero provider calls).
   Parse-managed file URLs are stable unless overwritten in place — if
@@ -935,7 +1021,7 @@ Payload contract (keys always present; values may be nil):
 | `:input_count` | `Integer`     | batch size                                                              |
 | `:input_type`  | `Symbol`      | `:search_query` / `:search_document`                                    |
 | `:total_tokens`| `Integer`/nil | provider-reported usage; nil for Fixture and providers without usage    |
-| `:cached`      | `Boolean`     | always false in v5.0; reserved for v5.1 embed cache                     |
+| `:cached`      | `Boolean`     | true when `Parse::Embeddings::Cache` served the vector (no provider call) |
 | `:error`       | `String`/nil  | `exception.class.name` when the block raised — class name only         |
 
 Notes:

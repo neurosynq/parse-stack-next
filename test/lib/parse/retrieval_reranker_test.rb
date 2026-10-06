@@ -202,6 +202,30 @@ class RetrievalRerankerTest < Minitest::Test
     assert_raises(R::InvalidResponseError) { rr.rerank(query: "q", documents: %w[a]) }
   end
 
+  def test_voyage_403_explains_key_and_host_mismatch
+    rr, = build_voyage_with_response(status: 403, body: "{}")
+    err = assert_raises(R::Voyage::AuthenticationError) { rr.rerank(query: "q", documents: %w[a]) }
+    assert_match(/base_url matches the key/, err.message)
+  end
+
+  def test_voyage_sends_top_k_for_every_document_when_top_n_is_nil
+    rr, conn = build_voyage_with_response(status: 200, body: { "data" => [] }.to_json)
+    rr.rerank(query: "q", documents: %w[a b c])
+    assert_equal 3, conn.body["top_k"]
+  end
+
+  def test_voyage_retries_429_then_raises
+    calls = 0
+    resp = FakeResp.new(429, "{}")
+    conn = Object.new
+    conn.define_singleton_method(:post) { |_p, &_b| calls += 1; resp }
+    rr = R::Voyage.new(api_key: "pa-k", max_retries: 2)
+    rr.instance_variable_set(:@connection, conn)
+    rr.define_singleton_method(:backoff_seconds) { |_| 0 }
+    assert_raises(R::Voyage::RateLimitError) { rr.rerank(query: "q", documents: %w[a]) }
+    assert_equal 3, calls
+  end
+
   def test_voyage_endpoint_follows_key_prefix
     refute R::Voyage.new(api_key: "pa-k").atlas?
     assert R::Voyage.new(api_key: "al-k").atlas?
