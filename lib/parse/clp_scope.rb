@@ -342,6 +342,13 @@ module Parse
       # requesting user, so a user always sees their own `email`. Pass
       # `class_name:` and `user_id:` to apply that exemption.
       #
+      # The exemption reads the row's `_id` (or `objectId`) as it comes out
+      # of the pipeline. A caller stage can rewrite that value, so pass
+      # `user_id:` only when ownership was settled before any caller stage
+      # ran: either no caller stage can change the identity (see
+      # {Parse::PipelineSecurity.identity_preserving?}), or the rows went
+      # through {.protected_strip_stage} at the head of their pipeline.
+      #
       # @param documents [Array<Hash>] rows (Mongo storage or Parse form).
       # @param strip_set [Set<String>] protected field names.
       # @param class_name [String, nil] the rows' class.
@@ -360,6 +367,31 @@ module Parse
           strip_top_level!(doc, strip_set)
         end
         documents
+      end
+
+      # A pipeline stage that removes protected fields at the database,
+      # placed at the head of a (sub-)pipeline before any caller stage runs.
+      #
+      # Ownership of a `_User` row is decided here, on the stored `_id`, so
+      # the self exemption cannot be claimed by a later stage that rewrites
+      # `_id`. For a `_User` read by a known user the fields are kept only on
+      # that user's own row; everywhere else they are unset. The `_p_<field>`
+      # storage column of a protected pointer is removed with the field.
+      #
+      # @param strip_set [Set<String>] protected field names for the scope.
+      # @param class_name [String, nil] the class the stage reads.
+      # @param user_id [String, nil] the requesting user's objectId.
+      # @return [Hash, nil] a `$unset` or `$set` stage, or nil when nothing
+      #   is protected.
+      def protected_strip_stage(strip_set, class_name: nil, user_id: nil)
+        return nil if strip_set.nil? || strip_set.empty?
+        columns = strip_set.flat_map { |f| [f.to_s, "_p_#{f}"] }.uniq
+        if class_name.to_s == Parse::Model::CLASS_USER && !user_id.to_s.empty?
+          own_row = { "$eq" => ["$_id", { "$literal" => user_id.to_s }] }
+          { "$set" => columns.to_h { |c| [c, { "$cond" => [own_row, "$#{c}", "$$REMOVE"] }] } }
+        else
+          { "$unset" => columns }
+        end
       end
 
       # Evaluate the `op` CLP for a resolved mongo-direct scope with the same

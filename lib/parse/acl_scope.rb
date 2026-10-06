@@ -266,6 +266,27 @@ module Parse
       #   * **`$facet`** — recursive: each facet branch is itself a
       #     pipeline; rewrite every branch independently.
       #
+      # Each joined class is also held to its own Class-Level Permissions,
+      # the way Parse Server's include sub-query would be:
+      #
+      #   * its `find` CLP is evaluated with Parse Server's branch
+      #     semantics ({Parse::CLPScope.row_constraint_for!}). A denial
+      #     refuses the whole join (fail closed). A grant that rests only
+      #     on `readUserFields` / `pointerFields` adds the "row points at
+      #     the requesting user" predicate to the join's leading `$match`
+      #     (or to `restrictSearchWithMatch` for `$graphLookup`);
+      #   * its protectedFields for the scope are removed by a
+      #     {Parse::CLPScope.protected_strip_stage} placed right after that
+      #     `$match`, before any caller stage of the sub-pipeline. Joined
+      #     rows therefore never carry a protected field into the outer
+      #     pipeline, whatever later stages reshape them, and a `_User`
+      #     row keeps its own `email` only when its STORED `_id` is the
+      #     requesting user.
+      #
+      # When `class_name:` names the queried class, each top-level `$facet`
+      # branch also starts with that class's strip stage: a branch nests the
+      # documents one level down, out of reach of the top-level strip.
+      #
       # Returns a NEW Array; the input pipeline is not mutated.
       # Master and nil-resolution pass through unchanged. Legacy
       # (non-strict-role) empty-perms resolutions also pass through.
@@ -275,8 +296,12 @@ module Parse
       #
       # @param pipeline [Array<Hash>] the aggregation pipeline.
       # @param resolution [Resolution, nil]
+      # @param class_name [String, nil] the queried class, for `$facet`
+      #   branch stripping.
       # @return [Array<Hash>] the rewritten pipeline.
-      def rewrite_pipeline(pipeline, resolution)
+      # @raise [Parse::CLPScope::Denied] when a joined class refuses `find`
+      #   for the scope.
+      def rewrite_pipeline(pipeline, resolution, class_name: nil)
         return pipeline if pipeline.nil? || pipeline.empty?
         return pipeline if resolution.nil? || resolution.master?
         perms = resolution.permission_strings
@@ -301,7 +326,25 @@ module Parse
         # this gate; the rewriter is the shared SDK-level layer so the
         # mongo-direct path enforces it independent of whether an agent
         # made the call.
-        pipeline.map { |stage| rewrite_stage(stage, acl_match, perms) }
+        ctx = JoinContext.new(acl_match, perms, resolution, clp_client_for(resolution))
+        pipeline.each_with_index.map do |stage, idx|
+          rewritten = rewrite_stage(stage, ctx)
+          next rewritten if class_name.nil?
+          strip_facet_branches(rewritten, class_name.to_s, ctx, pipeline[0...idx])
+        end
+      end
+
+      # Whether {.rewrite_pipeline} rewrites join stages for this
+      # resolution (and so places the protected-field strip at the head of
+      # every join). False for master, nil, and legacy empty-perms scopes.
+      #
+      # @param resolution [Resolution, nil]
+      # @return [Boolean]
+      def rewrites_joins?(resolution)
+        return false if resolution.nil? || resolution.master?
+        perms = resolution.permission_strings
+        strict = resolution.respond_to?(:strict_role?) && resolution.strict_role?
+        strict || !(perms.nil? || perms.empty?)
       end
 
       # Walk the result documents and redact every embedded sub-document
@@ -336,34 +379,70 @@ module Parse
 
       private
 
+      # Per-call state shared by the join rewriters.
+      JoinContext = Struct.new(:acl_match, :perms, :resolution, :client)
+
+      # The client whose schema decides CLP for a resolution. A user-scoped
+      # client (from `become` / `session_client`) holds no master key and
+      # cannot read `/schemas`, so it falls back to the default client (nil).
+      # Mirrors {Parse::MongoDB.clp_client_for}.
+      def clp_client_for(resolution)
+        c = client_of(resolution)
+        return nil if c.nil?
+        return nil unless c.respond_to?(:master_key) && !c.master_key.to_s.empty?
+        c
+      end
+
       # Apply the rewriter to a single pipeline stage. Operator-aware:
       # only join-style stages are touched. Everything else passes
-      # through verbatim. `perms` is threaded down so the cross-class
-      # CLP gate (Wave-3 TRACK-ACL-3) can challenge each joined class.
-      def rewrite_stage(stage, acl_match, perms)
+      # through verbatim. The context is threaded down so the
+      # cross-class CLP gate (Wave-3 TRACK-ACL-3) can challenge each
+      # joined class.
+      def rewrite_stage(stage, ctx)
         return stage unless stage.is_a?(Hash)
         op_key, op_val = stage.first
         case op_key.to_s
         when "$lookup"
-          { op_key => rewrite_lookup(op_val, acl_match, perms) }
+          { op_key => rewrite_lookup(op_val, ctx) }
         when "$unionWith"
-          { op_key => rewrite_union_with(op_val, acl_match, perms) }
+          { op_key => rewrite_union_with(op_val, ctx) }
         when "$graphLookup"
-          { op_key => rewrite_graph_lookup(op_val, acl_match, perms) }
+          { op_key => rewrite_graph_lookup(op_val, ctx) }
         when "$facet"
-          { op_key => rewrite_facet(op_val, acl_match, perms) }
+          { op_key => rewrite_facet(op_val, ctx) }
         else
           stage
         end
       end
 
-      # Cross-class CLP gate. Raises {Parse::CLPScope::Denied} when
-      # the current scope cannot `find` rows of `target_class`. Master
-      # mode is already short-circuited in {.rewrite_pipeline} (it
-      # never reaches the rewriters), so reaching this helper means
-      # `perms` is a real claim set. Centralized here to avoid drift
-      # between the three join-style rewriters.
-      def assert_join_target_permitted!(target, perms)
+      # Cross-class CLP gate for a joined class. Applies the hard
+      # internal-collection floor, then evaluates the joined class's `find`
+      # CLP with Parse Server's branch semantics. Raises
+      # {Parse::CLPScope::Denied} when the scope cannot `find` rows of
+      # `target` (including an unresolvable CLP: fail closed). Returns the
+      # `$match` predicate the joined rows must satisfy: the ACL predicate,
+      # ANDed with the pointer-ownership predicate when the grant rests on
+      # `readUserFields` / `pointerFields`.
+      #
+      # Master mode is short-circuited in {.rewrite_pipeline}, so reaching
+      # this helper means `perms` is a real claim set.
+      def join_predicate!(target, ctx)
+        acl_predicate = ctx.acl_match["$match"]
+        return acl_predicate if target.nil? || target.to_s.empty?
+        target_str = target.to_s
+        assert_join_target_permitted!(target_str, ctx.perms, client: ctx.client)
+        pointer_fields = Parse::CLPScope.row_constraint_for!(
+          target_str, :find, ctx.resolution, client: ctx.client,
+        )
+        return acl_predicate if pointer_fields.nil?
+        ownership = Parse::CLPScope.pointer_fields_predicate(pointer_fields, ctx.resolution.user_id)
+        { "$and" => [acl_predicate, ownership] }
+      end
+
+      # Internal-collection floor plus the `permits?` CLP gate for a joined
+      # class. Raises {Parse::PipelineSecurity::Error} for an internal
+      # collection and {Parse::CLPScope::Denied} when CLP refuses `find`.
+      def assert_join_target_permitted!(target, perms, client: nil)
         return if target.nil?
         target_str = target.to_s
         return if target_str.empty?
@@ -378,22 +457,53 @@ module Parse
         # admitting the SDK data classes (`_User`/`_Role`/`_Installation`/
         # `_Session`), which then face the per-scope CLP `find` gate.
         Parse::PipelineSecurity.assert_collection_allowed!(target_str)
-        return if Parse::CLPScope.permits?(target_str, :find, perms)
+        return if Parse::CLPScope.permits?(target_str, :find, perms, client: client)
         raise Parse::CLPScope::Denied.new(
           target_str, :find,
           "Joined class '#{target_str}' refuses :find for current scope.",
         )
       end
 
-      def rewrite_lookup(spec, acl_match, perms)
+      # The stages that lead a join's sub-pipeline: the row filter, then
+      # the joined class's protected-field strip (when it has any).
+      def join_head_stages!(target, ctx)
+        head = [{ "$match" => join_predicate!(target, ctx) }]
+        strip = strip_stage_for(target, ctx)
+        head << strip if strip
+        head
+      end
+
+      def strip_stage_for(target, ctx, user_id: ctx.resolution.user_id)
+        return nil if target.nil? || target.to_s.empty?
+        set = Parse::CLPScope.protected_fields_for(target.to_s, ctx.perms, client: ctx.client)
+        Parse::CLPScope.protected_strip_stage(set, class_name: target.to_s, user_id: user_id)
+      end
+
+      # Prepend the queried class's strip stage to every branch of a
+      # top-level `$facet`. The `_User` self exemption is kept only when no
+      # earlier stage can have rewritten `_id`.
+      def strip_facet_branches(stage, class_name, ctx, preceding)
+        return stage unless stage.is_a?(Hash)
+        op_key, op_val = stage.first
+        return stage unless op_key.to_s == "$facet" && op_val.is_a?(Hash)
+        stable = Parse::PipelineSecurity.identity_preserving?(preceding)
+        strip = strip_stage_for(class_name, ctx, user_id: stable ? ctx.resolution.user_id : nil)
+        return stage if strip.nil?
+        branches = op_val.each_with_object({}) do |(name, branch), out|
+          out[name] = branch.is_a?(Array) ? [strip] + branch : branch
+        end
+        { op_key => branches }
+      end
+
+      def rewrite_lookup(spec, ctx)
         # String shorthand `{$lookup: "Collection"}` is not a real
         # Mongo form; defensively leave it alone.
         return spec unless spec.is_a?(Hash)
         # Gate FIRST so a CLP-denied join is refused before the
         # rewriter spends work rebuilding the sub-pipeline. `from`
-        # accepts string or symbol — normalize via the gate.
+        # accepts string or symbol; the gate normalizes it.
         target = spec["from"] || spec[:from]
-        assert_join_target_permitted!(target, perms)
+        head = join_head_stages!(target, ctx)
         spec = spec.dup
         existing_pipeline = spec["pipeline"] || spec[:pipeline] || []
         # Walk the sub-pipeline recursively so nested $lookup /
@@ -402,69 +512,77 @@ module Parse
         # `perms` set. (Mongo evaluates the sub-pipeline in the
         # joined collection's context, but the requesting session is
         # unchanged; permissions don't elevate by traversing a join.)
-        rewritten_inner = existing_pipeline.map { |s| rewrite_stage(s, acl_match, perms) }
-        new_pipeline = [acl_match] + rewritten_inner
-        spec["pipeline"] = new_pipeline
+        rewritten_inner = existing_pipeline.map { |s| rewrite_stage(s, ctx) }
+        spec["pipeline"] = head + rewritten_inner
         spec.delete(:pipeline) # symbol form was promoted to string form
         spec
       end
 
-      def rewrite_union_with(spec, acl_match, perms)
+      def rewrite_union_with(spec, ctx)
         # `$unionWith` accepts either a String (collection name only)
-        # or a Hash `{coll:, pipeline:}`. Post the target from
-        # either shape so the CLP gate fires before the String→Hash
-        # upgrade — denying access to the joined class BEFORE we go
+        # or a Hash `{coll:, pipeline:}`. Resolve the target from
+        # either shape so the CLP gate fires before the String to Hash
+        # upgrade, denying access to the joined class BEFORE we go
         # to the trouble of building out an upgraded sub-pipeline.
         target = if spec.is_a?(String)
             spec
           elsif spec.is_a?(Hash)
             spec["coll"] || spec[:coll]
           end
-        assert_join_target_permitted!(target, perms)
+        return spec unless spec.is_a?(String) || spec.is_a?(Hash)
+        head = join_head_stages!(target, ctx)
 
         if spec.is_a?(String)
-          return { "coll" => spec, "pipeline" => [acl_match] }
+          return { "coll" => spec, "pipeline" => head }
         end
-        return spec unless spec.is_a?(Hash)
         spec = spec.dup
         existing_pipeline = spec["pipeline"] || spec[:pipeline] || []
-        rewritten_inner = existing_pipeline.map { |s| rewrite_stage(s, acl_match, perms) }
-        spec["pipeline"] = [acl_match] + rewritten_inner
+        rewritten_inner = existing_pipeline.map { |s| rewrite_stage(s, ctx) }
+        spec["pipeline"] = head + rewritten_inner
         spec.delete(:pipeline)
         spec
       end
 
-      def rewrite_graph_lookup(spec, acl_match, perms)
+      def rewrite_graph_lookup(spec, ctx)
         return spec unless spec.is_a?(Hash)
-        # Same CLP gate, same reasoning — $graphLookup reads from a
+        # Same CLP gate, same reasoning: $graphLookup reads from a
         # different collection in the same session's authority.
         target = spec["from"] || spec[:from]
-        assert_join_target_permitted!(target, perms)
+        predicate = join_predicate!(target, ctx)
+        # `$graphLookup` returns whole joined documents and has no
+        # sub-pipeline to strip protected fields in. Refuse it when the
+        # joined class has any for this scope.
+        if strip_stage_for(target, ctx)
+          raise Parse::CLPScope::Denied.new(
+            target.to_s, :find,
+            "$graphLookup into '#{target}' would return protected fields for the " \
+            "current scope; use $lookup, which strips them.",
+          )
+        end
         spec = spec.dup
         # `$graphLookup` doesn't accept a sub-pipeline. Its filter hook
         # is `restrictSearchWithMatch`, which is a $match-predicate (no
         # `$match` wrapper). Combine with any existing restriction via
         # `$and`.
-        acl_predicate = acl_match["$match"]
         existing = spec["restrictSearchWithMatch"] || spec[:restrictSearchWithMatch]
         combined = if existing.nil? || (existing.respond_to?(:empty?) && existing.empty?)
-            acl_predicate
+            predicate
           else
-            { "$and" => [existing, acl_predicate] }
+            { "$and" => [existing, predicate] }
           end
         spec["restrictSearchWithMatch"] = combined
         spec.delete(:restrictSearchWithMatch)
         spec
       end
 
-      def rewrite_facet(spec, acl_match, perms)
+      def rewrite_facet(spec, ctx)
         return spec unless spec.is_a?(Hash)
         spec.each_with_object({}) do |(branch_name, branch_pipeline), out|
           out[branch_name] = if branch_pipeline.is_a?(Array)
-              # Recurse with the same perms — facet branches are
+              # Recurse with the same perms: facet branches are
               # evaluated in the requesting session's authority, not
               # elevated.
-              branch_pipeline.map { |s| rewrite_stage(s, acl_match, perms) }
+              branch_pipeline.map { |s| rewrite_stage(s, ctx) }
             else
               branch_pipeline
             end

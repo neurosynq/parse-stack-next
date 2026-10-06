@@ -1807,6 +1807,12 @@ module Parse
             pipeline, class_name: collection_name, enabled: rewrite_lookups,
           )
 
+          # Decide, from the caller's own stages, whether a returned row's
+          # `_id` is still the stored one. The `_User` self exemption below
+          # trusts the output `_id`, so it is granted only when no caller
+          # stage could have rewritten it; otherwise the field is stripped.
+          identity_preserved = Parse::PipelineSecurity.identity_preserving?(pipeline)
+
           # Three-layer ACL simulation on the mongo-direct path:
           #
           # 1. Top-level $match: filter the queried collection's rows by
@@ -1859,7 +1865,7 @@ module Parse
             front = front_predicates.size == 1 ? front_predicates.first : { "$and" => front_predicates }
             pipeline = prepend_or_fold_acl_match(pipeline, { "$match" => front })
           end
-          pipeline = Parse::ACLScope.rewrite_pipeline(pipeline, resolution)
+          pipeline = Parse::ACLScope.rewrite_pipeline(pipeline, resolution, class_name: collection_name)
 
           agg_opts = {}
           agg_opts[:max_time_ms] = max_time_ms if max_time_ms
@@ -1885,13 +1891,17 @@ module Parse
           # pulls rows of another class under its `as` key, and those rows get
           # THAT class's set, the same as Parse Server's include sub-query
           # does. `_User` rows that are the requesting user keep their own
-          # protected fields, as on REST.
+          # protected fields, as on REST, but only when that identity is
+          # proven: the caller's stages preserve `_id` (root rows), or the
+          # join's head strip already decided ownership on the stored `_id`
+          # (joined rows, see {Parse::ACLScope.rewrite_pipeline}).
           unless resolution.nil? || resolution.master?
             strip_set = Parse::CLPScope.protected_fields_for(
               collection_name, perms_for_clp, client: clp_client_for(resolution),
             )
             Parse::CLPScope.redact_protected_fields!(
-              results, strip_set, class_name: collection_name, user_id: resolution.user_id,
+              results, strip_set, class_name: collection_name,
+                                  user_id: identity_preserved ? resolution.user_id : nil,
             ) if strip_set.any?
             redact_joined_protected_fields!(results, pipeline, resolution)
 
@@ -1939,6 +1949,9 @@ module Parse
         return if results.nil? || results.empty? || !pipeline.is_a?(Array)
         perms = resolution.permission_strings
         return if perms.nil?
+        # The self exemption is safe only when the join's sub-pipeline began
+        # with the strip stage, which decided ownership on the stored `_id`.
+        self_id = Parse::ACLScope.rewrites_joins?(resolution) ? resolution.user_id : nil
         pipeline.each do |stage|
           next unless stage.is_a?(Hash)
           spec = stage["$lookup"] || stage[:$lookup]
@@ -1957,7 +1970,7 @@ module Parse
               else []
               end
             next if docs.empty?
-            Parse::CLPScope.redact_protected_fields!(docs, set, class_name: from.to_s, user_id: resolution.user_id)
+            Parse::CLPScope.redact_protected_fields!(docs, set, class_name: from.to_s, user_id: self_id)
           end
         end
         nil
