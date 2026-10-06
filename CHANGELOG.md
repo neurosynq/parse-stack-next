@@ -58,6 +58,27 @@
   300 seconds, `nil` disables), releasing their LiveQuery subscriptions.
   `MCPSubscriptions::Manager#reap_orphans!` reaps on demand.
 
+#### Opt-in server field names in returned data
+
+- **NEW**: `Parse::Agent.new(field_names: :server)` and
+  `aggregation.results(field_names: :server)` return data keyed by the exact
+  server field names (`createdAt`, `totalPlays`, an explicit `field_map`
+  alias such as `ExternalID`) as Strings. Omitting the option keeps every
+  API's current behavior. Most agent output already used server names; the
+  option matters for `AggregationResult#to_h` and `#keys`, which default to
+  snake_case Symbols, and keeps distinct keys such as `totalPlays` and
+  `total_plays` instead of collapsing them. In server mode a snake_case
+  method name resolves when it matches exactly one key and raises naming the
+  candidates when it matches several. The mode is scoped per tool call, is
+  inherited by sub-agents, and never changes field restrictions: access
+  policies apply identically in either mode. Unsupported values raise
+  `ArgumentError`. It does not enable the REST aggregate `raw_field_names:`
+  or `raw_values:` flags.
+- **FIXED**: `call_method` serialized a returned Parse object from its
+  field-type map, emitting `{"title" => :string}` instead of values; it now
+  serializes the object's data (still projected and redacted). A returned
+  `AggregationResult` was emitted as its `inspect` string; it is now a hash.
+
 #### Retrieval profiles for `semantic_search`
 
 - **NEW**: `Parse::Retrieval::Profiles.register(name, ...)` defines
