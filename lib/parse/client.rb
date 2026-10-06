@@ -1685,7 +1685,11 @@ module Parse
       if !prefix.empty? && path.start_with?("#{prefix}/")
         path = path.delete_prefix(prefix)
       end
-      path.sub(%r{\A/+}, "").sub(%r{/+\z}, "")
+      # Trim slashes with string operations rather than an end-anchored
+      # regex, which backtracks polynomially on long runs of "/".
+      path = path.delete_prefix("/") while path.start_with?("/")
+      path = path.delete_suffix("/") while path.end_with?("/")
+      path
     end
 
     # Whether a request body carries a Parse operation: an `__op` key at any
