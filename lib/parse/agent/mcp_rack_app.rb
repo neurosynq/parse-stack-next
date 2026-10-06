@@ -651,6 +651,27 @@ module Parse
           if clean_sid.nil?
             return [400, json_headers, [json_rpc_error(-32_600, "Invalid Mcp-Session-Id")]]
           end
+          # Termination is gated like every other session operation: the
+          # Origin policy, authentication through the agent factory, and the
+          # session's owner binding. Before 5.8 any caller who knew a session
+          # id could terminate it (cancel its requests, drop its approvals,
+          # subscriptions, and log level) without authenticating.
+          if origin_refused?(env)
+            return [403, json_headers, [json_rpc_error(-32_700, "Origin not allowed")]]
+          end
+          begin
+            terminating_agent = @agent_factory.call(env)
+          rescue Parse::Agent::Unauthorized
+            @logger&.warn("[Parse::Agent::MCPRackApp] Unauthorized session termination")
+            return [401, json_headers, [unauthorized_body]]
+          rescue StandardError => e
+            @logger&.warn("[Parse::Agent::MCPRackApp] Factory error on DELETE: #{e.class.name}")
+            return [500, json_headers, [json_rpc_error(-32_603, "Internal error")]]
+          end
+          if @session_owners.claimed_by_other?(clean_sid, principal_fingerprint(terminating_agent, env))
+            @logger&.warn("[Parse::Agent::MCPRackApp] session termination refused: owned by another principal")
+            return [403, json_headers, [json_rpc_error(-32_600, "Mcp-Session-Id is owned by another principal")]]
+          end
           @cancellation_registry.cancel_all_for(clean_sid, reason: :session_terminated)
           # Wake any tool thread blocked on an elicitation reply for this
           # session (it returns `unavailable` → fail closed) and drop the
@@ -2091,6 +2112,16 @@ module Parse
             else
               false
             end
+          end
+        end
+
+        # True when the session is bound to a principal other than this one.
+        # An unclaimed session is not claimed by anyone else.
+        def claimed_by_other?(session_id, fingerprint)
+          return false if blank?(session_id)
+          @mutex.synchronize do
+            owner = @owners[session_id]
+            !owner.nil? && owner != fingerprint
           end
         end
 

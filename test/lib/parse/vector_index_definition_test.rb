@@ -193,4 +193,16 @@ class VectorIndexDefinitionTest < Minitest::Test
     plan = GenDeclared.search_indexes_plan
     assert_includes plan[:to_create].map { |d| d[:name] }, "gen_declared_vec"
   end
+
+  class StoredNameDoc < Parse::Object
+    parse_class "IndexDefinitionStoredName"
+    property :body_embedding, :vector, dimensions: 4
+    property :aliased_vec, :vector, dimensions: 4, field: :vec
+  end
+
+  def test_vector_path_is_the_stored_column
+    build = Parse::VectorSearch::IndexDefinition
+    assert_equal "bodyEmbedding", build.build(StoredNameDoc, field: :body_embedding)["fields"].first["path"]
+    assert_equal "vec", build.build(StoredNameDoc, field: :aliased_vec)["fields"].first["path"]
+  end
 end

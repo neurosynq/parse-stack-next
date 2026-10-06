@@ -209,7 +209,7 @@ Parse::AtlasSearch::IndexCatalog.create_index(
     fields: [
       {
         type: "vector",
-        path: "body_embedding",
+        path: "bodyEmbedding",          # the STORED column, not the Ruby name
         numDimensions: 1536,
         similarity: "cosine",
       },
@@ -220,6 +220,12 @@ Parse::AtlasSearch::IndexCatalog.create_index(
   },
 )
 ```
+
+The vector `path` is the column the property is stored under:
+`property :body_embedding, :vector` is saved as `bodyEmbedding` (or under an
+explicit `field:` alias). `find_similar`, hybrid search, index discovery, and
+drift checks all use that stored name; `Parse::VectorSearch::IndexDefinition`
+generates it for you.
 
 Including `_rperm` as a filter field lets the per-row ACL match
 short-circuit at the index level — strongly recommended for any

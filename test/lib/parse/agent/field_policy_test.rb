@@ -83,6 +83,19 @@ class AgentFieldPolicyTest < Minitest::Test
     assert_raises(ArgumentError) { agent(fields: { FPDoc => [1] }) }
   end
 
+  class FPAliased < Parse::Object
+    parse_class "FieldPolicyAliased"
+    property :public_text, :string, field: :PublicText
+    property :other, :string
+  end
+
+  def test_policy_accepts_ruby_and_exact_server_alias_names
+    by_ruby = agent(fields: { FPAliased => [:public_text] })
+    by_wire = agent(fields: { "FieldPolicyAliased" => ["PublicText"] })
+    assert_includes effective(by_ruby, "FieldPolicyAliased"), "PublicText"
+    assert_includes effective(by_wire, "FieldPolicyAliased"), "PublicText"
+  end
+
   # ---- sub-agents ------------------------------------------------------
 
   def test_sub_agent_intersects_its_parent

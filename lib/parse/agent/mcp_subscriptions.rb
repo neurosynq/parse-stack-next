@@ -399,8 +399,11 @@ module Parse
             # old stream) is recognized and does not tear the session down.
             @attached[session_id] = callback || true
             @orphaned_since.delete(session_id)
+            # Registered under the same lock detach_listener uses, so an old
+            # stream's teardown can never interleave between this stream's
+            # attachment marker and its delivery registration.
+            @notifier.register(session_id, &callback)
           end
-          @notifier.register(session_id, &callback)
         end
 
         # Tear down the subscriptions of every session that has been orphaned
@@ -478,10 +481,13 @@ module Parse
             end
             @attached.delete(session_id)
             @orphaned_since.delete(session_id)
+            # Unregister inside the lock: a replacement stream attaching
+            # concurrently either sees this teardown complete first (and then
+            # registers itself) or is seen here as current (superseded above).
+            @notifier.unregister(session_id)
             @sessions.delete(session_id)
           end
           return 0 if subs == :superseded
-          @notifier.unregister(session_id)
           subs ||= {}
           subs.each_value { |entry| safe_unsubscribe(entry[:sub]) }
           subs.size

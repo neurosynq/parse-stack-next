@@ -52,6 +52,12 @@
   approval, and cancellation ownership. An unresolved operator gets 401.
   Direct `MCPRackApp.new` construction and single-operator master-key use are
   unchanged.
+- **CHANGED**: Session termination (`DELETE` with `Mcp-Session-Id`) is now
+  gated like every other session operation: it passes the Origin policy,
+  authenticates through the agent factory (401 when refused), and is refused
+  with 403 when the session belongs to a different principal. Previously it
+  ran before authentication, so any caller who knew a session id could cancel
+  its requests and drop its approvals, subscriptions, and log level.
 - **FIXED**: `notifications/cancelled` and elicitation replies were bound only
   to the session id, so a caller who knew another principal's
   `Mcp-Session-Id` could cancel its requests or answer its approval prompts.
@@ -120,8 +126,14 @@
   `:raise` fails the call.
 - **NEW**: Each `semantic_search` call emits one `parse.retrieval.search`
   notification with the profile, counts, rerank stats, and timings, and never
-  the query, document text, field values, URLs, or credentials.
-  Rerank token counts are SDK estimates, not provider-reported usage.
+  the query, document text, field values, URLs, or credentials. A failed call
+  emits one too, naming only the error class. Rerank token counts are SDK
+  estimates, not provider-reported usage.
+- **IMPROVED**: The response token budget covers the whole response: each
+  returned parent document counts once, alongside chunk text. Under a profile
+  the budget is mandatory (the caller can lower it but not raise or disable
+  it), and a caller's `k` can never raise retrieval above the profile's
+  `rerank_candidates`.
 - **NEW**: `Parse::Retrieval::Benchmark` scores profiles on a labeled case set
   (recall@k, MRR, hit rate, mean and p95 latency, forbidden-id violations,
   estimated tokens), overall and per tag, through the real `semantic_search`
@@ -170,6 +182,18 @@
   helpers, and the mongo-direct entry points. Names a model does not declare
   keep the default camelCase formatting, and `Parse::Query.field_formatter`
   still applies to them.
+
+#### Vector search uses the stored column for multi-word vector properties
+
+- **FIXED**: A `:vector` property is saved under its `field_map` name
+  (`property :body_embedding, :vector` is stored as `bodyEmbedding`), but
+  `find_similar`, hybrid search, index auto-discovery, and drift checks used
+  the Ruby name (`body_embedding`) as the vector path, so a multi-word vector
+  property searched a path holding no vectors and auto-discovery could not
+  find its index. They now use the stored column, as does the new index
+  generator. Single-word properties such as `embedding` are unaffected. An
+  index created with the Ruby name as its path must be recreated with the
+  stored name; drift detection reports the mismatch.
 
 #### Release checks prove the intended coverage ran
 

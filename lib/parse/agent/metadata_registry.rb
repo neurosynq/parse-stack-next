@@ -390,9 +390,18 @@ module Parse
       def wire_field_names(class_name, names)
         klass = find_model_class(class_name_string(class_name))
         fmap = klass.respond_to?(:field_map) ? klass.field_map : {}
+        declared_wire = fmap.values.map(&:to_s)
         Array(names).map do |name|
           mapped = fmap[name.to_sym]
-          mapped ? mapped.to_s : name.to_s.columnize
+          if mapped
+            mapped.to_s
+          elsif declared_wire.include?(name.to_s)
+            # Already a declared server name (an explicit alias such as
+            # "PublicText"): keep it exactly, never re-case it.
+            name.to_s
+          else
+            name.to_s.columnize
+          end
         end.uniq
       end
 

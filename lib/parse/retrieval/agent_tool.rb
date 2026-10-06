@@ -75,7 +75,32 @@ module Parse
       #   by objectId) instead of being duplicated on every chunk. When the
       #   token budget trims the result, `budget_truncated: true` and
       #   `budget_dropped: <n>` are added.
-      def semantic_search(agent, class_name: nil, query: nil, k: nil,
+      def semantic_search(agent, **args)
+        started = monotonic_now
+        semantic_search_unobserved(agent, **args)
+      rescue StandardError => e
+        # Failures are observable too: one sanitized event naming the error
+        # class (never its message, which can echo input).
+        emit_failure_event(args, e, started)
+        raise
+      end
+
+      # @!visibility private
+      def emit_failure_event(args, error, started)
+        return unless defined?(ActiveSupport::Notifications)
+        payload = {
+          class_name: (args[:class_name] || args[:klass]).to_s,
+          profile: args[:profile]&.to_s,
+          error: error.class.name,
+          duration_ms: ((monotonic_now - started) * 1000).round(1),
+        }
+        ActiveSupport::Notifications.instrument("parse.retrieval.search", payload)
+      rescue StandardError
+        nil
+      end
+
+      # @!visibility private
+      def semantic_search_unobserved(agent, class_name: nil, query: nil, k: nil,
                                  filter: nil, vector_filter: nil, text_field: nil,
                                  chunk_size: nil, chunk_overlap: nil, chunk_by: nil,
                                  max_chunks_per_document: nil, max_total_tokens: nil,
@@ -154,10 +179,20 @@ module Parse
             Parse::Retrieval.reranker(prof.reranker), prof,
             charge: ->(tokens) { charge_rerank_tokens!(agent, scope, tokens) },
           )
-          retrieve_k = [prof.rerank_candidates, effective_k].max
+          # rerank_candidates is a hard budget: the caller's k can never
+          # raise how many documents are retrieved and sent to the
+          # reranker, so k is capped at it.
+          retrieve_k = prof.rerank_candidates
+          effective_k = [effective_k, retrieve_k].min
           rerank_top_n = [prof.rerank_top_n || effective_k, effective_k].min
         end
-        max_total_tokens = prof.max_total_tokens if prof && max_total_tokens.nil? && prof.max_total_tokens
+        if prof
+          # Under a profile the response budget is mandatory: the caller can
+          # lower it but never raise or disable it (0 does not switch it off).
+          ceiling = prof.max_total_tokens || DEFAULT_MAX_TOTAL_TOKENS
+          requested = max_total_tokens.to_i
+          max_total_tokens = requested.positive? ? [requested, ceiling].min : ceiling
+        end
         started = monotonic_now
 
         # with_precharged: the cap was charged above with per-tenant
@@ -330,14 +365,25 @@ module Parse
       # least the first chunk so a single oversize chunk still returns
       # something (flagged truncated).
       # @return [Array(Array<Chunk>, Integer)] [kept, dropped_count]
+      #
+      # The estimate covers the whole response, not only chunk text: each
+      # chunk's content plus, the first time a parent document appears, that
+      # document's serialized source record (it is hoisted into `documents`).
       def apply_token_budget(chunks, budget)
         return [chunks, 0] if budget.nil? || chunks.empty?
         total = 0
         kept = []
+        seen_docs = {}
         chunks.each do |chunk|
           est = (chunk.content.to_s.length / 4.0).ceil
+          oid = chunk.respond_to?(:metadata) && chunk.metadata.is_a?(Hash) ? chunk.metadata[:object_id] : nil
+          if oid && !seen_docs.key?(oid) && chunk.respond_to?(:source) && chunk.source
+            doc_est = (JSON.generate(chunk.source).length / 4.0).ceil rescue 0
+            est += doc_est
+          end
           break unless kept.empty? || total + est <= budget
           kept << chunk
+          seen_docs[oid] = true if oid
           total += est
         end
         [kept, chunks.length - kept.length]

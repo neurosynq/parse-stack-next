@@ -111,7 +111,10 @@ class MCPListenerOwnerBindingTest < Minitest::Test
     s1, _h, b1 = app.call(get_env(session_id: "sess-1", principal: "r:alice"))
     assert_equal 200, s1
     b1.close
-    dstatus, = app.call(delete_env(session_id: "sess-1"))
+    # Another principal cannot terminate the session (5.8).
+    refused, = app.call(delete_env(session_id: "sess-1").merge("HTTP_X_PRINCIPAL" => "r:mallory"))
+    assert_equal 403, refused
+    dstatus, = app.call(delete_env(session_id: "sess-1").merge("HTTP_X_PRINCIPAL" => "r:alice"))
     assert_equal 204, dstatus
     # After explicit termination a new principal may claim the id.
     s2, _h, b2 = app.call(get_env(session_id: "sess-1", principal: "r:mallory"))

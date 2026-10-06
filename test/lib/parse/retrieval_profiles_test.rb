@@ -130,6 +130,15 @@ class RetrievalProfilesTest < Minitest::Test
     end
   end
 
+  def test_caller_k_cannot_exceed_the_rerank_candidate_budget
+    P.register(:tight, k: 2, max_k: 20, reranker: :reverse, rerank_candidates: 2)
+    with_retrieve_spy do |c|
+      call(profile: "tight", k: 20)
+      assert_equal 2, c[:k], "retrieval stays within rerank_candidates"
+      assert_equal 2, c[:rerank_top_n]
+    end
+  end
+
   # ---- end to end through the real retriever ----------------------------
 
   def hits(n)
@@ -201,6 +210,44 @@ class RetrievalProfilesTest < Minitest::Test
     blob = e.to_s
     refute_includes blob, "body 1", "event must not carry document text"
     refute_includes blob, "q\"", "event must not carry the query"
+  end
+
+  def test_failed_search_emits_a_sanitized_event
+    events = []
+    sub = ActiveSupport::Notifications.subscribe("parse.retrieval.search") { |*a| events << a.last }
+    begin
+      assert_raises(Parse::Agent::ValidationError) { call(profile: "no-such-profile") }
+    ensure
+      ActiveSupport::Notifications.unsubscribe(sub)
+    end
+    assert_equal 1, events.size
+    assert_equal "Parse::Agent::ValidationError", events.first[:error]
+    assert_equal "no-such-profile", events.first[:profile]
+    refute events.first.key?(:query)
+  end
+
+  def test_profile_budget_cannot_be_disabled_or_raised_by_the_caller
+    P.register(:capped, k: 5, max_total_tokens: 40)
+    big = (1..5).map { |i| { "_id" => "d#{i}", "title" => "t", "body" => "y" * 200, "_vscore" => 0.9 } }
+    result = ProfDoc.stub(:find_similar, ->(**_kw) { big }) do
+      Parse::Retrieval::AgentTool.stub(:convert_to_parse_form, ->(doc, _c) { doc.dup }) do
+        call(profile: "capped", max_total_tokens: 0)
+      end
+    end
+    assert_equal true, result[:budget_truncated], "max_total_tokens: 0 does not disable a profile budget"
+    assert_operator result[:count], :<, 5
+  end
+
+  def test_budget_counts_parent_documents
+    chunk = ->(oid, content, source) do
+      Parse::Retrieval::Chunk.new(id: "#{oid}#0", content: content, score: 0.5, source: source,
+                                  metadata: { chunk_index: 0, chunk_count: 1, object_id: oid })
+    end
+    heavy = { "objectId" => "a", "notes" => "z" * 400 }
+    chunks = [chunk.("a", "short", heavy), chunk.("b", "short", { "objectId" => "b" })]
+    kept, dropped = Parse::Retrieval::AgentTool.send(:apply_token_budget, chunks, 60)
+    assert_equal 1, kept.size, "the first document's size counts toward the budget"
+    assert_equal 1, dropped
   end
 
   # ---- benchmark harness -------------------------------------------------

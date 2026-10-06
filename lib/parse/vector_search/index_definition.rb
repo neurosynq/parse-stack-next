@@ -64,7 +64,9 @@ module Parse
 
         vector = {
           "type" => "vector",
-          "path" => field_sym.to_s,
+          # The stored column (field_map), which is what $vectorSearch
+          # queries: `body_embedding` is saved as `bodyEmbedding`.
+          "path" => (model_class.respond_to?(:vector_storage_path) ? model_class.vector_storage_path(field_sym) : field_sym.to_s),
           "numDimensions" => meta[:dimensions],
           "similarity" => (meta[:similarity] || DEFAULT_SIMILARITY).to_s,
         }

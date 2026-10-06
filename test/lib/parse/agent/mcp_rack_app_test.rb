@@ -325,7 +325,7 @@ class MCPRackAppTest < Minitest::Test
     assert_equal "Missing Mcp-Session-Id", JSON.parse(body.first).dig("error", "message")
   end
 
-  def test_delete_with_session_id_returns_204_and_does_not_invoke_factory
+  def test_delete_with_session_id_authenticates_and_returns_204
     call_count = 0
     factory = ->(_env) { call_count += 1; valid_agent }
     app = Parse::Agent::MCPRackApp.new(agent_factory: factory)
@@ -334,7 +334,16 @@ class MCPRackAppTest < Minitest::Test
     status, _headers, body = app.call(env)
     assert_equal 204, status
     assert_equal [""], body
-    assert_equal 0, call_count, "DELETE must not invoke agent_factory"
+    assert_equal 1, call_count, "DELETE authenticates through agent_factory (5.8)"
+  end
+
+  def test_unauthenticated_delete_is_refused
+    factory = ->(_env) { raise Parse::Agent::Unauthorized, "no" }
+    app = Parse::Agent::MCPRackApp.new(agent_factory: factory)
+    env = rack_env(method: "DELETE")
+    env["HTTP_MCP_SESSION_ID"] = "session-to-terminate"
+    status, = app.call(env)
+    assert_equal 401, status
   end
 
   def test_delete_with_malicious_session_id_returns_400
