@@ -1863,9 +1863,10 @@ module Parse
           # #close, which #each's `ensure` always runs.
           MCPRackApp.adjust_listening_stream_count(1)
           @counted = true
-          @manager.attach_listener(@session_id) do |notification|
+          @listener = lambda do |notification|
             queue << format_event(notification)
           end
+          @manager.attach_listener(@session_id, &@listener)
           # Initial comment flushes response headers and confirms the stream.
           yield ": connected\n\n"
           start_heartbeat
@@ -1894,7 +1895,14 @@ module Parse
           @revalidator_thread&.kill unless @revalidator_thread == Thread.current
           @revalidator_thread = nil
           begin
-            @manager.detach_listener(@session_id)
+            # Pass this stream's own callback so a reconnect that already
+            # attached a newer stream is not torn down by this one closing.
+            # Custom managers with a one-argument detach_listener still work.
+            if @listener && @manager.method(:detach_listener).arity != 1
+              @manager.detach_listener(@session_id, @listener)
+            else
+              @manager.detach_listener(@session_id)
+            end
           rescue StandardError => e
             line = "[Parse::Agent::MCPRackApp::ListeningStreamBody] detach error: #{e.class}: #{e.message}"
             @logger ? @logger.warn(line) : warn(line)
@@ -1904,14 +1912,28 @@ module Parse
 
         private
 
+        # @return [Boolean] true once {#close} has run.
+        def closed?
+          @close_mutex.synchronize { @closed }
+        end
+
+        # Background threads start under the same mutex {#close} takes, and
+        # never once the stream is closed. A stream can close while #each is
+        # still yielding its first frame (client disconnect, DELETE); without
+        # this, the threads would start after close had already run and keep
+        # running (the revalidator re-authenticating indefinitely).
         def start_heartbeat
           return unless @heartbeat_interval && @heartbeat_interval > 0
           queue = @queue
           interval = @heartbeat_interval
-          @heartbeat = Thread.new do
-            loop do
-              sleep interval
-              queue << ": keep-alive\n\n"
+          @close_mutex.synchronize do
+            return if @closed
+            @heartbeat = Thread.new do
+              loop do
+                sleep interval
+                break if closed?
+                queue << ": keep-alive\n\n"
+              end
             end
           end
         end
@@ -1924,23 +1946,29 @@ module Parse
           return unless @revalidate && @revalidate_interval && @revalidate_interval > 0
           check = @revalidate
           interval = @revalidate_interval
-          @revalidator_thread = Thread.new do
-            loop do
-              sleep interval
-              ok = begin
-                  check.call
-                rescue StandardError => e
-                  line = "[Parse::Agent::MCPRackApp::ListeningStreamBody] revalidation error: #{e.class}"
-                  @logger ? @logger.warn(line) : warn(line)
-                  false
-                end
-              next if ok
-              line = "[Parse::Agent::MCPRackApp::ListeningStreamBody] closing listening stream: " \
-                     "caller identity no longer valid"
-              @logger ? @logger.warn(line) : warn(line)
-              close
-              break
-            end
+          @close_mutex.synchronize do
+            return if @closed
+            @revalidator_thread = Thread.new { revalidation_loop(check, interval) }
+          end
+        end
+
+        def revalidation_loop(check, interval)
+          loop do
+            sleep interval
+            break if closed?
+            ok = begin
+                check.call
+              rescue StandardError => e
+                line = "[Parse::Agent::MCPRackApp::ListeningStreamBody] revalidation error: #{e.class}"
+                @logger ? @logger.warn(line) : warn(line)
+                false
+              end
+            next if ok
+            line = "[Parse::Agent::MCPRackApp::ListeningStreamBody] closing listening stream: " \
+                   "caller identity no longer valid"
+            @logger ? @logger.warn(line) : warn(line)
+            close
+            break
           end
         end
 

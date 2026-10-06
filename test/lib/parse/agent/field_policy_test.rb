@@ -188,6 +188,23 @@ class AgentFieldPolicyTest < Minitest::Test
     refute_match(/\{message:/, err.message, "the message must not be a stringified Hash")
   end
 
+  def test_subquery_predicates_are_checked_against_their_target_class
+    a = agent(fields: { FPDoc => %i[title] })
+    inquery = { "parent" => { "$inQuery" => { "className" => "FieldPolicyDoc", "where" => { "body" => "x" } } } }
+    select = { "ref" => { "$select" => { "query" => { "className" => "FieldPolicyDoc", "where" => {} }, "key" => "status" } } }
+    nested = { "$or" => [inquery] }
+    [inquery, select, nested].each do |where|
+      err = assert_raises(Parse::Agent::AccessDenied, where.inspect) do
+        # The outer class has no allowlist; the subquery's class does.
+        Parse::Agent::FieldPolicy.with(a) { Parse::Agent::Tools.assert_where_fields_in_allowlist!("FieldPolicyOpen", where) }
+      end
+      assert_equal :field_denied, err.kind
+    end
+    # A readable subquery field passes.
+    ok = { "parent" => { "$inQuery" => { "className" => "FieldPolicyDoc", "where" => { "title" => "x" } } } }
+    Parse::Agent::FieldPolicy.with(a) { Parse::Agent::Tools.assert_where_fields_in_allowlist!("FieldPolicyOpen", ok) }
+  end
+
   def test_order_field_names_parses_rest_and_array_forms
     assert_equal %w[createdAt title], Parse::Agent::Tools.order_field_names("-createdAt, title")
     assert_equal %w[a b], Parse::Agent::Tools.order_field_names(["-a", "+b"])

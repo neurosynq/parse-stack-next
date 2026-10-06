@@ -36,6 +36,51 @@ module Parse
       # Agent constructor options a factory owns. Passing them through
       # `agent_options:` would let configuration override the identity or
       # authority the factory pins, so they are refused at construction.
+      # One rate limiter per principal, shared by every agent a deployment
+      # factory builds for that principal. A factory builds a fresh agent per
+      # request, and each agent would otherwise get a fresh limiter, so the
+      # configured rate limit never accumulated across requests. Bounded
+      # (least recently used) so a stream of principals cannot grow it
+      # without limit; an evicted principal starts a new window.
+      class PrincipalRateLimiters
+        DEFAULT_MAX_ENTRIES = 10_000
+
+        def initialize(limit:, window:, max_entries: DEFAULT_MAX_ENTRIES)
+          @limit = limit
+          @window = window
+          @max = max_entries
+          @limiters = {}
+          @mutex = Mutex.new
+        end
+
+        # @param principal [String]
+        # @return [Parse::Agent::RateLimiter]
+        def fetch(principal)
+          key = principal.to_s
+          @mutex.synchronize do
+            limiter = @limiters.delete(key) || Parse::Agent::RateLimiter.new(limit: @limit, window: @window)
+            @limiters[key] = limiter
+            @limiters.shift while @limiters.size > @max
+            limiter
+          end
+        end
+
+        def size
+          @mutex.synchronize { @limiters.size }
+        end
+      end
+
+      # @api private
+      # The registry a factory uses, or nil when the caller injected its own
+      # `rate_limiter:` (honored as-is, e.g. a shared Redis limiter).
+      def self.principal_rate_limiters_for(agent_options)
+        return nil if agent_options.key?(:rate_limiter)
+        PrincipalRateLimiters.new(
+          limit: agent_options.fetch(:rate_limit, Parse::Agent::DEFAULT_RATE_LIMIT),
+          window: agent_options.fetch(:rate_window, Parse::Agent::DEFAULT_RATE_WINDOW),
+        )
+      end
+
       FACTORY_OWNED_AGENT_OPTIONS = %i[
         session_token acl_user acl_role
         impersonate_user impersonation_user impersonate_mint impersonation_mint
@@ -121,6 +166,7 @@ module Parse
                   "(got #{session_validation.inspect})"
           end
           options = agent_options.dup.freeze
+          limiters = Parse::Agent::MCPRackApp.principal_rate_limiters_for(options)
 
           factory = lambda do |env|
             token = extractor.call(env).to_s.strip
@@ -130,6 +176,7 @@ module Parse
             user_id = validate_session!(parse_client, token, mode: session_validation)
             kwargs = options.merge(session_token: token, permissions: permissions)
             kwargs[:client] = client if client
+            kwargs[:rate_limiter] = limiters.fetch("user:#{user_id}") if limiters
             if tenant_from
               tenant = tenant_from.call(env, user_id)
               if tenant.nil? || tenant.to_s.strip.empty?
@@ -194,6 +241,7 @@ module Parse
           end
           assert_factory_options!(:master_analytics, agent_options, rack_options)
           options = agent_options.dup.freeze
+          limiters = Parse::Agent::MCPRackApp.principal_rate_limiters_for(options)
 
           # Resolve once per request and reuse it for ownership, so the
           # resolver's identity check is not repeated (and cannot disagree
@@ -216,6 +264,10 @@ module Parse
             if principal.nil? || principal.to_s.strip.empty?
               raise Parse::Agent::Unauthorized.new("Unidentified operator", reason: :missing_principal)
             end
+            # The operator is known only once an agent exists (the resolver
+            # receives it), so rebuild this request's agent with the
+            # operator's shared limiter.
+            agent = Parse::Agent.new(**kwargs, rate_limiter: limiters.fetch("op:#{principal}")) if limiters
             if tenant_from
               tenant = tenant_from.call(env, principal)
               if tenant.nil? || tenant.to_s.strip.empty?

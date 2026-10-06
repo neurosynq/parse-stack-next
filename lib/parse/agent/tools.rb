@@ -4334,12 +4334,53 @@ module Parse
       def assert_where_fields_in_allowlist!(class_name, where)
         return unless where.is_a?(Hash) && !where.empty?
         allowlist = MetadataRegistry.field_allowlist(class_name)
-        return if allowlist.nil? || allowlist.empty?
-        permitted = allowlist.map(&:to_s) | MetadataRegistry::ALWAYS_KEEP_FIELDS
-        check_match_keys_for_restricted_fields!(where, permitted)
+        if allowlist && allowlist.any?
+          permitted = allowlist.map(&:to_s) | MetadataRegistry::ALWAYS_KEEP_FIELDS
+          check_match_keys_for_restricted_fields!(where, permitted)
+        end
+        # Embedded subqueries are validated against their OWN target class,
+        # whether or not the outer class declares an allowlist.
+        assert_subquery_fields_in_allowlist!(where)
       end
 
       module_function :assert_where_fields_in_allowlist!
+
+      # @api private
+      # Walk a where: Hash for embedded subqueries (`$inQuery`, `$notInQuery`,
+      # `$select`, `$dontSelect`) and validate each one's predicates (and a
+      # `$select` key) against the target class's effective allowlist. An
+      # equivalent subquery must not reach a field a direct query on that
+      # class would be refused, or the subquery becomes an oracle for it.
+      # Class accessibility of the embedded className is enforced separately
+      # by ConstraintTranslator.
+      def assert_subquery_fields_in_allowlist!(node)
+        case node
+        when Hash
+          node.each do |key, value|
+            case key.to_s
+            when "$inQuery", "$notInQuery"
+              next unless value.is_a?(Hash)
+              target = value["className"] || value[:className]
+              inner = value["where"] || value[:where]
+              assert_where_fields_in_allowlist!(target.to_s, inner) if target
+            when "$select", "$dontSelect"
+              next unless value.is_a?(Hash)
+              query = value["query"] || value[:query] || {}
+              target = query["className"] || query[:className]
+              next unless target
+              assert_where_fields_in_allowlist!(target.to_s, query["where"] || query[:where])
+              selected = value["key"] || value[:key]
+              assert_fields_in_allowlist!(target.to_s, [selected]) if selected
+            else
+              assert_subquery_fields_in_allowlist!(value)
+            end
+          end
+        when Array
+          node.each { |item| assert_subquery_fields_in_allowlist!(item) }
+        end
+      end
+
+      module_function :assert_subquery_fields_in_allowlist!
 
       # @api private
       # Verify each referenced field is within agent_fields (or the
@@ -5758,7 +5799,29 @@ module Parse
           else
             result.to_s
           end
-        redact_hidden_classes!(formatted, agent: agent)
+        redact_hidden_classes!(project_embedded_objects(formatted), agent: agent)
+      end
+
+      # @api private
+      # Project every embedded Parse object in a formatted result through
+      # its OWN class's effective allowlist (class `agent_fields` narrowed by
+      # the executing agent's `fields:` policy). A method may return an
+      # object whose included children, or a plain Hash holding object JSON,
+      # carry fields the caller may not read; projecting only the top-level
+      # class would leak them. An embedded object is a Hash with a
+      # `className` and an `objectId`.
+      def project_embedded_objects(value)
+        case value
+        when Hash
+          class_name = value["className"] || value[:className]
+          has_id = value.key?("objectId") || value.key?(:objectId)
+          projected = class_name && has_id ? project_object_to_allowlist(class_name.to_s, value) : value
+          projected.each_with_object({}) { |(k, v), acc| acc[k] = project_embedded_objects(v) }
+        when Array
+          value.map { |item| project_embedded_objects(item) }
+        else
+          value
+        end
       end
 
       # @api private

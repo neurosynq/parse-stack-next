@@ -245,6 +245,62 @@ class MCPDeploymentsTest < Minitest::Test
     assert_equal 1, calls
   end
 
+  # ---- per-principal rate limiting ------------------------------------------
+
+  def test_user_scoped_shares_one_limiter_per_user_across_requests
+    client = FakeClient.new({ "tok-a" => "u_a", "tok-a2" => "u_a", "tok-b" => "u_b" }, master_key: "mk")
+    app = user_app(client, agent_options: { rate_limit: 1 })
+    with_agent_double do
+      post(app, "tools/list", headers: bearer("tok-a"))
+      post(app, "tools/list", headers: bearer("tok-a2"))
+      post(app, "tools/list", headers: bearer("tok-b"))
+    end
+    a1, a2, b = @built.map { |agent| agent.options[:rate_limiter] }
+    assert_same a1, a2, "two requests (even two sessions) from one user share a limiter"
+    refute_same a1, b, "different users get different limiters"
+    assert_equal 1, a1.instance_variable_get(:@limit)
+  end
+
+  def test_shared_limiter_actually_limits_across_requests
+    limiter = App::PrincipalRateLimiters.new(limit: 1, window: 60).fetch("user:u_a")
+    limiter.check!
+    assert_raises(Parse::Agent::RateLimitExceeded) do
+      App::PrincipalRateLimiters.new(limit: 1, window: 60) # a new registry is a new window...
+      limiter.check!                                       # ...but the shared limiter is not reset
+    end
+  end
+
+  def test_injected_rate_limiter_is_honored
+    injected = Object.new
+    def injected.check! = nil
+    client = FakeClient.new({ "tok-a" => "u_a" }, master_key: "mk")
+    app = user_app(client, agent_options: { rate_limiter: injected })
+    with_agent_double { post(app, "tools/list", headers: bearer("tok-a")) }
+    assert_same injected, @built.last.options[:rate_limiter]
+  end
+
+  def test_master_analytics_shares_one_limiter_per_operator
+    app = analytics_app
+    with_agent_double do
+      post(app, "tools/list", headers: op("ops-1"))
+      post(app, "tools/list", headers: op("ops-1"))
+      post(app, "tools/list", headers: op("ops-2"))
+    end
+    limiters = @built.map { |agent| agent.options[:rate_limiter] }.compact
+    assert_equal 3, limiters.size
+    assert_same limiters[0], limiters[1]
+    refute_same limiters[0], limiters[2]
+  end
+
+  def test_principal_limiter_registry_is_bounded
+    reg = App::PrincipalRateLimiters.new(limit: 5, window: 60, max_entries: 2)
+    first = reg.fetch("a")
+    reg.fetch("b")
+    reg.fetch("c")
+    assert_equal 2, reg.size
+    refute_same first, reg.fetch("a"), "the least recently used principal was evicted"
+  end
+
   # ---- cross-caller isolation, both factories --------------------------------
 
   def isolation_cases
@@ -394,6 +450,21 @@ class MCPDeploymentsTest < Minitest::Test
     valid = false
     assert_equal "S", detached.pop(timeout: 1), "stream must close once revalidation fails"
     assert_includes reader.value, ": connected\n\n"
+  end
+
+  def test_stream_closed_during_first_frame_starts_no_revalidation
+    manager = Object.new
+    manager.define_singleton_method(:attach_listener) { |_sid, &_cb| nil }
+    manager.define_singleton_method(:detach_listener) { |_sid| nil }
+    checks = 0
+    body = App::ListeningStreamBody.new(manager, "S", 0.01, nil,
+                                        revalidate: -> { checks += 1; true }, revalidate_interval: 0.01)
+    # The client disconnects while the initial frame is being written.
+    body.each { |_chunk| body.close }
+    sleep 0.1
+    assert_equal 0, checks, "no revalidation may run after the stream closed"
+    assert_nil body.instance_variable_get(:@revalidator_thread)
+    assert_nil body.instance_variable_get(:@heartbeat)
   end
 
   def test_user_scoped_installs_listening_stream_revalidation

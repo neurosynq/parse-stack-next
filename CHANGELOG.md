@@ -21,6 +21,15 @@
   ordered. They now refuse with `AccessDenied` (`kind: :field_denied`), as
   `group_by`, `distinct`, and aggregation already did. Server-owned tenant,
   per-agent, and canonical filters are not affected.
+- **FIXED**: Subqueries could reach fields a direct query would be refused:
+  `$inQuery`, `$notInQuery`, `$select`, and `$dontSelect` predicates (and a
+  `$select` key) are now checked against their target class's effective
+  allowlist, so an equivalent subquery is no longer an oracle for a hidden
+  field.
+- **FIXED**: `call_method` results projected only the top-level object, so a
+  returned object's embedded children (or object JSON inside a returned Hash)
+  could carry fields outside their own class's allowlist. Every embedded
+  object is now projected through its own class's effective allowlist.
 - **FIXED**: Field refusals from `group_by`, `group_by_date`, and `distinct`
   passed the refusal into `AccessDenied`'s class-name slot, so the message was
   a stringified Hash and `kind`, `denied_field`, and `allowed_fields` were
@@ -53,10 +62,24 @@
   from a cached response. Revocation is now bounded by the identity cache's
   TTL and invalidation hooks. The guide documents the interval for each path
   (REST, mongo-direct, listening streams).
+- **IMPROVED**: The deployment factories keep one rate limiter per
+  principal (the session's user, or the resolved operator), bounded to the
+  most recently seen 10,000, so `rate_limit:` accumulates across requests
+  instead of resetting with each request's fresh agent. An injected
+  `rate_limiter:` in `agent_options` is used as-is.
 - **NEW**: Orphaned subscription sessions (subscribed but never streamed, or
   whose stream closed without `DELETE`) are reaped after `orphan_ttl` (default
   300 seconds, `nil` disables), releasing their LiveQuery subscriptions.
   `MCPSubscriptions::Manager#reap_orphans!` reaps on demand.
+- **FIXED**: A client that reconnected a listening stream before the old one
+  closed lost its subscriptions: the old stream's close detached the session,
+  unregistering the new stream's delivery and tearing down its LiveQuery
+  subscriptions. A superseded stream now detaches nothing; the latest stream
+  owns the session, and `DELETE` still tears it down.
+- **FIXED**: A listening stream that closed while its first frame was being
+  written could start its heartbeat and identity-revalidation threads after
+  closing, leaving them running indefinitely. Both start under the close lock
+  and never once the stream is closed.
 
 #### Opt-in server field names in returned data
 
@@ -147,6 +170,32 @@
   helpers, and the mongo-direct entry points. Names a model does not declare
   keep the default camelCase formatting, and `Parse::Query.field_formatter`
   still applies to them.
+
+#### Release checks prove the intended coverage ran
+
+- **CHANGED**: `rake test:integration` checks Parse Server's health before
+  each file and after each failure, and fails the run (naming the file) when
+  the server goes down instead of passing with skips. Skips caused by an
+  unreachable Parse Server, MongoDB, or Redis fail their file; Atlas-only,
+  missing-credential, and missing-tool skips remain skips.
+  `PSNEXT_FAIL_ON_INFRA_SKIP=false` reports them without failing.
+- **FIXED**: The integration stack's Parse Server cache adapter could crash
+  Parse Server when its Redis client was closed (an unawaited rejected `put`
+  became an uncaught exception). Cache commands now connect lazily, wait for
+  readiness with a bound, and treat any command error as a cache miss.
+- **NEW**: The release workflow validates the tagged commit before
+  publishing: the tag must match `version.rb`, the unit-test workflow must
+  have passed on that exact commit, and the unit suite runs again; otherwise
+  nothing is pushed. Provider contract tests run in a separate scheduled or
+  manual workflow, never on pull requests.
+- **NEW**: CI runs the unit suite against ActiveModel/ActiveSupport 7.1, 7.2,
+  and 8.0 (`gemfiles/`), and an MCP client smoke test drives the Rack app
+  over real HTTP through initialize, tool and prompt listing, completion,
+  logging, a streamed tool call, and session termination.
+- **NEW**: `docs/mongodb_direct_guide.md` documents MongoDB 9.0 `null`
+  semantics on dotted paths. The SDK never compares a dotted path to `null`
+  on its own; only caller-supplied constraints are affected, and those
+  shapes are pinned by tests.
 
 #### Query model resolution works for any Parse class name
 

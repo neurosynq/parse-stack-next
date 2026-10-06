@@ -174,4 +174,31 @@ class MCPOrphanSubscriptionsTest < Minitest::Test
     end
     assert_equal 0, mgr.orphaned_session_count
   end
+
+  # ---- reconnect: an old stream closing after a new one attached ----------
+
+  def test_superseded_stream_closing_keeps_the_active_streams_subscriptions
+    mgr = manager
+    old_stream = ->(_n) {}
+    new_stream = ->(_n) {}
+    mgr.attach_listener("s1", &old_stream)
+    subscribe(mgr, "s1")
+    mgr.attach_listener("s1", &new_stream) # client reconnected before the old stream closed
+
+    assert_equal 0, mgr.detach_listener("s1", old_stream), "the superseded stream tears nothing down"
+    refute @lq.subs.first.unsubscribed?
+    assert mgr.listener?("s1"), "the active stream keeps its delivery"
+    assert_equal 1, mgr.subscription_count
+
+    assert_equal 1, mgr.detach_listener("s1", new_stream), "the active stream closing tears the session down"
+    assert @lq.subs.first.unsubscribed?
+  end
+
+  def test_delete_still_tears_down_regardless_of_streams
+    mgr = manager
+    mgr.attach_listener("s1") { |_n| }
+    subscribe(mgr, "s1")
+    assert_equal 1, mgr.detach_listener("s1")
+    assert @lq.subs.first.unsubscribed?
+  end
 end

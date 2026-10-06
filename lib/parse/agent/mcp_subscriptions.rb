@@ -394,7 +394,10 @@ module Parse
         def attach_listener(session_id, &callback)
           reap_orphans!
           @mutex.synchronize do
-            @attached[session_id] = true
+            # The latest stream owns the session. Remember its callback so a
+            # superseded stream that closes later (a reconnect overlaps the
+            # old stream) is recognized and does not tear the session down.
+            @attached[session_id] = callback || true
             @orphaned_since.delete(session_id)
           end
           @notifier.register(session_id, &callback)
@@ -460,13 +463,26 @@ module Parse
         #
         # @param session_id [String]
         # @return [Integer] number of LiveQuery subscriptions stopped.
-        def detach_listener(session_id)
-          @notifier.unregister(session_id)
+        #
+        # @param listener [Proc, nil] the closing stream's callback (as passed
+        #   to {#attach_listener}). When a newer stream has since attached for
+        #   the same session, the closing stream was superseded by a reconnect:
+        #   nothing is unregistered or torn down, so the active stream keeps
+        #   its delivery and subscriptions. nil (session termination via
+        #   DELETE) always tears the session down.
+        def detach_listener(session_id, listener = nil)
           subs = @mutex.synchronize do
+            current = @attached[session_id]
+            if listener && current && !current.equal?(listener) && current != true
+              next :superseded
+            end
             @attached.delete(session_id)
             @orphaned_since.delete(session_id)
             @sessions.delete(session_id)
-          end || {}
+          end
+          return 0 if subs == :superseded
+          @notifier.unregister(session_id)
+          subs ||= {}
           subs.each_value { |entry| safe_unsubscribe(entry[:sub]) }
           subs.size
         end
