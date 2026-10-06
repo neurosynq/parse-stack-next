@@ -496,8 +496,9 @@ class MCPDeploymentsTest < Minitest::Test
     manager = Object.new
     manager.define_singleton_method(:attach_listener) { |_sid, &_cb| nil }
     manager.define_singleton_method(:detach_listener) { |sid| detached << sid }
+    # Each check blocks until the test supplies its outcome, so the loop
+    # cannot run ahead of the assertions.
     outcomes = Queue.new
-    ([:raise, :ok] + [:raise] * App::ListeningStreamBody::MAX_REVALIDATION_ERRORS).each { |o| outcomes << o }
     checks = Queue.new
     check = lambda do
       outcome = outcomes.pop
@@ -508,8 +509,10 @@ class MCPDeploymentsTest < Minitest::Test
     body = App::ListeningStreamBody.new(manager, "S", 0, Logger.new(nil),
                                         revalidate: check, revalidate_interval: 0.01)
     reader = Thread.new { body.each { |_c| } }
+    outcomes << :raise << :ok
     2.times { checks.pop(timeout: 1) }
-    assert_nil detached.pop(timeout: 0.03), "one error followed by success keeps the stream open"
+    assert_nil detached.pop(timeout: 0.05), "one error followed by success keeps the stream open"
+    App::ListeningStreamBody::MAX_REVALIDATION_ERRORS.times { outcomes << :raise }
     assert_equal "S", detached.pop(timeout: 1), "persistent errors close the stream"
     reader.join(1)
   end

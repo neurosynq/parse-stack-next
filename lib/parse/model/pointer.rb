@@ -404,6 +404,16 @@ module Parse
       # We have a registered class with this field - handle autofetch
       field_name = method_name.to_s.chomp("=").to_sym
 
+      # A setter would change a fetched copy held inside this pointer, which
+      # nothing ever saves, so the write would be lost without notice.
+      if method_name.to_s.end_with?("=")
+        raise NoMethodError.new(
+          "undefined method '#{method_name}' for a #{self.class} to #{parse_class}. A pointer " \
+          "cannot be modified: fetch the object first (pointer.fetch) and set :#{field_name} on it.",
+          method_name,
+        )
+      end
+
       # If autofetch_raise_on_missing_keys is enabled, raise an error
       if Parse.autofetch_raise_on_missing_keys
         raise Parse::AutofetchTriggeredError.new(klass, id, field_name, is_pointer: true)
@@ -430,8 +440,8 @@ module Parse
     def respond_to_missing?(method_name, include_private = false)
       return super if is_a?(Parse::Object)
       klass = Parse::Model.find_class(parse_class)
-      if klass && klass.respond_to?(:fields)
-        field_name = method_name.to_s.chomp("=").to_sym
+      if klass && klass.respond_to?(:fields) && !method_name.to_s.end_with?("=")
+        field_name = method_name.to_sym
         return true if klass.fields[field_name]
       end
       super

@@ -78,7 +78,8 @@ module Parse
       @collection = other.instance_variable_get(:@collection).dup
       # Pending relation operations (RelationCollectionProxy) are copied too.
       %i[@additions @removals].each do |ivar|
-        value = instance_variable_get(ivar) if instance_variable_defined?(ivar)
+        next unless instance_variable_defined?(ivar)
+        value = instance_variable_get(ivar)
         instance_variable_set(ivar, value.dup) if value.is_a?(Array)
       end
       @mutations_from_database = nil
@@ -283,6 +284,7 @@ module Parse
     def add!(*items)
       items = items.flatten
       return false unless @delegate.respond_to?(:op_add!)
+      return true if items.empty?
       return add(*items) && true if unsaved_delegate?
       apply_atomic_op(:op_add!, items) do |list, objs|
         list + objs
@@ -299,6 +301,7 @@ module Parse
     def add_unique!(*items)
       items = items.flatten
       return false unless @delegate.respond_to?(:op_add_unique!)
+      return true if items.empty?
       return add_unique(*items) && true if unsaved_delegate?
       apply_atomic_op(:op_add_unique!, items) do |list, objs|
         objs.each { |o| list << o unless list.include?(o) }
@@ -315,6 +318,7 @@ module Parse
     def remove!(*items)
       items = items.flatten
       return false unless @delegate.respond_to?(:op_remove!)
+      return true if items.empty?
       return remove(*items) && true if unsaved_delegate?
       apply_atomic_op(:op_remove!, items) do |list, objs|
         list.reject { |x| objs.include?(x) }

@@ -230,8 +230,10 @@ module Parse
             # hash, lets try to build a Pointer of that type.
 
             if val.is_a?(Hash) && (val["__type"] == "Pointer" || val["__type"] == "Object")
-              # Get nested fetched keys for this field if available
-              nested_keys = nested_keys_for(association_key)
+              # Get nested fetched keys for this field if available. Query
+              # keys are recorded under the remote column name, which differs
+              # from the local name for multi-word fields.
+              nested_keys = nested_keys_for(association_key) || nested_keys_for(parse_field)
               # Always trust the declared klassName — never the className the
               # server (or attacker-controlled mass assignment) supplied. This
               # prevents type confusion where a pointer to a different class
@@ -273,21 +275,40 @@ module Parse
           end
 
           # We only support pointers, either by object or by transforming a hash.
+          # Assignment from application code (track == true) also accepts an
+          # objectId String, which becomes a pointer of the declared class,
+          # and refuses an object or pointer of another class. A pointer
+          # hash is wire data: its className is ignored in favor of the
+          # declared class, as before.
           define_method(set_attribute_method) do |val, track = true|
             if val == Parse::Properties::DELETE_OP
               val = nil
             elsif val.is_a?(Hash) && (val["__type"] == "Pointer" || val["__type"] == "Object")
               # Get nested fetched keys for this field if available
-              nested_keys = nested_keys_for(key)
+              nested_keys = nested_keys_for(key) || nested_keys_for(parse_field)
               # Always trust declared klassName over incoming hash className.
               incoming_class = val[Parse::Model::KEY_CLASS_NAME]
               if incoming_class && !Parse::Model.same_parse_class?(incoming_class, klassName)
                 warn "[#{self.class}] belongs_to :#{key} expected className=#{klassName.inspect}, ignoring incoming className=#{incoming_class.inspect}"
               end
               val = Parse::Object.build val, klassName, fetched_keys: nested_keys
+            elsif track == true && val.is_a?(String)
+              # A blank String (an empty form select) clears the pointer.
+              val = val.blank? ? nil : Parse::Object.build({ Parse::Model::TYPE_FIELD => Parse::Model::TYPE_POINTER,
+                                                             Parse::Model::KEY_CLASS_NAME => klassName,
+                                                             Parse::Model::OBJECT_ID => val }, klassName)
             end
 
             if track == true
+              unless val.nil? || val.is_a?(Parse::Pointer)
+                raise ArgumentError, "#{self.class}##{key} expects a #{klassName} object, pointer or objectId, got #{val.class}."
+              end
+              # The class is checked when the declared class is a registered
+              # model, matching has_many arrays.
+              if val.is_a?(Parse::Pointer) && Parse::Model.find_class(klassName) &&
+                 !Parse::Model.same_parse_class?(val.parse_class, klassName)
+                raise ArgumentError, "#{self.class}##{key} expects a #{klassName} object, got #{val.parse_class}."
+              end
               prepare_for_dirty_tracking!(key)
               send will_change_method unless val == instance_variable_get(ivar)
             else

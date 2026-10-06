@@ -142,7 +142,9 @@ module Parse
           end
 
           define_method(key) do |*args, &block|
-            return nil if @id.nil?
+            # An unsaved owner has no related record, unless the scope alone
+            # selects it (`scope_only: true` does not use the owner id).
+            return nil if @id.blank? && opts[:scope_only] != true
             query = Parse::Query.new(klassName, limit: 1)
             query.where(foreign_field => self) unless opts[:scope_only] == true
 

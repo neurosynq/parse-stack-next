@@ -32,13 +32,48 @@ module Parse
     # @overload add(parse_objects)
     #  Add an array of Parse::Objects or Parse::Pointers to this collection.
     #  @param parse_objects [Array<Parse::Object,Parse::Pointer>] the array to append.
+    # An objectId String is accepted and becomes a pointer of the declared
+    # class.
+    # @raise [ArgumentError] if an item is nil, of another Parse class, or
+    #  cannot be turned into a pointer.
     # @return [Array<Parse::Object>] the collection
     def add(*items)
-      notify_will_change! if items.count > 0
-      items.flatten.parse_objects.each do |item|
-        collection.push(item) if item.is_a?(Parse::Pointer)
-      end
+      items = typecast_items(items)
+      return @collection if items.empty?
+      notify_will_change!
+      items.each { |item| collection.push(item) }
       @collection
+    end
+
+    alias_method :push, :add
+
+    # Add items that are not already part of the collection.
+    # @param items [Array<Parse::Object,Parse::Pointer,String>] items to uniquely add
+    # @raise [ArgumentError] (see #add)
+    # @return [Array<Parse::Object>] the collection
+    def add_unique(*items)
+      items = typecast_items(items)
+      return @collection if items.empty?
+      notify_will_change!
+      @collection = collection | items
+      @collection
+    end
+
+    alias_method :push_unique, :add_unique
+
+    # @see #add
+    def <<(*list)
+      add(*list)
+      self
+    end
+
+    # Replace the contents of the collection. The items are validated as in
+    # {#add}.
+    # @param items [Array<Parse::Object,Parse::Pointer,String>] the new contents.
+    # @raise [ArgumentError] (see #add)
+    # @return [self]
+    def replace(items)
+      super(typecast_items(Array(items.is_a?(Parse::CollectionProxy) ? items.to_a : items)))
     end
 
     # Removes Parse::Objects from the collection.
@@ -48,40 +83,37 @@ module Parse
     # @overload remove(parse_objects)
     #  Remove an array of Parse::Objects or Parse::Pointers from this collection.
     #  @param parse_objects [Array<Parse::Object,Parse::Pointer>] the array of objects to remove.
+    # An objectId String removes the object of the declared class with that id.
     # @return [Array<Parse::Object>] the collection
     def remove(*items)
-      notify_will_change! if items.count > 0
-      items.flatten.parse_objects.each do |item|
-        collection.delete item
-      end
+      items = typecast_items(items, strict: false)
+      return @collection if items.empty?
+      notify_will_change!
+      items.each { |item| collection.delete item }
       @collection
     end
 
+    alias_method :delete, :remove
+
     # Atomically add a set of Parse::Objects to this collection.
-    # This is done by making the API request directly with Parse server; the
-    # local object is not updated with changes.
     # @see CollectionProxy#add!
     # @see #add_unique!
     def add!(*items)
-      super(items.flatten.parse_pointers)
+      super(*typecast_items(items))
     end
 
     # Atomically add a set of Parse::Objects to this collection for those not already
     # in the collection.
-    # This is done by making the API request directly with Parse server; the
-    # local object is not updated with changes.
     # @see CollectionProxy#add_unique!
     # @see #add!
     def add_unique!(*items)
-      super(items.flatten.parse_pointers)
+      super(*typecast_items(items))
     end
 
     # Atomically remove a set of Parse::Objects to this collection.
-    # This is done by making the API request directly with Parse server; the
-    # local object is not updated with changes.
     # @see CollectionProxy#remove!
     def remove!(*items)
-      super(items.flatten.parse_pointers)
+      super(*typecast_items(items, strict: false))
     end
 
     # Force fetch the set of pointer objects in this collection.
@@ -129,6 +161,66 @@ module Parse
       end
       opts = defaults.merge(opts)
       super(opts)
+    end
+
+    private
+
+    # Convert the given items to Parse objects of the collection's class.
+    # Parse objects and pointers are kept, pointer hashes are built, and an
+    # objectId String becomes a pointer of the declared class.
+    # @param items [Array] the items to convert (nested arrays are flattened).
+    # @param strict [Boolean] when true, an item that cannot be converted, or
+    #  belongs to another Parse class, raises. When false it is skipped.
+    # @raise [ArgumentError] in strict mode, for an invalid item.
+    # @return [Array<Parse::Pointer>]
+    def typecast_items(items, strict: true)
+      items.flatten.each_with_object([]) do |item, list|
+        obj = typecast_item(item)
+        if obj.nil?
+          next unless strict
+          raise ArgumentError, "Invalid item #{item.inspect} for #{collection_label}: " \
+                               "expected a Parse::Object, Parse::Pointer or objectId String."
+        end
+        unless item_class_allowed?(obj.parse_class)
+          next unless strict
+          raise ArgumentError, "Invalid item for #{collection_label}: expected a " \
+                               "#{@parse_class} object, got #{obj.parse_class}."
+        end
+        list << obj
+      end
+    end
+
+    # @return [Parse::Pointer, nil] the item as a Parse object, or nil.
+    def typecast_item(item)
+      case item
+      when Parse::Pointer
+        item
+      when Hash
+        type = item["__type"] || item[:__type]
+        return nil if type.present? && !%w[Pointer Object].include?(type.to_s)
+        # A pointer hash is wire data: with a declared class its className
+        # is ignored (with a warning), as for server data.
+        [item].parse_objects(@parse_class.presence).first
+      when String
+        return nil if item.blank? || @parse_class.blank?
+        Parse::Object.build({ Parse::Model::TYPE_FIELD => Parse::Model::TYPE_POINTER,
+                              Parse::Model::KEY_CLASS_NAME => @parse_class,
+                              Parse::Model::OBJECT_ID => item }, @parse_class)
+      end
+    end
+
+    # @return [Boolean] whether an item of `klass` may be part of this
+    #   collection. The class is checked when the declared class is a
+    #   registered model; a declaration naming no model (for example a
+    #   has_many whose `as:` was left to default) keeps accepting any class.
+    def item_class_allowed?(klass)
+      return true if @parse_class.blank? || Parse::Model.find_class(@parse_class).nil?
+      klass.present? && Parse::Model.same_parse_class?(klass, @parse_class)
+    end
+
+    def collection_label
+      owner = @delegate.respond_to?(:parse_class) ? @delegate.parse_class : @delegate.class
+      @key ? "#{owner}##{@key}" : self.class.name
     end
   end
 end

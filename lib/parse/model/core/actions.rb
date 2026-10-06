@@ -1703,17 +1703,15 @@ module Parse
       # Clears changes information on all collections (array and relations) and all
       # local attributes.
       def changes_applied!
-        # find all fields that are of type :array
-        fields(:array).each_key do |key|
-          proxy = send(key)
-          # clear changes
-          proxy.changes_applied! if proxy.respond_to?(:changes_applied!)
-        end
-
-        # for all relational fields,
-        relations.each do |key, v|
-          proxy = send(key)
-          # clear changes if they support the method.
+        # Settle the array and relation proxies that exist. Read the ivar
+        # rather than the getter: the getter can autofetch a pointer or
+        # build an empty proxy, and neither has changes to settle. A
+        # relation proxy also drops its saved additions and removals here,
+        # so a later save does not send them again.
+        (fields(:array).keys + relations.keys).uniq.each do |key|
+          ivar = :"@#{key}"
+          next unless instance_variable_defined?(ivar)
+          proxy = instance_variable_get(ivar)
           proxy.changes_applied! if proxy.respond_to?(:changes_applied!)
         end
         changes_applied
