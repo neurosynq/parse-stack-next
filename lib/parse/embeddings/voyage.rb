@@ -116,7 +116,64 @@ module Parse
     #   {Parse::Middleware::BodyBuilder::REDACTED_HEADERS}.
     class Voyage < Provider
       class AuthenticationError < Error; end
-      class BadRequestError < Error; end
+      # A 4xx the provider refused outright. Carries the HTTP status and
+      # the provider's own error text (bounded and terminal-sanitized) so
+      # callers can tell a request that was merely too large from one that
+      # is malformed.
+      class BadRequestError < Error
+        # Phrases that positively identify a request rejected for its
+        # SIZE (too many inputs or too many tokens summed across the
+        # batch). Matched case-insensitively against the provider's error
+        # text. Kept deliberately narrow: an unrelated 400 (bad parameter,
+        # invalid JSON) must never be mistaken for a size error, because
+        # the response to a size error is to split and resend.
+        #
+        # Voyage documents these 400 causes as "Batch size is too large"
+        # and "Total number of tokens in the batch exceeds the limit"; its
+        # messages read like "The max allowed tokens per submitted batch
+        # is 120000" and "The batch size limit is 128".
+        REQUEST_TOO_LARGE_PATTERNS = [
+          /batch size is too large/i,
+          /batch size limit/i,
+          /total number of tokens in the batch exceeds/i,
+          /max(?:imum)? allowed tokens per (?:submitted )?batch/i,
+        ].freeze
+
+        # Phrases identifying ONE input that is longer than the model's
+        # context window ("Number of tokens in an example exceeds the
+        # context length"). Splitting the batch cannot fix this.
+        INPUT_TOO_LONG_PATTERNS = [
+          /tokens in an example exceeds the context length/i,
+        ].freeze
+
+        # @return [Integer, nil] the HTTP status the provider returned.
+        attr_reader :status
+        # @return [String, nil] the provider's error text, truncated and
+        #   sanitized for terminals and logs.
+        attr_reader :detail
+
+        def initialize(message = nil, status: nil, detail: nil)
+          super(message)
+          @status = status
+          @detail = detail
+        end
+
+        # @return [Boolean] true when the provider rejected the request
+        #   because the batch (input count or summed tokens) is too large,
+        #   so resending it in smaller pieces can succeed.
+        def request_too_large?
+          return true if @status == 413
+          return false if @detail.nil? || input_too_long?
+          REQUEST_TOO_LARGE_PATTERNS.any? { |re| re.match?(@detail) }
+        end
+
+        # @return [Boolean] true when a single input exceeds the model's
+        #   context length.
+        def input_too_long?
+          return false if @detail.nil?
+          INPUT_TOO_LONG_PATTERNS.any? { |re| re.match?(@detail) }
+        end
+      end
       class RateLimitError < Error; end
       class TransientError < Error; end
 
@@ -266,9 +323,30 @@ module Parse
       # at most this many documents, and this many chunks summed
       # across them.
       # The endpoint also caps a request at 120k tokens summed across
-      # every document, which the SDK cannot check without a tokenizer.
+      # every document ({CONTEXT_MAX_REQUEST_TOKENS}), which the SDK can
+      # only estimate: it has no tokenizer.
       MAX_CONTEXT_DOCUMENTS = 1_000
       MAX_CONTEXT_CHUNKS = 16_000
+
+      # Voyage's cap on input tokens summed across every document in one
+      # contextualized request.
+      CONTEXT_MAX_REQUEST_TOKENS = 120_000
+
+      # Bytes per token assumed when ESTIMATING a request's input tokens
+      # for packing. Real tokenizers average closer to four bytes per token
+      # for English text, so dividing by three over-estimates and packs
+      # conservatively. This is an estimate, not a token count: the SDK has
+      # no tokenizer. When the estimate still lets an over-limit request
+      # through, the provider's size rejection is handled by splitting the
+      # request (see {CONTEXT_MAX_SPLIT_DEPTH}).
+      CONTEXT_ESTIMATED_BYTES_PER_TOKEN = 3
+
+      # How many times one contextualized request may be halved after the
+      # provider rejects it as too large. Ten halvings take the largest
+      # allowed request ({MAX_CONTEXT_DOCUMENTS} documents) down to single
+      # documents, so this bounds the retries without stopping short of a
+      # one-document request.
+      CONTEXT_MAX_SPLIT_DEPTH = 10
 
       # Default `embed_batch_size` for {CONTEXTUALIZED_MODELS}. Each
       # string is a whole document there, so 128 paragraph-sized inputs
@@ -704,25 +782,83 @@ module Parse
       # Embed documents through the contextualized endpoint and return one
       # Array of chunk vectors per document, in input order.
       #
-      # Voyage accepts up to {MAX_CONTEXT_CHUNKS} chunks per request, but
-      # that many vectors serialize to far more than {MAX_RESPONSE_BYTES}.
-      # Whole documents are therefore grouped so each response's estimated
-      # size stays within the cap, and the groups are sent in turn. A
-      # single document too large for the cap on its own is sent alone
-      # with a response allowance sized to its chunk count.
+      # This is robust adaptation, not exact token counting. Whole
+      # documents are packed into requests that stay within every limit
+      # the SDK can check or estimate:
+      #
+      # * at most {MAX_CONTEXT_DOCUMENTS} documents;
+      # * a chunk count whose response stays within {MAX_RESPONSE_BYTES}
+      #   (sized by the vectors coming back);
+      # * an ESTIMATED input-token total within
+      #   {CONTEXT_MAX_REQUEST_TOKENS} (see
+      #   {CONTEXT_ESTIMATED_BYTES_PER_TOKEN}).
+      #
+      # A document is never split across requests. A document that alone
+      # exceeds a budget is sent on its own (its response allowance is
+      # sized to its chunk count). If the provider still rejects a request
+      # as too large, that request is halved by document and each half
+      # resent (see {#embed_contextualized_group}), so a mis-estimate costs
+      # extra requests rather than failing the batch.
       def embed_contextualized(documents, input_type, wire_input_type)
-        per_vector = response_bytes_per_vector
-        chunks_per_request = [MAX_RESPONSE_BYTES / per_vector, 1].max
+        chunks_per_request = [MAX_RESPONSE_BYTES / response_bytes_per_vector, 1].max
         groups = []
-        documents.each do |doc|
+        documents.each_with_index do |doc, i|
           last = groups.last
-          if last && last.sum(&:length) + doc.length <= chunks_per_request
-            last << doc
+          tokens = estimate_input_tokens(doc)
+          if last &&
+             last[:docs].length < MAX_CONTEXT_DOCUMENTS &&
+             last[:chunks] + doc.length <= chunks_per_request &&
+             last[:tokens] + tokens <= CONTEXT_MAX_REQUEST_TOKENS
+            last[:docs] << doc
+            last[:chunks] += doc.length
+            last[:tokens] += tokens
           else
-            groups << [doc]
+            groups << { docs: [doc], offset: i, chunks: doc.length, tokens: tokens }
           end
         end
-        groups.flat_map { |group| embed_contextualized_request(group, input_type, wire_input_type) }
+        groups.flat_map do |group|
+          embed_contextualized_group(group[:docs], group[:offset], input_type, wire_input_type, 0)
+        end
+      end
+
+      # Send one packed group, halving it by document and resending each
+      # half when the provider rejects it as too large. Only an error that
+      # {BadRequestError#request_too_large?} positively identifies is split;
+      # any other error propagates unchanged. Results are concatenated in
+      # input order, so alignment with the caller's documents is preserved
+      # however the group was divided.
+      #
+      # @param offset [Integer] index of `documents.first` in the caller's
+      #   original input, for error messages.
+      # @param depth [Integer] halvings so far, bounded by
+      #   {CONTEXT_MAX_SPLIT_DEPTH}.
+      def embed_contextualized_group(documents, offset, input_type, wire_input_type, depth)
+        embed_contextualized_request(documents, input_type, wire_input_type)
+      rescue BadRequestError => e
+        raise unless e.request_too_large?
+
+        if documents.length == 1
+          raise BadRequestError.new(
+            "Parse::Embeddings::Voyage: document #{offset} (#{documents.first.length} chunk(s), " \
+            "about #{estimate_input_tokens(documents.first)} estimated tokens) is too large for a " \
+            "single #{@model} request even on its own. Split that document into fewer or shorter " \
+            "chunks, or into several documents. Provider said: #{e.detail || e.message}",
+            status: e.status, detail: e.detail,
+          )
+        end
+        raise if depth >= CONTEXT_MAX_SPLIT_DEPTH
+
+        mid = documents.length / 2
+        embed_contextualized_group(documents[0...mid], offset, input_type, wire_input_type, depth + 1) +
+          embed_contextualized_group(documents[mid..], offset + mid, input_type, wire_input_type, depth + 1)
+      end
+
+      # Conservative ESTIMATE of a document's input tokens: its chunks'
+      # bytes divided by {CONTEXT_ESTIMATED_BYTES_PER_TOKEN}, rounded up.
+      # Used only for packing, never to refuse a document.
+      def estimate_input_tokens(chunks)
+        bytes = chunks.sum(&:bytesize)
+        (bytes + CONTEXT_ESTIMATED_BYTES_PER_TOKEN - 1) / CONTEXT_ESTIMATED_BYTES_PER_TOKEN
       end
 
       # @return [Integer] the planning estimate for one vector's JSON size.
@@ -1037,9 +1173,37 @@ module Parse
             sleep(backoff_seconds(attempts))
             next
           end
-          raise BadRequestError,
-                "Parse::Embeddings::Voyage: #{status} from POST /#{path}."
+          detail = provider_error_detail(response.body)
+          message = +"Parse::Embeddings::Voyage: #{status} from POST /#{path}."
+          message << " #{detail}" if detail
+          raise BadRequestError.new(message, status: status, detail: detail)
         end
+      end
+
+      # Longest provider error text kept on a {BadRequestError}.
+      MAX_ERROR_DETAIL_CHARS = 500
+
+      # Extract the provider's error text from a non-2xx body, bounded and
+      # made safe to print. Voyage returns `{ "detail": "..." }`; a
+      # `message`, a string `error`, or a nested `error.message` is accepted
+      # too. Returns nil for an empty, oversized, or unparseable body rather
+      # than raising, since the status code alone still describes the
+      # failure.
+      def provider_error_detail(body)
+        s = body.to_s
+        return nil if s.empty? || s.bytesize > 64 * 1024
+        parsed = JSON.parse(s, max_nesting: 8)
+        return nil unless parsed.is_a?(Hash)
+        text = parsed["detail"] || parsed["message"]
+        err = parsed["error"]
+        text ||= err["message"] if err.is_a?(Hash)
+        text ||= err if err.is_a?(String)
+        text = text.to_json unless text.nil? || text.is_a?(String)
+        return nil if text.nil? || text.strip.empty?
+        text = text[0, MAX_ERROR_DETAIL_CHARS]
+        defined?(Parse::TerminalSafe) ? Parse::TerminalSafe.sanitize_line(text) : text
+      rescue JSON::ParserError
+        nil
       end
 
       def parse_json_body!(body, max_bytes = MAX_RESPONSE_BYTES)
