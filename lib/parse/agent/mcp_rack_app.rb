@@ -313,6 +313,17 @@ module Parse
       #   explicit `streaming:` or `notifications:` also raises, since the
       #   switch already owns those toggles. Requires a streaming-capable Rack
       #   server (Puma, Falcon, Unicorn); has no effect under WEBrick.
+      # @param listening_stream_revalidator [#call, nil] re-checks the caller's
+      #   identity on long-lived GET listening streams. Called with the agent
+      #   that opened the stream every `listening_stream_revalidate_interval`
+      #   seconds; a falsy return (or a raise) closes the stream, which tears
+      #   down that session's subscriptions. POST requests re-authenticate
+      #   through the agent factory on every call, but a listening stream is
+      #   authenticated once at attach, so this is what bounds how long a
+      #   revoked session keeps receiving notifications. `nil` (default) skips
+      #   revalidation. {MCPRackApp.user_scoped} installs one.
+      # @param listening_stream_revalidate_interval [Numeric, nil] seconds
+      #   between revalidations. Required (positive) when a revalidator is set.
       # @raise [ArgumentError] if both or neither of agent_factory/block are given.
       def initialize(agent_factory: nil, max_body_size: DEFAULT_MAX_BODY_SIZE,
                      logger: nil, streaming: nil,
@@ -328,6 +339,8 @@ module Parse
                      transport: nil,
                      approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
                      principal_resolver: nil,
+                     listening_stream_revalidator: nil,
+                     listening_stream_revalidate_interval: nil,
                      health_path: nil, &block)
         if agent_factory && block
           raise ArgumentError, "Provide agent_factory: OR a block, not both"
@@ -420,6 +433,19 @@ module Parse
           raise ArgumentError, "principal_resolver must respond to #call"
         end
         @principal_resolver = principal_resolver
+
+        if listening_stream_revalidator
+          unless listening_stream_revalidator.respond_to?(:call)
+            raise ArgumentError, "listening_stream_revalidator must respond to #call"
+          end
+          unless listening_stream_revalidate_interval.is_a?(Numeric) && listening_stream_revalidate_interval.positive?
+            raise ArgumentError,
+                  "listening_stream_revalidate_interval must be a positive Numeric when a " \
+                  "listening_stream_revalidator is set (got #{listening_stream_revalidate_interval.inspect})"
+          end
+        end
+        @listening_stream_revalidator = listening_stream_revalidator
+        @listening_stream_revalidate_interval = listening_stream_revalidate_interval
 
         # Listening-stream coordinator (the server→client broadcast bus
         # backing resource subscriptions, MCP elicitation, and
@@ -841,7 +867,9 @@ module Parse
         #     Failures (no correlation_id, no match) are silent 202 no-ops
         #     to avoid a probe oracle — exactly like notifications/cancelled.
         if elicitation_reply?(body)
-          route_elicitation_reply(agent, body)
+          # Only the session's owner may answer its approval prompts. A
+          # mismatch is the same silent 202 as any other miss (no oracle).
+          route_elicitation_reply(agent, body) if session_controllable?(agent, env)
           return [202, json_headers, [""]]
         end
 
@@ -859,7 +887,11 @@ module Parse
         #     always 202 Accepted with an empty body.
         if body.is_a?(Hash) && body["method"] == "notifications/cancelled"
           request_id = body.dig("params", "requestId")
-          if agent.respond_to?(:correlation_id) && agent.correlation_id && request_id
+          # Only the session's owner may cancel its in-flight requests; a
+          # caller who merely knows (or chose) the same Mcp-Session-Id gets the
+          # same silent 202 as any other miss.
+          if agent.respond_to?(:correlation_id) && agent.correlation_id && request_id &&
+             session_controllable?(agent, env)
             @cancellation_registry.cancel(
               agent.correlation_id,
               request_id,
@@ -957,6 +989,15 @@ module Parse
           listener_check: ->(cid) { mgr ? mgr.listener?(cid) : false },
           timeout: @approval_timeout,
         )
+      end
+
+      # Whether this request's principal may send control messages
+      # (cancellation, elicitation replies) for its Mcp-Session-Id: true for an
+      # unbound session or one bound to this principal.
+      def session_controllable?(agent, env)
+        cid = agent.respond_to?(:correlation_id) ? agent.correlation_id : nil
+        return false if cid.nil? || cid.to_s.empty?
+        @session_owners.controllable_by?(cid, principal_fingerprint(agent, env))
       end
 
       # The log-level registry this request may read and write, or nil.
@@ -1143,7 +1184,13 @@ module Parse
           return [503, json_headers, [json_rpc_error(-32_000, "server busy")]]
         end
 
-        body = ListeningStreamBody.new(@subscription_manager, session_id, @heartbeat_interval, @logger)
+        revalidate = if @listening_stream_revalidator
+            revalidator = @listening_stream_revalidator
+            -> { revalidator.call(agent) }
+          end
+        body = ListeningStreamBody.new(@subscription_manager, session_id, @heartbeat_interval, @logger,
+                                       revalidate: revalidate,
+                                       revalidate_interval: @listening_stream_revalidate_interval)
         [200, sse_headers, body]
       end
 
@@ -1785,11 +1832,19 @@ module Parse
         # @param heartbeat_interval [Numeric] SSE comment heartbeat period in
         #   seconds; `<= 0` disables heartbeats.
         # @param logger [#warn, nil]
-        def initialize(manager, session_id, heartbeat_interval, logger)
+        # @param revalidate [#call, nil] identity re-check run every
+        #   `revalidate_interval` seconds; a falsy return or a raise closes the
+        #   stream. See MCPRackApp's `listening_stream_revalidator:`.
+        # @param revalidate_interval [Numeric, nil]
+        def initialize(manager, session_id, heartbeat_interval, logger,
+                       revalidate: nil, revalidate_interval: nil)
           @manager = manager
           @session_id = session_id
           @heartbeat_interval = heartbeat_interval
           @logger = logger
+          @revalidate = revalidate
+          @revalidate_interval = revalidate_interval
+          @revalidator_thread = nil
           @queue = Queue.new
           @heartbeat = nil
           @closed = false
@@ -1814,6 +1869,7 @@ module Parse
           # Initial comment flushes response headers and confirms the stream.
           yield ": connected\n\n"
           start_heartbeat
+          start_revalidation
           loop do
             msg = @queue.pop
             break if msg == DONE
@@ -1835,6 +1891,8 @@ module Parse
           MCPRackApp.adjust_listening_stream_count(-1) if @counted
           @heartbeat&.kill
           @heartbeat = nil
+          @revalidator_thread&.kill unless @revalidator_thread == Thread.current
+          @revalidator_thread = nil
           begin
             @manager.detach_listener(@session_id)
           rescue StandardError => e
@@ -1854,6 +1912,34 @@ module Parse
             loop do
               sleep interval
               queue << ": keep-alive\n\n"
+            end
+          end
+        end
+
+        # Re-check the caller's identity on a timer; close the stream the first
+        # time the check fails. close runs the normal teardown (detach the
+        # listener, unsubscribe the session's LiveQuery subscriptions) and
+        # wakes #each, which then ends the response.
+        def start_revalidation
+          return unless @revalidate && @revalidate_interval && @revalidate_interval > 0
+          check = @revalidate
+          interval = @revalidate_interval
+          @revalidator_thread = Thread.new do
+            loop do
+              sleep interval
+              ok = begin
+                  check.call
+                rescue StandardError => e
+                  line = "[Parse::Agent::MCPRackApp::ListeningStreamBody] revalidation error: #{e.class}"
+                  @logger ? @logger.warn(line) : warn(line)
+                  false
+                end
+              next if ok
+              line = "[Parse::Agent::MCPRackApp::ListeningStreamBody] closing listening stream: " \
+                     "caller identity no longer valid"
+              @logger ? @logger.warn(line) : warn(line)
+              close
+              break
             end
           end
         end
@@ -1982,6 +2068,18 @@ module Parse
 
         # True when `session_id` is bound to exactly this principal. Never
         # claims an unbound session (unlike {#authorize_attach}).
+        # True when the session is unbound (never initialized or attached) or
+        # bound to this principal. Used to gate per-session control messages
+        # (cancellation, elicitation replies): an unbound session has no owner
+        # to protect, while a bound one only accepts its owner.
+        def controllable_by?(session_id, fingerprint)
+          return false if blank?(session_id) || blank?(fingerprint)
+          @mutex.synchronize do
+            owner = @owners[session_id]
+            owner.nil? || owner == fingerprint
+          end
+        end
+
         def owned_by?(session_id, fingerprint)
           return false if blank?(session_id) || blank?(fingerprint)
           @mutex.synchronize { @owners[session_id] == fingerprint }
@@ -2295,3 +2393,6 @@ module Parse
     end
   end
 end
+
+# Supported deployment patterns (MCPRackApp.user_scoped / .master_analytics).
+require_relative "mcp_deployments"

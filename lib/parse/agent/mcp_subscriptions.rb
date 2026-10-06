@@ -87,6 +87,15 @@ module Parse
       # caps that growth, mirroring SessionOwnerRegistry::DEFAULT_MAX_ENTRIES.
       DEFAULT_MAX_SESSIONS = 10_000
 
+      # Default grace period, in seconds, before an orphaned session's
+      # subscriptions are reaped. A session is orphaned while it holds
+      # subscriptions but has no listening stream attached: it subscribed and
+      # never opened the GET stream, or subscribed again after its stream
+      # closed. Normal teardown (unsubscribe, stream close, DELETE) is
+      # unaffected; this bounds how long an abandoned session keeps LiveQuery
+      # subscriptions open when none of those ever happen.
+      DEFAULT_ORPHAN_TTL = 300
+
       # Parse a resource URI into `[class_name, kind]`, enforcing that the kind
       # is LiveQuery-backed.
       #
@@ -318,12 +327,23 @@ module Parse
         #   sessions holding subscriptions. {#subscribe} raises
         #   {Parse::Agent::ValidationError} when a NEW session would exceed it.
         #   See {DEFAULT_MAX_SESSIONS}.
+        # @param orphan_ttl [Numeric, nil] seconds an orphaned session (holding
+        #   subscriptions with no listening stream attached) is kept before
+        #   {#reap_orphans!} tears its subscriptions down. See
+        #   {DEFAULT_ORPHAN_TTL}. `nil` disables reaping.
+        # @param clock [#call] monotonic clock returning seconds, injectable
+        #   for tests. Defaults to `Process::CLOCK_MONOTONIC`.
         def initialize(logger: nil, debounce_interval: DEFAULT_DEBOUNCE_INTERVAL,
                        notifier: nil, live_query_client: nil, supported: nil,
                        timer: nil,
                        live_query_admin_client: nil, live_query_scoped_client: nil,
                        max_subscriptions_per_session: DEFAULT_MAX_SUBSCRIPTIONS_PER_SESSION,
-                       max_sessions: DEFAULT_MAX_SESSIONS)
+                       max_sessions: DEFAULT_MAX_SESSIONS,
+                       orphan_ttl: DEFAULT_ORPHAN_TTL,
+                       clock: nil)
+          if !orphan_ttl.nil? && !(orphan_ttl.is_a?(Numeric) && orphan_ttl.positive?)
+            raise ArgumentError, "orphan_ttl must be a positive Numeric or nil (got #{orphan_ttl.inspect})"
+          end
           @logger = logger
           @debounce_interval = debounce_interval
           @notifier = notifier || LocalNotifier.new
@@ -338,7 +358,19 @@ module Parse
           # session_id => { uri => { sub:, debouncer: } }
           @sessions = Hash.new { |h, k| h[k] = {} }
           @mutex = Mutex.new
+          @orphan_ttl = orphan_ttl
+          @clock = clock || -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+          # Sessions with a listening stream attached, tracked here (under
+          # @mutex) rather than read from the notifier, so {#reap_orphans!} and
+          # {#attach_listener} decide "orphaned or not" under one lock and an
+          # attach can never interleave with a reap of the same session.
+          @attached = {}
+          # session_id => clock time the session became orphaned.
+          @orphaned_since = {}
         end
+
+        # @return [Numeric, nil] the configured orphan grace period.
+        attr_reader :orphan_ttl
 
         attr_reader :notifier
 
@@ -360,7 +392,47 @@ module Parse
         # @yieldparam notification_hash [Hash] JSON-RPC notification to deliver.
         # @return [void]
         def attach_listener(session_id, &callback)
+          reap_orphans!
+          @mutex.synchronize do
+            @attached[session_id] = true
+            @orphaned_since.delete(session_id)
+          end
           @notifier.register(session_id, &callback)
+        end
+
+        # Tear down the subscriptions of every session that has been orphaned
+        # (subscriptions held, no listening stream attached) for at least
+        # {#orphan_ttl} seconds. Called opportunistically from {#subscribe} and
+        # {#attach_listener}; operators may also call it on a timer. The
+        # orphan check and the removal happen under one lock, so a session
+        # that attaches concurrently is either seen as attached (and kept) or
+        # attaches after its subscriptions were removed (and starts clean).
+        # LiveQuery unsubscribes run after the lock is released.
+        #
+        # @return [Integer] number of sessions reaped.
+        def reap_orphans!
+          return 0 if @orphan_ttl.nil?
+          now = @clock.call
+          reaped = @mutex.synchronize do
+            expired = @orphaned_since.select { |sid, since| !@attached[sid] && now - since >= @orphan_ttl }.keys
+            expired.map do |sid|
+              @orphaned_since.delete(sid)
+              [sid, @sessions.delete(sid) || {}]
+            end
+          end
+          reaped.each do |sid, subs|
+            subs.each_value { |entry| safe_unsubscribe(entry[:sub]) }
+            warn_logger("reaped orphaned session #{sid.to_s[0, 8]}... (#{subs.size} subscription(s), " \
+                        "no listening stream for #{@orphan_ttl}s)")
+          end
+          reaped.size
+        end
+
+        # @return [Integer] number of sessions currently orphaned (holding
+        #   subscriptions with no listening stream), whether or not their
+        #   grace period has elapsed.
+        def orphaned_session_count
+          @mutex.synchronize { @orphaned_since.size }
         end
 
         # Whether a listening stream is currently attached for the session.
@@ -390,7 +462,11 @@ module Parse
         # @return [Integer] number of LiveQuery subscriptions stopped.
         def detach_listener(session_id)
           @notifier.unregister(session_id)
-          subs = @mutex.synchronize { @sessions.delete(session_id) } || {}
+          subs = @mutex.synchronize do
+            @attached.delete(session_id)
+            @orphaned_since.delete(session_id)
+            @sessions.delete(session_id)
+          end || {}
           subs.each_value { |entry| safe_unsubscribe(entry[:sub]) }
           subs.size
         end
@@ -412,6 +488,7 @@ module Parse
                   "Complete initialize first, then open the GET listening stream."
           end
           class_name, resource = MCPSubscriptions.parse_subscribable_uri(uri)
+          reap_orphans!
 
           # Authorization parity with the read path (resources/read →
           # agent.execute → assert_class_accessible!). Enforce agent_hidden, the
@@ -495,6 +572,9 @@ module Parse
               :over_cap
             else
               @sessions[session_id][uri] = { sub: sub, debouncer: debouncer }
+              # A session holding subscriptions without a listening stream
+              # starts its orphan grace period now (if not already running).
+              @orphaned_since[session_id] ||= @clock.call unless @attached[session_id]
               :stored
             end
           end
@@ -527,7 +607,10 @@ module Parse
           entry = @mutex.synchronize do
             subs = @sessions[session_id]
             e = subs.delete(uri)
-            @sessions.delete(session_id) if subs.empty?
+            if subs.empty?
+              @sessions.delete(session_id)
+              @orphaned_since.delete(session_id)
+            end
             e
           end
           return false unless entry

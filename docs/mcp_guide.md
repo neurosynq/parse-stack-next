@@ -396,6 +396,141 @@ Common uses for the direct dispatcher:
 
 ---
 
+## Deployment Patterns
+
+`MCPRackApp.new(agent_factory: ...)` accepts any factory. For the two common
+production shapes, two factories package the identity rules so a deployment
+cannot drift from one access mode into the other by accident:
+
+| Factory | Use it for | Identity | Data access |
+|---|---|---|---|
+| `MCPRackApp.user_scoped` | Personal assistants, application users | A Parse session token on every request; missing or invalid is 401 | The user's own ACL/CLP, enforced by Parse Server on REST and by the SDK on mongo-direct paths. No master-key fallback |
+| `MCPRackApp.master_analytics` | Analytics, reporting, trusted operational tools | A verified operator from a required `principal_resolver`; unresolved is 401 | Master authority, narrowed by the agent's `tools:`, `classes:`, `filters:`, and field policy. Read-only by default |
+
+Both factories take `agent_options:` (extra `Parse::Agent.new` options such
+as `tools:`, `methods:`, `classes:`, `filters:`) and pass the remaining
+keywords to `MCPRackApp.new` (`transport:`, `logger:`, `allowed_origins:`,
+...). Options that set identity or authority (`session_token`, `acl_user`,
+`acl_role`, `impersonate_*`, `tenant_id`, `client`, `permissions`) are refused
+in `agent_options:`, and the factory owns `agent_factory:` and
+`principal_resolver:`. A deliberate single-operator master-key endpoint is
+still built with `MCPRackApp.new` directly.
+
+### Personal assistant (user-scoped)
+
+```ruby
+# config/routes.rb (Rails), or `run` it from config.ru
+MCP = Parse::Agent::MCPRackApp.user_scoped(
+  transport: :streamable_http,
+  permissions: :write,                       # writes still go only through agent_methods
+  tenant_from: ->(env, user_id) { Workspace.id_for_user(user_id) },  # pinned server-side
+  agent_options: { classes: %w[Post Comment], methods: %w[archive] },
+)
+mount MCP, at: "/mcp"
+```
+
+```ruby
+# The only write this assistant can make, declared by the application.
+class Post < Parse::Object
+  agent_method :archive, permission: :write, supports_dry_run: true, permitted_keys: [:reason]
+  def archive(reason:, agent: nil, dry_run: false, **)
+    return { would: "archive #{id}", reason: reason } if dry_run
+    update!(archived_at: Time.now, archive_reason: reason)
+  end
+end
+
+# Require a human approval (MCP elicitation) before any :write call runs.
+Parse::Agent.require_approval_for = [:write]
+```
+
+The client sends the user's session token as `Authorization: Bearer
+<token>` (or `X-Parse-Session-Token`; pass `session_token_from: ->(env) {
+... }` for anything else). Every request builds a fresh
+`Parse::Agent.new(session_token: token, ...)`, so the agent acts as that user
+and tool arguments cannot change who it is or which tenant it is bound to.
+`tenant_from` returning nil refuses the request rather than running unscoped.
+
+On logout the token stops validating, so the next request gets 401 and any
+open listening stream closes within the revalidation interval. To reconnect,
+the client logs in again and starts a new MCP session (`initialize`) with the
+new token. A session id is bound to the principal that initialized it, so
+the new token cannot take over the old session, and the old session's
+subscriptions are torn down when its stream closes (or reaped as orphans,
+below).
+
+### Read-only analytics endpoint (master key)
+
+```ruby
+ANALYTICS = Parse::Agent::MCPRackApp.master_analytics(
+  # Required. Resolve the VERIFIED operator behind the request. Returning
+  # nil or "" refuses the request with 401.
+  principal_resolver: ->(_agent, env) { env["warden"]&.user&.email },
+  transport: :streamable_http,
+  agent_options: {
+    classes: %w[Post Subscription PostMetric],
+    tools: %w[query_class count_objects group_by group_by_date distinct aggregate get_schema],
+  },
+)
+
+# Audit: every tool call emits parse.agent.tool_call.
+ActiveSupport::Notifications.subscribe("parse.agent.tool_call") do |*, payload|
+  AuditLog.record(tool: payload[:tool], correlation_id: payload[:correlation_id])
+end
+```
+
+`master_analytics` raises `ArgumentError` at construction without a
+`principal_resolver`. Without one every master-key agent has the same
+fingerprint, so two operators sharing the endpoint could attach to, approve,
+or cancel each other's sessions. The operator identity governs session
+ownership and audit; master authority governs what data the agent can reach,
+and the configured tools and classes govern what it may actually do. It
+defaults to `permissions: :readonly`, and refuses a client without a master
+key.
+
+### Session ownership
+
+Under both factories, an `Mcp-Session-Id` is bound to the principal that
+initialized it (the session token for `user_scoped`, the resolved operator for
+`master_analytics`). Another caller who knows or chooses the same id cannot:
+
+- re-initialize it (403),
+- attach its listening stream (403),
+- cancel its in-flight requests (`notifications/cancelled` is a silent 202 no-op),
+- answer its approval prompts (the elicitation reply is a silent 202 no-op),
+- change its log level.
+
+### Revocation intervals
+
+How quickly a logged-out, expired, or revoked session (or a role change)
+stops having effect, for a `user_scoped` deployment:
+
+| Path | `session_validation: :per_request` (default) | `session_validation: :cached` |
+|---|---|---|
+| New MCP request (any tool) | Next request: the token is re-checked against Parse Server (`GET /users/me`, response cache bypassed) | Identity-cache TTL (`identity_cache_ttl`, default 3600s), or immediately when the `Parse::Cache::Invalidation` `after_logout` / `_User` hooks evict the token |
+| REST tools within an accepted request | Immediate: Parse Server validates the token on every call | Immediate |
+| Mongo-direct reads (identity) | Next request: a failed check also evicts the token from `client.authorization` | Same as the row above |
+| Mongo-direct reads (role change) | Role-cache TTL (`role_cache_ttl`, default 30s), or immediately when the `_Role` invalidation hook fires | Same |
+| Open listening stream / subscriptions | Within `session_revalidate_interval` (default 60s): the stream is re-checked and closed, tearing down its LiveQuery subscriptions | Same (stream re-checks always ask Parse Server) |
+
+`:per_request` costs one `/users/me` call per MCP request; `:cached` saves it
+at the price of the identity-TTL window when invalidation hooks are not
+installed. The TTLs are configured with
+`Parse::Authorization.configure(identity_cache_ttl:, role_cache_ttl:)`.
+
+### Orphaned subscriptions
+
+A session that subscribes to resources but never opens its listening stream
+(or subscribes again after the stream closed) holds LiveQuery subscriptions
+with nowhere to deliver them. Normal teardown (unsubscribe, stream close,
+`DELETE`) does not cover that case, so the subscription manager reaps such
+sessions after a grace period: `orphan_ttl:` on
+`Parse::Agent::MCPSubscriptions::Manager` (default 300 seconds, `nil` to
+disable). Reaping runs whenever a session subscribes or attaches a stream,
+and can be triggered with `manager.reap_orphans!`. A session that attaches
+its stream within the grace period keeps its subscriptions.
+
+---
+
 ## Connecting Claude Desktop (stdio bridge)
 
 Parse Stack speaks MCP over **HTTP** (the standalone server and the
