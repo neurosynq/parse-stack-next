@@ -397,31 +397,31 @@ class ArrayEqualityIntegrationTest < Minitest::Test
 
       with_timeout(5, "testing :size constraint") do
         begin
-          # Test :tags.size => 2
-          results = TaggedItem.query(:tags.size => 2).all
+          # Test :tags.array_size => 2
+          results = TaggedItem.query(:tags.array_size => 2).all
           names = results.map(&:name)
 
-          puts "Query: :tags.size => 2"
+          puts "Query: :tags.array_size => 2"
           puts "Results: #{names.inspect}"
 
           assert_equal 1, results.length, "Should find exactly 1 item with 2 tags"
           assert_equal "two_tags", results.first.name, "Should find two_tags item"
 
-          # Test :tags.size => 3
-          results = TaggedItem.query(:tags.size => 3).all
+          # Test :tags.array_size => 3
+          results = TaggedItem.query(:tags.array_size => 3).all
           names = results.map(&:name)
 
-          puts "Query: :tags.size => 3"
+          puts "Query: :tags.array_size => 3"
           puts "Results: #{names.inspect}"
 
           assert_equal 1, results.length, "Should find exactly 1 item with 3 tags"
           assert_equal "three_tags", results.first.name, "Should find three_tags item"
 
-          # Test :tags.size => 0
-          results = TaggedItem.query(:tags.size => 0).all
+          # Test :tags.array_size => 0
+          results = TaggedItem.query(:tags.array_size => 0).all
           names = results.map(&:name)
 
-          puts "Query: :tags.size => 0"
+          puts "Query: :tags.array_size => 0"
           puts "Results: #{names.inspect}"
 
           assert_equal 1, results.length, "Should find exactly 1 item with 0 tags"
@@ -876,45 +876,45 @@ class ArrayEqualityIntegrationTest < Minitest::Test
 
       with_timeout(10, "testing size comparison operators") do
         begin
-          # Test :tags.size => { gt: 2 } - size > 2
-          results = TaggedItem.query(:tags.size => { gt: 2 }).all
+          # Test :tags.array_size => { gt: 2 } - size > 2
+          results = TaggedItem.query(:tags.array_size => { gt: 2 }).all
           names = results.map(&:name).sort
-          puts "Query: :tags.size => { gt: 2 }"
+          puts "Query: :tags.array_size => { gt: 2 }"
           puts "Results: #{names.inspect}"
           assert_equal ["five", "three"], names, "gt: 2 should find three and five"
 
-          # Test :tags.size => { gte: 3 } - size >= 3
-          results = TaggedItem.query(:tags.size => { gte: 3 }).all
+          # Test :tags.array_size => { gte: 3 } - size >= 3
+          results = TaggedItem.query(:tags.array_size => { gte: 3 }).all
           names = results.map(&:name).sort
-          puts "Query: :tags.size => { gte: 3 }"
+          puts "Query: :tags.array_size => { gte: 3 }"
           puts "Results: #{names.inspect}"
           assert_equal ["five", "three"], names, "gte: 3 should find three and five"
 
-          # Test :tags.size => { lt: 2 } - size < 2
-          results = TaggedItem.query(:tags.size => { lt: 2 }).all
+          # Test :tags.array_size => { lt: 2 } - size < 2
+          results = TaggedItem.query(:tags.array_size => { lt: 2 }).all
           names = results.map(&:name).sort
-          puts "Query: :tags.size => { lt: 2 }"
+          puts "Query: :tags.array_size => { lt: 2 }"
           puts "Results: #{names.inspect}"
           assert_equal ["one", "zero"], names, "lt: 2 should find zero and one"
 
-          # Test :tags.size => { lte: 1 } - size <= 1
-          results = TaggedItem.query(:tags.size => { lte: 1 }).all
+          # Test :tags.array_size => { lte: 1 } - size <= 1
+          results = TaggedItem.query(:tags.array_size => { lte: 1 }).all
           names = results.map(&:name).sort
-          puts "Query: :tags.size => { lte: 1 }"
+          puts "Query: :tags.array_size => { lte: 1 }"
           puts "Results: #{names.inspect}"
           assert_equal ["one", "zero"], names, "lte: 1 should find zero and one"
 
-          # Test :tags.size => { ne: 2 } - size != 2
-          results = TaggedItem.query(:tags.size => { ne: 2 }).all
+          # Test :tags.array_size => { ne: 2 } - size != 2
+          results = TaggedItem.query(:tags.array_size => { ne: 2 }).all
           names = results.map(&:name).sort
-          puts "Query: :tags.size => { ne: 2 }"
+          puts "Query: :tags.array_size => { ne: 2 }"
           puts "Results: #{names.inspect}"
           assert_equal ["five", "one", "three", "zero"], names, "ne: 2 should exclude two"
 
-          # Test combined: :tags.size => { gte: 1, lt: 3 } - 1 <= size < 3
-          results = TaggedItem.query(:tags.size => { gte: 1, lt: 3 }).all
+          # Test combined: :tags.array_size => { gte: 1, lt: 3 } - 1 <= size < 3
+          results = TaggedItem.query(:tags.array_size => { gte: 1, lt: 3 }).all
           names = results.map(&:name).sort
-          puts "Query: :tags.size => { gte: 1, lt: 3 }"
+          puts "Query: :tags.array_size => { gte: 1, lt: 3 }"
           puts "Results: #{names.inspect}"
           assert_equal ["one", "two"], names, "gte: 1, lt: 3 should find one and two"
 
@@ -959,21 +959,21 @@ class ArrayEqualityIntegrationTest < Minitest::Test
 
       with_timeout(10, "testing pointer array :size") do
         begin
-          # Test :categories.size => 2
-          results = Product.query(:categories.size => 2).all
+          # Test :categories.array_size => 2
+          results = Product.query(:categories.array_size => 2).all
           names = results.map(&:name)
 
-          puts "Query: :categories.size => 2"
+          puts "Query: :categories.array_size => 2"
           puts "Results: #{names.inspect}"
 
           assert_equal 1, results.length, "Should find exactly 1 product with 2 categories"
           assert_equal "two_cats", results.first.name, "Should find two_cats product"
 
-          # Test :categories.size => 1
-          results = Product.query(:categories.size => 1).all
+          # Test :categories.array_size => 1
+          results = Product.query(:categories.array_size => 1).all
           names = results.map(&:name)
 
-          puts "Query: :categories.size => 1"
+          puts "Query: :categories.array_size => 1"
           puts "Results: #{names.inspect}"
 
           assert_equal 1, results.length, "Should find exactly 1 product with 1 category"

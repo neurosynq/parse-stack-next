@@ -594,8 +594,10 @@ module Parse
         # Use provided port, or configured port, or default
         port ||= Parse.mcp_server_port || 3001
 
-        @mcp_enabled = true
+        # Load the server before flagging MCP as enabled, so a failed load
+        # does not leave mcp_enabled? reporting true.
         require_relative "agent/mcp_server"
+        @mcp_enabled = true
         MCPServer.default_port = port
 
         # Pass remote API config if available

@@ -89,6 +89,9 @@ module Parse
         if klass.nil?
           klass = ::Class.new(Parse::Object)
           Parse::Generated.const_set(parse_class_name, klass)
+          # The default parse_class comes from the Ruby name, which here is
+          # namespaced ("Parse::Generated::Post"). Bind the server class name.
+          klass.parse_class(className.to_s)
         end
         unless klass.is_a?(Class) && klass <= Parse::Object
           raise ArgumentError, "Resolved class #{klass.inspect} for #{className.inspect} is not a Parse::Object subclass"
@@ -106,20 +109,109 @@ module Parse
         class_fields = klass.field_map.values + [:className]
         fields.each do |field, type|
           field = field.to_sym
-          key = field.to_s.underscore.to_sym
           next if base_fields.include?(field) || class_fields.include?(field)
+          next unless type.respond_to?(:[]) && type[:type].present?
 
-          data_type = type[:type].downcase.to_sym
-          if data_type == :pointer
-            klass.belongs_to key, as: safe_target_class(type[:targetClass]), field: field
-          elsif data_type == :relation
-            klass.has_many key, through: :relation, as: safe_target_class(type[:targetClass]), field: field
-          else
-            klass.property key, data_type, field: field
+          data_type = type[:type].to_s.downcase.to_sym
+          # A model's field registry shares one namespace between Ruby
+          # names and server columns, so a column whose name another column
+          # already claimed as its Ruby name (`foo_bar` after `fooBar`)
+          # cannot be mapped. Skip it instead of aborting the whole build.
+          if klass.fields.key?(field) || klass.field_map.key?(field)
+            builder_warn "skipping column #{className}.#{field}: its name is already " \
+                         "used by another column of the same class"
+            next
+          end
+          key = safe_accessor_name(klass, field, data_type)
+          next if key.nil?
+
+          begin
+            if data_type == :pointer
+              klass.belongs_to key, as: safe_target_class(type[:targetClass]), field: field
+            elsif data_type == :relation
+              klass.has_many key, through: :relation, as: safe_target_class(type[:targetClass]), field: field
+            else
+              # A renamed accessor must not get an alias under the column
+              # name, which is the method it was renamed to avoid.
+              opts = { field: field }
+              opts[:alias] = false if key.to_s != field.to_s.underscore
+              klass.property key, data_type, **opts
+            end
+          rescue StandardError, SystemStackError => e
+            builder_warn "skipping column #{className}.#{field}: #{e.class}: #{e.message}"
+            next
+          end
+          # Hydration from server JSON dispatches on `<column>_set_attribute!`.
+          # The association and property DSLs only alias that hook when the
+          # column name itself is free as a method, so add it for a renamed
+          # accessor (`class` -> `class_field`).
+          setter = :"#{field}_set_attribute!"
+          target = :"#{key}_set_attribute!"
+          if setter != target && !klass.method_defined?(setter) && klass.method_defined?(target)
+            klass.send(:alias_method, setter, target)
           end
           class_fields.push(field)
         end
         klass
+      end
+
+      # Suffix appended to a column's Ruby accessor name when the natural
+      # (underscored) name is unusable.
+      RENAMED_ACCESSOR_SUFFIX = "_field"
+
+      # @!visibility private
+      # Chooses the Ruby accessor name for server column `field`. The natural
+      # name is `field.underscore`. It is replaced with `<name>_field` (then
+      # `<name>_field2`, ...) when it would shadow a method every
+      # Parse::Object relies on (`class`, `hash`, `save`, `send`,
+      # `object_id`, `changes`, ...), when a boolean column's class-level
+      # scope would shadow a class method (`freeze`, `name`), or when another
+      # column already claimed it (`fooBar` and `foo_bar` both underscore to
+      # `foo_bar`). The server column name is unchanged (it is kept with
+      # `field:`). Returns nil, after a warning, when no safe name exists.
+      # @return [Symbol, nil]
+      def self.safe_accessor_name(klass, field, data_type)
+        natural = field.to_s.underscore
+        unless natural.match?(/\A[a-z_][a-zA-Z0-9_]*\z/)
+          builder_warn "skipping column #{klass.parse_class}.#{field}: not a valid Ruby method name"
+          return nil
+        end
+        candidates = [natural, "#{natural}#{RENAMED_ACCESSOR_SUFFIX}"]
+        candidates.concat((2..9).map { |n| "#{natural}#{RENAMED_ACCESSOR_SUFFIX}#{n}" })
+        name = candidates.find { |c| !accessor_conflict?(klass, c.to_sym, data_type) }
+        if name.nil?
+          builder_warn "skipping column #{klass.parse_class}.#{field}: no free Ruby accessor name"
+          return nil
+        end
+        if name != natural
+          builder_warn "column #{klass.parse_class}.#{field} is exposed as ##{name} " \
+                       "because ##{natural} would clash with an existing method or column"
+        end
+        name.to_sym
+      end
+
+      # @!visibility private
+      # Whether defining accessor `key` on `klass` would replace an existing
+      # method or reuse a name another column already maps to.
+      def self.accessor_conflict?(klass, key, data_type)
+        return true if klass.fields.key?(key) || klass.field_map.key?(key)
+        return true if klass.respond_to?(:relations) && klass.relations.key?(key)
+        instance_names = [key, :"#{key}=", :"#{key}_changed?", :"#{key}_was"]
+        instance_names << :"#{key}?" if data_type == :boolean
+        return true if instance_names.any? { |m| method_taken?(klass, m) }
+        # Boolean columns also get a class-level scope named after the key.
+        return true if data_type == :boolean && klass.respond_to?(key, true)
+        false
+      end
+
+      # @!visibility private
+      def self.method_taken?(klass, name)
+        klass.method_defined?(name) || klass.private_method_defined?(name)
+      end
+
+      # @!visibility private
+      def self.builder_warn(message)
+        warn "[Parse::Model::Builder] #{message}"
       end
 
       # @!visibility private

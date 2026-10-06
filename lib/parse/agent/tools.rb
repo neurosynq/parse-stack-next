@@ -6233,6 +6233,8 @@ module Parse
             refuse_empty_readable_text_fields!(class_name, readable)
             facet_opts[:fields] = readable
           end
+          # Parse::AtlasSearch is loaded on first use, not with the agent.
+          require_relative "../atlas_search"
           result = Parse::AtlasSearch.faceted_search(
             class_name, query.to_s, facets,
             limit: limit, master: true, **facet_opts,
@@ -6594,6 +6596,10 @@ module Parse
       # carry implementation details (toggle names, internal stage
       # ordering) that aren't useful in an LLM tool-call response.
       def invoke_atlas_search(op, class_name, query, opts, **extra)
+        # Parse::AtlasSearch is loaded on first use, not with the agent. Load
+        # it before the body runs so the rescue clauses below can resolve
+        # its error classes.
+        require_relative "../atlas_search"
         case op
         when :search
           Parse::AtlasSearch.search(class_name, query, **opts)

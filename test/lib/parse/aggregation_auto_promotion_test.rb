@@ -126,14 +126,14 @@ class AggregationAutoPromotionTest < Minitest::Test
   end
 
   # ---- Query#count (aggregation-pipeline branch) -------------------------
-  # `:field.size` compiles to an __aggregation_pipeline marker, forcing
+  # `:field.array_size` compiles to an __aggregation_pipeline marker, forcing
   # #count and #results through the inline-Aggregation terminals that the
   # other tests above never reach.
 
   def test_count_aggregation_promotes_when_session_token_set
     stub_mongodb_enabled!(true)
     @query.session_token = "r:test-session"
-    @query.where :tags.size => 2
+    @query.where :tags.array_size => 2
     direct_called = false
     Parse::MongoDB.define_singleton_method(:aggregate) do |_class_name, _pipeline, **_kw|
       direct_called = true
@@ -147,7 +147,7 @@ class AggregationAutoPromotionTest < Minitest::Test
 
   def test_count_aggregation_stays_on_rest_when_no_scope
     stub_mongodb_enabled!(true)
-    @query.where :tags.size => 2
+    @query.where :tags.array_size => 2
     response = stub_response([])
     @mock_client.expect :aggregate_pipeline, response do |_table, _pipeline, **_kw|
       true
@@ -159,7 +159,7 @@ class AggregationAutoPromotionTest < Minitest::Test
   def test_count_aggregation_fails_closed_when_scoped_and_mongodb_disabled
     stub_mongodb_enabled!(false)
     @query.session_token = "r:test-session"
-    @query.where :tags.size => 2
+    @query.where :tags.array_size => 2
     # Security: same contract as #aggregate / #distinct — a scoped count
     # must not fall back to REST /aggregate (master-key-only, unenforced).
     assert_raises(Parse::Query::MongoDirectRequired) { @query.count }
@@ -170,7 +170,7 @@ class AggregationAutoPromotionTest < Minitest::Test
   def test_results_pipeline_promotes_when_session_token_set
     stub_mongodb_enabled!(true)
     @query.session_token = "r:test-session"
-    @query.where :tags.size => 2
+    @query.where :tags.array_size => 2
     direct_called = false
     Parse::MongoDB.define_singleton_method(:aggregate) do |_class_name, _pipeline, **_kw|
       direct_called = true
@@ -185,7 +185,7 @@ class AggregationAutoPromotionTest < Minitest::Test
   def test_results_pipeline_fails_closed_when_scoped_and_mongodb_disabled
     stub_mongodb_enabled!(false)
     @query.session_token = "r:test-session"
-    @query.where :tags.size => 2
+    @query.where :tags.array_size => 2
     assert_raises(Parse::Query::MongoDirectRequired) { @query.results }
   end
 
@@ -278,7 +278,7 @@ class AggregationAutoPromotionTest < Minitest::Test
 
   def test_count_aggregation_ambient_session_promotes_to_direct
     stub_mongodb_enabled!(true)
-    @query.where :tags.size => 2
+    @query.where :tags.array_size => 2
     direct_called = false
     Parse::MongoDB.define_singleton_method(:aggregate) do |_class_name, _pipeline, **_kw|
       direct_called = true
@@ -292,7 +292,7 @@ class AggregationAutoPromotionTest < Minitest::Test
 
   def test_count_aggregation_ambient_session_fails_closed_when_mongodb_disabled
     stub_mongodb_enabled!(false)
-    @query.where :tags.size => 2
+    @query.where :tags.array_size => 2
     assert_raises(Parse::Query::MongoDirectRequired) do
       Parse.with_session("r:ambient-tok") { @query.count }
     end

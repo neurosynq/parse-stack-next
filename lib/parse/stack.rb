@@ -776,10 +776,17 @@ module Parse
     #   - the name singularizes to a *different* string (i.e. looks plural),
     #   - the singular form does NOT already end in `s` (per design: classes
     #     whose name ends in `s` are not auto-aliased),
-    #   - the singular constant is defined (searching ancestors so a
-    #     top-level model is visible from a nested reference) and is a
-    #     `Parse::Object` subclass,
-    #   - the plural is not already defined on the referencing module.
+    #   - the singular constant resolves from the referencing module and
+    #     is a `Parse::Object` subclass,
+    #   - the plural is not already defined in the singular class's own
+    #     namespace.
+    #
+    # The alias is installed in the namespace that defines the singular
+    # class (`Object` for a top-level `Post`, `Blog` for `Blog::Post`), never
+    # on the module where the lookup happened. A reference to `Posts` from
+    # inside an unrelated class or module therefore resolves, but does not
+    # add a `Posts` constant to that module. A frozen namespace is left
+    # alone (no `FrozenError`).
     #
     # @param mod [Module] the module/class on which `const_missing` fired.
     # @param name [Symbol] the missing constant name.
@@ -795,12 +802,37 @@ module Parse
       return nil unless mod.const_defined?(sym, true)
       klass = mod.const_get(sym)
       return nil unless klass.is_a?(Class) && klass < Parse::Object
-      return nil if mod.const_defined?(name, false)
-      mod.const_set(name, klass)
+      home = __pluralized_alias_home(klass, sym)
+      return nil if home.nil?
+      if home.const_defined?(name, false)
+        existing = home.const_get(name, false)
+        return existing.equal?(klass) ? klass : nil
+      end
+      return nil if home.frozen?
+      home.const_set(name, klass)
       klass
-    rescue NameError, LoadError
+    rescue NameError, LoadError, FrozenError
       # const_get/const_defined? can raise on malformed names or autoload
       # failures; never let alias resolution mask the original lookup.
+      nil
+    end
+
+    # @!visibility private
+    # The namespace that directly defines `klass` under the name `singular`,
+    # which is where its pluralized alias belongs. nil when it cannot be
+    # determined (anonymous class, or a constant that only resolves through
+    # an ancestor).
+    # @param klass [Class]
+    # @param singular [Symbol]
+    # @return [Module, nil]
+    def __pluralized_alias_home(klass, singular)
+      name = klass.name
+      return nil if name.nil?
+      parent_name = name.rpartition("::").first
+      home = parent_name.empty? ? ::Object : ::Object.const_get(parent_name, false)
+      return nil unless home.is_a?(Module) && home.const_defined?(singular, false)
+      home.const_get(singular, false).equal?(klass) ? home : nil
+    rescue NameError
       nil
     end
 
@@ -1048,4 +1080,7 @@ Parse._attach_slow_query_subscriber! if Parse.slow_query_threshold_ms
 # already defined. Gated at runtime on Parse.pluralized_aliases?.
 require_relative "model/core/pluralized_aliases"
 
-require_relative "stack/railtie" if defined?(::Rails)
+# Only hook into Rails when railties is loaded. A bare `Rails` module (for
+# example the one rails-html-sanitizer defines) has no `Rails::Railtie`, and
+# subclassing it would abort loading the gem.
+require_relative "stack/railtie" if defined?(::Rails::Railtie)

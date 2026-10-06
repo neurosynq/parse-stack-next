@@ -86,7 +86,50 @@ module Parse
       relation: "Relation",
       bytes: "Bytes",
       acl: "ACL",
+      # SDK-only property types with no native Parse column type. They are
+      # stored in the column type Parse Server actually holds them as.
+      vector: "Array",
+      timezone: "String",
+      time_zone: "String",
+      phone: "String",
+      email: "String",
     }.freeze
+
+    # Resolve the local type of a model field for schema comparison and
+    # migration. `fields` has no entry for a `has_many through: :relation`
+    # association, so a field that only appears in `relations` is reported
+    # as `:relation`.
+    # @param model_class [Class] a Parse::Object subclass
+    # @param name [Symbol] the canonical field name (a `field_map` key)
+    # @return [Symbol, nil]
+    def self.local_field_type(model_class, name)
+      type = model_class.fields[name]
+      return type.to_sym unless type.nil?
+      return :relation if model_class.respond_to?(:relations) && model_class.relations.key?(name.to_sym)
+      nil
+    end
+
+    # Build the server column definition for a model field, including the
+    # `targetClass` a Pointer or Relation column requires.
+    # @param model_class [Class] a Parse::Object subclass
+    # @param name [Symbol] the canonical field name (a `field_map` key)
+    # @param wire [String, Symbol] the server column name
+    # @return [Hash] the column definition, e.g. `{ "type" => "Pointer", "targetClass" => "Author" }`
+    def self.field_definition_for(model_class, name, wire)
+      type = local_field_type(model_class, name) || :string
+      parse_type = REVERSE_TYPE_MAP[type] || "String"
+      definition = { "type" => parse_type }
+      case parse_type
+      when "Pointer"
+        target = model_class.references[wire.to_s] || model_class.references[wire.to_sym] ||
+                 model_class.references[name]
+        definition["targetClass"] = target.to_s if target
+      when "Relation"
+        target = model_class.relations[name.to_sym] || model_class.relations[wire.to_sym]
+        definition["targetClass"] = target.to_s if target
+      end
+      definition
+    end
 
     class << self
       # Fetch all schemas from the Parse Server.
@@ -250,7 +293,7 @@ module Parse
         @model_class.field_map.each do |name, wire|
           next if core_field?(name)
           next if server.include?(wire.to_s)
-          missing[name] = @model_class.fields[name]
+          missing[name] = Parse::Schema.local_field_type(@model_class, name)
         end
         missing
       end
@@ -266,7 +309,7 @@ module Parse
         server.each do |name, info|
           # Skip core fields
           next if %w[objectId createdAt updatedAt ACL].include?(name)
-          missing[name] = info[:type] unless local.include?(name) || local.include?(name.underscore.to_sym)
+          missing[name] = info[:type] unless local.include?(name) || local.include?(name.underscore)
         end
         missing
       end
@@ -288,7 +331,7 @@ module Parse
         mismatches = {}
         @model_class.field_map.each do |name, wire|
           next if core_field?(name)
-          local_type = @model_class.fields[name]
+          local_type = Parse::Schema.local_field_type(@model_class, name)
           next if local_type.nil?
           server_type = @server_schema.field_type(wire.to_s)
           next unless server_type
@@ -362,8 +405,15 @@ module Parse
         @model_class.fields.reject { |k, _| core_field?(k) }
       end
 
+      # Every local name a server column may match: field keys plus the
+      # canonical and wire names in `field_map` (which also covers
+      # `has_many through: :relation` columns, absent from `fields`).
       def local_field_names
-        local_fields.keys.map(&:to_s)
+        names = local_fields.keys.map(&:to_s)
+        @model_class.field_map.each do |name, wire|
+          names << name.to_s << wire.to_s
+        end
+        names.uniq
       end
 
       def server_field_names
@@ -374,10 +424,16 @@ module Parse
         %i[id object_id created_at updated_at acl objectId createdAt updatedAt ACL].include?(name.to_sym)
       end
 
+      # Types that compare equal to the server column they are stored in:
+      # a `:vector` is an Array column, and `:timezone`, `:phone`, and
+      # `:email` are String columns.
       def normalize_type(type)
         case type.to_sym
         when :integer, :float, :number then :number
         when :geo_point then :geopoint
+        when :geo_polygon then :polygon
+        when :vector then :array
+        when :timezone, :time_zone, :phone, :email then :string
         else type.to_sym
         end
       end
@@ -417,11 +473,11 @@ module Parse
         end
 
         @diff.missing_on_server.each do |name, type|
-          ops << {
-            action: :add_field,
-            field: @model_class.field_map[name].to_s,
-            type: REVERSE_TYPE_MAP[type] || "String",
-          }
+          wire = @model_class.field_map[name]
+          definition = Parse::Schema.field_definition_for(@model_class, name, wire)
+          op = { action: :add_field, field: wire.to_s, type: definition["type"] }
+          op[:target_class] = definition["targetClass"] if definition["targetClass"]
+          ops << op
         end
 
         ops
@@ -438,7 +494,8 @@ module Parse
           when :create_class
             lines << "  CREATE CLASS #{op[:class_name]}"
           when :add_field
-            lines << "  ADD FIELD #{op[:field]} (#{op[:type]})"
+            target = op[:target_class] ? " -> #{op[:target_class]}" : ""
+            lines << "  ADD FIELD #{op[:field]} (#{op[:type]}#{target})"
           end
         end
         lines.join("\n")
@@ -472,7 +529,8 @@ module Parse
         # Add missing fields
         @diff.missing_on_server.each do |name, type|
           field_name = @model_class.field_map[name].to_s
-          field_schema = { "fields" => { field_name => field_definition(type) } }
+          definition = Parse::Schema.field_definition_for(@model_class, name, field_name)
+          field_schema = { "fields" => { field_name => definition } }
 
           response = @client.update_schema(@model_class.parse_class, field_schema)
           if response.success?
@@ -497,7 +555,7 @@ module Parse
         # multi-word or custom-`field:` property.
         @model_class.field_map.each do |name, wire|
           next if %i[id object_id created_at updated_at acl objectId createdAt updatedAt ACL].include?(name)
-          fields[wire.to_s] = field_definition(@model_class.fields[name])
+          fields[wire.to_s] = Parse::Schema.field_definition_for(@model_class, name, wire)
         end
 
         # Add pointer targets. `references` is keyed by the wire column name
@@ -535,11 +593,6 @@ module Parse
           return val if val.is_a?(Hash) && !val.empty?
         end
         Parse::Schema.default_class_level_permissions
-      end
-
-      def field_definition(type)
-        parse_type = REVERSE_TYPE_MAP[type.to_sym] || "String"
-        { "type" => parse_type }
       end
     end
   end

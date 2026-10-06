@@ -10,7 +10,8 @@ module Parse
   # queries. It contains an operand (the Parse field) and an operator (the Parse
   # operation). These combined with a value, provide you with a constraint.
   #
-  # All operation registrations add methods to the Symbol class.
+  # All operation registrations add methods to the Symbol class, through
+  # the {Operation::SymbolMethods} module.
   class Operation
 
     # @!attribute operand
@@ -87,18 +88,71 @@ module Parse
       handler.new(self, value)
     end
 
+    # Operator names that are never installed as `Symbol` methods because
+    # they would replace or shadow behavior other code relies on:
+    #
+    # - `:size` is Ruby's own `Symbol#size`; replacing it broke
+    #   `sort_by(&:size)` and any code that measures a symbol.
+    # - `:id` makes every symbol `respond_to?(:id)`, which ActiveRecord
+    #   treats as a record. `where(status: :draft)` then raised
+    #   `TypeError: can't cast Parse::Operation` (issue #83).
+    #
+    # Each one is installed under the alternate name given here instead.
+    # The original name stays registered in {operators}, so an explicit
+    # `Parse::Operation.new(:tags, :size)` still resolves.
+    SYMBOL_METHOD_RENAMES = { id: :pointer_id, size: :array_size }.freeze
+
+    # The module that carries the query DSL methods (`:plays.gt`,
+    # `:tags.in`, ...). It is included into `Symbol` rather than defining
+    # methods on `Symbol` directly, so a method another library defines on
+    # `Symbol` (Mongoid's `Symbol#gt`, Sequel's `Symbol#desc`) is never
+    # replaced by Parse, whichever library loads first.
+    module SymbolMethods; end
+
+    class << self
+      # Operator names that were not installed on `Symbol` because another
+      # library already defines a method of that name. Use the explicit
+      # form `Parse::Operation.new(:field, :op) => value` for these.
+      # @return [Array<Symbol>]
+      def symbol_conflicts
+        @symbol_conflicts ||= []
+      end
+    end
+
     # Register a new symbol operator method mapped to a specific {Parse::Constraint}.
+    # @param op [Symbol] the operator name.
+    # @param klass [Class] the {Parse::Constraint} subclass that handles it.
     def self.register(op, klass)
-      Operation.operators[op.to_sym] = klass
-      # Some operator names (e.g. :size) collide with existing Symbol methods.
-      # The override is intentional - the query DSL repurposes these for
-      # constraint building. Remove the prior definition so define_method
-      # does not emit "method redefined" under ruby -W.
-      Symbol.send(:remove_method, op) if Symbol.method_defined?(op, false)
-      Symbol.send :define_method, op do |value = nil|
+      op = op.to_sym
+      Operation.operators[op] = klass
+      method_name = SYMBOL_METHOD_RENAMES.fetch(op, op)
+      Operation.operators[method_name] = klass
+      install_symbol_method(method_name)
+    end
+
+    # Defines `method_name` on {SymbolMethods} unless `Symbol` already has
+    # a method of that name from somewhere other than Parse.
+    # @!visibility private
+    def self.install_symbol_method(method_name)
+      existing = ::Symbol.method_defined?(method_name) &&
+                 ::Symbol.instance_method(method_name).owner
+      if existing && existing != SymbolMethods
+        symbol_conflicts << method_name unless symbol_conflicts.include?(method_name)
+        return false
+      end
+      if SymbolMethods.method_defined?(method_name, false)
+        SymbolMethods.send(:remove_method, method_name)
+      end
+      op = method_name
+      SymbolMethods.send :define_method, method_name do |value = nil|
         operation = Operation.new self, op
         value.nil? ? operation : operation.constraint(value)
       end
+      true
     end
   end
 end
+
+# Included (not prepended) so methods defined on Symbol itself, by Ruby or
+# by another library, keep precedence over the Parse query DSL.
+Symbol.include(Parse::Operation::SymbolMethods)

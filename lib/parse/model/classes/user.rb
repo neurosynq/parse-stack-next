@@ -202,6 +202,17 @@ module Parse
   class User < Parse::Object
     parse_class Parse::Model::CLASS_USER
 
+    # ActiveModel naming relative to the `Parse` namespace, so Rails forms,
+    # params, routes, and i18n see `Parse::User` as `user`
+    # (`params[:user]`, `users_path`) rather than `parse_user`. `name` stays
+    # "Parse::User". A subclass outside the `Parse` namespace keeps the
+    # default naming.
+    # @return [ActiveModel::Name]
+    def self.model_name
+      return super if name.nil? || !name.start_with?("Parse::")
+      @_relative_model_name ||= ActiveModel::Name.new(self, Parse)
+    end
+
     # When true (default), saving a new {Parse::User} that has a `password`
     # value routes through Parse Server's signup endpoint (`POST /parse/users`)
     # with the `X-Parse-Revocable-Session` header set, so the signup response
@@ -908,6 +919,57 @@ module Parse
       self.session_token.present?
     end
 
+    # Replace each non-empty token in `text` with `[FILTERED]`. Used by the
+    # `inspect` overrides on {Parse::User} and {Parse::Session} so a session
+    # token does not land in logs, exception messages or console history.
+    # @!visibility private
+    # @param text [String] the inspect output.
+    # @param tokens [Array<String, nil>] tokens to redact.
+    # @return [String]
+    def self.redact_session_token(text, *tokens)
+      out = text.to_s
+      tokens.each do |t|
+        next unless t.is_a?(String) && !t.strip.empty?
+        out = out.gsub(t, "[FILTERED]")
+      end
+      out
+    end
+
+    # Default inspect output with the session token redacted.
+    # @return [String]
+    def inspect
+      self.class.redact_session_token(super, @session_token, @_session_token)
+    end
+
+    # Saves pending changes. When the save changes the password, Parse Server
+    # revokes the user's other sessions, so this client's identity plane
+    # drops every cached entry for the user to make the revocation visible
+    # to mongo-direct reads at once.
+    # @!visibility private
+    def update!(raw: false, force: false)
+      password_changing = changed.include?("password")
+      result = super
+      ok = raw ? (result.respond_to?(:success?) && result.success?) : result == true
+      if ok && password_changing && client.respond_to?(:invalidate_user_identity)
+        client.invalidate_user_identity(id)
+      end
+      result
+    end
+
+    # Deletes the user. On success every cached identity entry for the user
+    # is dropped from this client's identity plane, since Parse Server
+    # removes the user's sessions with the account.
+    # @param session [String] (see Parse::Object#destroy)
+    # @return [Boolean] whether the operation was successful.
+    def destroy(session: nil)
+      user_id = id
+      success = super
+      if success && client.respond_to?(:invalidate_user_identity)
+        client.invalidate_user_identity(user_id)
+      end
+      success
+    end
+
     # Invalid the current session token for this logged in user.
     # @return [Boolean] True/false if successful
     def logout
@@ -1016,7 +1078,10 @@ module Parse
     # the request.
     #
     # @param body [Hash] The hash containing the Parse::User fields. The field `username` and `password` are required.
-    # @option opts [Boolean] :master_key Whether the master key should be used for this request.
+    # @option opts [Boolean] :use_master_key send the master key with the
+    #   signup. Off by default: a master-key signup returns no session token
+    #   and bypasses the `_User` create CLP. Pass `true` only for admin
+    #   provisioning that needs that bypass.
     # @raise [ArgumentError] If `body` contains `authData`/`auth_data`/`objectId` — use {.autologin_service} for federated flows.
     # @raise [Parse::Error::UsernameMissingError] If username is missing.
     # @raise [Parse::Error::PasswordMissingError] If password is missing.
@@ -1350,6 +1415,13 @@ module Parse
         end
         n
       end
+      # Every session but (optionally) the current one is gone server-side.
+      # Drop the user's identity entries on this client and on the default
+      # client (the logout above went through `Parse.client`). A kept
+      # current token simply re-resolves on its next use.
+      [client, Parse.client].uniq.each do |cl|
+        cl.invalidate_user_identity(id) if cl.respond_to?(:invalidate_user_identity)
+      end
       @session_token = nil unless keep_current
       @session = nil unless keep_current
       count
@@ -1648,8 +1720,9 @@ module Parse
         # Cloud Code `beforeSave(_User)` see `request.user = caller`,
         # which an integrator can mistake for "the new user". The signup
         # endpoint authenticates by the signup itself, not by a prior
-        # session — pass `nil` explicitly. Master key continues to flow
-        # via the normal authentication middleware when configured.
+        # session, so pass `nil` explicitly. The master key is not sent
+        # either (see Parse::API::Users#create_user): Parse Server mints no
+        # session token for a master-key signup.
         res = client.create_user(body, session_token: nil)
         unless res.error?
           result = res.result

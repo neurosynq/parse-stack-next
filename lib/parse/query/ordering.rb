@@ -56,11 +56,39 @@ module Parse
   end # Order
 end
 
-# Extension to add all the operator instance methods to the Symbol classe
-class Symbol
-  Parse::Order::ORDERING.keys.each do |sym|
-    define_method(sym) do
-      Parse::Order.new self, sym
+module Parse
+  class Order
+    # Carries the `:field.asc` / `:field.desc` sort helpers. Included into
+    # `Symbol` rather than defined on it, and skipped for any name another
+    # library already defines on `Symbol` (Mongoid, Sequel core extensions),
+    # so Parse never replaces another library's `Symbol#asc` or `#desc`.
+    # Use `Parse::Order.new(:field, :desc)` when such a library is loaded.
+    module SymbolMethods; end
+
+    # Converts another library's sort key (Mongoid's `:field.desc` when
+    # Mongoid owns `Symbol#desc`) into a {Parse::Order}.
+    # @param value [Object]
+    # @return [Parse::Order, nil] nil when `value` is not a known foreign sort key.
+    def self.from_foreign(value)
+      return value if value.is_a?(Parse::Order)
+      if defined?(::Mongoid::Criteria::Queryable::Key) &&
+         value.is_a?(::Mongoid::Criteria::Queryable::Key)
+        case value.operator
+        when 1, "1" then return new(value.name, :asc)
+        when -1, "-1" then return new(value.name, :desc)
+        end
+      end
+      nil
     end
-  end # each
+
+    ORDERING.keys.each do |sym|
+      existing = ::Symbol.method_defined?(sym) && ::Symbol.instance_method(sym).owner
+      next if existing && existing != SymbolMethods
+      SymbolMethods.send(:define_method, sym) do
+        Parse::Order.new self, sym
+      end
+    end
+  end
 end
+
+Symbol.include(Parse::Order::SymbolMethods)

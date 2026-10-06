@@ -67,11 +67,41 @@ module Parse
 
       # Creates a new constraint given an operation and value.
       def create(operation, value)
+        operation = translate_foreign_operation(operation)
         #default to a generic equality constraint if not passed an operation
         unless operation.is_a?(Parse::Operation) && operation.valid?
           return self.new(operation, value)
         end
         operation.constraint(value)
+      end
+
+      # MongoDB operator strings that a Mongoid query key may carry, mapped to
+      # the equivalent Parse operator.
+      # @!visibility private
+      MONGOID_OPERATOR_MAP = {
+        "$gt" => :gt, "$gte" => :gte, "$lt" => :lt, "$lte" => :lte,
+        "$ne" => :ne, "$in" => :in, "$nin" => :nin, "$all" => :all,
+        "$exists" => :exists, "$elemMatch" => :elem_match,
+        "$near" => :near, "$size" => :size,
+      }.freeze
+
+      # When Mongoid is loaded before Parse, `:plays.gt` returns Mongoid's
+      # own query key, because Parse does not replace another library's
+      # `Symbol` methods. Translate such a key into the equivalent
+      # {Parse::Operation} so `where(:plays.gt => 10)` keeps working.
+      # Anything else is returned unchanged.
+      # @!visibility private
+      def translate_foreign_operation(operation)
+        return operation if operation.is_a?(Parse::Operation)
+        return operation unless defined?(::Mongoid::Criteria::Queryable::Key) &&
+                                operation.is_a?(::Mongoid::Criteria::Queryable::Key)
+        op = MONGOID_OPERATOR_MAP[operation.operator.to_s]
+        if op.nil?
+          raise ArgumentError, "Unsupported Mongoid query key #{operation.operator.inspect} " \
+                               "for field #{operation.name.inspect}. Use " \
+                               "Parse::Operation.new(:field, :operator) instead."
+        end
+        Parse::Operation.new(operation.name, op)
       end
 
       # Set the keyword for this Constraint. Subclasses should use this method.

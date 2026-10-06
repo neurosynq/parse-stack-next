@@ -138,13 +138,13 @@ class MongoDBOperatorsIntegrationTest < Minitest::Test
         # --- Test 4: Array size operator ---
         puts "\n--- Test: Array size operator ---"
 
-        parse_results = ProductOperatorTest.query(:tags.size => 3).all
+        parse_results = ProductOperatorTest.query(:tags.array_size => 3).all
         parse_names = parse_results.map(&:name).sort
-        puts "Parse Server (:tags.size => 3): #{parse_names.inspect}"
+        puts "Parse Server (:tags.array_size => 3): #{parse_names.inspect}"
 
-        direct_results = ProductOperatorTest.query(:tags.size => 3).results_direct
+        direct_results = ProductOperatorTest.query(:tags.array_size => 3).results_direct
         direct_names = direct_results.map(&:name).sort
-        puts "MongoDB Direct (:tags.size => 3): #{direct_names.inspect}"
+        puts "MongoDB Direct (:tags.array_size => 3): #{direct_names.inspect}"
 
         assert_equal parse_names, direct_names, "Size results should match"
         assert_equal 4, direct_names.length, "Should find 4 products with 3 tags"
@@ -152,13 +152,13 @@ class MongoDBOperatorsIntegrationTest < Minitest::Test
         # --- Test 5: Array size with comparison ---
         puts "\n--- Test: Array size with comparison ---"
 
-        parse_results = ProductOperatorTest.query(:tags.size => { :gte => 3 }).all
+        parse_results = ProductOperatorTest.query(:tags.array_size => { :gte => 3 }).all
         parse_names = parse_results.map(&:name).sort
-        puts "Parse Server (:tags.size => { gte: 3 }): #{parse_names.inspect}"
+        puts "Parse Server (:tags.array_size => { gte: 3 }): #{parse_names.inspect}"
 
-        direct_results = ProductOperatorTest.query(:tags.size => { :gte => 3 }).results_direct
+        direct_results = ProductOperatorTest.query(:tags.array_size => { :gte => 3 }).results_direct
         direct_names = direct_results.map(&:name).sort
-        puts "MongoDB Direct (:tags.size => { gte: 3 }): #{direct_names.inspect}"
+        puts "MongoDB Direct (:tags.array_size => { gte: 3 }): #{direct_names.inspect}"
 
         assert_equal parse_names, direct_names, "Size gte results should match"
 

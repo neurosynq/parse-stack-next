@@ -75,17 +75,17 @@ class QueryCompileSnapshotTest < Minitest::Test
   end
 
   def test_marker_stripping_for_rest
-    # Pipeline-producing constraints (e.g. :tags.size) must be stripped from
+    # Pipeline-producing constraints (e.g. :tags.array_size) must be stripped from
     # the REST `where` hash; the marker belongs only to the routing layer.
     # Snapshot the REST-shape next to the pipeline-shape to lock both in.
-    q = SnapPost.where(:tags.size => { gt: 2 }).where(:category => "music")
+    q = SnapPost.where(:tags.array_size => { gt: 2 }).where(:category => "music")
     assert_snapshot(compile(q), name: "marker_stripping_rest", group: GROUP)
   end
 
   def test_pipeline_extraction
     # The complement of marker_stripping: the same constraint surfaced via
     # #pipeline should return just the aggregation stages, no REST scaffolding.
-    q = SnapPost.where(:tags.size => { gt: 2 })
+    q = SnapPost.where(:tags.array_size => { gt: 2 })
     assert_snapshot(q.pipeline.as_json, name: "pipeline_extraction", group: GROUP)
   end
 

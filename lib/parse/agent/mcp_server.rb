@@ -1,7 +1,13 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-require "webrick"
+# WEBrick is not a dependency of this gem (it left Ruby's default gems in
+# 3.0). It is only needed by MCPServer#start; the Rack app works without it.
+begin
+  require "webrick"
+rescue LoadError
+  nil
+end
 require "json"
 require "stringio"
 require "active_support/core_ext/object/blank"
@@ -189,8 +195,24 @@ module Parse
         )
       end
 
+      # Load WEBrick for the standalone server, raising a LoadError that
+      # explains the fix when the application does not bundle it.
+      # @raise [LoadError] when the webrick gem is not available.
+      # @return [true]
+      def self.require_webrick!
+        return true if defined?(::WEBrick::HTTPServer)
+        require "webrick"
+        true
+      rescue LoadError => e
+        raise LoadError, "Parse::Agent::MCPServer#start needs the webrick gem, which is not a " \
+                         "dependency of parse-stack-next. Add `gem \"webrick\"` to your Gemfile, " \
+                         "or mount Parse::Agent::MCPRackApp in your own Rack server " \
+                         "(Puma, Falcon, ...). (#{e.message})"
+      end
+
       # Start the HTTP server (blocking)
       def start
+        self.class.require_webrick!
         @server = WEBrick::HTTPServer.new(
           Port: @port,
           BindAddress: @host,

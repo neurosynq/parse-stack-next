@@ -209,7 +209,7 @@ class ArrayConstraintsUnitTest < Minitest::Test
     puts "\n=== Testing size constraint with zero ==="
 
     query = Parse::Query.new("TestClass")
-    query.where(:tags.size => 0)
+    query.where(:tags.array_size => 0)
 
     pipeline = query.pipeline
     match_stage = pipeline.find { |stage| stage["$match"] }
@@ -224,7 +224,7 @@ class ArrayConstraintsUnitTest < Minitest::Test
     puts "\n=== Testing size constraint with comparison operators ==="
 
     query = Parse::Query.new("TestClass")
-    query.where(:tags.size => { gt: 2, lte: 10 })
+    query.where(:tags.array_size => { gt: 2, lte: 10 })
 
     pipeline = query.pipeline
     match_stage = pipeline.find { |stage| stage["$match"] }

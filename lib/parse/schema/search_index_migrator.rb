@@ -131,6 +131,7 @@ module Parse
       #   - `:wait_results` — Hash{name => :ready|:failed|:timeout} when
       #     `wait: true`; empty otherwise.
       def apply!(update: false, drop: false, wait: false, timeout: 600)
+        load_atlas_search!
         p = plan
         coll = p[:collection]
         wait_results = {}
@@ -253,13 +254,19 @@ module Parse
       # Search support) — the migrator degrades gracefully and treats
       # the absence as "no indexes yet".
       def fetch_existing_indexes(coll)
-        unless defined?(Parse::AtlasSearch::IndexManager)
-          return [[], false]
-        end
         return [[], false] unless mongodb_enabled?
+        load_atlas_search!
         [Parse::AtlasSearch::IndexManager.list_indexes(coll, force_refresh: true), true]
-      rescue Parse::AtlasSearch::NotAvailable, StandardError
+      rescue StandardError # includes Parse::AtlasSearch::NotAvailable
         [[], false]
+      end
+
+      # Parse::AtlasSearch is not loaded with the SDK. Load it here instead
+      # of testing `defined?(Parse::AtlasSearch...)`: the namespace can
+      # already exist (protected_paths.rb opens it early) without the
+      # IndexManager or the error classes the migrator needs.
+      def load_atlas_search!
+        require_relative "../atlas_search"
       end
 
       def mongodb_enabled?
