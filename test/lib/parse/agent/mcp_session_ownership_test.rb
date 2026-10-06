@@ -208,4 +208,16 @@ class MCPSessionOwnershipTest < Minitest::Test
     refute manager.listener?("S2")
   end
 
+
+  # A stream closed before it starts never takes a capacity slot, so the
+  # listening-stream count returns to where it was.
+  def test_closed_stream_does_not_leak_a_capacity_slot
+    manager = Parse::Agent::MCPSubscriptions::Manager.new(live_query_client: Object.new)
+    before = Parse::Agent::MCPRackApp.active_listening_stream_count
+    body = Parse::Agent::MCPRackApp::ListeningStreamBody.new(manager, "S3", 0, nil)
+    body.close
+    body.each { |_c| }
+    assert_equal before, Parse::Agent::MCPRackApp.active_listening_stream_count
+  end
+
 end

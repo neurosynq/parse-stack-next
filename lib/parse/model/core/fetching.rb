@@ -447,9 +447,12 @@ module Parse
         # Autofetch if object is a pointer OR was selectively fetched
         # Skip if autofetch is disabled for this instance
         needs_fetch = pointer? || has_selective_keys?
+        # A pointer never autofetches for its ACL. A partially fetched object
+        # does when the ACL was left out, so code that edits it starts from
+        # the record's real ACL instead of nil.
         return unless needs_fetch &&
                       !autofetch_disabled? &&
-                      key != :acl &&
+                      !(key == :acl && pointer?) &&
                       !Parse::Properties::BASE_KEYS.include?(key) &&
                       respond_to?(:fetch)
 

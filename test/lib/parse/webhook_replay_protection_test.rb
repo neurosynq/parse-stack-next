@@ -40,10 +40,14 @@ class WebhookReplayProtectionTest < Minitest::Test
     Parse::Webhooks.instance_variable_set(:@allow_unauthenticated, @saved_allow)
     Parse::Webhooks.instance_variable_set(:@missing_key_warned, @saved_warned)
     Parse::Webhooks.logging = @saved_logging
-    ENV["PARSE_SERVER_WEBHOOK_KEY"] = @saved_env_key if @saved_env_key
-    ENV["PARSE_WEBHOOK_KEY"] = @saved_env_legacy if @saved_env_legacy
-    ENV["PARSE_WEBHOOK_ALLOW_UNAUTHENTICATED"] = @saved_env_allow if @saved_env_allow
-    ENV["PARSE_WEBHOOK_SIGNING_SECRET"] = @saved_env_secret if @saved_env_secret
+    # Restore each variable, deleting it when it was unset before the test,
+    # so a secret set here never leaks into later test files.
+    {
+      "PARSE_SERVER_WEBHOOK_KEY" => @saved_env_key,
+      "PARSE_WEBHOOK_KEY" => @saved_env_legacy,
+      "PARSE_WEBHOOK_ALLOW_UNAUTHENTICATED" => @saved_env_allow,
+      "PARSE_WEBHOOK_SIGNING_SECRET" => @saved_env_secret,
+    }.each { |name, saved| saved.nil? ? ENV.delete(name) : ENV[name] = saved }
     Parse::Webhooks.instance_variable_set(:@routes, nil)
     Parse::Webhooks::ReplayProtection.reset!
   end
@@ -197,6 +201,27 @@ class WebhookReplayProtectionTest < Minitest::Test
       ))
       payload = parse_body([nil, nil, body_io])
       assert payload.key?("success"), "valid signature must pass: #{payload.inspect}"
+    end
+  end
+
+  # A captured signed delivery cannot be replayed by changing or dropping the
+  # unsigned nonce: signed deliveries are deduplicated on their signature.
+  def test_signed_replay_with_altered_nonce_is_rejected
+    Parse::Webhooks::ReplayProtection.signing_secret = SECRET
+    body = '{"functionName":"signed"}'
+    ts = Time.now.to_i
+    sig = sign(body, ts)
+    capture_io do
+      first = parse_body([nil, nil, Parse::Webhooks.call(build_env(body: body, request_id: "_RB_r1",
+                                                                     timestamp: ts, signature: sig))[2]])
+      assert first.key?("success"), first.inspect
+      %w[_RB_r2 different].each do |nonce|
+        replay = parse_body([nil, nil, Parse::Webhooks.call(build_env(body: body, request_id: nonce,
+                                                                        timestamp: ts, signature: sig))[2]])
+        assert_equal "Webhook replay detected.", replay["error"], "nonce #{nonce}"
+      end
+      no_nonce = parse_body([nil, nil, Parse::Webhooks.call(build_env(body: body, timestamp: ts, signature: sig))[2]])
+      assert_equal "Webhook replay detected.", no_nonce["error"]
     end
   end
 

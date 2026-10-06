@@ -1757,7 +1757,15 @@ module Parse
       key = key.to_sym
       # Base keys are always considered fetched
       return true if Parse::Properties::BASE_KEYS.include?(key)
-      return true if key == :acl || key == :ACL
+      # The ACL counts as fetched only when the selective response carried
+      # it. Treating it as always present made `acl` read nil on a partial
+      # fetch, so `(obj.acl || Parse::ACL.new).apply(...)` replaced the
+      # record's real ACL with a single grant on save. Reading it now
+      # autofetches like any other field the partial fetch left out.
+      if key == :acl || key == :ACL
+        return @_fetched_keys.include?(:ACL) || @_fetched_keys.include?(:acl) ||
+               instance_variable_get(:@_authorization_acl_state) != :unknown
+      end
 
       # Check both local key and remote field name
       # Convert remote_key to symbol for consistent comparison

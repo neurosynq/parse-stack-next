@@ -509,11 +509,12 @@ module Parse
       # Read the owner's dirty state before touching the items, so a change
       # that was already pending is still sent by the next save.
       was_dirty = delegate_field_dirty?
-      server = server_array_after_op
-      # A plain array adopts the array the server returned, so a local copy
-      # that was already out of date is corrected; otherwise (pointer
-      # collections, or a reply without the field) the operation is applied
-      # locally the same way the server applied it.
+      # A clean plain array adopts the array the server returned, so a local
+      # copy that was already out of date is corrected. With unsaved local
+      # edits pending, adopting it would discard them, so the operation is
+      # applied locally instead (as it is for pointer collections, or a reply
+      # without the field) and the pending edits are still sent on save.
+      server = was_dirty ? nil : server_array_after_op
       @collection = server || yield(collection.to_a.dup, items)
       @loaded = true
       unless was_dirty

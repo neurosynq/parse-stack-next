@@ -447,6 +447,28 @@ class AssocAuditTest < Minitest::Test
     refute obj.tags_changed?, "adopting the server value is not a local change"
   end
 
+  # Unsaved local edits survive an atomic add: the server array is not
+  # adopted while the field is dirty, and the pending edit is still sent.
+  def test_atomic_add_keeps_unsaved_local_edits
+    unless Parse::Client.client?
+      Parse.setup(server_url: "http://localhost:1/parse", application_id: "a", api_key: "k")
+    end
+    obj = ServerArrayDoc.new(objectId: "x1", tags: ["a"])
+    obj.send(:clear_changes!) if obj.respond_to?(:clear_changes!, true)
+    obj.tags.add("pending")
+    fake = Struct.new(:result) do
+      def error? = false
+      def success? = true
+    end
+    reply = fake.new({ "tags" => %w[a atomic] })
+    obj.client.stub(:update_object, ->(*_a, **_k) { reply }) do
+      assert obj.tags.add!("atomic")
+    end
+    assert_includes obj.tags.to_a, "pending"
+    assert_includes obj.tags.to_a, "atomic"
+    assert obj.tags_changed?, "the pending edit is still sent on save"
+  end
+
   private
 
   def silence_warnings_for

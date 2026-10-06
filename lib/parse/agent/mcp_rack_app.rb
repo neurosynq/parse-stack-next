@@ -1968,8 +1968,13 @@ module Parse
           # Rack server never iterates — or a client that disconnects before
           # iteration — never inflates the counter; the matching decrement is in
           # #close, which #each's `ensure` always runs.
-          MCPRackApp.adjust_listening_stream_count(1)
-          @counted = true
+          # Increment and record it under the close lock, so a close racing
+          # this cannot skip the matching decrement and leak a stream slot.
+          @close_mutex.synchronize do
+            return if @closed
+            MCPRackApp.adjust_listening_stream_count(1)
+            @counted = true
+          end
           listener = lambda do |notification|
             queue << format_event(notification)
           end
@@ -1998,16 +2003,17 @@ module Parse
         # Terminate the stream: stop heartbeats, detach the listener, and tear
         # down the session's LiveQuery subscriptions. Idempotent.
         def close
-          @close_mutex.synchronize do
+          counted = @close_mutex.synchronize do
             return if @closed
             @closed = true
             # Wake the revalidator so it exits at once instead of after its
             # next interval.
             @close_signal.broadcast
+            @counted
           end
           # Balance the #each increment exactly once (close is idempotent via
-          # @closed, and only #each sets @counted).
-          MCPRackApp.adjust_listening_stream_count(-1) if @counted
+          # @closed, and #each counts only under the same lock).
+          MCPRackApp.adjust_listening_stream_count(-1) if counted
           @heartbeat&.kill
           @heartbeat = nil
           # The revalidator is not killed: it may be inside a REST call, and

@@ -728,6 +728,7 @@ module Parse
       # @param payload [Parse::Webhooks::Payload] the afterDelete payload.
       # @return [void]
       def run_after_delete_chain(payload)
+        obj = nil
         return unless payload&.after_delete?
         obj = payload.parse_object
         return unless obj.is_a?(Parse::Object)
@@ -737,7 +738,7 @@ module Parse
         nil
       rescue => e
         warn "[Parse::Webhooks] afterDelete after_destroy callback raised for " \
-             "#{obj.class}##{Parse::TerminalSafe.sanitize_line(obj&.id)} -- the object is " \
+             "#{obj ? obj.class : "UnknownObject"}##{Parse::TerminalSafe.sanitize_line(obj&.id)} -- the object is " \
              "already deleted; logging and continuing: #{e.class}: " \
              "#{Parse::TerminalSafe.sanitize_line(Parse::Middleware::BodyBuilder.redact(e.message))}"
         nil

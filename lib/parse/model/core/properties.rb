@@ -926,6 +926,11 @@ module Parse
           rescue Parse::Properties::TypecastError
             raise if track == true
           end
+          # Record any in-place edit made to the current value before its
+          # baseline is dropped: `obj.meta["a"] = 2; obj.meta = obj.meta`
+          # would otherwise lose the edit, since the reassigned value equals
+          # the (already edited) current one.
+          _detect_in_place_changes! if track == true && @_mutable_snapshots&.key?(key)
           # A replaced value starts a new in-place tracking baseline.
           @_mutable_snapshots&.delete(key)
           # if dirty trackin is enabled, call the ActiveModel required method of _will_change!

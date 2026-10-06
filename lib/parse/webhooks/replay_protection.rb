@@ -125,6 +125,7 @@ module Parse
         # `request_id` or an `X-Parse-Webhook-Nonce` header is present.
         def verify!(env, body_str, request_id)
           secret = signing_secret
+          signed_key = nil
           if secret && !secret.empty?
             ts_header = env[HEADER_TIMESTAMP].to_s
             sig_header = env[HEADER_SIGNATURE].to_s
@@ -137,6 +138,20 @@ module Parse
             unless ActiveSupport::SecurityUtils.secure_compare(expected, sig_header)
               return "Invalid webhook signature."
             end
+            # A signed delivery is deduplicated on its signature, which covers
+            # the timestamp and body and cannot be changed without the secret.
+            # Keying it on the unsigned nonce would let a captured request be
+            # replayed within the timestamp window by altering or dropping
+            # that header.
+            signed_key = "sig\x1f#{sig_header}"
+          end
+
+          if signed_key
+            window = [replay_window_seconds, signing_max_skew_seconds * 2].max
+            digest = Digest::SHA256.hexdigest(signed_key)
+            return "Webhook replay detected." if cache.seen?(digest, window)
+            cache.record(digest, replay_cache_size)
+            return nil
           end
 
           # Dedup only when the delivery carries a per-delivery identifier.

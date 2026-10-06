@@ -370,4 +370,16 @@ class TypecastPropertyTest < Minitest::Test
     hydrated = Parse::File.new({ "name" => "a.txt", "url" => "https://files.example.com/a.txt" })
     assert_includes hydrated.inspect, "@contents=false"
   end
+
+  # Reassigning a mutable property to itself after an in-place edit keeps
+  # the edit in the update payload.
+  def test_reassigning_after_in_place_edit_keeps_the_change
+    @obj.meta = { "a" => 1 }
+    @obj.changes_applied!
+    @obj.meta["a"] = 2
+    @obj.meta = @obj.meta
+    assert @obj.meta_changed?
+    assert_equal({ "a" => 2 }, @obj.attribute_updates["meta"] || @obj.attribute_updates[:meta])
+  end
+
 end
