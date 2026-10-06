@@ -431,13 +431,13 @@ class MCPDeploymentsTest < Minitest::Test
     end
 
     assert_equal Set["Editor"], ctx.resolve_user("u_a").role_names
-    current = Set[] # role removed
+    current.clear # role removed (mutated in place: the lookup closure reads it)
     roles.now = Parse::Authorization::Context::DEFAULT_ROLE_TTL - 1
     assert_equal Set["Editor"], ctx.resolve_user("u_a").role_names, "stale within the role TTL"
     roles.now = Parse::Authorization::Context::DEFAULT_ROLE_TTL
     assert_equal Set[], ctx.resolve_user("u_a").role_names, "fresh once the role TTL elapses"
 
-    current = Set["Admin"]
+    current.replace(Set["Admin"])
     ctx.invalidate_user_roles("u_a")
     assert_equal Set["Admin"], ctx.resolve_user("u_a").role_names, "immediate on invalidation"
   end
