@@ -4,6 +4,15 @@
 
 A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [parse-stack-next](https://github.com/neurosynq/parse-stack-next) is a Ruby client SDK, REST client, and Active Model ORM for [Parse Server](http://parseplatform.org/), combining a low-level API client, a query engine, an object-relational mapper (ORM), and a Cloud Code Webhooks rack application in a single gem.
 
+## What's new in 5.8
+
+- **5.8.0: MCP deployments can expose less than their users can read.** `Parse::Agent.new(fields: { Customer => %i[display_name timezone] })` narrows a class's `agent_fields` for one agent, so a user-facing assistant and an analytics endpoint in one process expose different subsets of the same model. It applies to queries, includes, aggregation, search, schema output, exports, and `semantic_search` text, and `query_class`/`count_objects`/`export_data` now refuse filtering or sorting on a hidden field. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.8.0: Supported deployment patterns.** `MCPRackApp.user_scoped` serves signed-in application users (no master-key fallback, server-pinned identity and tenant), and `MCPRackApp.master_analytics` serves a shared read-only analytics endpoint that requires an operator `principal_resolver`. Cancellations and approval replies are now bound to the session's owner, revocation intervals are documented, and orphaned subscriptions are reaped. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.8.0: Retrieval profiles for `semantic_search`.** Server-configured profiles (for example `fast`, `balanced`, `precise`) compose hybrid search and reranking with budgets, spend accounting, and observable fallback; each call emits a sanitized `parse.retrieval.search` event, and `Parse::Retrieval::Benchmark` measures profiles on labeled cases. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.8.0: Vector index definitions from the model, with optional quantization.** `Parse::VectorSearch::IndexDefinition` generates the Atlas definition from your declarations (filters and tenant field included) with preview and diff, and `quantization: :scalar`/`:binary` on a `:vector` property shrinks index memory without changing stored data. Contextualized embedding batches now adapt to provider size limits. See [CHANGELOG.md](./CHANGELOG.md)
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full 5.8 entry.
+
 ## What's new in 5.7
 
 - **5.7.6: `semantic_search` respects `agent_fields` for chunk content.** A class that embedded a field hidden by its `agent_fields` allowlist returned that field's text as chunk content. Chunk text now comes only from embedded fields the agent may read; a hidden text source is refused with `:field_denied` before the search runs. See [CHANGELOG.md](./CHANGELOG.md)
