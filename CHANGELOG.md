@@ -132,6 +132,22 @@
   write path are unchanged. Drift detection reports a quantization mismatch
   between the declaration and the live index.
 
+#### Queries use a property's declared remote name
+
+- **FIXED**: A property declared with an explicit remote name, such as
+  `property :account_id, :string, field: :account_id` or
+  `property :auth_id_sub, :string, field: :authId_sub`, was saved and read
+  under that name, but queries camel-cased it anyway: `where(account_id:)`
+  compiled to `accountId`, `order(:auth_id_sub.desc)` to `authIdSub`, and even
+  the string key `"authId_sub"` became `authIdSub`, so queries against systems
+  whose columns use underscores or mixed casing silently matched nothing.
+  Queries now send a declared `field:` name exactly as declared, for both the
+  Ruby name and the remote name, across `where`, operators, `order`, `keys`,
+  `include`, subqueries (each with its own class's names), aggregation
+  helpers, and the mongo-direct entry points. Names a model does not declare
+  keep the default camelCase formatting, and `Parse::Query.field_formatter`
+  still applies to them.
+
 #### Query model resolution works for any Parse class name
 
 - **FIXED**: `Parse::Query` looked up its table's model with

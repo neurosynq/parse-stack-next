@@ -225,6 +225,13 @@ module Parse
     @field_formatter = :columnize
     @allow_scope_introspection = false
 
+    # Fiber-local scope used by {Parse::Query.format_field} to honor a
+    # model's explicit `field:` names while a query compiles.
+    FIELD_ALIAS_SCOPE_KEY = :parse_query_field_alias_scope
+    EMPTY_FIELD_ALIASES = {}.freeze
+    FIELD_ALIAS_CACHE = {}
+    FIELD_ALIAS_CACHE_MUTEX = Mutex.new
+
     # The set of symbol keys that {#conditions} treats as query-shape
     # options (cache TTL, ordering, limits, ACL convenience helpers,
     # session/master-key overrides) rather than as field-name
@@ -303,12 +310,70 @@ module Parse
 
       # @param str [String] the string to format
       # @return [String] formatted string using {Parse::Query.field_formatter}.
+      #   While a query is compiling, a name the query's model declares with
+      #   an explicit `field:` (for example `property :account_id, field:
+      #   :account_id` or `field: :authId_sub`) is returned exactly as
+      #   declared, whether the caller used the Ruby name or the remote name.
       def format_field(str)
         res = str.to_s.strip
+        aliases = Thread.current[FIELD_ALIAS_SCOPE_KEY]
+        if aliases && (mapped = aliases[res])
+          return mapped
+        end
         if field_formatter.present? && res.respond_to?(field_formatter)
           res = res.send(field_formatter)
         end
         res
+      end
+
+      # Run the block with `table`'s explicit field aliases in effect for
+      # {format_field}. Always sets the scope (possibly to an empty map), so
+      # a subquery on another class, compiled inside an outer query, uses its
+      # own model's names. Fiber-local, so concurrent queries are isolated.
+      #
+      # @param table [String] the Parse class name.
+      # @return the block's value
+      def with_field_aliases(table)
+        previous = Thread.current[FIELD_ALIAS_SCOPE_KEY]
+        Thread.current[FIELD_ALIAS_SCOPE_KEY] = field_aliases_for(table)
+        yield
+      ensure
+        Thread.current[FIELD_ALIAS_SCOPE_KEY] = previous
+      end
+
+      # The explicit remote names a model declares: every `field_map` entry
+      # whose remote name differs from what {format_field} would produce
+      # for the Ruby name. Maps both the Ruby name and the remote name to the
+      # remote name, so `where(account_id:)` and `where("account_id" =>)`
+      # both compile to the declared column. Names the model does not alias
+      # are absent, so they keep the default formatting.
+      #
+      # @param table [String]
+      # @return [Hash{String => String}]
+      def field_aliases_for(table)
+        klass = (Parse::Model.find_class(table.to_s) rescue nil)
+        return EMPTY_FIELD_ALIASES unless klass.respond_to?(:field_map)
+        fmap = klass.field_map
+        cache_key = [klass.object_id, fmap.size, field_formatter]
+        cached = FIELD_ALIAS_CACHE_MUTEX.synchronize { FIELD_ALIAS_CACHE[cache_key] }
+        return cached if cached
+
+        aliases = {}
+        fmap.each do |ruby_name, remote|
+          ruby = ruby_name.to_s
+          wire = remote.to_s
+          default = if field_formatter.present? && ruby.respond_to?(field_formatter)
+              ruby.send(field_formatter)
+            else
+              ruby
+            end
+          next if wire == default
+          aliases[ruby] = wire
+          aliases[wire] = wire
+        end
+        aliases.freeze
+        FIELD_ALIAS_CACHE_MUTEX.synchronize { FIELD_ALIAS_CACHE[cache_key] = aliases }
+        aliases
       end
 
       # Convert camelCase string to snake_case
@@ -8088,3 +8153,75 @@ module Parse
     end
   end
 end # Parse
+
+module Parse
+  # Wraps the public compile and pipeline entry points of Parse::Query and
+  # the aggregation helpers so {Parse::Query.format_field} honors the model's
+  # explicit `field:` names (for example `account_id` or `authId_sub`) instead
+  # of camel-casing them. Without this, `where(account_id: ...)` compiled to
+  # `accountId` and silently matched nothing.
+  module QueryFieldAliasScope
+    QUERY_METHODS = %i[
+      add_constraint keys exclude_keys order includes pluck count_distinct
+      compile compile_where prepared pipeline count results distinct first first_direct
+      build_direct_mongodb_pipeline build_query_aggregate_pipeline build_aggregation_pipeline
+      aggregate group_by group_by_date explain
+    ].freeze
+
+    # The mongo-direct entry points are wrapped with their exact signatures
+    # (not `*args, **kwargs`), so `Method#parameters` still reports the
+    # `client:` keyword that client-binding checks rely on.
+    module DirectMethods
+      def results_direct(raw: false, max_time_ms: nil, session_token: nil, master: nil,
+                         acl_user: nil, acl_role: nil, client: nil, &block)
+        Parse::Query.with_field_aliases(@table) do
+          super(raw: raw, max_time_ms: max_time_ms, session_token: session_token, master: master,
+                acl_user: acl_user, acl_role: acl_role, client: client, &block)
+        end
+      end
+
+      def count_direct(session_token: nil, master: nil, acl_user: nil, acl_role: nil, client: nil)
+        Parse::Query.with_field_aliases(@table) do
+          super(session_token: session_token, master: master, acl_user: acl_user,
+                acl_role: acl_role, client: client)
+        end
+      end
+
+      def distinct_direct(field, return_pointers: false, order: nil, session_token: nil, master: nil,
+                          acl_user: nil, acl_role: nil, client: nil)
+        Parse::Query.with_field_aliases(@table) do
+          super(field, return_pointers: return_pointers, order: order, session_token: session_token,
+                master: master, acl_user: acl_user, acl_role: acl_role, client: client)
+        end
+      end
+
+      def distinct_direct_pointers(field, order: nil, session_token: nil, master: nil,
+                                   acl_user: nil, acl_role: nil, client: nil)
+        Parse::Query.with_field_aliases(@table) do
+          super(field, order: order, session_token: session_token, master: master,
+                acl_user: acl_user, acl_role: acl_role, client: client)
+        end
+      end
+    end
+
+    def self.wrap(klass, methods, table_from)
+      mod = Module.new do
+        methods.each do |m|
+          next unless klass.method_defined?(m) || klass.private_method_defined?(m)
+          define_method(m) do |*args, **kwargs, &blk|
+            table = instance_exec(&table_from)
+            Parse::Query.with_field_aliases(table) { super(*args, **kwargs, &blk) }
+          end
+        end
+      end
+      klass.prepend(mod)
+    end
+  end
+
+  QueryFieldAliasScope.wrap(Query, QueryFieldAliasScope::QUERY_METHODS, -> { @table })
+  Query.prepend(QueryFieldAliasScope::DirectMethods)
+  [Aggregation, GroupBy, GroupByDate].each do |helper|
+    QueryFieldAliasScope.wrap(helper, %i[pipeline results count execute!], -> { @query&.table })
+  end
+end
+
