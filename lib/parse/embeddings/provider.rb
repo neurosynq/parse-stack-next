@@ -1,6 +1,8 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
+require "uri"
+
 module Parse
   module Embeddings
     # Abstract base class for embedding providers. Concrete subclasses
@@ -242,6 +244,30 @@ module Parse
 
       # @return [Hash] attributes safe to surface in {#inspect}. Override
       #   in subclasses to add fields; never add credentials.
+      # Identity of the deployment this provider talks to, for use in cache
+      # keys: the endpoint's scheme, host, non-default port, and path. Never
+      # includes credentials, userinfo, or a query string. Two providers of
+      # the same class and model pointed at different deployments (two
+      # self-hosted servers, or a provider behind a proxy) can return
+      # different vectors for the same input, so their cache entries must
+      # not be shared.
+      #
+      # The default reads `@base_url`, which every built-in HTTP provider
+      # sets. A provider with no configurable endpoint returns nil, which
+      # leaves its cache key unchanged. Override to supply another identity.
+      #
+      # @return [String, nil]
+      def cache_identity
+        url = instance_variable_defined?(:@base_url) ? @base_url : nil
+        return nil if url.nil? || url.to_s.empty?
+        uri = URI.parse(url.to_s)
+        return nil if uri.host.nil? || uri.host.empty?
+        port = uri.port && uri.port != uri.default_port ? ":#{uri.port}" : ""
+        "#{uri.scheme}://#{uri.host.downcase}#{port}#{uri.path.to_s.chomp("/")}"
+      rescue URI::InvalidURIError
+        nil
+      end
+
       def inspect_attrs
         out = {}
         out[:model] = safe_call(:model_name)

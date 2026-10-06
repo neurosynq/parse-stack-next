@@ -333,7 +333,8 @@ Every `text:`-overload query funnels through one embed path
 ```ruby
 # Opt-in query-embed cache: repeated identical queries skip the
 # provider round-trip. Keyed by (provider, model, dimensions,
-# input_type, SHA-256(input)) — plaintext never lands in the store.
+# input_type, deployment endpoint, SHA-256(input)); plaintext and
+# credentials never land in the store.
 Parse::Embeddings::Cache.enable!(max_entries: 2048, ttl: 600)
 Parse::Embeddings::Cache.stats   # => { enabled:, hits:, misses:, size: }
 
@@ -504,13 +505,18 @@ Two things to know:
   one-chunk document. Registering a context model as an `embed` provider
   works, but the stored vectors carry no surrounding-document context.
   Use `embed_chunks` when chunk-level context is the point.
-* **Request sizing is handled for you.** Voyage caps one request at 1,000
-  documents, 16,000 chunks, and 120k tokens. `embed_chunks` checks the
-  document and chunk caps before sending and splits large inputs across
-  several requests by whole document, so a document's chunks always
-  travel together. The token cap cannot be checked locally; keep very
-  long documents to a few per call. Context models default to
-  `embed_batch_size: 32` for the same reason.
+* **Request sizing is partly handled for you.** Voyage caps one request
+  at 1,000 documents, 16,000 chunks, and 120k tokens. `embed_chunks`
+  checks the document and chunk caps before sending, and splits large
+  inputs across several requests by whole document (a document's chunks
+  always travel together) so that each **response** stays under the
+  SDK's response-size cap. That split is sized by the vectors coming
+  back, not by tokens going out, so it does **not** guarantee a request
+  stays under the 120k input-token cap. The SDK has no tokenizer to
+  check that; keep long documents to a few per call, and expect a
+  `BadRequestError` from Voyage if a request exceeds it. Context models
+  default to `embed_batch_size: 32` to keep `embed_text` batches clear of
+  the token cap for typical inputs, which is a heuristic, not a check.
 
 ---
 
@@ -947,9 +953,12 @@ each row's digest sibling (so the save-path recompute cannot elide the
 provider call), and saves. Unlike `embed_pending!` — which only fills
 NULL vectors — `reembed!` recomputes populated rows too. Run it with a
 master-key client (or pass `save_opts:` with a session token that can
-write every row). Each row's save makes one provider call; pace bulk
-runs against provider rate limits (see `BatchEmbedder` below for the
-pattern, or just throttle the loop).
+write every row). `batch_size:` is the query page size: it controls how
+many records are fetched per round, not how many inputs go into a provider
+request. Each row's save makes its own provider call; pace bulk runs
+against provider rate limits (see `BatchEmbedder` below for the pattern,
+or just throttle the loop). `embed_pending!(batch_size:)` pages the same
+way.
 
 ### Changed-width migrations: dual-field workflow
 

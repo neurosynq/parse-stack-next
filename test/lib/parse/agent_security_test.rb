@@ -508,7 +508,6 @@ class AgentInternalErrorSanitizationTest < Minitest::Test
       # legitimate operator-side leak path we want to keep.
       original_stderr = $stderr
       $stderr = StringIO.new
-      operator_log = nil
       result = begin
           @agent.execute(:get_all_schemas)
         ensure

@@ -1134,19 +1134,21 @@ class MCPStreamingTest < Minitest::Test
 
     # Heartbeats are distinguished by their dedicated `parse-stack:heartbeat:*`
     # progressToken; tool reports use the request progressToken.
-    heartbeats = progress_events.select { |e|
+    heartbeat = lambda do |e|
       JSON.parse(e[:data]).dig("params", "progressToken").to_s.start_with?("parse-stack:heartbeat:")
-    }
-    tool_reports = progress_events - heartbeats
+    end
+    first_report = progress_events.index { |e| !heartbeat.call(e) }
 
-    assert tool_reports.size >= 1,
-           "Expected at least 1 tool-progress event, got #{tool_reports.size}"
-    # At most one heartbeat should have fired (the one BEFORE the tool
-    # reported). After the tool report, the suppression flag stops all
-    # further heartbeats even though the dispatcher continues for ~0.5s.
-    assert heartbeats.size <= 1,
-           "Expected at most 1 heartbeat before tool progress took over, got #{heartbeats.size}. " \
-           "Events: #{progress_events.map { |e| JSON.parse(e[:data]).dig("params") }.inspect}"
+    refute_nil first_report, "Expected at least 1 tool-progress event"
+    # The property under test: once the tool reports, the suppression flag
+    # stops all further heartbeats even though the dispatcher keeps running
+    # for ~0.5s (room for ~5 more). How many heartbeats fire BEFORE the
+    # report depends on scheduler jitter (a slow CI runner can fit two into
+    # the 0.15s pre-progress delay), so that count is not asserted.
+    late = progress_events[(first_report + 1)..].select(&heartbeat)
+    assert_empty late,
+                 "Heartbeats continued after tool progress took over. " \
+                 "Events: #{progress_events.map { |e| JSON.parse(e[:data]).dig("params") }.inspect}"
   end
 
   def test_tool_progress_uses_request_progress_token

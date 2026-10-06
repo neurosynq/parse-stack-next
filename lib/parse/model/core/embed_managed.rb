@@ -428,7 +428,10 @@ module Parse
         #
         # @param field [Symbol, nil] limit to one embed target; nil
         #   processes every declared directive.
-        # @param batch_size [Integer] rows fetched per round (default 100).
+        # @param batch_size [Integer] rows fetched per query page (default
+        #   100). This pages the records; it does NOT batch provider
+        #   requests. Each record is saved individually and makes its own
+        #   embedding call.
         # @param limit [Integer, nil] stop after re-embedding at most
         #   this many records across all directives; nil = no cap.
         # @param where [Hash, nil] extra query constraints (e.g.
@@ -527,7 +530,10 @@ module Parse
         #
         # @param field [Symbol, nil] limit the backfill to one embed
         #   target; nil processes every declared directive.
-        # @param batch_size [Integer] rows fetched per round (default 100).
+        # @param batch_size [Integer] rows fetched per query page (default
+        #   100). This pages the records; it does NOT batch provider
+        #   requests. Each record is saved individually and makes its own
+        #   embedding call.
         # @param limit [Integer, nil] stop after embedding at most this
         #   many records across all directives; nil = no cap.
         # @param where [Hash, nil] extra query constraints AND-ed with the

@@ -53,7 +53,8 @@ callers.
   no `truncation` field, so none is sent for these models. Large inputs are
   sent as several requests, grouping whole documents so each response stays
   within the provider's response-size cap; a document is never split across
-  requests.
+  requests. That split is sized by response vectors, not input tokens, so
+  it does not by itself keep a request under Voyage's 120k-token input cap.
 - **NEW**: `Parse::Retrieval::Reranker::Voyage` wraps Voyage's `/v1/rerank`
   and plugs into `Parse::Retrieval.retrieve(rerank:)` like the Cohere
   reranker. It defaults to `rerank-3` and accepts `rerank-3-lite` and the
@@ -111,6 +112,38 @@ callers.
   request now reaches the dispatcher, which answers `-32601`, and the client
   negotiates a supported version through `initialize`. Other methods still
   get a 400 for an unsupported version.
+
+#### Embedding cache entries are separated by deployment
+
+- **FIXED**: `Parse::Embeddings::Cache` keyed entries by provider class,
+  model, dimensions, and input type, but not by endpoint. Two providers of
+  the same class and model pointed at different deployments (two
+  self-hosted `LocalHTTP` servers serving different weights under one model
+  name, or a provider behind a proxy) shared cache entries, so one could be
+  served the other's vector for the same query. The key now includes the
+  provider's deployment identity: the endpoint's scheme, host, non-default
+  port, and path, never credentials, userinfo, or a query string. Built-in
+  HTTP providers derive it from their `base_url`; `Provider#cache_identity`
+  can be overridden. Providers with no endpoint keep their existing keys,
+  so custom providers are unaffected. Existing cached entries for built-in
+  providers miss once and are re-filled.
+
+#### Test infrastructure
+
+- **CHANGED**: Development and CI use Bundler 4.0.22. The lockfile now
+  includes gem checksums; dependency versions are unchanged.
+- **CHANGED**: The CI matrix's `3.5` lane, which resolved to a 2025
+  `3.5.0preview1` build, is replaced by Ruby 4.0. The unit suite passes on
+  Ruby 4.0.6.
+- **NEW**: Snapshot fixtures pin the `$vectorSearch` pipeline (master,
+  user-session, strict-role, and caller-filter scopes), the native
+  `$rankFusion` pipeline (including that the ACL `$match` and final `$limit`
+  run after fusion), and `clp_scope` protected-field resolution and
+  redaction.
+- **FIXED**: A streaming heartbeat test asserted how many heartbeats fired
+  before a tool's first progress report, which depends on scheduler timing
+  and failed intermittently on slower CI runners. It now asserts the
+  property under test: no heartbeat follows the first report.
 
 ### Behavior Notes
 

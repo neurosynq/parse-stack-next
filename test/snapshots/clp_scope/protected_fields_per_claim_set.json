@@ -1,0 +1,12 @@
+{
+  "master": [],
+  "owner": [],
+  "public": [
+    "email",
+    "phone",
+    "ssn"
+  ],
+  "support_role": [
+    "ssn"
+  ]
+}

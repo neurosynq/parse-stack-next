@@ -97,6 +97,44 @@ class EmbeddingsCacheTest < Minitest::Test
     assert_equal 2, CACHE.stats[:size]
   end
 
+  # Same provider class and model, two deployments: e.g. two self-hosted
+  # servers that both expose "nomic-embed-text" but serve different
+  # weights, or a provider pointed at a proxy. Their vectors are not
+  # interchangeable, so one must never be served the other's cache entry.
+  def test_key_separates_deployments_of_the_same_model
+    CACHE.enable!
+    a = Parse::Embeddings::LocalHTTP.new(base_url: "https://embed-a.internal/v1", model: "nomic-embed-text", dimensions: 3, allow_private_endpoint: true)
+    b = Parse::Embeddings::LocalHTTP.new(base_url: "https://embed-b.internal/v1", model: "nomic-embed-text", dimensions: 3, allow_private_endpoint: true)
+    calls = Hash.new(0)
+    [a, b].each_with_index do |prov, i|
+      prov.define_singleton_method(:embed_text) do |strings, input_type: :search_document|
+        calls[i] += 1
+        strings.map { [i.to_f, 0.0, 0.0] }
+      end
+    end
+
+    va = CACHE.fetch_vector(a, "hello")
+    vb = CACHE.fetch_vector(b, "hello")
+
+    assert_equal [0.0, 0.0, 0.0], va
+    assert_equal [1.0, 0.0, 0.0], vb, "deployment b must not be served deployment a's vector"
+    assert_equal({ 0 => 1, 1 => 1 }, calls)
+  end
+
+  def test_deployment_identity_excludes_credentials_and_query
+    prov = Parse::Embeddings::LocalHTTP.new(base_url: "https://embed.internal:8443/v1/?token=secret", model: "m", dimensions: 3, allow_private_endpoint: true)
+    identity = prov.cache_identity
+    assert_equal "https://embed.internal:8443/v1", identity
+    refute_includes CACHE.send(:key_for, prov, "x", :search_query), "secret"
+  end
+
+  def test_providers_without_an_endpoint_keep_their_existing_key
+    provider = CountingProvider.new
+    assert_nil provider.cache_identity
+    key = CACHE.send(:key_for, provider, "hello", :search_query)
+    assert_equal "#{CountingProvider.name}|counting-1|3|search_query|#{Digest::SHA256.hexdigest("hello")}", key
+  end
+
   def test_lru_eviction
     CACHE.enable!(max_entries: 2)
     provider = CountingProvider.new
