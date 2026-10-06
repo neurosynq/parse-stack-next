@@ -258,9 +258,17 @@ module Parse
           # layouts. The resource version retires every credential variant
           # of a resource on a write to it; collection reads also carry the
           # class version, which any write to the class replaces (see
-          # {#version_keys}). `nil` means a version does not exist yet, so
-          # no entry bound to it can be live and the read is skipped.
-          @versions = read_versions(url)
+          # {#version_keys}).
+          #
+          # A read establishes its versions BEFORE the request goes out,
+          # creating any that are missing, and later stores its response
+          # only under those. Resolving them after the response instead let
+          # a read that started before a write but finished after it adopt
+          # the versions the write had just created and store its older
+          # body under them, so a revoked row was served to every later
+          # reader. A write only reads them: `nil` means a version does not
+          # exist yet, so no entry bound to it can be live.
+          @versions = method == :get ? establish_versions(url) : read_versions(url)
           @cache_key = @versions ? versioned_key(url, @versions) : nil
           # Skip cache read if write_only mode is enabled
           if method == :get && @cache_key.present? && !@write_only && @store.key?(@cache_key)
@@ -355,21 +363,25 @@ module Parse
              response_env.body.present? && response_env.response_headers[CONTENT_LENGTH_KEY].to_i.between?(20, 1_250_000)
             store_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
             begin
-              # No version yet: create the missing ones so this entry is
-              # bound to them. A later write replaces them.
-              if @versions.nil?
-                @versions = ensure_versions(url)
-                @cache_key = versioned_key(url, @versions)
+              # Store only under the versions established before dispatch,
+              # and only if none of them changed while the request was in
+              # flight. A change means a write landed during the request, so
+              # this body may predate it (a row whose ACL was just revoked,
+              # for instance) and must not be cached under any version.
+              if @versions && @cache_key && read_versions(url) == @versions
+                # Store with string keys (and a plain Hash of headers) so the
+                # value round-trips losslessly through the Redis cache
+                # wrapper's JSON serialization. The read path above reads
+                # string keys first with a symbol-key fallback for legacy
+                # entries.
+                @store.store(@cache_key,
+                             { "headers" => response_env.response_headers.to_h, "body" => response_env.body },
+                             expires: @expires)
+                duration_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - store_start) * 1000.0).round(3)
+                instrument_cache(:store, method: method, url_path: url_path, duration_ms: duration_ms)
+              elsif self.class.logging.present?
+                puts("[Parse::Cache] Skip store, version changed in flight >> #{url_path}")
               end
-              # Store with string keys (and a plain Hash of headers) so the
-              # value round-trips losslessly through the Redis cache wrapper's
-              # JSON serialization. The read path above reads string keys first
-              # with a symbol-key fallback for legacy entries.
-              @store.store(@cache_key,
-                           { "headers" => response_env.response_headers.to_h, "body" => response_env.body },
-                           expires: @expires)
-              duration_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - store_start) * 1000.0).round(3)
-              instrument_cache(:store, method: method, url_path: url_path, duration_ms: duration_ms)
             rescue => e
               puts "[Parse::Cache] Store Error: #{e.class.name}"
               instrument_cache(:error, method: method, url_path: url_path, error: e.class.name)
@@ -377,11 +389,12 @@ module Parse
           end # if
 
           # Retire the written resources again once the server has applied
-          # the write. The retirement before the request leaves a window in
-          # which a concurrent reader can fetch the pre-write state and cache
-          # it under the fresh versions; a row whose ACL was just revoked
-          # would then stay readable until the entry expired. Bumping again
-          # after the response closes that window.
+          # the write. A reader that established the versions the pre-write
+          # bump created, and then fetched the pre-write state, would
+          # otherwise cache it under live versions; a row whose ACL was just
+          # revoked would then stay readable until the entry expired. The
+          # second bump makes that reader's versions stale, so its in-flight
+          # check skips the store, or its stored entry becomes unreachable.
           if @write_targets
             begin
               bump_versions(url, @write_targets)
@@ -549,21 +562,60 @@ module Parse
       # @return [Array<String>, nil] the current versions, or nil when any
       #   of them does not exist yet.
       def read_versions(url)
-        versions = version_keys(url).map do |key|
-          value = @store[key]
-          value.is_a?(String) && !value.empty? ? value : nil
-        end
+        versions = version_keys(url).map { |key| read_version(key) }
         versions.include?(nil) ? nil : versions
       end
 
-      # The current versions, creating any that do not exist yet.
+      # The current versions, creating any that do not exist yet. Called
+      # before a read is dispatched, so the read is bound to versions that
+      # exist before the server answers it.
       # @!visibility private
       # @return [Array<String>]
-      def ensure_versions(url)
-        version_keys(url).map do |key|
-          value = @store[key]
-          value.is_a?(String) && !value.empty? ? value : write_version(key)
+      def establish_versions(url)
+        version_keys(url).map { |key| establish_version(key) }
+      end
+
+      # The current value of one version key, creating it when missing.
+      #
+      # Creation must not overwrite a version a concurrent write just
+      # bumped: the reader would then hold a version the write never
+      # retires. Where the store has an atomic set-if-absent (`create`),
+      # a lost race simply adopts the winner's value. Otherwise the value
+      # is written and read back, and whatever the store then holds is the
+      # version used. A write that landed in between still makes its
+      # post-response bump, which the in-flight check in {#call!} detects.
+      # @!visibility private
+      # @return [String]
+      def establish_version(key)
+        current = read_version(key)
+        return current if current
+        version = SecureRandom.hex(8)
+        if store_creates?
+          begin
+            return version if @store.create(key, version, expires: legacy_version_ttl)
+            current = read_version(key)
+            return current if current
+          rescue NotImplementedError
+            # Fall through to a plain write and read-back.
+          end
         end
+        @store.store(key, version, expires: legacy_version_ttl)
+        read_version(key) || version
+      end
+
+      # @!visibility private
+      # @return [String, nil]
+      def read_version(key)
+        value = @store[key]
+        value.is_a?(String) && !value.empty? ? value : nil
+      end
+
+      # Whether the store offers an atomic set-if-absent.
+      # @!visibility private
+      def store_creates?
+        return false unless @store.respond_to?(:create)
+        return true unless @store.respond_to?(:supports?)
+        !!@store.supports?(:create)
       end
 
       # Replace a version with a fresh random one. A random value rather
