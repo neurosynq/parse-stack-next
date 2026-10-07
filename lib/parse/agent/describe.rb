@@ -176,7 +176,8 @@ module Parse
           tenant_id: tenant_id,
           classes: filter_descriptor(@class_filter_only, @class_filter_except),
           tools: tools_descriptor,
-          methods: filter_descriptor(@method_filter_only, @method_filter_except, transform: ->(s) { s.to_s }),
+          methods: filter_descriptor(@method_filter_only, @method_filter_except, transform: ->(s) { s.to_s })
+            .merge(layers: method_filter_layers_descriptor),
           filters: per_agent_filters_summary,
           hidden_classes: Parse::Agent::MetadataRegistry.hidden_class_names,
           per_class: per_class_descriptor,
@@ -383,10 +384,15 @@ module Parse
         lines << "    except:    #{data[:tools][:except].inspect}" if data[:tools][:except]
         lines << "    effective: #{data[:tools][:effective].inspect}"
 
-        if data[:methods][:only] || data[:methods][:except]
+        inherited_layers = Array(data[:methods][:layers])[0...-1] if data[:methods][:only] || data[:methods][:except]
+        inherited_layers ||= Array(data[:methods][:layers])
+        if data[:methods][:only] || data[:methods][:except] || inherited_layers.any?
           lines << "  methods:"
           lines << "    only:    #{data[:methods][:only].inspect}" if data[:methods][:only]
           lines << "    except:  #{data[:methods][:except].inspect}" if data[:methods][:except]
+          inherited_layers.each do |layer|
+            lines << "    inherited: #{layer.compact.inspect}"
+          end
         end
 
         if data[:filters]
