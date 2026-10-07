@@ -866,9 +866,11 @@ class QueryCompileFixesTest < Minitest::Test
 
   # LiveQuery and push refuse pipeline-only constraints and keep authority
 
-  def lq_client
+  # A LiveQuery client for the default client's application unless told
+  # otherwise, so same-app subscriptions forward the query's session.
+  def lq_client(application_id: default_client.application_id)
     require_relative "../../../lib/parse/live_query"
-    Parse::LiveQuery::Client.new(url: "wss://test.example.com", application_id: "test_app_id",
+    Parse::LiveQuery::Client.new(url: "wss://test.example.com", application_id: application_id,
                                  client_key: "test_key", auto_connect: false)
   end
 
@@ -922,6 +924,69 @@ class QueryCompileFixesTest < Minitest::Test
     combined = FixSong.query(:plays => 1) | scoped_song
     combined.instance_variable_set(:@session_token, nil)
     assert_raises(ArgumentError) { combined.subscribe(client: lq_client) }
+  ensure
+    Parse::LiveQuery.reset! if defined?(Parse::LiveQuery) && Parse::LiveQuery.respond_to?(:reset!)
+  end
+
+  # LiveQuery never sends one application's credentials to another
+
+  def assert_no_subscription_sent(client)
+    assert_empty client.instance_variable_get(:@subscriptions).to_h,
+                 "no subscription may be registered or sent"
+  end
+
+  def test_same_app_subscribe_sends_the_query_session
+    sub = lq_client.subscribe(scoped_song)
+    assert_equal "r:alice", sub.session_token
+    sub = scoped_song.subscribe(client: lq_client)
+    assert_equal "r:alice", sub.session_token
+  ensure
+    Parse::LiveQuery.reset! if defined?(Parse::LiveQuery) && Parse::LiveQuery.respond_to?(:reset!)
+  end
+
+  def test_client_subscribe_refuses_a_session_for_another_app
+    other = lq_client(application_id: "appB")
+    err = assert_raises(ArgumentError) { other.subscribe(scoped_song) }
+    assert_match(/another application/, err.message)
+    refute_match(/r:alice/, err.message)
+    assert_raises(ArgumentError) { other.subscribe(become_query) }
+    assert_raises(ArgumentError) { other.subscribe(scoped_song, session_token: "r:alice") }
+    assert_no_subscription_sent(other)
+  ensure
+    Parse::LiveQuery.reset! if defined?(Parse::LiveQuery) && Parse::LiveQuery.respond_to?(:reset!)
+  end
+
+  def test_query_subscribe_refuses_a_session_for_another_app
+    other = lq_client(application_id: "appB")
+    assert_raises(ArgumentError) { scoped_song.subscribe(client: other) }
+    assert_raises(ArgumentError) { become_query.subscribe(client: other) }
+    assert_no_subscription_sent(other)
+  ensure
+    Parse::LiveQuery.reset! if defined?(Parse::LiveQuery) && Parse::LiveQuery.respond_to?(:reset!)
+  end
+
+  def test_app_b_bound_query_with_session_refuses_app_a_live_query
+    q = app_b_query
+    q.session_token = "r:alice-on-b"
+    a_client = lq_client
+    assert_raises(ArgumentError) { a_client.subscribe(q) }
+    assert_raises(ArgumentError) { q.subscribe(client: a_client) }
+    assert_no_subscription_sent(a_client)
+    sub = lq_client(application_id: "appB").subscribe(q)
+    assert_equal "r:alice-on-b", sub.session_token
+  ensure
+    Parse::LiveQuery.reset! if defined?(Parse::LiveQuery) && Parse::LiveQuery.respond_to?(:reset!)
+  end
+
+  def test_unscoped_query_on_another_app_sends_no_query_credential
+    # A query with the default authority carries no credential of its own,
+    # so subscribing it on another application's LiveQuery client is not
+    # refused; only a caller-supplied token (the caller's choice) is sent.
+    other = lq_client(application_id: "appB")
+    sub = other.subscribe(FixSong.query(:plays => 1))
+    assert_nil sub.session_token
+    sub = other.subscribe(FixSong.query(:plays => 1), session_token: "r:caller")
+    assert_equal "r:caller", sub.session_token
   ensure
     Parse::LiveQuery.reset! if defined?(Parse::LiveQuery) && Parse::LiveQuery.respond_to?(:reset!)
   end

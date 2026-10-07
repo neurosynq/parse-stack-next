@@ -376,8 +376,9 @@ module Parse
           class_name = query.table
           where = query.compile_rest_where
           # The subscription runs under the query's own session (or its
-          # `become` client's); a different explicit token raises.
-          session_token = query.live_query_session_token(session_token)
+          # `become` client's); a different explicit token raises, and so
+          # does a query bound to another application than this client.
+          session_token = query.live_query_session_token(session_token, live_query_client: self)
         end
 
         # Refuse server-side-JS / data-mutating operators in the `where`

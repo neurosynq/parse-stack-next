@@ -929,6 +929,7 @@ class WebhookAuditContractTest < Minitest::Test
   # Declares `acl_policy policy, owner: :self` on Parse::User for one block
   # and restores the built-in default afterwards.
   def with_self_owned_users(policy = :owner_else_private)
+    saved = {}
     names = %i[@acl_policy_setting @acl_owner_field @default_acls @_permissive_default_warned]
     saved = names.to_h { |n| [n, Parse::User.instance_variable_defined?(n) ? [Parse::User.instance_variable_get(n)] : nil] }
     capture_io { Parse::User.acl_policy policy, owner: :self }

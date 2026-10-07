@@ -997,9 +997,13 @@ module Parse
     # Run an OR or subquery merge so that a raise leaves this query exactly
     # as it was: constraints, authority, client, and the pinned authority.
     def with_or_rollback
+      saved = {}
+      saved_where = nil
+      captured_where = false
       ivars = OR_SCOPE_STATE_IVARS + %i[@_or_branch_scope @_or_branch_app @read_preference]
       saved = ivars.to_h { |iv| [iv, [instance_variable_defined?(iv), instance_variable_get(iv)]] }
       saved_where = @where.dup
+      captured_where = true
       yield
     rescue StandardError
       saved.each do |iv, (defined, value)|
@@ -1009,7 +1013,7 @@ module Parse
           remove_instance_variable(iv)
         end
       end
-      @where = saved_where
+      @where = saved_where if captured_where
       raise
     end
     private :with_or_rollback
@@ -4833,7 +4837,7 @@ module Parse
         fields: fields,
         keys: keys,
         watch: watch,
-        session_token: live_query_session_token(session_token),
+        session_token: live_query_session_token(session_token, live_query_client: lq_client),
         use_master_key: use_master_key,
         &block
       )
@@ -5719,7 +5723,12 @@ module Parse
       # Keys like ["project.name", "project.status"] define which subfields to fetch on nested objects
       nested_keys = Parse::Query.parse_keys_to_nested_keys(@keys) if @keys.present?
 
-      list.map { |m| Parse::Object.build(m, @table, fetched_keys: fetch_keys, nested_fetched_keys: nested_keys) }.compact
+      built = list.map { |m| Parse::Object.build(m, @table, fetched_keys: fetch_keys, nested_fetched_keys: nested_keys) }.compact
+      # Record session owners against the client that fetched them, so a
+      # later delete of an already-gone session can still drop its owner's
+      # cached identities.
+      Parse::Session._remember_owners!(built, client) if @table == Parse::Model::CLASS_SESSION && defined?(Parse::Session)
+      built
     end
 
     # Validates includes against keys and field types, printing debug warnings for:
@@ -5945,9 +5954,17 @@ module Parse
     # LiveQuery has no equivalent of `scope_to_user` / `scope_to_role`, so
     # those raise, and an explicit token that differs from the query's
     # authority raises too.
+    #
+    # A query that carries any authority must target the same Parse
+    # application as the LiveQuery client, compared by application id, so
+    # one app's session token is never sent to another app's LiveQuery
+    # server. A query with the default authority sends no query-derived
+    # credential, so it is not checked.
     # @param explicit [String, nil] a `session_token:` passed by the caller.
+    # @param live_query_client [Parse::LiveQuery::Client, nil] the client
+    #   the subscription will be sent on.
     # @return [String, nil]
-    def live_query_session_token(explicit = nil)
+    def live_query_session_token(explicit = nil, live_query_client: nil)
       enforce_or_branch_scope!
       scope = or_effective_scope
       if scope.key?(:user) || scope.key?(:role)
@@ -5961,8 +5978,26 @@ module Parse
         raise ArgumentError,
               "The session_token: passed to subscribe differs from the session this query runs under."
       end
+      ensure_live_query_application!(live_query_client) unless scope.empty?
       (explicit.is_a?(String) && !explicit.empty?) ? explicit : own
     end
+
+    # @!visibility private
+    # Raise when a LiveQuery client targets a different Parse application
+    # than this query, so a credential bound to one app never reaches
+    # another. Compared by application id: the LiveQuery URL is a WebSocket
+    # endpoint and never matches the REST server URL.
+    def ensure_live_query_application!(live_query_client)
+      return if live_query_client.nil? || !live_query_client.respond_to?(:application_id)
+      query_app = or_application_identity&.first
+      lq_app = live_query_client.application_id.to_s
+      return if query_app.nil? || query_app.empty? || lq_app.empty? || query_app == lq_app
+      raise ArgumentError,
+            "This query runs under an authority bound to application #{query_app.inspect}, but the " \
+            "LiveQuery client targets #{lq_app.inspect}. Its credentials are not sent to another " \
+            "application; subscribe on a LiveQuery client for the same application."
+    end
+    private :ensure_live_query_application!
 
     # @return [Hash] the un-stripped reduced where hash, including any
     #   SDK-internal markers like `"__mongo_direct_only"` and
