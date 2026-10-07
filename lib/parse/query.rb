@@ -209,8 +209,8 @@ module Parse
     #   # Valid values: :primary, :primary_preferred, :secondary, :secondary_preferred, :nearest
     #  @return [Symbol, String] the read preference for this query.
     attr_reader :table, :session_token
-    attr_writer :client
-    attr_accessor :key, :cache, :use_master_key, :verbose_aggregate, :read_preference
+    attr_accessor :key, :cache, :verbose_aggregate, :read_preference
+    attr_reader :use_master_key
 
     # We have a special class method to handle field formatting. This turns
     # the symbol keys in an operand from one key to another. For example, we can
@@ -570,6 +570,50 @@ module Parse
         constraint_reduce(where)
       end
 
+      # SDK routing markers that a REST `$or` branch cannot carry.
+      # @!visibility private
+      OR_BRANCH_MARKERS = %w[__aggregation_pipeline __mongo_direct_only].freeze
+
+      # @!visibility private
+      # Compile one branch of an OR group. A constraint that only works
+      # through the aggregation pipeline or mongo-direct (`readable_by`,
+      # `:ACL.readable_by`, `:tags.array_size`, the mongo-direct geo
+      # operators) compiles to a routing marker that {compile_where}
+      # strips. Inside an OR that would turn the branch into `{}`, which
+      # matches every row, or silently drop part of it. Such a branch is
+      # refused instead.
+      # @param where [Array<Parse::Constraint>]
+      # @return [Hash] the compiled branch.
+      # @raise [ArgumentError] when the branch carries a routing marker.
+      def compile_or_branch(where)
+        markers = compile_markers(where)
+        if or_branch_marker?(markers)
+          names = Array(where).select { |c| c.is_a?(Parse::Constraint) && or_branch_marker?(c.as_json) }
+                             .map do |c|
+                               field = c.operand.to_s.casecmp?("acl") ? "ACL" : c.operand.to_s
+                               c.operation.respond_to?(:operator) ? "#{field}.#{c.operation.operator}" : field
+                             end
+          raise ArgumentError,
+                "This constraint is not supported inside an OR " \
+                "(#{names.empty? ? "pipeline-only constraint" : names.uniq.join(", ")}): it needs the " \
+                "aggregation pipeline or mongo-direct, and a REST `$or` branch cannot carry it. " \
+                "Apply it outside the OR, or run the OR branches as separate queries."
+        end
+        compile_where(where)
+      end
+
+      # @!visibility private
+      def or_branch_marker?(value)
+        case value
+        when Hash
+          value.any? { |k, v| OR_BRANCH_MARKERS.include?(k.to_s) || or_branch_marker?(v) }
+        when Array
+          value.any? { |v| or_branch_marker?(v) }
+        else
+          false
+        end
+      end
+
       # @!visibility private
       # Reduce a list of constraints into one where hash. Constraints on the
       # same field are combined so every one of them still applies:
@@ -688,6 +732,14 @@ module Parse
       @client ||= self.class.client
     end
 
+    # Set the client this query runs through. A client from
+    # {Parse::Client#become} carries a session, so on a query combined
+    # with OR the change is checked like any other change of authority.
+    # @param value [Parse::Client]
+    def client=(value)
+      guard_or_scope_change { @client = value }
+    end
+
     # Clear a specific clause of this query. This can be one of: :where, :order,
     # :includes, :skip, :limit, :count, :keys or :results.
     # @param item [:Symbol] the clause to clear.
@@ -768,6 +820,11 @@ module Parse
     #   and their value.
     # @return [self]
     def conditions(expressions = {})
+      # Apply `:or` last, so a `:session` or `:use_master_key` in the same
+      # Hash is in place before the branches' authority is compared.
+      if expressions.is_a?(Hash) && expressions.key?(:or) && expressions.keys.last != :or
+        expressions = expressions.reject { |k, _| k == :or }.merge(or: expressions[:or])
+      end
       expressions.each do |expression, value|
         # Normalize to symbol for comparison (handles both string and symbol keys)
         expr_sym = expression.respond_to?(:to_sym) ? expression.to_sym : expression
@@ -835,11 +892,65 @@ module Parse
           not_publicly_readable if value
         elsif expr_sym == :not_publicly_writable
           not_publicly_writable if value
+        elsif expression == :or
+          # Symbol key only: a string "or" stays a literal field name.
+          add_or_branches(value)
         else
           add_constraint(expression, value)
         end
       end # each
       self #chaining
+    end
+
+    # @!visibility private
+    # Handle the `:or => [branch, ...]` condition. Each branch is a
+    # constraint Hash, a {Parse::Query}, or an Array of {Parse::Constraint}.
+    # The branches are ORed together and the group is ANDed with the
+    # query's other constraints. A branch with no constraints matches every
+    # row, so the group adds no constraint. An empty list matches no rows.
+    # @param branches [Array]
+    def add_or_branches(branches)
+      unless branches.is_a?(Array)
+        raise ArgumentError, ":or expects an Array of constraint hashes or queries, got #{branches.class}."
+      end
+      wheres = branches.map do |branch|
+        case branch
+        when Parse::Query
+          unless branch.table == @table
+            raise ArgumentError, ":or branch queries must be of the same class #{@table} (got #{branch.table})."
+          end
+          # The branch's authority travels with its conditions, or raises
+          # when it differs from this query's.
+          merge_or_scope!(branch)
+          branch.where
+        when Hash then Parse::Query.new(@table, branch).where
+        when Array
+          # A branch given as a list: constraints, or constraint hashes that
+          # are expanded the same way a Hash branch is. Anything else is
+          # refused, so a typo cannot empty the branch and turn it into
+          # match-all.
+          branch.flat_map do |item|
+            case item
+            when Parse::Constraint then [item]
+            when Hash then Parse::Query.new(@table, item).where
+            else
+              raise ArgumentError, ":or Array branches may only hold Parse::Constraint objects or constraint hashes, got #{item.class}."
+            end
+          end
+        else
+          raise ArgumentError, ":or branches must be constraint hashes or Parse::Query objects, got #{branch.class}."
+        end
+      end
+      if wheres.empty?
+        # `$or: []` is rejected by MongoDB. Keep the "no rows" meaning.
+        add_constraint(:objectId.in, [])
+        return
+      end
+      # Refuse pipeline-only constraints in any branch before deciding
+      # whether the group is match-all.
+      compiled = wheres.map { |w| Parse::Query.compile_or_branch(w) }
+      return if wheres.any? { |w| Parse::Query.match_all?(w) }
+      add_constraint(Parse::Constraint::CompoundQueryConstraint.new(:or, compiled), nil, filter: false)
     end
 
     alias_method :query, :conditions
@@ -854,11 +965,16 @@ module Parse
         value = value.session_token
       end
 
-      if value.nil? || (value.is_a?(String) && value.present?)
-        @session_token = value
-      else
+      unless value.nil? || (value.is_a?(String) && value.present?)
         raise ArgumentError, "Invalid session token passed to query."
       end
+      guard_or_scope_change { @session_token = value }
+    end
+
+    # @param value [Boolean, nil] whether to send the master key (nil
+    #   leaves the decision to the request layer).
+    def use_master_key=(value)
+      guard_or_scope_change { @use_master_key = value }
     end
 
     # returns the query clause for the particular clause
@@ -1008,11 +1124,21 @@ module Parse
         case entry
         when Order
           entry.field = Query.format_field(entry.field)
-          @order.push entry
+          push_order(entry)
         when Symbol, String
-          o = Order.new(entry)
+          # Accept the REST sort-string form: "-title" is descending and
+          # "+title" ascending. Parsing the sign here keeps a repeated field
+          # deduplicated and gives the direct `$sort` stage a real field name.
+          name = entry.to_s
+          o = if name.start_with?("-") && name.length > 1
+              Order.new(name[1..], :desc)
+            elsif name.start_with?("+") && name.length > 1
+              Order.new(name[1..], :asc)
+            else
+              Order.new(entry)
+            end
           o.field = Query.format_field(o.field)
-          @order.push o
+          push_order(o)
         when Hash
           entry.each do |field, direction|
             dir_sym = direction.is_a?(String) ? direction.downcase.to_sym : direction
@@ -1023,7 +1149,7 @@ module Parse
             end
             o = Order.new(field, dir_sym)
             o.field = Query.format_field(o.field)
-            @order.push o
+            push_order(o)
           end
         else
           raise ArgumentError,
@@ -1035,6 +1161,19 @@ module Parse
       @results = nil if ordering.count > 0
       self #chaining
     end #order
+
+    # @!visibility private
+    # Add one sort key. A field that is already in the order keeps its
+    # position and takes the new direction, so it is sent once. Parse Server
+    # and MongoDB both resolve a repeated sort key the same way.
+    def push_order(order)
+      index = @order.index { |existing| existing.field.to_s == order.field.to_s }
+      if index
+        @order[index] = order
+      else
+        @order.push order
+      end
+    end
 
     # Use with limit to paginate through results. Default is 0.
     # @example
@@ -1325,7 +1464,16 @@ module Parse
     # @param where_clauses [Array<Parse::Constraint>] a list of Parse::Constraint objects to combine.
     # @return [Query] the combined query with an OR clause.
     def or_where(where_clauses = [])
-      where_clauses = where_clauses.where if where_clauses.is_a?(Parse::Query)
+      if where_clauses.is_a?(Parse::Query)
+        unless where_clauses.table == @table
+          raise ArgumentError, "Parse queries must be of the same class #{@table}."
+        end
+        merge_or_scope!(where_clauses)
+        # A query with no constraints is a branch that matches every row, so
+        # the whole OR does too.
+        return match_all! if Parse::Query.match_all?(where_clauses.where)
+        where_clauses = where_clauses.where
+      end
       where_clauses = Parse::Query.new(@table, where_clauses).where if where_clauses.is_a?(Hash)
       return self if where_clauses.blank?
       # Reuse the existing OR only when it is the query's sole constraint.
@@ -1339,13 +1487,13 @@ module Parse
       # if we don't have a OR clause to reuse, then create a new one with then
       # current set of constraints
       if compound.blank?
-        initial_constraints = Parse::Query.compile_where(@where)
+        initial_constraints = Parse::Query.compile_or_branch(@where)
         # Only include initial constraints if they're not empty
         initial_values = initial_constraints.empty? ? [] : [initial_constraints]
         compound = Parse::Constraint::CompoundQueryConstraint.new :or, initial_values
       end
       # then take the where clauses from the second query and append them.
-      new_constraints = Parse::Query.compile_where(where_clauses)
+      new_constraints = Parse::Query.compile_or_branch(where_clauses)
       # Only add new constraints if they're not empty
       unless new_constraints.empty?
         compound.value.push new_constraints
@@ -1355,13 +1503,240 @@ module Parse
       self #chaining
     end
 
+    # Combine two queries with OR. The result is a copy of the receiver
+    # (its limit, order, keys and includes) whose where is the OR of both.
+    #
+    # * A receiver with no constraints is a starting point, the same as
+    #   {#or_where}: `Model.query | q` gives an OR whose only branch is `q`,
+    #   so `[q1, q2].reduce(Model.query, :|)` gives `q1 OR q2`.
+    # * A right-hand side with no constraints is a branch that matches
+    #   every row, so `q | Model.query` has no constraints.
+    #
+    # The auth scope (session token, master-key flag, `scope_to_user`,
+    # `scope_to_role`) carries over from whichever side set it. Two
+    # different scopes raise `ArgumentError`, since the OR could only run
+    # under one of them.
     # @see #or_where
     # @return [Query] the combined query with an OR clause.
+    # @raise [ArgumentError] when the classes or auth scopes differ, or a
+    #   branch holds a pipeline-only constraint.
     def |(other_query)
       raise ArgumentError, "Parse queries must be of the same class #{@table}." unless @table == other_query.table
       copy_query = self.clone
-      copy_query.or_where other_query.where
+      copy_query.send(:merge_or_scope!, other_query)
+      if Parse::Query.match_all?(other_query.where)
+        # Still refuse a pipeline-only receiver rather than silently
+        # widening it.
+        Parse::Query.compile_or_branch(@where)
+        copy_query.match_all!
+      else
+        copy_query.or_where other_query.where
+      end
       copy_query
+    end
+
+    # @!visibility private
+    # Auth scope ivars an OR must agree on.
+    OR_SCOPE_IVARS = %i[session_token use_master_key acl_user acl_role].freeze
+
+    # @!visibility private
+    # The authority this query runs under, as one comparable Hash: the
+    # session token, the scoped user id, the scoped role name, and an
+    # explicit master-key flag. An explicit `use_master_key = false` beside
+    # a session, user, or role adds nothing, since those already run without
+    # the master key. An empty Hash is the default authority.
+    # @return [Hash]
+    def or_effective_scope
+      scope = {}
+      scope[:session] = @session_token unless @session_token.nil?
+      # A client from Parse::Client#become sends its bound session on every
+      # request that names no token and does not ask for the master key,
+      # so it counts as that session. A non-default client with neither a
+      # session nor a master key runs without the master key.
+      own_client = or_explicit_client
+      if own_client && @session_token.nil? && @use_master_key != true
+        bound = own_client.respond_to?(:session_token) ? own_client.session_token : nil
+        if bound.is_a?(String) && !bound.strip.empty?
+          scope[:session] = bound
+        elsif !(own_client.respond_to?(:master_key) && own_client.master_key.present?)
+          scope[:master] = false
+        end
+      end
+      scope[:user] = Parse::Query.or_scope_value(:acl_user, @acl_user) unless @acl_user.nil?
+      scope[:role] = Parse::Query.or_scope_value(:acl_role, @acl_role) unless @acl_role.nil?
+      unless @use_master_key.nil? || (@use_master_key == false && !scope.empty?)
+        scope[:master] = @use_master_key
+      end
+      scope.delete(:master) if scope[:master] == false && scope.size > 1
+      scope
+    end
+    protected :or_effective_scope
+
+    # @!visibility private
+    # The client set on this query when it is not the default client, or
+    # nil. Read from the instance variable so it never memoizes the default.
+    # @return [Parse::Client, nil]
+    def or_explicit_client
+      own = @client
+      return nil if own.nil?
+      default = begin
+          self.class.client
+        rescue StandardError
+          nil
+        end
+      return nil if default && own.equal?(default)
+      own
+    end
+    protected :or_explicit_client
+
+    # @!visibility private
+    # Whether a client changes the authority a query runs under: it is
+    # bound to a session, or it has no master key.
+    def or_authority_client?(own_client)
+      return false unless own_client.respond_to?(:session_token) && own_client.respond_to?(:master_key)
+      bound = own_client.session_token
+      (bound.is_a?(String) && !bound.strip.empty?) || own_client.master_key.blank?
+    end
+    private :or_authority_client?
+
+    # @!visibility private
+    # Instance variables that make up a query's authority.
+    OR_SCOPE_STATE_IVARS = %i[@session_token @use_master_key @acl_user @acl_role @client].freeze
+
+    # @!visibility private
+    # Run an assignment that may change this query's authority. On a query
+    # combined with OR, a change that leaves the pinned authority raises
+    # and the previous values are restored, so a rescued error never
+    # leaves the query running under a different principal.
+    def guard_or_scope_change
+      return yield if @_or_branch_scope.nil?
+      saved = OR_SCOPE_STATE_IVARS.to_h { |iv| [iv, instance_variable_get(iv)] }
+      begin
+        yield
+        enforce_or_branch_scope!
+      rescue StandardError
+        saved.each { |iv, v| instance_variable_set(iv, v) }
+        raise
+      end
+    end
+    private :guard_or_scope_change
+
+    # @!visibility private
+    # Combine `other`'s authority with this query's for an OR. Both must
+    # run under the same authority: a query with the default authority
+    # adopts the other's, and two different authorities (a session and a
+    # scoped user, a session and the master key, two users) raise. The
+    # adopted authority is then pinned, so a later change to this query's
+    # session, master-key flag, or scope raises instead of running the
+    # other query's rows under a different principal. Read preference is
+    # carried over but a mismatch keeps this query's value.
+    # @param other [Parse::Query]
+    def merge_or_scope!(other)
+      theirs = other.or_effective_scope
+      unless theirs.empty?
+        mine = or_effective_scope
+        if mine.empty?
+          OR_SCOPE_IVARS.each do |ivar|
+            instance_variable_set(:"@#{ivar}", other.instance_variable_get(:"@#{ivar}"))
+          end
+          adopt_or_client!(other, theirs)
+          # Fail closed if the adopted state still does not reproduce the
+          # other query's authority.
+          unless or_effective_scope == theirs
+            raise ArgumentError,
+                  "Cannot combine with OR a query running under #{Parse::Query.describe_or_scope(theirs)} " \
+                  "through its own client. Run the queries separately."
+          end
+        elsif mine != theirs
+          raise ArgumentError,
+                "Queries combined with OR must run under the same authority " \
+                "(#{Parse::Query.describe_or_scope(mine)} vs #{Parse::Query.describe_or_scope(theirs)}). " \
+                "Run them separately, or set the same scope on each."
+        end
+        @_or_branch_scope = theirs
+      end
+      @read_preference ||= other.read_preference
+      self
+    end
+    protected :merge_or_scope!
+
+    # @!visibility private
+    # Carry `other`'s client-bound authority onto this query. A query with
+    # no client of its own takes `other`'s client, which keeps its server
+    # and session. A query with its own client takes the derived session
+    # token (or the no-master-key flag) explicitly instead.
+    def adopt_or_client!(other, theirs)
+      their_client = other.or_explicit_client
+      return if their_client.nil?
+      if or_explicit_client.nil?
+        @client = their_client
+      elsif other.session_token.nil? && theirs.key?(:session)
+        @session_token = theirs[:session]
+      elsif theirs[:master] == false
+        @use_master_key = false
+      end
+    end
+    private :adopt_or_client!
+
+    # @!visibility private
+    # Raise when this query's authority no longer matches the one an OR
+    # branch was combined under.
+    def enforce_or_branch_scope!
+      return if @_or_branch_scope.nil?
+      current = or_effective_scope
+      return if current == @_or_branch_scope
+      raise ArgumentError,
+            "This query was combined with OR under #{Parse::Query.describe_or_scope(@_or_branch_scope)}; " \
+            "changing it to #{Parse::Query.describe_or_scope(current)} would run the combined " \
+            "branches under a different authority. Build a new query instead."
+    end
+    private :enforce_or_branch_scope!
+
+    # @!visibility private
+    # A redacted, human-readable form of an authority Hash for errors.
+    def self.describe_or_scope(scope)
+      return "the default authority" if scope.empty?
+      scope.map do |kind, value|
+        case kind
+        when :session then "a session token"
+        when :user then "scoped user #{value}"
+        when :role then "scoped role #{value}"
+        when :master then value ? "the master key" : "no master key"
+        end
+      end.join(" + ")
+    end
+
+    # @!visibility private
+    # A comparable form of one auth scope value.
+    def self.or_scope_value(ivar, value)
+      case ivar
+      when :acl_user
+        value.respond_to?(:id) ? value.id : value.to_s
+      when :acl_role
+        name = value.respond_to?(:name) ? value.name : value.to_s
+        name.to_s.delete_prefix("role:")
+      else
+        value
+      end
+    end
+
+    # @!visibility private
+    # Drop every where constraint, so the query matches all rows.
+    # @return [self]
+    def match_all!
+      @where = []
+      @results = nil
+      self
+    end
+    protected :match_all!
+
+    # @!visibility private
+    # Whether a list of constraints places no restriction on the rows (an
+    # empty list, or constraints that compile to nothing).
+    # @param where [Array<Parse::Constraint>]
+    # @return [Boolean]
+    def self.match_all?(where)
+      where.blank? || compile_markers(where).empty?
     end
 
     # Add a "field is NOT between" condition — the logical negation of
@@ -1937,6 +2312,7 @@ module Parse
 
     # @!visibility private
     def _opts
+      enforce_or_branch_scope!
       opts = {}
       opts[:cache] = self.cache || false
       # Only forward `use_master_key` when the caller actually set it.
@@ -1946,6 +2322,14 @@ module Parse
       # init-block comment on `@use_master_key`.
       opts[:use_master_key] = self.use_master_key unless self.use_master_key.nil?
       opts[:session_token] = self.session_token unless self.session_token.nil?
+      # SDK-internal metadata read (the role-graph walk used for scope
+      # enforcement): keeps the master key inside `Parse.without_master_key`.
+      # Set only by the SDK through an instance variable, never a public option.
+      if @_metadata_master == true
+        opts[:use_master_key] = true
+        opts.delete(:session_token)
+        opts[:metadata_master] = Parse::Client::METADATA_MASTER_REQUEST
+      end
       # for now, don't cache requests where we disable master_key or provide session token
       # if opts[:use_master_key] == false || opts[:session_token].present?
       #   opts[:cache] = false
@@ -2291,7 +2675,7 @@ module Parse
     # @return [self]
     def scope_to_user(user)
       raise ArgumentError, "[Parse::Query] scope_to_user requires a Parse::User or User Pointer." unless user.respond_to?(:id) && user.id.is_a?(String)
-      @acl_user = user
+      guard_or_scope_change { @acl_user = user }
       self
     end
 
@@ -2331,7 +2715,7 @@ module Parse
       # Parse::ACLScope#resolve_for_role only ever sees Parse::Role or
       # String. Without normalization, any String-only operation
       # (e.g. #start_with?, #sub) silently NoMethodErrors on Symbol.
-      @acl_role = role.is_a?(Symbol) ? role.to_s : role
+      guard_or_scope_change { @acl_role = role.is_a?(Symbol) ? role.to_s : role }
       self
     end
 
@@ -2477,6 +2861,10 @@ module Parse
 
     # @!visibility private
     def mongo_direct_scope_kwargs
+      enforce_or_branch_scope!
+      # SDK-internal metadata read (see `_opts`): master mode on the direct
+      # path too, whatever `Parse.without_master_key` says.
+      return { master: Parse::ACLScope::METADATA_MASTER } if @_metadata_master == true
       if @acl_user
         # Pre-resolved User pointer. Hand it to Parse::ACLScope as
         # acl_user: so the same three-layer simulation runs (top-level
@@ -2544,9 +2932,10 @@ module Parse
     # @return [Boolean]
     # @!visibility private
     def mongo_direct_master_posture?
-      # `Parse.without_master_key` strips the master key from every REST
-      # request in the block, an explicit `use_master_key: true` included.
-      return false if master_key_suppressed?
+      # Inside `Parse.without_master_key` this still answers true: the
+      # resulting `master: true` is dropped by Parse::ACLScope.resolve!,
+      # which runs the read in the public scope (or raises under
+      # `require_session_token`) with the block-specific message.
       c = begin
           client
         rescue StandardError
@@ -2564,15 +2953,6 @@ module Parse
     # @!visibility private
     def master_key_suppressed?
       Parse.respond_to?(:master_key_disabled?) && Parse.master_key_disabled?
-    end
-
-    # An explicit `master: true` passed to a direct terminal, dropped inside
-    # a `Parse.without_master_key` block. REST strips the master key there
-    # even when a call asks for it, so the direct read falls back to the
-    # public scope as REST would.
-    # @!visibility private
-    def direct_master_kwarg(master)
-      master == true && master_key_suppressed? ? nil : master
     end
 
     # Auth kwargs for the Atlas Search bridge (`#atlas_search` builder
@@ -2608,7 +2988,6 @@ module Parse
       explicit = %i[session_token master acl_user acl_role].select { |k| options.key?(k) }
       if explicit.any?
         given = explicit.to_h { |k| [k, options[k]] }
-        given.delete(:master) if direct_master_kwarg(given[:master]).nil?
         return client_kwarg.merge(given)
       end
 
@@ -2617,6 +2996,7 @@ module Parse
 
     # @!visibility private
     def atlas_search_scope_kwargs
+      enforce_or_branch_scope!
       if @acl_user
         { acl_user: @acl_user }
       elsif @acl_role
@@ -2625,9 +3005,9 @@ module Parse
         { session_token: @session_token }
       elsif use_master_key == true
         # An explicit master request skips the ambient session, as on REST.
-        # Inside `Parse.without_master_key` the key is stripped, so the
-        # search runs in the public scope.
-        master_key_suppressed? ? {} : { master: true }
+        # Inside `Parse.without_master_key` Parse::AtlasSearch drops it and
+        # the search runs in the public scope.
+        { master: true }
       elsif (ambient = ambient_session_token)
         { session_token: ambient }
       elsif anonymous_session_block?
@@ -2770,7 +3150,6 @@ module Parse
         acl_user = auth[:acl_user]
         acl_role = auth[:acl_role]
       end
-      master = direct_master_kwarg(master)
 
       # Execute the aggregation directly on MongoDB. The pipeline was built
       # entirely from SDK constraint translation (no user-supplied stages),
@@ -2916,7 +3295,6 @@ module Parse
         acl_user = auth[:acl_user]
         acl_role = auth[:acl_role]
       end
-      master = direct_master_kwarg(master)
 
       # SDK-built pipeline only — see results_direct for rationale.
       # ACL simulation runs inside Parse::MongoDB.aggregate when
@@ -3017,7 +3395,6 @@ module Parse
         acl_user = auth[:acl_user]
         acl_role = auth[:acl_role]
       end
-      master = direct_master_kwarg(master)
       raw_results = Parse::MongoDB.aggregate(@table, pipeline,
                                              allow_internal_fields: true,
                                              read_preference: @read_preference,
@@ -4255,7 +4632,7 @@ module Parse
       lq_client = client || Parse::LiveQuery.client
       lq_client.subscribe(
         @table,
-        where: compile_where,
+        where: compile_rest_where,
         fields: fields,
         keys: keys,
         watch: watch,
@@ -5295,7 +5672,7 @@ module Parse
         q[:excludeKeys] = @exclude_keys.join(",") if encode && @exclude_keys&.any?
         q[:order] = @order.join(",") unless @order.empty?
         unless @where.empty?
-          q[:where] = Parse::Query.compile_where(@where)
+          q[:where] = coerce_rest_pointer_ids(Parse::Query.compile_where(@where))
           q[:where] = q[:where].to_json if encode
         end
 
@@ -5326,6 +5703,14 @@ module Parse
     #   query, with SDK-internal routing markers stripped.
     def compile_where
       self.class.compile_where(@where || [])
+    end
+
+    # @return [Hash] the where clause as sent to Parse Server over REST or
+    #   LiveQuery: {#compile_where} with bare objectIds on declared pointer
+    #   fields rewritten into Pointer hashes, so they match the stored
+    #   pointer.
+    def compile_rest_where
+      coerce_rest_pointer_ids(compile_where)
     end
 
     # @return [Hash] the un-stripped reduced where hash, including any
@@ -6168,6 +6553,56 @@ module Parse
       end
     end
 
+    # @!visibility private
+    # Rewrite bare objectId strings compared to a declared pointer column
+    # into Pointer hashes, for the REST where clause. Parse Server compares
+    # a pointer column against its "Class$objectId" storage form, so a bare
+    # objectId never matched (and `$ne` matched every row). Same rules as
+    # {#coerce_bare_pointer_ids}: only declared pointers with a known target
+    # class, only `$eq` / `$ne` / `$in` / `$nin` / `$all` and plain
+    # equality, recursing into `$or` / `$and` / `$nor`.
+    # @param where [Hash] a compiled where clause.
+    # @return [Hash]
+    def coerce_rest_pointer_ids(where)
+      return where unless where.is_a?(Hash) && !where.empty?
+      klass = table_model_class
+      return where unless klass
+      where.each_with_object({}) do |(field, value), out|
+        name = field.to_s
+        out[field] = if %w[$or $and $nor].include?(name) && value.is_a?(Array)
+            value.map { |branch| coerce_rest_pointer_ids(branch) }
+          elsif name.start_with?("$") || name.include?(".")
+            value
+          elsif (target = get_pointer_target_class_for(klass, name))
+            rest_pointer_value(target, value)
+          else
+            value
+          end
+      end
+    end
+
+    # @!visibility private
+    def rest_pointer_value(target, value)
+      bare = ->(v) { v.is_a?(String) && !v.empty? && !v.include?("$") }
+      to_pointer = ->(v) { bare.(v) ? { "__type" => "Pointer", "className" => target, "objectId" => v } : v }
+      case value
+      when String
+        to_pointer.(value)
+      when Hash
+        return value if value.key?("__type") || value.key?(:__type)
+        value.each_with_object({}) do |(op, op_value), out|
+          out[op] = case op.to_s
+            when "$eq", "$ne" then to_pointer.(op_value)
+            when "$in", "$nin", "$all"
+              op_value.is_a?(Array) ? op_value.map(&to_pointer) : op_value
+            else op_value
+            end
+        end
+      else
+        value
+      end
+    end
+
     # Handle a constraint value that is a bare String inside `$in`/`$nin`
     # against a column positively identified as a pointer, when the
     # target class cannot be resolved (no local belongs_to AND no peer
@@ -6571,20 +7006,21 @@ module Parse
         raise ArgumentError, "All queries passed to Parse::Query.or must be for the same Parse class."
       end
 
-      # Start with an empty query for this table
+      # Start with an empty query for this table, carrying the members'
+      # common auth scope (raises when two members set different scopes).
       result = self.new(table)
+      queries.each { |query| result.send(:merge_or_scope!, query) }
 
-      # Filter to only queries that have constraints
-      queries = queries.filter { |q| q.where.present? && !q.where.empty? }
+      # Refuse pipeline-only constraints in any member first, so one is
+      # never dropped or widened.
+      queries.each { |query| compile_or_branch(query.where) }
+
+      # A query with no constraints matches every row, so an OR that
+      # includes one does too.
+      return result if queries.any? { |q| match_all?(q.where) }
 
       # Add each query's complete constraint set as an OR branch
-      queries.each do |query|
-        # Compile the where constraints to check if they result in empty conditions
-        compiled_where = Parse::Query.compile_where(query.where)
-        unless compiled_where.empty?
-          result.or_where(query.where)
-        end
-      end
+      queries.each { |query| result.or_where(query.where) }
 
       result
     end
@@ -6631,13 +7067,19 @@ module Parse
 
     # Creates a deep copy of this query object, allowing independent modifications
     # @return [Parse::Query] a new query object with the same constraints
-    # @note The @client and @results instance variables are intentionally NOT cloned.
-    #   The cloned query will use the default client when executed.
+    # @note The @results instance variable is not cloned. A client that sets
+    #   the query's authority (session-bound or without a master key) is kept
+    #   by reference; otherwise the copy uses the default client.
     def clone
       cloned_query = Parse::Query.new(self.instance_variable_get(:@table))
       # Note: :client is intentionally excluded - it contains non-serializable objects
       # (Redis connections, Faraday connections) and should be obtained lazily
-      [:count, :where, :order, :keys, :exclude_keys, :includes, :limit, :skip, :cache, :use_master_key, :hint].each do |param|
+      # The auth scope and read routing travel with the copy, so a cloned or
+      # combined query never runs under a broader authority than the
+      # original.
+      [:count, :where, :order, :keys, :exclude_keys, :includes, :limit, :skip, :cache, :use_master_key, :hint,
+       :session_token, :acl_user, :acl_role, :read_preference, :key, :acl_query_mongo_direct,
+       :_or_branch_scope].each do |param|
         if instance_variable_defined?(:"@#{param}")
           value = instance_variable_get(:"@#{param}")
           if value.is_a?(Array) || value.is_a?(Hash)
@@ -6654,6 +7096,14 @@ module Parse
           end
           cloned_query.instance_variable_set(:"@#{param}", cloned_value)
         end
+      end
+      # A client that carries a session or no master key (one from
+      # Parse::Client#become or #anonymous) is part of the query's
+      # authority, so the copy keeps it. Any other client, including the
+      # memoized default, is still resolved lazily.
+      own_client = or_explicit_client
+      if own_client && or_authority_client?(own_client)
+        cloned_query.instance_variable_set(:@client, own_client)
       end
       cloned_query.instance_variable_set(:@results, nil)
       cloned_query

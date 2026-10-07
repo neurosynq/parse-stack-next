@@ -3873,8 +3873,8 @@ If you want to see if a particular field contains a specific Parse::Object (poin
 q.where :field => Parse::Pointer.new("_User", "anObjectId")
 # alias using subclass helper
 q.where :field => Parse::User.pointer("anObjectId")
-# alias using `:id` constraint. We will infer :user maps to class "_User" (Parse::User)
-q.where :user.id => "anObjectId"
+# alias using the `pointer_id` constraint. We will infer :user maps to class "_User" (Parse::User)
+q.where :user.pointer_id => "anObjectId"
 ```
 
 #### Less Than
@@ -3976,15 +3976,15 @@ Match arrays by their length:
 
 ```ruby
 # Exact size
-q.where :tags.size => 2          # arrays with exactly 2 elements
+q.where :tags.array_size => 2                  # arrays with exactly 2 elements
 
 # Size comparisons
-q.where :tags.size => { gt: 3 }      # size > 3
-q.where :tags.size => { gte: 2 }     # size >= 2
-q.where :tags.size => { lt: 5 }      # size < 5
-q.where :tags.size => { lte: 4 }     # size <= 4
-q.where :tags.size => { ne: 0 }      # size != 0
-q.where :tags.size => { gte: 2, lt: 10 }  # range: 2 <= size < 10
+q.where :tags.array_size => { gt: 3 }          # size > 3
+q.where :tags.array_size => { gte: 2 }         # size >= 2
+q.where :tags.array_size => { lt: 5 }          # size < 5
+q.where :tags.array_size => { lte: 4 }         # size <= 4
+q.where :tags.array_size => { ne: 0 }          # size != 0
+q.where :tags.array_size => { gte: 2, lt: 10 } # range: 2 <= size < 10
 
 # Empty/non-empty shortcuts (index-friendly)
 q.where :tags.arr_empty => true     # empty arrays (uses { field: [] })
@@ -4033,7 +4033,7 @@ All array constraints work with `has_many :through => :array` relations:
 Product.query(:categories.set_equals => [cat1, cat2])
 
 # Find products with more than 3 categories
-Product.query(:categories.size => { gt: 3 })
+Product.query(:categories.array_size => { gt: 3 })
 ```
 
 **Note:** Array constraints using aggregation pipelines require MongoDB 3.6+.
@@ -4213,7 +4213,7 @@ Event.where(:updated_at.between_dates => [1.week.ago, Time.now])
 ```
 
 #### Matches Object Id
-Sometimes you want to find rows where a particular Parse object exists. You can do so by passing a the Parse::Object subclass or a Parse::Pointer. In some cases you may only have the "objectId" of the record you are looking for. For convenience, you can also use the `id` constraint. This will assume that the name of the field matches a particular Parse class you have defined. Assume the following:
+Sometimes you want to find rows where a particular Parse object exists. You can do so by passing a the Parse::Object subclass or a Parse::Pointer. In some cases you may only have the "objectId" of the record you are looking for. For convenience, you can also use the `pointer_id` constraint. This will assume that the name of the field matches a particular Parse class you have defined. Assume the following:
 
 ```ruby
 # where this Parse object equals the object in the column `field`.
@@ -4221,18 +4221,18 @@ q.where :field => Parse::Pointer("Field", "someObjectId")
 # => "field":{"__type":"Pointer","className":"Field","objectId":"someObjectId"}}
 
 # alias, shorthand when we infer `:field` maps to `Field` parse class.
-q.where :field.id => "someObjectId"
+q.where :field.pointer_id => "someObjectId"
 # => "field":{"__type":"Pointer","className":"Field","objectId":"someObjectId"}}
 
 ```
 It is always important to be thoughtful in naming column names in associations as
 close to their foreign Parse class names. This enables more expressive syntax while reducing
-code. The `id` also supports any object or pointer object. These are all equivalent:
+code. `pointer_id` also accepts any object or pointer object. These are all equivalent:
 
 ```ruby
 q.where :user    => User.pointer("xyx123")
-q.where :user.id => "xyx123"
-q.where :user.id => User.pointer("xyx123")
+q.where :user.pointer_id => "xyx123"
+q.where :user.pointer_id => User.pointer("xyx123")
 # All produce
 # => "user":{"__type":"Pointer","className":"_User","objectId":"xyx123"}}
 ```
@@ -4260,15 +4260,15 @@ In some cases, you do not have the Parse object, but you have its `objectId`. Yo
 
 ```ruby
 # shorthand if you are using convention. Will infer class `Artist`
-Song.all :artist.id => artist_id
+Song.all :artist.pointer_id => artist_id
 
 # other approaches, same result
 Song.all :artist => Artist.pointer(artist_id)
 Song.all :artist => Parse::Pointer.new("Artist", artist_id)
 
-# "id" safely pointers and strings for supporting these types of API patterns
+# `pointer_id` safely accepts pointers and strings for these kinds of API patterns
 def find_songs(artist)
-  Song.all :artist.id => artist
+  Song.all :artist.pointer_id => artist
 end
 
 # all ok
@@ -5813,7 +5813,7 @@ Event.query(:event_date.gt => Time.now).results_direct
 Event.query(:event_date.gte => start_date, :event_date.lte => end_date).results_direct
 
 # Array operators
-Song.query(:tags.size => 3).results_direct
+Song.query(:tags.array_size => 3).results_direct
 Song.query(:tags.contains_all => ["rock", "classic"]).results_direct
 Song.query(:tags.empty_or_nil => true).results_direct
 
@@ -6100,6 +6100,12 @@ Parse.client.authorization.role_cache_ttl    = 120    # user_id → role names
 Parse.client.authorization.invalidate(token)
 Parse.client.authorization.invalidate_user_roles(user_id)
 ```
+
+A custom identity plane that implements neither `invalidate_value` nor
+generation support (`generation`, `generation_current?`, `bump_generation`)
+can only forget one token at a time. Revoking every session
+of a user (password change, account deletion, `logout_all!`, a batch destroy of
+sessions) is then bounded by `identity_cache_ttl` rather than immediate.
 
 Both caches default to per-process memory. With a keyspaced
 `Parse::Cache::Redis` you can move them to the shared backend so every worker

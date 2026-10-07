@@ -352,7 +352,7 @@ module Parse
         if @channels.is_a?(Array) && @channels.empty? == false
           q.where :channels.in => @channels
         end
-        msg[:where] = q.compile_where unless q.where.empty?
+        msg[:where] = q.compile_rest_where unless q.where.empty?
       elsif @channels.is_a?(Array) && @channels.empty? == false
         msg[:channels] = @channels
       end

@@ -374,7 +374,7 @@ module Parse
         if class_name.is_a?(Parse::Query)
           query = class_name
           class_name = query.table
-          where = query.compile_where
+          where = query.compile_rest_where
         end
 
         # Refuse server-side-JS / data-mutating operators in the `where`
@@ -1031,8 +1031,15 @@ module Parse
         # bypasses ACL/CLP/protectedFields. Sending it unconditionally
         # (the pre-5.1.0 behavior) silently elevated session-token
         # subscriptions the caller believed were scoped.
-        if admin_connection?
+        if admin_connection? && Parse.respond_to?(:master_key_disabled?) && Parse.master_key_disabled?
+          # Inside `Parse.without_master_key` the connect frame carries no
+          # master key, as REST requests in the block do not. The socket is
+          # then ACL-scoped for its whole lifetime.
+          @connected_as_admin = false
+          warn_master_key_withheld_once
+        elsif admin_connection?
           message[:masterKey] = @master_key
+          @connected_as_admin = true
           warn_master_key_connection_once
         elsif @use_master_key
           # Opted into admin mode but no usable master key is present —
@@ -1043,6 +1050,16 @@ module Parse
         end
 
         send_message(message)
+      end
+
+      # One-time warning that an admin connection was opened without its
+      # master key because `Parse.without_master_key` was active.
+      def warn_master_key_withheld_once
+        return if @master_key_withheld_warning_emitted
+        @master_key_withheld_warning_emitted = true
+        warn "[Parse::LiveQuery] admin connection (use_master_key: true) opened " \
+             "inside Parse.without_master_key: the connect frame carries no master " \
+             "key, so every subscription on this connection is ACL-scoped."
       end
 
       # One-time loud warning that this connection bypasses ACL/CLP for
@@ -1063,6 +1080,17 @@ module Parse
       # silently disagree with the connection's actual authorization.
       # Both are "you think you're scoped (or elevated) but you're not."
       def warn_subscription_scope_mismatch(use_master_key, session_token)
+        if @connected_as_admin && Parse.respond_to?(:master_key_disabled?) && Parse.master_key_disabled? &&
+           !@block_on_admin_warning_emitted
+          # Parse Server fixes master-key authorization per connection at
+          # connect time, so a socket that connected with the master key
+          # stays elevated even for a subscription made inside the block.
+          @block_on_admin_warning_emitted = true
+          warn "[Parse::LiveQuery:SECURITY] subscribe inside Parse.without_master_key " \
+               "on a connection that already connected with the master key: Parse " \
+               "Server authorizes per connection, so this subscription still " \
+               "bypasses ACL/CLP. Use a non-admin client for streams inside the block."
+        end
         if use_master_key && !admin_connection?
           return if @per_sub_master_key_warning_emitted
           @per_sub_master_key_warning_emitted = true
