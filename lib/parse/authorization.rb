@@ -522,8 +522,12 @@ module Parse
       # invalidation when the plane offers one ({Parse::Cache::SubCache}
       # does), else a generation counter. nil when the plane has neither,
       # `:absent` when the plane keeps one but it is missing (fresh or just
-      # cleared), `:unavailable` when reading it failed. A nonce never repeats, so a
-      # plane clear that drops it cannot make an old value come back.
+      # cleared), `:unavailable` when reading it failed. A nonce never repeats,
+      # so a plane clear that drops it cannot make an old value come back. A
+      # generation counter can: a custom plane whose `clear` also deletes its
+      # generations restarts the counter, so a lookup racing another
+      # process's reset is bounded by `identity_cache_ttl`. Such a plane
+      # should implement `invalidation_nonce` / `bump_invalidation_nonce`.
       def plane_epoch
         cache = @identity_cache
         if cache.respond_to?(:invalidation_nonce)

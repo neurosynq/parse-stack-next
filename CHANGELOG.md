@@ -282,6 +282,12 @@ outcome is listed under Behavior Notes.
   `_after_batch_destroy` hooks are now private.
 - A session deleted elsewhere whose owner this process never recorded keeps
   resolving until the next rate-limited reset or `identity_cache_ttl`.
+- A custom identity plane gets the cross-process revocation-race guarantee by
+  implementing `invalidation_nonce` and `bump_invalidation_nonce`, as the
+  built-in Redis plane does. One with generation counters only is covered for
+  single-token and per-user invalidations, but a lookup racing another
+  process's full reset is bounded by `identity_cache_ttl` when the plane's
+  `clear` also deletes its counters.
 - A sub-agent's `tools:` or `methods:` `only:` list that leaves nothing once
   the parent's `only:` and `except:` lists apply now raises `ArgumentError`.
   An explicitly empty `only: []` is accepted. A sub-agent passing

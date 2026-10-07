@@ -397,9 +397,17 @@ Two behaviors to know before you rely on these:
   when it moved. On the Redis identity plane the marker is a random nonce
   shared by every process, replaced on each invalidation, so this also holds
   for invalidations made by other processes, including a full reset. A custom
-  plane with generation support shares a counter instead; one without gets
-  the guarantee within one process only, and across processes it is bounded
-  by `identity_cache_ttl`.
+  plane gets the same cross-process guarantee by implementing
+  `invalidation_nonce` (return the current marker String, or nil when none is
+  set) and `bump_invalidation_nonce` (store and return a new random String).
+  A custom plane with generation support but no nonce shares a generation
+  counter instead. That covers single-token and per-user invalidations made
+  by other processes, but not a full reset if the plane's `clear` also deletes
+  its generation counters: the counter restarts at a value an in-flight
+  lookup may already hold, so a lookup racing another process's reset can
+  keep its answer until `identity_cache_ttl`. A plane with neither gets the
+  guarantee within one process only, and across processes it is bounded by
+  `identity_cache_ttl`.
 
 On a Redis outage these planes behave differently from the response cache.
 The response cache degrades to a passthrough request; the identity and role
