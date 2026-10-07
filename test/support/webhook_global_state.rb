@@ -51,7 +51,18 @@ module WebhookGlobalState
 
   def self.ivars_of(target, names)
     names.to_h do |name|
-      [name, target.instance_variable_defined?(name) ? [target.instance_variable_get(name)] : nil]
+      [name, target.instance_variable_defined?(name) ? [deep_copy(target.instance_variable_get(name))] : nil]
+    end
+  end
+
+  # Copies nested Hashes and Arrays (the route table) so a test that
+  # registers a route in place cannot change the snapshot. Procs and other
+  # values are kept as they are.
+  def self.deep_copy(value)
+    case value
+    when Hash then value.each_with_object(value.class.new) { |(k, v), h| h[k] = deep_copy(v) }
+    when Array then value.map { |v| deep_copy(v) }
+    else value
     end
   end
 

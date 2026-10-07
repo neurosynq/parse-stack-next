@@ -576,6 +576,26 @@ module Parse
           super
         end
 
+        # Mass assignment (`attributes=`, `apply_attributes!`) sets the ACL
+        # through these setters rather than `acl=`: `acl` by its Ruby name,
+        # `ACL` (an alias bound at class definition) by its remote name.
+        def acl_set_attribute!(*args, **kwargs, &block)
+          @_webhook_handler_acl_assigned = true
+          super
+        end
+
+        def ACL_set_attribute!(*args, **kwargs, &block)
+          @_webhook_handler_acl_assigned = true
+          super
+        end
+
+        # Forget assignments made before the handler ran (the field-guard
+        # pre-step reverts a client ACL through `acl=`).
+        # @!visibility private
+        def reset_webhook_handler_acl_assigned!
+          @_webhook_handler_acl_assigned = false
+        end
+
         # @return [Boolean] whether the handler assigned the ACL.
         def webhook_handler_acl_assigned?
           @_webhook_handler_acl_assigned == true

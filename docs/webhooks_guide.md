@@ -290,15 +290,17 @@ count even if the handler returns `true`.
 
 An operator on a dotted sub-key (`"meta.count"`) arrives only as its resulting
 sub-document, so on an update the SDK writes back just the sub-keys that
-changed, as dotted paths, and a removed sub-key as a `Delete`. The diff follows
-nested plain objects, so a change to `meta.count.value` is written as
-`"meta.count.value"` alone. Concurrent writes to other sub-keys at any depth
-survive. Some limits remain:
+changed, as dotted paths, and a removed sub-key as a `Delete`. The split is one
+level deep: a changed sub-key is written whole at `field.sub`, nested objects
+included, because Parse Server rebuilds the afterSave object from a dotted key
+only one level deep. Concurrent writes to other sub-keys of the field survive.
+Some limits remain:
 
-- Two concurrent operators on the same sub-key can still overwrite each other.
-- An array is written whole at its path, so a concurrent `Add` to an array
-  inside a sub-document is lost. A value that changed shape (a number that
-  became an object) is also written whole at its path.
+- Two concurrent writes inside the same sub-key can still overwrite each
+  other, including two operators on deeper paths under it
+  (`meta.count.value` and `meta.count.other`).
+- An array is written whole, so a concurrent `Add` to an array inside a
+  sub-document is lost.
 - When a changed sub-key would carry a typed value (a Date, Bytes, Pointer, or
   other `__type` value), the whole field is written instead, because Parse
   Server stores a dotted typed value without converting it. Unchanged typed
@@ -306,9 +308,19 @@ survive. Some limits remain:
 - A client that replaces a whole sub-document gets a merge: the changed
   sub-keys are written and the sub-keys it knew about and removed are
   deleted, so a sub-key another request added in the meantime survives.
+- Parse Server reports the reply's dotted keys back to the client in the save
+  response. The JavaScript SDK applies them; other clients may need to fetch
+  the object to see the merged value.
 - A dotted key in a Hash the handler returns (`{ "meta.y" => 5 }`) is folded
-  into the nearest parent path the reply writes whole, and replaces any
-  deeper writes under it, so the reply never names a path and its child.
+  into the parent path the reply writes whole. A key deeper than one level
+  (`"meta.count.value"`) is folded into a `meta.count` write built from the
+  pending object, and on a create every dotted key folds into its whole
+  field. An operator folded this way (`{"__op" => "Increment"}`, `Add`,
+  `AddUnique`, `Remove`, `Delete`) is applied to the value it replaces; an
+  operator that cannot be applied there, or two of your own keys that
+  conflict (`"meta.a" => 5` with `"meta.a.b" => 6`), fails the save with an
+  error. Hash keys may use Ruby names (`acl:`); they are mapped to the
+  stored field names.
 
 On a create, returning `parse_object` also writes the model's declared
 defaults for fields the client did not send, including its ACL policy. Parse
@@ -318,10 +330,15 @@ would. Owner-based policies (`:owner_else_private`, the default, as well as
 `:owner_else_public` and `:owner_but_public_read`) take the owner from the
 declared `owner:` field and, when that is empty, from the user who made the
 request, so a signed-in client owns what it creates. A request without a user
-gets the policy's fallback (master-key only under `:owner_else_private`). An
-ACL the client sent is kept, and an ACL the handler sets always wins. Built-in
-classes such as `_User` that have no policy of their own keep Parse Server's
-defaults. A handler that returns `true`, `nil`, or a Hash keeps the client's
+gets the policy's fallback (master-key only under `:owner_else_private`), and so
+does a master-key request. A `_User` class declared with `owner: :self` is
+owned by the new user, never by the requester: the reply carries the policy's
+ACL without an owner entry and Parse Server adds the new user's own read and
+write. An ACL the client sent is kept, and an ACL the handler sets always
+wins, whether through `acl=` or mass assignment. A `guard :acl, :master_only`
+revert on a create returns the ACL to the class policy rather than to `{}`.
+Built-in classes such as `_User` that have no policy of their own keep Parse
+Server's defaults. A handler that returns `true`, `nil`, or a Hash keeps the client's
 write as sent, so a create without an ACL stays public; return
 `parse_object` to apply the policy. An ACL the handler assigns on
 `parse_object` (`parse_object.acl = Parse::ACL.new`) is written whatever the

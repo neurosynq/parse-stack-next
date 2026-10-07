@@ -15,7 +15,8 @@ require_relative "../../support/webhook_test_server"
 # - An ACL the client sent is kept.
 # - Concurrent top-level Increment operators all apply.
 # - Concurrent dotted sub-key writes to different sub-keys all survive, and a
-#   sub-key the client removed is deleted.
+#   sub-key the client removed is deleted. The reply splits one level deep,
+#   and a nested change saves cleanly when the class has an afterSave hook.
 #
 # Requires Docker (PARSE_TEST_USE_DOCKER=true) and a Parse Server container
 # whose `host.docker.internal` resolves back to the test host.
@@ -164,13 +165,45 @@ class WebhookBeforeSaveReplyIntegrationTest < Minitest::Test
     assert_equal({ "a" => 2, "b" => 2, "c" => 1 }, fetch(id)["meta"])
   end
 
-  def test_concurrent_nested_dotted_writes_survive
-    id = seed("meta" => { "count" => { "value" => 1, "other" => 1 } })
-    keys = %w[value other]
+  # The reply is split one level deep, so concurrent changes inside two
+  # different sub-documents both survive (each is written at its own
+  # `meta.<sub>` path).
+  def test_concurrent_writes_to_different_sub_documents_survive
+    id = seed("meta" => { "count" => { "value" => 1 }, "other" => { "n" => 1 } })
+    paths = %w[meta.count.value meta.other.n]
     concurrently(2, barrier: true) do |i|
-      rest(:put, "classes/WebhookReplyCounter/#{id}", { "meta.count.#{keys[i]}" => { "__op" => "Increment", "amount" => 1 } })
+      rest(:put, "classes/WebhookReplyCounter/#{id}", { paths[i] => { "__op" => "Increment", "amount" => 1 } })
     end
-    assert_equal({ "count" => { "value" => 2, "other" => 2 } }, fetch(id)["meta"])
+    assert_equal({ "count" => { "value" => 2 }, "other" => { "n" => 2 } }, fetch(id)["meta"])
+  end
+
+  # Parse Server rebuilds the afterSave object from a non-operator dotted key
+  # only one level deep. A reply with a deeper path made the save response
+  # fail after the write committed when the class had an afterSave hook.
+  def test_nested_change_with_an_after_save_hook_succeeds_with_the_right_shape
+    seen = Queue.new
+    Parse::Webhooks.route(:after_save, "WebhookReplyCounter") do
+      seen << parse_object.meta
+      true
+    end
+    Parse::Webhooks.register_triggers!(@server.url)
+    id = seed("meta" => { "count" => { "value" => 1, "other" => 1 }, "x" => 1 })
+    resp = rest(:put, "classes/WebhookReplyCounter/#{id}", { "meta" => { "count" => { "value" => 5, "other" => 1 }, "x" => 1 } })
+    assert resp.success?, "save failed: #{resp.result.inspect}"
+    expected = { "count" => { "value" => 5, "other" => 1 }, "x" => 1 }
+    assert_equal expected, fetch(id)["meta"]
+    after = nil
+    # The seed's own afterSave arrives first; keep the last one seen.
+    deadline = Time.now + 10
+    while Time.now < deadline
+      begin
+        after = seen.pop(true)
+        break if after.is_a?(Hash) && after.dig("count", "value") == 5
+      rescue ThreadError
+        sleep 0.05
+      end
+    end
+    assert_equal expected, after, "afterSave saw the stored shape"
   end
 
   def test_removed_sub_key_is_deleted

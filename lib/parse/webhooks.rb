@@ -501,6 +501,8 @@ module Parse
                 master: payload.master? || false,
                 is_new: payload.original.blank?,
               )
+              # A guard revert is not the handler assigning the ACL.
+              pre_obj.reset_webhook_handler_acl_assigned! if pre_obj.respond_to?(:reset_webhook_handler_acl_assigned!)
             end
           end
         end
@@ -785,10 +787,10 @@ module Parse
       # as its resulting sub-document, so on an update a changed sub-document
       # is written back as dotted keys for just the sub-keys that differ from
       # the stored one. A concurrent write to another sub-key survives; the
-      # changed sub-key itself is written as its resulting value. The diff
-      # recurses through nested plain objects; an array or a reshaped value is
-      # written whole at its path, and a field whose writes would carry a
-      # typed value is written whole.
+      # changed sub-key itself is written as its resulting value. The split
+      # is one level deep (a changed sub-key is written whole at
+      # `field.sub`), and a field whose writes would carry a typed value is
+      # written whole.
       #
       # @param payload [Parse::Webhooks::Payload] the beforeSave payload.
       # @param obj [Parse::Object, nil] the handler's object (nil when none).
@@ -837,7 +839,7 @@ module Parse
         return nil if changes.empty? && drops.empty? && overrides.blank?
 
         reply = client_write_data(raw_object, raw_original)
-        overrides = overrides.present? ? overrides.transform_keys(&:to_s) : {}
+        overrides = overrides.present? ? remote_override_keys(payload, overrides) : {}
         # A field the handler wrote or dropped replaces the client's dotted
         # sub-key writes for it; MongoDB refuses `meta` and `meta.x` together.
         (drops + changes.keys + overrides.keys).each do |remote|
@@ -846,39 +848,83 @@ module Parse
         drops.each { |remote| reply.delete(remote) }
         reply.merge!(changes)
         reply.merge!(overrides)
-        fold_dotted_overrides!(reply, overrides.keys)
+        fold_dotted_overrides!(reply, overrides.keys, raw_object: raw_object, create: raw_original.nil?)
         reply
+      end
+
+      # A handler's Hash override keyed by Ruby names (`{acl: ...}`,
+      # `{author_name: ...}`) is mapped to the remote field names the reply
+      # uses, so it replaces the matching field instead of sitting beside it.
+      # A dotted key maps its first segment.
+      # @!visibility private
+      def remote_override_keys(payload, overrides)
+        klass = begin
+            name = payload.parse_class
+            name.present? ? Parse::Object.find_class(name) : nil
+          rescue StandardError
+            nil
+          end
+        map = klass.respond_to?(:field_map) ? klass.field_map : {}
+        overrides.each_with_object({}) do |(key, value), out|
+          key = key.to_s
+          head, rest = key.split(".", 2)
+          remote = map[head.to_sym]
+          head = remote.to_s if remote
+          out[rest ? "#{head}.#{rest}" : head] = value
+        end
       end
 
       # A handler's Hash override may name a sub-key (`"meta.y"`) of a field
       # the reply writes whole (a create, or a field written whole on an
       # update). MongoDB refuses `meta` and `meta.y` in one update, so the
-      # sub-key write is folded into the whole value. When the whole value is
-      # not a plain sub-document (an operator, a typed value, nil), the
-      # handler's sub-key write wins and the whole field is dropped.
+      # sub-key write is folded into the whole value. An override deeper
+      # than one level (`"meta.count.value"`) is folded into a `field.sub`
+      # write seeded from the pending object, because Parse Server rebuilds
+      # the afterSave object from a dotted key only one level deep. On a
+      # create every dotted override folds into its whole field.
+      #
+      # When the value it folds into is not a plain sub-document, a client's
+      # value is replaced by the handler's sub-key, and two of the handler's
+      # own overrides that conflict (`"meta.a" => 5` with `"meta.a.b" => 6`)
+      # raise {ResponseError}.
       # @!visibility private
-      def fold_dotted_overrides!(reply, override_keys)
-        override_keys.each do |key|
+      def fold_dotted_overrides!(reply, override_keys, raw_object: {}, create: false)
+        handler_keys = override_keys.to_set
+        override_keys.sort_by { |k| k.count(".") }.each do |key|
           next unless key.include?(".") && reply.key?(key)
           segments = key.split(".")
           # The nearest ancestor path the reply writes whole, if any.
           parent = (1...segments.length).map { |n| segments.first(n).join(".") }.reverse.find { |p| reply.key?(p) }
-          next unless parent
+          unless parent
+            next if !create && segments.length <= 2
+            parent = create ? segments.first : segments.first(2).join(".")
+            seed = parent.split(".").reduce(raw_object) { |cur, seg| cur.is_a?(Hash) ? cur[seg] : nil }
+            reply[parent] = plain_sub_document?(seed) ? seed.deep_dup : {}
+          end
           value = reply.delete(key)
           whole = reply[parent]
-          unless plain_sub_document?(whole)
-            reply.delete(parent)
-            reply[key] = value
-            next
+          if plain_sub_document?(whole)
+            whole = whole.deep_dup
+          elsif handler_keys.include?(parent)
+            raise Parse::Webhooks::ResponseError,
+                  "before_save reply: #{key} conflicts with #{parent} in the handler's reply"
+          else
+            whole = {}
           end
-          whole = whole.deep_dup
           *dirs, leaf = segments.drop(parent.count(".") + 1)
           node = dirs.reduce(whole) do |cur, dir|
-            cur[dir] = {} unless cur[dir].is_a?(Hash)
+            cur[dir] = {} unless plain_sub_document?(cur[dir])
             cur[dir]
           end
-          if value.is_a?(Hash) && value["__op"] == "Delete"
-            node.delete(leaf)
+          if value.is_a?(Hash) && value.key?("__op")
+            # A whole write stores its value as data, so an operator folded
+            # into it is applied here rather than written as a Hash.
+            result = fold_override_op(key, node[leaf], value)
+            if result.equal?(FOLD_DELETE)
+              node.delete(leaf)
+            else
+              node[leaf] = result
+            end
           else
             node[leaf] = value
           end
@@ -888,7 +934,52 @@ module Parse
       end
 
       # @!visibility private
+      FOLD_DELETE = Object.new.freeze
+
+      # Apply a handler's sub-key operator to the value it replaces inside a
+      # sub-document the reply writes whole, with Parse Server's semantics
+      # for that operator. Raises {ResponseError} (an `{error}` reply, so
+      # Parse Server refuses the save) for an operator that cannot be applied
+      # to a plain value, rather than storing the operator Hash as data.
+      # @param key [String] the dotted override key, for the error message.
+      # @param current [Object] the value at that path in the whole write.
+      # @param op [Hash] the operator Hash (`{"__op" => ...}`).
+      # @return [Object] the new value, or {FOLD_DELETE} to remove the key.
+      # @!visibility private
+      def fold_override_op(key, current, op)
+        name = op["__op"]
+        case name
+        when "Delete"
+          FOLD_DELETE
+        when "Increment"
+          amount = op["amount"]
+          unless amount.is_a?(Numeric) && (current.nil? || current.is_a?(Numeric))
+            raise Parse::Webhooks::ResponseError,
+                  "before_save reply: cannot apply Increment to #{key} (#{current.class})"
+          end
+          (current || 0) + amount
+        when "Add", "AddUnique", "Remove"
+          objects = op["objects"]
+          unless objects.is_a?(Array) && (current.nil? || current.is_a?(Array))
+            raise Parse::Webhooks::ResponseError,
+                  "before_save reply: cannot apply #{name} to #{key} (#{current.class})"
+          end
+          base = current || []
+          case name
+          when "Add" then base + objects
+          when "AddUnique" then base + objects.reject { |o| base.include?(o) }.uniq
+          else base.reject { |o| objects.include?(o) }
+          end
+        else
+          raise Parse::Webhooks::ResponseError,
+                "before_save reply: operator #{name.inspect} on #{key} cannot be combined " \
+                "with a whole write of its parent field"
+        end
+      end
+
+      # @!visibility private
       def handler_assigned_acl?(obj)
+        return true if obj.instance_variable_get(:@_webhook_reply_acl) == true
         obj.respond_to?(:webhook_handler_acl_assigned?) && obj.webhook_handler_acl_assigned?
       end
 
@@ -908,17 +999,44 @@ module Parse
           obj.instance_variable_set(:@_acl_pristine, false)
           return
         end
-        user = payload.user
-        return unless user.is_a?(Parse::User) && user.id.present?
         return unless obj.is_a?(Parse::Object) && obj.instance_variable_get(:@_acl_pristine)
         return if obj.instance_variable_get(:@_acl_owner_override)
         klass = obj.class
+        return if klass.respond_to?(:builtin_acl_default_active?) && klass.builtin_acl_default_active?
         return unless klass.respond_to?(:acl_policy_setting) && klass.acl_policy_setting.to_s.start_with?("owner_")
         field = klass.acl_owner_field
-        if field && field != :self && obj.respond_to?(field)
+        if field == :self
+          adopt_self_owned_acl!(obj, klass)
+          return
+        end
+        # A master-key request is not the user's own write.
+        return if payload.master?
+        user = payload.user
+        return unless user.is_a?(Parse::User) && user.id.present?
+        if field && obj.respond_to?(field)
           return if obj.send(field).present?
         end
         obj.instance_variable_set(:@_acl_owner_override, user)
+      end
+
+      # A self-owned user (`acl_policy ..., owner: :self`) owns its own
+      # record, never the requesting user. Its objectId is assigned by Parse
+      # Server after beforeSave, and Parse Server adds the new user's own
+      # read and write to the ACL of every `_User` create. So the reply
+      # carries the policy's ACL without the owner entry (`{}`, or public
+      # read under `:owner_but_public_read`), which Parse Server completes
+      # with the user's own grant. The save-time resolver is skipped, since
+      # it would pre-generate an objectId the server does not use.
+      # @!visibility private
+      def adopt_self_owned_acl!(obj, klass)
+        acl = if klass.acl_policy_setting == :owner_but_public_read
+            Parse::ACL.everyone(true, false)
+          else
+            Parse::ACL.new
+          end
+        klass.instance_method(:acl=).bind_call(obj, acl)
+        obj.instance_variable_set(:@_acl_pristine, false)
+        obj.instance_variable_set(:@_webhook_reply_acl, true)
       end
 
       # The client's write, rebuilt from a beforeSave payload. Parse Server
@@ -965,10 +1083,12 @@ module Parse
       # a whole-object write of the same value. Writing just the sub-keys that
       # differ from the stored sub-document gives the same result as either
       # client write, without overwriting sub-keys another request changed in
-      # the meantime. The diff recurses through nested plain objects, so a
-      # change to `meta.count.value` is written as that path alone. A sub-key
-      # missing from the new value is written as a `Delete` operator. An
-      # array, or a value whose shape changed, is written whole at its path.
+      # the meantime. The split is one level deep: a changed sub-key is
+      # written whole at `field.sub`, nested objects included, because Parse
+      # Server rebuilds the afterSave object from a non-operator dotted key
+      # only one level deep (`"meta.count.value"` would set `meta.count` to
+      # the leaf). A sub-key missing from the new value is written as a
+      # `Delete` operator.
       #
       # Parse Server stores a dotted value as sent, without the type transform
       # a whole write gets, so a Date would land as a plain sub-document
@@ -989,8 +1109,8 @@ module Parse
         writes
       end
 
-      # Collect the dotted writes that turn `stored` into `value` under
-      # `path`. Never emits a path together with one of its children.
+      # Collect the one-level dotted writes that turn `stored` into `value`
+      # under `path`.
       # @!visibility private
       def diff_sub_document(path, value, stored, writes)
         (value.keys | stored.keys).each do |sub|
@@ -998,13 +1118,7 @@ module Parse
           old_present = stored.key?(sub)
           next if new_present && old_present && value[sub] == stored[sub]
           sub_path = "#{path}.#{sub}"
-          if !new_present
-            writes[sub_path] = { "__op" => "Delete" }
-          elsif old_present && splittable_level?(value[sub], stored[sub])
-            diff_sub_document(sub_path, value[sub], stored[sub], writes)
-          else
-            writes[sub_path] = value[sub]
-          end
+          writes[sub_path] = new_present ? value[sub] : { "__op" => "Delete" }
         end
       end
 
