@@ -385,6 +385,41 @@ class QueryCompileFixesTest < Minitest::Test
     assert_equal({ session_token: "r:alice" }, combined.send(:mongo_direct_scope_kwargs))
   end
 
+  # The scoped side pins the result whichever operand order is used.
+
+  def test_scoped_receiver_pins_authority_with_unscoped_right_side
+    combined = alice_query | FixSong.query(:plays => 2)
+    assert_raises(ArgumentError) { combined.session_token = nil }
+    assert_still_alice(combined)
+    assert_raises(ArgumentError) { combined.use_master_key = true }
+    assert_still_alice(combined)
+  end
+
+  def test_scoped_receiver_pins_authority_with_match_all_right_side
+    combined = alice_query | FixSong.query
+    assert_raises(ArgumentError) { combined.session_token = nil }
+    assert_equal "r:alice", combined.session_token
+  end
+
+  def test_scoped_receiver_pins_authority_through_or_where
+    combined = alice_query.or_where(FixSong.query(:plays => 2))
+    assert_raises(ArgumentError) { combined.session_token = nil }
+    assert_still_alice(combined)
+  end
+
+  def test_scoped_first_member_pins_authority_in_query_or
+    combined = Parse::Query.or(alice_query, FixSong.query(:plays => 2))
+    assert_raises(ArgumentError) { combined.session_token = nil }
+    assert_still_alice(combined)
+  end
+
+  def test_scoped_receiver_pins_authority_with_unscoped_or_key_branch
+    receiver = alice_query
+    receiver.conditions(:or => [FixSong.query(:plays => 2)])
+    assert_raises(ArgumentError) { receiver.session_token = nil }
+    assert_still_alice(receiver)
+  end
+
   def test_execution_refuses_a_changed_pinned_authority
     combined = FixSong.query(:plays => 1) | alice_query
     combined.instance_variable_set(:@session_token, nil)

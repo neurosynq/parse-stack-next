@@ -1626,14 +1626,20 @@ module Parse
     # run under the same authority: a query with the default authority
     # adopts the other's, and two different authorities (a session and a
     # scoped user, a session and the master key, two users) raise. The
-    # adopted authority is then pinned, so a later change to this query's
+    # resulting authority is then pinned whichever side carried it, so a
+    # later change to this query's
     # session, master-key flag, or scope raises instead of running the
     # other query's rows under a different principal. Read preference is
     # carried over but a mismatch keeps this query's value.
     # @param other [Parse::Query]
     def merge_or_scope!(other)
       theirs = other.or_effective_scope
-      unless theirs.empty?
+      if theirs.empty?
+        # The other query has the default authority: pin this query's own
+        # authority, so the result does not depend on operand order.
+        mine = or_effective_scope
+        @_or_branch_scope = mine unless mine.empty?
+      else
         mine = or_effective_scope
         if mine.empty?
           OR_SCOPE_IVARS.each do |ivar|
