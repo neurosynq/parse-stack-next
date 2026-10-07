@@ -151,7 +151,7 @@ module Parse
         # d = d.pointer if d.is_a?(Parse::Object) #simplified query object
         #  d = d.compile
         if d.is_a?(Parse::Query)
-          compiled = d.compile(encode: false, includeClassName: true)
+          compiled = d.compile_subquery
           # compiled["className"] = d.table
           d = compiled
         end

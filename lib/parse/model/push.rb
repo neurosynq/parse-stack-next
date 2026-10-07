@@ -352,7 +352,17 @@ module Parse
         if @channels.is_a?(Array) && @channels.empty? == false
           q.where :channels.in => @channels
         end
-        msg[:where] = q.compile_rest_where unless q.where.empty?
+        unless q.where.empty?
+          compiled = q.compile_rest_where
+          # Constraints that compile to nothing would target every
+          # installation; refuse instead of widening the audience.
+          if compiled.empty?
+            raise ArgumentError,
+                  "The push targeting query has constraints but compiles to no `where`, " \
+                  "which would reach every installation. Check the targeting constraints."
+          end
+          msg[:where] = compiled
+        end
       elsif @channels.is_a?(Array) && @channels.empty? == false
         msg[:channels] = @channels
       end

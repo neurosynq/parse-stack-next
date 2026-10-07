@@ -588,18 +588,26 @@ module Parse
       def compile_or_branch(where)
         markers = compile_markers(where)
         if or_branch_marker?(markers)
-          names = Array(where).select { |c| c.is_a?(Parse::Constraint) && or_branch_marker?(c.as_json) }
-                             .map do |c|
-                               field = c.operand.to_s.casecmp?("acl") ? "ACL" : c.operand.to_s
-                               c.operation.respond_to?(:operator) ? "#{field}.#{c.operation.operator}" : field
-                             end
+          names = pipeline_only_constraint_names(where)
           raise ArgumentError,
                 "This constraint is not supported inside an OR " \
-                "(#{names.empty? ? "pipeline-only constraint" : names.uniq.join(", ")}): it needs the " \
+                "(#{names.empty? ? "pipeline-only constraint" : names.join(", ")}): it needs the " \
                 "aggregation pipeline or mongo-direct, and a REST `$or` branch cannot carry it. " \
                 "Apply it outside the OR, or run the OR branches as separate queries."
         end
         compile_where(where)
+      end
+
+      # @!visibility private
+      # Names (`field.operator`) of the constraints in a where list that
+      # compile to a pipeline or mongo-direct routing marker.
+      # @return [Array<String>]
+      def pipeline_only_constraint_names(where)
+        Array(where).select { |c| c.is_a?(Parse::Constraint) && or_branch_marker?(c.as_json) }
+                    .map do |c|
+                      field = c.operand.to_s.casecmp?("acl") ? "ACL" : c.operand.to_s
+                      c.operation.respond_to?(:operator) ? "#{field}.#{c.operation.operator}" : field
+                    end.uniq
       end
 
       # @!visibility private
@@ -913,6 +921,11 @@ module Parse
       unless branches.is_a?(Array)
         raise ArgumentError, ":or expects an Array of constraint hashes or queries, got #{branches.class}."
       end
+      with_or_rollback { add_or_branches_unguarded(branches) }
+    end
+
+    # @!visibility private
+    def add_or_branches_unguarded(branches)
       wheres = branches.map do |branch|
         case branch
         when Parse::Query
@@ -923,7 +936,7 @@ module Parse
           # when it differs from this query's.
           merge_or_scope!(branch)
           branch.where
-        when Hash then Parse::Query.new(@table, branch).where
+        when Hash then or_branch_hash_where(branch)
         when Array
           # A branch given as a list: constraints, or constraint hashes that
           # are expanded the same way a Hash branch is. Anything else is
@@ -932,7 +945,7 @@ module Parse
           branch.flat_map do |item|
             case item
             when Parse::Constraint then [item]
-            when Hash then Parse::Query.new(@table, item).where
+            when Hash then or_branch_hash_where(item)
             else
               raise ArgumentError, ":or Array branches may only hold Parse::Constraint objects or constraint hashes, got #{item.class}."
             end
@@ -952,6 +965,54 @@ module Parse
       return if wheres.any? { |w| Parse::Query.match_all?(w) }
       add_constraint(Parse::Constraint::CompoundQueryConstraint.new(:or, compiled), nil, filter: false)
     end
+    private :add_or_branches_unguarded
+
+    # @!visibility private
+    # Query options that shape a whole query and mean nothing inside one OR
+    # branch.
+    OR_BRANCH_OPTION_KEYS = %i[order keys key skip limit include includes cache read_preference].freeze
+
+    # @!visibility private
+    # The constraints of a Hash OR branch. The branch is built as its own
+    # query so a `session:` / `use_master_key:` key or a nested `:or` with a
+    # scoped query is applied there, and its authority then has to agree
+    # with this query's (adopted when this query has none, refused when it
+    # differs). Query-shaping options inside a branch are refused.
+    # @param hash [Hash]
+    # @return [Array<Parse::Constraint>]
+    def or_branch_hash_where(hash)
+      options = hash.keys.select { |k| k.is_a?(Symbol) && OR_BRANCH_OPTION_KEYS.include?(k) }
+      if options.any?
+        raise ArgumentError,
+              "#{options.map(&:inspect).join(", ")} cannot be set inside an OR branch; " \
+              "set it on the query itself."
+      end
+      branch = Parse::Query.new(@table, hash)
+      merge_or_scope!(branch)
+      branch.where
+    end
+    private :or_branch_hash_where
+
+    # @!visibility private
+    # Run an OR or subquery merge so that a raise leaves this query exactly
+    # as it was: constraints, authority, client, and the pinned authority.
+    def with_or_rollback
+      ivars = OR_SCOPE_STATE_IVARS + %i[@_or_branch_scope @_or_branch_app @read_preference]
+      saved = ivars.to_h { |iv| [iv, [instance_variable_defined?(iv), instance_variable_get(iv)]] }
+      saved_where = @where.dup
+      yield
+    rescue StandardError
+      saved.each do |iv, (defined, value)|
+        if defined
+          instance_variable_set(iv, value)
+        elsif instance_variable_defined?(iv)
+          remove_instance_variable(iv)
+        end
+      end
+      @where = saved_where
+      raise
+    end
+    private :with_or_rollback
 
     alias_method :query, :conditions
     alias_method :append, :conditions
@@ -1125,20 +1186,15 @@ module Parse
         when Order
           entry.field = Query.format_field(entry.field)
           push_order(entry)
-        when Symbol, String
-          # Accept the REST sort-string form: "-title" is descending and
-          # "+title" ascending. Parsing the sign here keeps a repeated field
-          # deduplicated and gives the direct `$sort` stage a real field name.
-          name = entry.to_s
-          o = if name.start_with?("-") && name.length > 1
-              Order.new(name[1..], :desc)
-            elsif name.start_with?("+") && name.length > 1
-              Order.new(name[1..], :asc)
-            else
-              Order.new(entry)
-            end
-          o.field = Query.format_field(o.field)
-          push_order(o)
+        when String
+          if entry.include?(",")
+            # The REST sort string lists several fields: "title,-plays".
+            order(*entry.split(",").map(&:strip).reject(&:empty?))
+            next
+          end
+          push_order(parse_order_string(entry))
+        when Symbol
+          push_order(parse_order_string(entry))
         when Hash
           entry.each do |field, direction|
             dir_sym = direction.is_a?(String) ? direction.downcase.to_sym : direction
@@ -1161,6 +1217,25 @@ module Parse
       @results = nil if ordering.count > 0
       self #chaining
     end #order
+
+    # @!visibility private
+    # One field of the REST sort-string form: "-title" is descending and
+    # "+title" ascending. Parsing the sign here keeps a repeated field
+    # deduplicated and gives the direct `$sort` stage a real field name.
+    # @return [Parse::Order]
+    def parse_order_string(entry)
+      name = entry.to_s
+      o = if name.start_with?("-") && name.length > 1
+          Order.new(name[1..], :desc)
+        elsif name.start_with?("+") && name.length > 1
+          Order.new(name[1..], :asc)
+        else
+          Order.new(entry)
+        end
+      o.field = Query.format_field(o.field)
+      o
+    end
+    private :parse_order_string
 
     # @!visibility private
     # Add one sort key. A field that is already in the order keeps its
@@ -1323,6 +1398,7 @@ module Parse
     # @return [self]
     def add_constraints(list)
       list = Array.wrap(list).select { |m| m.is_a?(Parse::Constraint) }
+      list.each { |c| merge_subquery_scopes!(c.value) }
       @where = @where + list
       self
     end
@@ -1361,10 +1437,30 @@ module Parse
         constraint.operand = Query.format_field(constraint.operand)
       end
       reject_vector_constraint!(constraint)
+      merge_subquery_scopes!(constraint.value)
       @where.push constraint
       @results = nil
       self #chaining
     end
+
+    # @!visibility private
+    # Parse Server runs a subquery (`$inQuery`, `$notInQuery`, `$select`,
+    # `$dontSelect`) under the outer request's authority, so a subquery's
+    # own session or scope has to agree with this query's: it is adopted
+    # when this query has none and refused when it differs, the same rule
+    # as an OR branch.
+    def merge_subquery_scopes!(value)
+      subqueries = case value
+        when Parse::Query then [value]
+        when Hash
+          q = value[:query] || value["query"]
+          q.is_a?(Parse::Query) ? [q] : []
+        else []
+        end
+      return if subqueries.empty?
+      with_or_rollback { subqueries.each { |q| merge_or_scope!(q) } }
+    end
+    private :merge_subquery_scopes!
 
     # @!visibility private
     # Raise {Parse::VectorSearch::ConstraintNotSupported} when a
@@ -1464,6 +1560,11 @@ module Parse
     # @param where_clauses [Array<Parse::Constraint>] a list of Parse::Constraint objects to combine.
     # @return [Query] the combined query with an OR clause.
     def or_where(where_clauses = [])
+      with_or_rollback { or_where_unguarded(where_clauses) }
+    end
+
+    # @!visibility private
+    def or_where_unguarded(where_clauses)
       if where_clauses.is_a?(Parse::Query)
         unless where_clauses.table == @table
           raise ArgumentError, "Parse queries must be of the same class #{@table}."
@@ -1474,7 +1575,7 @@ module Parse
         return match_all! if Parse::Query.match_all?(where_clauses.where)
         where_clauses = where_clauses.where
       end
-      where_clauses = Parse::Query.new(@table, where_clauses).where if where_clauses.is_a?(Hash)
+      where_clauses = or_branch_hash_where(where_clauses) if where_clauses.is_a?(Hash)
       return self if where_clauses.blank?
       # Reuse the existing OR only when it is the query's sole constraint.
       # When other constraints sit beside it, the current where is
@@ -1502,6 +1603,7 @@ module Parse
       @where = [compound]
       self #chaining
     end
+    private :or_where_unguarded
 
     # Combine two queries with OR. The result is a copy of the receiver
     # (its limit, order, keys and includes) whose where is the OR of both.
@@ -1590,16 +1692,6 @@ module Parse
     protected :or_explicit_client
 
     # @!visibility private
-    # Whether a client changes the authority a query runs under: it is
-    # bound to a session, or it has no master key.
-    def or_authority_client?(own_client)
-      return false unless own_client.respond_to?(:session_token) && own_client.respond_to?(:master_key)
-      bound = own_client.session_token
-      (bound.is_a?(String) && !bound.strip.empty?) || own_client.master_key.blank?
-    end
-    private :or_authority_client?
-
-    # @!visibility private
     # Instance variables that make up a query's authority.
     OR_SCOPE_STATE_IVARS = %i[@session_token @use_master_key @acl_user @acl_role @client].freeze
 
@@ -1633,12 +1725,16 @@ module Parse
     # carried over but a mismatch keeps this query's value.
     # @param other [Parse::Query]
     def merge_or_scope!(other)
+      merge_or_application!(other)
       theirs = other.or_effective_scope
       if theirs.empty?
         # The other query has the default authority: pin this query's own
         # authority, so the result does not depend on operand order.
         mine = or_effective_scope
-        @_or_branch_scope = mine unless mine.empty?
+        unless mine.empty?
+          @_or_branch_scope = mine
+          @_or_branch_app = or_application_identity
+        end
       else
         mine = or_effective_scope
         if mine.empty?
@@ -1660,11 +1756,62 @@ module Parse
                 "Run them separately, or set the same scope on each."
         end
         @_or_branch_scope = theirs
+        @_or_branch_app = or_application_identity
       end
       @read_preference ||= other.read_preference
       self
     end
     protected :merge_or_scope!
+
+    # @!visibility private
+    # The client set on this query when it is a real Parse client other
+    # than the default one, or nil.
+    # @return [Parse::Client, nil]
+    def or_application_client
+      own = or_explicit_client
+      return nil unless own.respond_to?(:application_id) && own.respond_to?(:server_url)
+      own
+    end
+    protected :or_application_client
+
+    # @!visibility private
+    # The application this query runs against, as [application id, server
+    # URL], from its own client or the default client. nil when no client
+    # can be resolved.
+    # @return [Array<String>, nil]
+    def or_application_identity
+      target = or_application_client || begin
+          self.class.client
+        rescue StandardError
+          nil
+        end
+      return nil unless target.respond_to?(:application_id) && target.respond_to?(:server_url)
+      [target.application_id.to_s, target.server_url.to_s.chomp("/")]
+    end
+    protected :or_application_identity
+
+    # @!visibility private
+    # Queries combined with OR must target the same application, so a
+    # session token or master-key authority from one app is never sent to
+    # another. An empty receiver on the default client (no constraints, no
+    # authority) takes the other query's client, as it takes its authority;
+    # any other mismatch raises.
+    def merge_or_application!(other)
+      mine = or_application_identity
+      theirs = other.or_application_identity
+      return if mine.nil? || theirs.nil? || mine == theirs
+      their_client = other.or_application_client
+      if their_client && or_application_client.nil? && @_or_branch_scope.nil? &&
+         or_effective_scope.empty? && Parse::Query.match_all?(@where)
+        @client = their_client
+        return
+      end
+      raise ArgumentError,
+            "Queries combined with OR must run against the same Parse application " \
+            "(#{mine.first} at #{mine.last} vs #{theirs.first} at #{theirs.last}). " \
+            "Run them separately on their own clients."
+    end
+    private :merge_or_application!
 
     # @!visibility private
     # Carry `other`'s client-bound authority onto this query. A query with
@@ -1689,6 +1836,12 @@ module Parse
     # branch was combined under.
     def enforce_or_branch_scope!
       return if @_or_branch_scope.nil?
+      if @_or_branch_app && (app = or_application_identity) && app != @_or_branch_app
+        raise ArgumentError,
+              "This query was combined with OR against Parse application #{@_or_branch_app.first}; " \
+              "running it against #{app.first} would send its authority to another application. " \
+              "Build a new query instead."
+      end
       current = or_effective_scope
       return if current == @_or_branch_scope
       raise ArgumentError,
@@ -1697,6 +1850,35 @@ module Parse
             "branches under a different authority. Build a new query instead."
     end
     private :enforce_or_branch_scope!
+
+    # @!visibility private
+    # On a query combined with OR, auth kwargs passed straight to a direct
+    # or Atlas terminal (`results_direct(master: true)`) must name the same
+    # authority the query was pinned to, and an explicit client the same
+    # application. A narrower `master: false` is allowed.
+    def enforce_explicit_auth_against_or_scope!(session_token: nil, master: nil, acl_user: nil, acl_role: nil, client: nil)
+      return if @_or_branch_scope.nil?
+      if client && @_or_branch_app && client.respond_to?(:application_id) && client.respond_to?(:server_url)
+        app = [client.application_id.to_s, client.server_url.to_s.chomp("/")]
+        unless app == @_or_branch_app
+          raise ArgumentError,
+                "This query was combined with OR against Parse application #{@_or_branch_app.first}; " \
+                "the client: passed here targets #{app.first}."
+        end
+      end
+      given = {}
+      token = session_token.respond_to?(:session_token) ? session_token.session_token : session_token
+      given[:session] = token unless token.nil?
+      given[:user] = Parse::Query.or_scope_value(:acl_user, acl_user) unless acl_user.nil?
+      given[:role] = Parse::Query.or_scope_value(:acl_role, acl_role) unless acl_role.nil?
+      given[:master] = true if master && master != false
+      return if given.empty? || given == @_or_branch_scope
+      raise ArgumentError,
+            "This query was combined with OR under #{Parse::Query.describe_or_scope(@_or_branch_scope)}; " \
+            "the auth passed here (#{Parse::Query.describe_or_scope(given)}) would run it under a " \
+            "different authority."
+    end
+    private :enforce_explicit_auth_against_or_scope!
 
     # @!visibility private
     # A redacted, human-readable form of an authority Hash for errors.
@@ -2992,8 +3174,11 @@ module Parse
         end
 
       explicit = %i[session_token master acl_user acl_role].select { |k| options.key?(k) }
-      if explicit.any?
+      if explicit.any? || options.key?(:client)
         given = explicit.to_h { |k| [k, options[k]] }
+        enforce_explicit_auth_against_or_scope!(client: options[:client], **given)
+      end
+      if explicit.any?
         return client_kwarg.merge(given)
       end
 
@@ -3115,6 +3300,8 @@ module Parse
     # @note This is a read-only operation. Direct MongoDB queries cannot modify data.
     # @see Parse::MongoDB.configure
     def results_direct(raw: false, max_time_ms: nil, session_token: nil, master: nil, acl_user: nil, acl_role: nil, client: nil, &block)
+      enforce_explicit_auth_against_or_scope!(session_token: session_token, master: master,
+                                              acl_user: acl_user, acl_role: acl_role, client: client)
       # `limit(0)` asks for no rows. MongoDB rejects `$limit: 0`, and
       # omitting the stage would return every row.
       return [] if @limit == 0
@@ -3263,6 +3450,8 @@ module Parse
     # @note This is a read-only operation. Direct MongoDB queries cannot modify data.
     # @see Parse::MongoDB.configure
     def count_direct(session_token: nil, master: nil, acl_user: nil, acl_role: nil, client: nil)
+      enforce_explicit_auth_against_or_scope!(session_token: session_token, master: master,
+                                              acl_user: acl_user, acl_role: acl_role, client: client)
       require_relative "mongodb"
       Parse::MongoDB.require_gem!
 
@@ -3341,6 +3530,8 @@ module Parse
     def distinct_direct(field, return_pointers: false, order: nil,
                                session_token: nil, master: nil, acl_user: nil, acl_role: nil,
                                client: nil)
+      enforce_explicit_auth_against_or_scope!(session_token: session_token, master: master,
+                                              acl_user: acl_user, acl_role: acl_role, client: client)
       require_relative "mongodb"
       Parse::MongoDB.require_gem!
 
@@ -4642,7 +4833,7 @@ module Parse
         fields: fields,
         keys: keys,
         watch: watch,
-        session_token: session_token || @session_token,
+        session_token: live_query_session_token(session_token),
         use_master_key: use_master_key,
         &block
       )
@@ -5716,7 +5907,61 @@ module Parse
     #   fields rewritten into Pointer hashes, so they match the stored
     #   pointer.
     def compile_rest_where
+      refuse_pipeline_only!("a LiveQuery subscription or push target")
       coerce_rest_pointer_ids(compile_where)
+    end
+
+    # @!visibility private
+    # Compile this query as a subquery of another (`$inQuery`,
+    # `$notInQuery`, `$select`, `$dontSelect`). Parse Server evaluates it
+    # from the REST form, so a pipeline-only constraint, which that form
+    # drops, is refused rather than turning the subquery into match-all.
+    # @return [Hash]
+    def compile_subquery
+      refuse_pipeline_only!("a subquery")
+      enforce_or_branch_scope!
+      compile(encode: false, includeClassName: true)
+    end
+
+    # @!visibility private
+    # Raise when this query holds a constraint that only the aggregation
+    # pipeline or mongo-direct can run, for a target that receives only
+    # the REST where form.
+    def refuse_pipeline_only!(target)
+      markers = compile_markers
+      return unless Parse::Query.or_branch_marker?(markers)
+      names = Parse::Query.pipeline_only_constraint_names(@where)
+      raise ArgumentError,
+            "This query cannot be used as #{target}: " \
+            "#{names.empty? ? "a pipeline-only constraint" : names.join(", ")} needs the aggregation " \
+            "pipeline or mongo-direct, and Parse Server receives only the REST where form, " \
+            "which would drop it."
+    end
+    private :refuse_pipeline_only!
+
+    # @!visibility private
+    # The session a LiveQuery subscription built from this query must use:
+    # the query's own session token or the session of its `become` client.
+    # LiveQuery has no equivalent of `scope_to_user` / `scope_to_role`, so
+    # those raise, and an explicit token that differs from the query's
+    # authority raises too.
+    # @param explicit [String, nil] a `session_token:` passed by the caller.
+    # @return [String, nil]
+    def live_query_session_token(explicit = nil)
+      enforce_or_branch_scope!
+      scope = or_effective_scope
+      if scope.key?(:user) || scope.key?(:role)
+        raise ArgumentError,
+              "A query scoped with scope_to_user / scope_to_role cannot be subscribed to: " \
+              "LiveQuery authorizes by session token only. Subscribe with that user's session instead."
+      end
+      explicit = explicit.session_token if explicit.respond_to?(:session_token)
+      own = scope[:session]
+      if explicit.is_a?(String) && !explicit.empty? && own && explicit != own
+        raise ArgumentError,
+              "The session_token: passed to subscribe differs from the session this query runs under."
+      end
+      (explicit.is_a?(String) && !explicit.empty?) ? explicit : own
     end
 
     # @return [Hash] the un-stripped reduced where hash, including any
@@ -7015,6 +7260,10 @@ module Parse
       # Start with an empty query for this table, carrying the members'
       # common auth scope (raises when two members set different scopes).
       result = self.new(table)
+      # Run against the members' application: seed the client from the
+      # first member that sets one (the members are then checked to agree).
+      seed = queries.lazy.map { |q| q.send(:or_application_client) }.find(&:itself)
+      result.instance_variable_set(:@client, seed) if seed
       queries.each { |query| result.send(:merge_or_scope!, query) }
 
       # Refuse pipeline-only constraints in any member first, so one is
@@ -7085,7 +7334,7 @@ module Parse
       # original.
       [:count, :where, :order, :keys, :exclude_keys, :includes, :limit, :skip, :cache, :use_master_key, :hint,
        :session_token, :acl_user, :acl_role, :read_preference, :key, :acl_query_mongo_direct,
-       :_or_branch_scope].each do |param|
+       :_or_branch_scope, :_or_branch_app].each do |param|
         if instance_variable_defined?(:"@#{param}")
           value = instance_variable_get(:"@#{param}")
           if value.is_a?(Array) || value.is_a?(Hash)
@@ -7103,14 +7352,12 @@ module Parse
           cloned_query.instance_variable_set(:"@#{param}", cloned_value)
         end
       end
-      # A client that carries a session or no master key (one from
-      # Parse::Client#become or #anonymous) is part of the query's
-      # authority, so the copy keeps it. Any other client, including the
-      # memoized default, is still resolved lazily.
-      own_client = or_explicit_client
-      if own_client && or_authority_client?(own_client)
-        cloned_query.instance_variable_set(:@client, own_client)
-      end
+      # A client set on the query (one from Parse::Client#become or
+      # #anonymous, or a client for another application) decides where the
+      # query's session token and authority are sent, so the copy keeps it.
+      # Only the memoized default client is resolved lazily again.
+      own_client = or_application_client
+      cloned_query.instance_variable_set(:@client, own_client) if own_client
       cloned_query.instance_variable_set(:@results, nil)
       cloned_query
     end

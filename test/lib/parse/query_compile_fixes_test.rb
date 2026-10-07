@@ -660,4 +660,277 @@ class QueryCompileFixesTest < Minitest::Test
     assert_equal pointer("_User", "abc123"), where["user"]
   end
 
+
+  # Application binding: a query's session token and authority are never
+  # sent to another Parse application.
+
+  def app_b_client(master_key: "mkb")
+    Parse::Client.new(server_url: "http://localhost:2/parse", app_id: "appB",
+                      api_key: "kb", master_key: master_key)
+  end
+
+  def app_b_query(plays = 1)
+    q = FixSong.query(:plays => plays)
+    q.client = app_b_client
+    q
+  end
+
+  def test_clone_keeps_another_apps_master_key_client_with_session
+    q = app_b_query
+    q.session_token = "r:alice-on-b"
+    copy = q.clone
+    assert_same q.client, copy.client
+    assert_equal "appB", copy.client.application_id
+    assert_equal "r:alice-on-b", copy.session_token
+  end
+
+  def test_clone_keeps_another_apps_client_without_authority
+    q = app_b_query
+    assert_same q.client, q.clone.client
+  end
+
+  def test_or_across_applications_raises
+    default_client
+    a = FixSong.query(:plays => 2)
+    assert_raises(ArgumentError) { app_b_query | a }
+    assert_raises(ArgumentError) { a | app_b_query }
+    assert_raises(ArgumentError) { a.or_where(app_b_query) }
+    assert_raises(ArgumentError) { Parse::Query.or(app_b_query, a) }
+    assert_raises(ArgumentError) { Parse::Query.or(a, app_b_query) }
+    assert_raises(ArgumentError) { FixSong.query(:plays => 3, :or => [app_b_query]) }
+  end
+
+  def test_or_across_applications_with_sessions_raises
+    default_client
+    alice_a = alice_query
+    bob_b = app_b_query
+    bob_b.session_token = "r:alice"
+    err = assert_raises(ArgumentError) { alice_a | bob_b }
+    assert_match(/same Parse application/, err.message)
+    refute_match(/r:alice/, err.message)
+    assert_raises(ArgumentError) { bob_b | alice_a }
+  end
+
+  def test_two_different_master_key_clients_do_not_combine
+    other_b = Parse::Client.new(server_url: "http://localhost:3/parse", app_id: "appC",
+                                api_key: "kc", master_key: "mkc")
+    c = FixSong.query(:plays => 2)
+    c.client = other_b
+    assert_raises(ArgumentError) { app_b_query | c }
+  end
+
+  def test_empty_receiver_takes_the_other_applications_client
+    default_client
+    combined = FixSong.query | app_b_query
+    assert_equal "appB", combined.client.application_id
+    combined = Parse::Query.or(app_b_query(1), app_b_query(2))
+    assert_equal "appB", combined.client.application_id
+  end
+
+  def test_same_application_clients_combine
+    default_client
+    same = FixSong.query(:plays => 2)
+    same.client = Parse::Client.new(server_url: "http://localhost:1/parse/", app_id: "a",
+                                    api_key: "k", master_key: "mk")
+    combined = FixSong.query(:plays => 1) | same
+    assert_equal "a", combined.client.application_id
+    combined = same | FixSong.query(:plays => 1)
+    assert_same same.client, combined.client
+  end
+
+  def test_session_never_moves_to_another_application
+    default_client
+    combined = FixSong.query(:plays => 1) | alice_query
+    assert_raises(ArgumentError) { combined.client = app_b_client }
+    assert_equal "a", combined.client.application_id
+    assert_equal "r:alice", combined.session_token
+    combined.instance_variable_set(:@client, app_b_client)
+    assert_raises(ArgumentError) { combined.send(:_opts) }
+  end
+
+
+  # Hash OR branches carry their authority (second review round)
+
+  def scoped_song(plays = 1)
+    q = FixSong.query(:plays => plays)
+    q.session_token = "r:alice"
+    q
+  end
+
+  def test_nested_or_hash_branch_keeps_scoped_query_authority
+    default_client
+    q = FixSong.query(:or => [{ :or => [scoped_song] }, { :plays => 2 }])
+    assert_equal "r:alice", q.session_token
+    assert_raises(ArgumentError) { q.session_token = nil }
+  end
+
+  def test_or_where_hash_with_nested_scoped_query_keeps_authority
+    default_client
+    q = FixSong.query(:plays => 0).or_where(:or => [scoped_song])
+    assert_equal "r:alice", q.session_token
+  end
+
+  def test_hash_branch_session_key_conflicts_with_master
+    default_client
+    assert_raises(ArgumentError) do
+      FixSong.query(use_master_key: true, :or => [{ session: "r:alice", :plays => 1 }, { :plays => 2 }])
+    end
+  end
+
+  def test_or_where_hash_session_key_is_adopted
+    default_client
+    q = FixSong.query(:plays => 0).or_where(session: "r:alice", :plays => 1)
+    assert_equal "r:alice", q.session_token
+  end
+
+  def test_hash_branch_refuses_query_options
+    %i[limit order keys skip include].each do |opt|
+      assert_raises(ArgumentError) { FixSong.query(:or => [{ :plays => 1, opt => 1 }, { :plays => 2 }]) }
+    end
+  end
+
+  # A rejected OR leaves the receiver unchanged
+
+  def test_rejected_or_branches_leave_receiver_unchanged
+    default_client
+    q = FixSong.query(:plays => 0)
+    before = q.compile(encode: false)
+    assert_raises(ArgumentError) { q.conditions(:or => [scoped_song, 42]) }
+    assert_nil q.session_token
+    q.session_token = "r:bob" # not pinned
+    q.session_token = nil
+    assert_equal before, q.compile(encode: false)
+  end
+
+  def test_rejected_or_where_leaves_receiver_unchanged
+    default_client
+    q = FixSong.query(:plays => 0)
+    bad = scoped_song
+    bad.where(:tags.array_size => 2)
+    assert_raises(ArgumentError) { q.or_where(bad) }
+    assert_nil q.session_token
+    assert_nil q.instance_variable_get(:@_or_branch_scope)
+  end
+
+  # Explicit auth on direct terminals agrees with the pinned authority
+
+  def test_explicit_master_on_direct_terminal_of_pinned_query_raises
+    default_client
+    combined = FixSong.query(:plays => 1) | scoped_song
+    assert_raises(ArgumentError) { combined.results_direct(master: true) }
+    assert_raises(ArgumentError) { combined.count_direct(session_token: "r:bob") }
+    assert_raises(ArgumentError) { combined.distinct_direct(:plays, acl_user: Parse::User.new(objectId: "bob")) }
+    assert_raises(ArgumentError) { combined.send(:atlas_search_auth_kwargs, { master: true }) }
+    assert_raises(ArgumentError) { combined.results_direct(client: app_b_client) }
+  end
+
+  def test_matching_explicit_auth_on_pinned_query_is_allowed
+    default_client
+    combined = FixSong.query(:plays => 1) | scoped_song
+    assert_equal({ session_token: "r:alice" },
+                 combined.send(:atlas_search_auth_kwargs, { session_token: "r:alice" }))
+  end
+
+  # Subqueries carry their authority and refuse pipeline-only constraints
+
+  def test_scoped_subquery_authority_is_adopted
+    default_client
+    q = FixSong.query(:artist.in_query => scoped_artist_query)
+    assert_equal "r:alice", q.session_token
+    assert_raises(ArgumentError) { q.session_token = nil }
+  end
+
+  def test_conflicting_subquery_authority_raises
+    default_client
+    outer = FixSong.query(:plays => 1)
+    outer.session_token = "r:bob"
+    assert_raises(ArgumentError) { outer.where(:artist.in_query => scoped_artist_query) }
+    assert_equal 1, outer.where.size, "the rejected subquery constraint is not added"
+    assert_raises(ArgumentError) { outer.where(:artist.select => { key: "objectId", query: scoped_artist_query }) }
+  end
+
+  def test_subquery_with_pipeline_only_constraint_is_refused
+    sub = FixArtist.query(:name => "x")
+    sub.where(:tags.array_size => 2)
+    q = FixSong.query(:artist.in_query => sub)
+    assert_raises(ArgumentError) { q.compile(encode: false) }
+    q2 = FixSong.query(:artist.not_in_query => sub)
+    assert_raises(ArgumentError) { q2.compile(encode: false) }
+  end
+
+  def scoped_artist_query
+    q = FixArtist.query(:name => "x")
+    q.session_token = "r:alice"
+    q
+  end
+
+  # LiveQuery and push refuse pipeline-only constraints and keep authority
+
+  def lq_client
+    require_relative "../../../lib/parse/live_query"
+    Parse::LiveQuery::Client.new(url: "wss://test.example.com", application_id: "test_app_id",
+                                 client_key: "test_key", auto_connect: false)
+  end
+
+  def test_compile_rest_where_refuses_pipeline_only_constraints
+    assert_raises(ArgumentError) { FixSong.query(:tags.set_equals => %w[a b]).compile_rest_where }
+    assert_raises(ArgumentError) { lq_client.subscribe(FixSong.query(:tags.array_size => 2)) }
+  ensure
+    Parse::LiveQuery.reset! if defined?(Parse::LiveQuery) && Parse::LiveQuery.respond_to?(:reset!)
+  end
+
+  def test_push_refuses_pipeline_only_targeting
+    p1 = Parse::Push.new
+    p1.where(:channels.not_empty => true)
+    assert_raises(ArgumentError) { p1.payload }
+    p2 = Parse::Push.new
+    p2.where(:device_type => "ios", :channels.set_equals => %w[a])
+    assert_raises(ArgumentError) { p2.payload }
+  end
+
+  def test_client_subscribe_uses_the_query_session
+    sub = lq_client.subscribe(scoped_song)
+    assert_equal "r:alice", sub.session_token
+  ensure
+    Parse::LiveQuery.reset! if defined?(Parse::LiveQuery) && Parse::LiveQuery.respond_to?(:reset!)
+  end
+
+  def test_client_subscribe_uses_the_become_client_session
+    sub = lq_client.subscribe(become_query)
+    assert_equal "r:alice", sub.session_token
+  ensure
+    Parse::LiveQuery.reset! if defined?(Parse::LiveQuery) && Parse::LiveQuery.respond_to?(:reset!)
+  end
+
+  def test_client_subscribe_refuses_a_different_explicit_session
+    assert_raises(ArgumentError) { lq_client.subscribe(scoped_song, session_token: "r:bob") }
+  ensure
+    Parse::LiveQuery.reset! if defined?(Parse::LiveQuery) && Parse::LiveQuery.respond_to?(:reset!)
+  end
+
+  def test_subscribe_refuses_scope_to_user
+    q = FixSong.query(:plays => 1).scope_to_user(Parse::User.new(objectId: "bob"))
+    assert_raises(ArgumentError) { lq_client.subscribe(q) }
+    assert_raises(ArgumentError) { q.subscribe(client: lq_client) }
+  ensure
+    Parse::LiveQuery.reset! if defined?(Parse::LiveQuery) && Parse::LiveQuery.respond_to?(:reset!)
+  end
+
+  def test_query_subscribe_uses_become_session_and_pinned_check
+    sub = become_query.subscribe(client: lq_client)
+    assert_equal "r:alice", sub.session_token
+    combined = FixSong.query(:plays => 1) | scoped_song
+    combined.instance_variable_set(:@session_token, nil)
+    assert_raises(ArgumentError) { combined.subscribe(client: lq_client) }
+  ensure
+    Parse::LiveQuery.reset! if defined?(Parse::LiveQuery) && Parse::LiveQuery.respond_to?(:reset!)
+  end
+
+  # Comma sort strings
+
+  def test_order_splits_comma_sort_string
+    assert_equal "title,-plays", FixSong.query.order("title,-plays").compile(encode: false)[:order]
+    assert_equal "title,-plays", FixSong.query.order("title, -plays", :title).compile(encode: false)[:order]
+  end
+
 end

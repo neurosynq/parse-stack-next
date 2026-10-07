@@ -41,15 +41,16 @@ class QueryHardeningTest < Minitest::Test
     refute_includes payload.to_json, "__aggregation_pipeline"
   end
 
-  def test_marker_in_subquery_does_not_leak_through_matches
+  def test_marker_in_subquery_is_refused_instead_of_leaking
     # Outer query is plain REST; inner query carries a direct-only
-    # constraint. The outer query's compiled JSON must not include the
-    # inner's __ marker.
+    # constraint. Parse Server evaluates the subquery from its REST form,
+    # which drops the constraint and would match every row, so compiling
+    # the outer query refuses it. The marker never reaches REST JSON.
     inner = User.query(:area.geo_intersects => Parse::Polygon.new([[0, 0], [0, 1], [1, 0]]))
     outer = User.query(:related.matches => inner)
-    payload = outer.compile(encode: false)
-    refute_includes payload.to_json, "__mongo_direct_only",
-                    "Nested subquery must not leak the routing marker into REST JSON"
+    err = assert_raises(ArgumentError) { outer.compile(encode: false) }
+    assert_match(/subquery/, err.message)
+    refute_includes err.message, "__mongo_direct_only"
   end
 
   def test_requires_mongo_direct_still_fires_after_strip

@@ -1588,10 +1588,10 @@ module Parse
           unless query.is_a?(Parse::Query)
             raise ArgumentError, "Invalid Parse::Query object provided in :query field of value: #{@operation.operand}.#{$dontSelect} => #{@value}"
           end
-          query = query.compile(encode: false, includeClassName: true)
+          query = query.compile_subquery
         elsif @value.is_a?(Parse::Query)
           # if its a query, then assume dontSelect key is the same name as operand.
-          query = @value.compile(encode: false, includeClassName: true)
+          query = @value.compile_subquery
         else
           raise ArgumentError, "Invalid `:select` query constraint. It should follow the format: :field.select => { key: 'key', query: '<Parse::Query>' }"
         end
@@ -1639,10 +1639,10 @@ module Parse
           unless query.is_a?(Parse::Query)
             raise ArgumentError, "Invalid Parse::Query object provided in :query field of value: #{@operation.operand}.#{$dontSelect} => #{@value}"
           end
-          query = query.compile(encode: false, includeClassName: true)
+          query = query.compile_subquery
         elsif @value.is_a?(Parse::Query)
           # if its a query, then assume dontSelect key is the same name as operand.
-          query = @value.compile(encode: false, includeClassName: true)
+          query = @value.compile_subquery
         else
           raise ArgumentError, "Invalid `:reject` query constraint. It should follow the format: :field.reject => { key: 'key', query: '<Parse::Query>' }"
         end
@@ -2289,10 +2289,10 @@ module Parse
           unless query.is_a?(Parse::Query)
             raise ArgumentError, "Invalid Parse::Query object provided in :query field of value: #{@operation.operand}.matches_key_in_query => #{@value}"
           end
-          query = query.compile(encode: false, includeClassName: true)
+          query = query.compile_subquery
         elsif @value.is_a?(Parse::Query)
           # if its a query, then assume key is the same name as operand.
-          query = @value.compile(encode: false, includeClassName: true)
+          query = @value.compile_subquery
         else
           raise ArgumentError, "Invalid `:matches_key_in_query` query constraint. It should follow the format: :field.matches_key_in_query => { key: 'key', query: '<Parse::Query>' }"
         end
@@ -2339,10 +2339,10 @@ module Parse
           unless query.is_a?(Parse::Query)
             raise ArgumentError, "Invalid Parse::Query object provided in :query field of value: #{@operation.operand}.does_not_match_key_in_query => #{@value}"
           end
-          query = query.compile(encode: false, includeClassName: true)
+          query = query.compile_subquery
         elsif @value.is_a?(Parse::Query)
           # if its a query, then assume key is the same name as operand.
-          query = @value.compile(encode: false, includeClassName: true)
+          query = @value.compile_subquery
         else
           raise ArgumentError, "Invalid `:does_not_match_key_in_query` query constraint. It should follow the format: :field.does_not_match_key_in_query => { key: 'key', query: '<Parse::Query>' }"
         end

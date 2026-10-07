@@ -375,6 +375,9 @@ module Parse
           query = class_name
           class_name = query.table
           where = query.compile_rest_where
+          # The subscription runs under the query's own session (or its
+          # `become` client's); a different explicit token raises.
+          session_token = query.live_query_session_token(session_token)
         end
 
         # Refuse server-side-JS / data-mutating operators in the `where`
@@ -1007,6 +1010,27 @@ module Parse
         end
       end
 
+      # Release the latch set when this admin client first connected inside
+      # {Parse.without_master_key}. Until this is called, every later
+      # connect and reconnect withholds the master key. The next connect
+      # made outside the block then sends it again, elevating every
+      # subscription on the socket (a warning names how many).
+      # @return [void]
+      def allow_master_key_connection!
+        return unless @master_key_withheld
+        @master_key_withheld = false
+        @master_key_latch_released = true
+        nil
+      end
+
+      # @return [Boolean] whether this client withholds its master key on
+      #   every connect because it first connected inside
+      #   {Parse.without_master_key}.
+      def master_key_withheld?
+        @master_key_withheld == true
+      end
+      public :allow_master_key_connection!, :master_key_withheld?
+
       # Resubscribe all pending subscriptions
       def resubscribe_all
         subs = @monitor.synchronize { @subscriptions.values.dup }
@@ -1034,10 +1058,27 @@ module Parse
         if admin_connection? && Parse.respond_to?(:master_key_disabled?) && Parse.master_key_disabled?
           # Inside `Parse.without_master_key` the connect frame carries no
           # master key, as REST requests in the block do not. The socket is
-          # then ACL-scoped for its whole lifetime.
+          # then ACL-scoped for its whole lifetime, and the choice is latched:
+          # a later reconnect (including an explicit `connect` made outside
+          # the block) keeps withholding it, so subscriptions created on
+          # this socket are never silently elevated.
+          @master_key_withheld = true
+          @connected_as_admin = false
+          warn_master_key_withheld_once
+        elsif admin_connection? && @master_key_withheld
           @connected_as_admin = false
           warn_master_key_withheld_once
         elsif admin_connection?
+          if @master_key_latch_released
+            @master_key_latch_released = false
+            pending = @monitor.synchronize { @subscriptions.size }
+            if pending.positive?
+              warn "[Parse::LiveQuery:SECURITY] reconnecting with the master key after " \
+                   "allow_master_key_connection!: #{pending} existing subscription(s), " \
+                   "including any created inside Parse.without_master_key, now bypass " \
+                   "ACL/CLP."
+            end
+          end
           message[:masterKey] = @master_key
           @connected_as_admin = true
           warn_master_key_connection_once
