@@ -6483,7 +6483,7 @@ export PARSE_TEST_SERVER_URL=http://localhost:29337/parse
 export PARSE_TEST_APP_ID=psnextItAppId
 export PARSE_TEST_API_KEY=psnext-it-rest-key
 export PARSE_TEST_MASTER_KEY=psnextItMasterKey
-export PARSE_TEST_MONGO_URI="mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"
+export PARSE_TEST_MONGO_URI="mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin&directConnection=true"
 export PARSE_TEST_REDIS_URL=redis://localhost:29379/0
 export PARSE_TEST_LIVE_QUERY_URL=ws://localhost:29337
 export ATLAS_URI="mongodb://localhost:29020/parse_atlas_test?directConnection=true"

@@ -28,7 +28,7 @@ class HintMongoDirectIntegrationTest < Minitest::Test
   include ParseStackIntegrationTest
 
   # Same URI the other direct integration tests use.
-  MONGODB_URI = (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin")
+  MONGODB_URI = (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin&directConnection=true")
 
   INDEX_NAME = "hint_integ_category_1"
   CATEGORY = "hint_integ_seeds"

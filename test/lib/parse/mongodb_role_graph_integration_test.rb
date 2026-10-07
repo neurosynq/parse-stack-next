@@ -23,7 +23,7 @@ class MongoDBRoleGraphIntegrationTest < Minitest::Test
 
   MONGODB_URI = ENV["ANALYTICS_DATABASE_URI"] ||
                 ENV["PARSE_TEST_MONGO_URI"] ||
-                "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"
+                "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin&directConnection=true"
 
   def setup
     @test_users = []

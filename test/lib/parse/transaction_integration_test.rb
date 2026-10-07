@@ -327,9 +327,12 @@ class TransactionIntegrationTest < Minitest::Test
           )
           batch.add(new_product)
 
-          # Create inventory for new product
+          # Create inventory for the existing product. An object created in
+          # this same transaction has no objectId until the batch commits, so
+          # it cannot be referenced here (the SDK refuses to save a pointer to
+          # an unsaved object).
           new_inventory = TransactionInventory.new(
-            product: new_product.pointer,
+            product: existing_product.pointer,
             location: "Warehouse B",
             quantity: 30,
           )

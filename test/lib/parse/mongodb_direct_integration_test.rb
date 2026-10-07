@@ -98,7 +98,7 @@ class MongoDBDirectIntegrationTest < Minitest::Test
 
   # MongoDB connection URI for the test Docker container
   # Same as Parse Server uses, just with localhost:29017 (mapped from Docker's internal 27017)
-  MONGODB_URI = (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin")
+  MONGODB_URI = (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin&directConnection=true")
 
   def with_timeout(seconds, message = "Operation")
     Timeout::timeout(seconds) do

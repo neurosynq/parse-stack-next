@@ -491,7 +491,13 @@ module Parse
                 responses = batch.submit
               rescue Parse::Error => e
                 conflict = e.message.match?(/\b#{TRANSACTION_CONFLICT_CODE}\b/)
-                if conflict && attempts < retries
+                # Parse Server runs a transaction's requests concurrently on
+                # one MongoDB session, which MongoDB intermittently rejects
+                # ("transaction number does not match"). Parse Server aborts
+                # the whole transaction and answers a bare 500, so nothing
+                # was applied and the transaction can be resent.
+                transient = e.is_a?(Parse::Error::ServiceUnavailableError)
+                if (conflict || transient) && attempts < retries
                   sleep(0.1 * attempts)
                   next
                 end

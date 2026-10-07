@@ -125,16 +125,17 @@ class ParseObjectIntegrationTest < Minitest::Test
 
       assert object.destroy, "Should destroy object"
 
-      object2 = TestObject.new(objectId: object.id)
-      result = object2.fetch
-      assert_nil object2.id, "Object ID should be nil after fetching deleted object"
-      assert object2._deleted?, "Object should be marked as deleted"
-      assert_equal object2, result, "fetch should return self even for deleted objects"
+      # A destroyed object keeps its id and reports destroyed? (as in
+      # ActiveRecord), and saving it never recreates the record.
+      assert object.destroyed?, "Object should be marked destroyed"
+      refute_nil object.id, "Destroyed object keeps its id"
+      refute object.persisted?
+      refute object.save, "Saving a destroyed object returns false"
+      assert_raises(Parse::RecordNotSaved) { object.save! }
 
-      # Test that deleted objects cannot be saved
-      assert_raises(Parse::Error::ProtocolError) do
-        object2.save
-      end
+      # Fetching the deleted record by id reports that it no longer exists.
+      object2 = TestObject.new(objectId: object.id)
+      assert_raises(Parse::Error::ProtocolError) { object2.fetch }
     end
   end
 
@@ -445,20 +446,14 @@ class ParseObjectIntegrationTest < Minitest::Test
       # Destroy it
       assert object.destroy, "Should destroy object"
 
-      # Try to fetch it again
+      # The destroyed object refuses to save rather than recreating the row.
+      refute object.save, "Saving a destroyed object returns false"
+      error = assert_raises(Parse::RecordNotSaved) { object.save! }
+      assert_match(/destroyed/i, error.message)
+
+      # The record is gone on the server.
       deleted_object = TestObject.new(objectId: object.id)
-      deleted_object.fetch
-
-      # Verify it's marked as deleted
-      assert deleted_object._deleted?, "Object should be marked as deleted"
-      assert_nil deleted_object.id, "Object ID should be nil"
-
-      # Try to save it (should throw error)
-      error = assert_raises(Parse::Error::ProtocolError) do
-        deleted_object.save
-      end
-
-      assert_match(/Cannot save deleted object/, error.message, "Error message should mention deleted object")
+      assert_raises(Parse::Error::ProtocolError) { deleted_object.fetch }
     end
   end
 
