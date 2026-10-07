@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require_relative "../../test_helper_integration"
+require_relative "../../support/webhook_global_state"
 require_relative "../../support/webhook_test_server"
 
 # DISRUPTIVE integration test: registers a real webhook against the live
@@ -31,6 +32,7 @@ require_relative "../../support/webhook_test_server"
 #   3. After a Parse Server restart the registration persists (it lives in
 #      mongo) and the webhook still round-trips on the same client.
 class WebhookRestartDisruptiveTest < Minitest::Test
+  include WebhookGlobalState
   include ParseStackIntegrationTest
 
   FUNCTION_NAME = "webhookRestartEcho"

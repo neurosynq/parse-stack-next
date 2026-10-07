@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require_relative "../../test_helper_integration"
+require_relative "../../support/webhook_global_state"
 require_relative "../../support/webhook_test_server"
 
 # End-to-end proof that beforeFind/afterFind webhooks route through the real
@@ -28,6 +29,7 @@ class WebhookAfterFindPost < Parse::Object
 end
 
 class WebhookAfterFindIntegrationTest < Minitest::Test
+  include WebhookGlobalState
   include ParseStackIntegrationTest
 
   def setup

@@ -557,6 +557,29 @@ module Parse
         # object from @object/@original).
         return @parse_object if defined?(@parse_object) && !@parse_object.nil?
         @parse_object = build_parse_object
+        # On a beforeSave create, note when the handler assigns an ACL. The
+        # model's dirty tracking ignores an assignment equal to the default
+        # stamp (`obj.acl = Parse::ACL.new` under a `{}` default), and the
+        # reply must still treat it as the handler's explicit choice.
+        if before_save? && @original.blank? && @parse_object.is_a?(Parse::Object)
+          @parse_object.extend(HandlerAclAssignment)
+        end
+        @parse_object
+      end
+
+      # Marks an object whose handler assigned its ACL. Used only on the
+      # object a beforeSave create handler receives.
+      # @!visibility private
+      module HandlerAclAssignment
+        def acl=(value)
+          @_webhook_handler_acl_assigned = true
+          super
+        end
+
+        # @return [Boolean] whether the handler assigned the ACL.
+        def webhook_handler_acl_assigned?
+          @_webhook_handler_acl_assigned == true
+        end
       end
 
       # @!visibility private

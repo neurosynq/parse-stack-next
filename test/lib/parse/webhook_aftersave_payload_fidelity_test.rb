@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require_relative "../../test_helper"
+require_relative "../../support/webhook_global_state"
 require "minitest/autorun"
 
 # Unit-level regression suite that LOCKS IN the webhook full-object contract:
@@ -127,6 +128,7 @@ class CondCbPost < Parse::Object
 end
 
 class WebhookAfterSavePayloadFidelityTest < Minitest::Test
+  include WebhookGlobalState
   def setup
     Parse::Webhooks.instance_variable_set(:@routes, nil)
   end

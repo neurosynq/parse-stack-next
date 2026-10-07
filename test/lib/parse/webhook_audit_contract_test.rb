@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require_relative "../../test_helper"
+require_relative "../../support/webhook_global_state"
 
 # Pins the webhook response bodies to Parse Server's HTTP webhook contract
 # (HooksController.wrapToHTTPRequest + triggers.getResponseObject, Parse
@@ -20,6 +21,7 @@ require_relative "../../test_helper"
 #   `success` keeps the rows.
 # - every trigger: only an `{"error": ...}` body denies the operation.
 class WebhookAuditContractTest < Minitest::Test
+  include WebhookGlobalState
   WEBHOOK_HEADER = "HTTP_X_PARSE_WEBHOOK_KEY"
   TS = "2026-10-06T22:05:32.610Z"
 
@@ -67,6 +69,44 @@ class WebhookAuditContractTest < Minitest::Test
     def record_destroyed
       $webhook_audit_destroyed << id
     end
+    def autofetch!(*); nil; end
+  end
+
+  class AuditPrivate < Parse::Object
+    parse_class "WebhookAuditPrivate"
+    acl_policy :private
+    property :title, :string
+    def autofetch!(*); nil; end
+  end
+
+  class AuditPublicRead < Parse::Object
+    parse_class "WebhookAuditPublicRead"
+    acl_policy :public_read
+    property :title, :string
+    def autofetch!(*); nil; end
+  end
+
+  class AuditOwned < Parse::Object
+    parse_class "WebhookAuditOwned"
+    acl_policy :owner_else_private, owner: :author
+    property :title, :string
+    belongs_to :author, as: :user
+    def autofetch!(*); nil; end
+  end
+
+  class AuditOwnedReadable < Parse::Object
+    parse_class "WebhookAuditOwnedReadable"
+    acl_policy :owner_but_public_read, owner: :author
+    property :title, :string
+    belongs_to :author, as: :user
+    def autofetch!(*); nil; end
+  end
+
+  class AuditLegacyDefault < Parse::Object
+    parse_class "WebhookAuditLegacyDefault"
+    set_default_acl :public, read: true, write: false
+    set_default_acl "role:Editors", read: true, write: true
+    property :title, :string
     def autofetch!(*); nil; end
   end
 
@@ -275,6 +315,382 @@ class WebhookAuditContractTest < Minitest::Test
     assert_equal "u1", reply["undeclared"]
     assert_equal "draft", reply["status"], "declared defaults are still applied on create"
     refute reply.key?("className")
+  end
+
+  def create_body(fields)
+    { "triggerName" => "beforeSave", "master" => false,
+      "object" => { "className" => "WebhookAuditDoc" }.merge(fields) }
+  end
+
+  REQUEST_USER = { "objectId" => "u9", "className" => "_User", "username" => "req" }.freeze
+  OWNER_RW = { "u9" => { "read" => true, "write" => true } }.freeze
+
+  def create_for(class_name, fields = {}, user: nil)
+    body = { "triggerName" => "beforeSave", "master" => false,
+             "object" => { "className" => class_name, "title" => "t1" }.merge(fields) }
+    body["user"] = user if user
+    post("/before_save/#{class_name}", body)["success"]
+  end
+
+  def route_handler(class_name, &edit)
+    Parse::Webhooks.route(:before_save, class_name) do
+      o = parse_object
+      o.title = "handled"
+      edit&.call(o)
+      o
+    end
+  end
+
+  def test_logged_in_create_gets_the_request_user_as_owner
+    route_handler("WebhookAuditDoc")
+    reply = post("/before_save/WebhookAuditDoc", create_body("title" => "t1").merge("user" => REQUEST_USER))["success"]
+    assert_equal OWNER_RW, reply["ACL"], "the default :owner_else_private policy owns the record by the requesting user"
+    assert_equal "draft", reply["status"], "declared defaults are still applied on create"
+  end
+
+  def test_anonymous_create_gets_the_declared_fallback_acl
+    route_handler("WebhookAuditDoc")
+    reply = post("/before_save/WebhookAuditDoc", create_body("title" => "t1"))["success"]
+    assert_equal({}, reply["ACL"], "never reply without an ACL: Parse Server would store it public read/write")
+  end
+
+  def test_owner_field_wins_over_the_request_user
+    route_handler("WebhookAuditOwned")
+    author = { "__type" => "Pointer", "className" => "_User", "objectId" => "a1" }
+    reply = create_for("WebhookAuditOwned", { "author" => author }, user: REQUEST_USER)
+    assert_equal({ "a1" => { "read" => true, "write" => true } }, reply["ACL"])
+  end
+
+  def test_owner_policy_without_owner_field_value_uses_the_request_user
+    route_handler("WebhookAuditOwned")
+    assert_equal OWNER_RW, create_for("WebhookAuditOwned", {}, user: REQUEST_USER)["ACL"]
+    assert_equal({}, create_for("WebhookAuditOwned")["ACL"])
+  end
+
+  def test_owner_but_public_read_uses_the_request_user
+    route_handler("WebhookAuditOwnedReadable")
+    reply = create_for("WebhookAuditOwnedReadable", {}, user: REQUEST_USER)
+    assert_equal({ "*" => { "read" => true } }.merge(OWNER_RW), reply["ACL"])
+    assert_equal({ "*" => { "read" => true } }, create_for("WebhookAuditOwnedReadable")["ACL"])
+  end
+
+  def test_declared_policies_apply_on_client_create
+    route_handler("WebhookAuditPrivate")
+    route_handler("WebhookAuditPublicRead")
+    route_handler("WebhookAuditLegacyDefault")
+    assert_equal({}, create_for("WebhookAuditPrivate", {}, user: REQUEST_USER)["ACL"])
+    assert_equal({ "*" => { "read" => true } }, create_for("WebhookAuditPublicRead", {}, user: REQUEST_USER)["ACL"])
+    assert_equal({ "*" => { "read" => true }, "role:Editors" => { "read" => true, "write" => true } },
+                 create_for("WebhookAuditLegacyDefault", {}, user: REQUEST_USER)["ACL"])
+  end
+
+  def test_handler_acl_equal_to_the_default_is_still_written
+    route_handler("WebhookAuditPrivate") { |o| o.acl = Parse::ACL.private }
+    route_handler("WebhookAuditPublicRead") { |o| o.acl = Parse::ACL.everyone(true, false) }
+    assert_equal({}, create_for("WebhookAuditPrivate")["ACL"])
+    assert_equal({ "*" => { "read" => true } }, create_for("WebhookAuditPublicRead")["ACL"])
+  end
+
+  def test_handler_assigned_empty_acl_is_written_even_for_a_signed_in_request
+    route_handler("WebhookAuditDoc") { |o| o.acl = Parse::ACL.new }
+    reply = post("/before_save/WebhookAuditDoc", create_body("title" => "t1").merge("user" => REQUEST_USER))["success"]
+    assert_equal({}, reply["ACL"], "the handler's explicit private ACL wins over the requesting user")
+    reply = post("/before_save/WebhookAuditDoc", create_body("title" => "t1"))["success"]
+    assert_equal({}, reply["ACL"])
+  end
+
+  def test_handler_assigned_empty_acl_wins_over_the_owner_field
+    route_handler("WebhookAuditOwned") { |o| o.acl = Parse::ACL.new }
+    author = { "__type" => "Pointer", "className" => "_User", "objectId" => "a1" }
+    assert_equal({}, create_for("WebhookAuditOwned", { "author" => author })["ACL"])
+  end
+
+  def test_handler_acl_wins_over_the_request_user
+    route_handler("WebhookAuditDoc") { |o| o.acl = Parse::ACL.everyone(true, false) }
+    reply = post("/before_save/WebhookAuditDoc", create_body("title" => "t1").merge("user" => REQUEST_USER))["success"]
+    assert_equal({ "*" => { "read" => true } }, reply["ACL"])
+  end
+
+  def test_client_acl_wins_over_the_request_user
+    acl = { "u2" => { "read" => true } }
+    route_handler("WebhookAuditDoc")
+    reply = post("/before_save/WebhookAuditDoc",
+                 create_body("title" => "t1", "ACL" => acl).merge("user" => REQUEST_USER))["success"]
+    assert_equal acl, reply["ACL"]
+  end
+
+  def test_create_keeps_the_client_acl
+    acl = { "u1" => { "read" => true, "write" => true } }
+    Parse::Webhooks.route(:before_save, "WebhookAuditDoc") { parse_object }
+    reply = post("/before_save/WebhookAuditDoc", create_body("title" => "t1", "ACL" => acl))["success"]
+    assert_equal acl, reply["ACL"]
+  end
+
+  def test_create_writes_an_acl_the_handler_set
+    Parse::Webhooks.route(:before_save, "WebhookAuditDoc") do
+      o = parse_object
+      o.acl = Parse::ACL.everyone(true, false)
+      o
+    end
+    reply = post("/before_save/WebhookAuditDoc", create_body("title" => "t1"))["success"]
+    assert_equal({ "*" => { "read" => true } }, reply["ACL"])
+  end
+
+  # An explicit handler ACL is written whatever the handler returns.
+
+  def route_acl_then(return_value, acl)
+    Parse::Webhooks.route(:before_save, "WebhookAuditDoc") do
+      parse_object.acl = acl
+      return_value
+    end
+  end
+
+  def test_handler_empty_acl_with_true_return_on_create_is_written
+    route_acl_then(true, Parse::ACL.new)
+    reply = post("/before_save/WebhookAuditDoc", create_body("title" => "t1"))["success"]
+    assert_equal({}, reply["ACL"], "the handler's private ACL must not be dropped for a true return")
+    assert_equal "t1", reply["title"], "the client's write is still carried"
+  end
+
+  def test_handler_empty_acl_with_nil_return_on_create_is_written
+    route_acl_then(nil, Parse::ACL.new)
+    reply = post("/before_save/WebhookAuditDoc", create_body("title" => "t1").merge("user" => REQUEST_USER))["success"]
+    assert_equal({}, reply["ACL"])
+  end
+
+  def test_handler_acl_with_hash_return_without_acl_on_create_is_written
+    route_acl_then({ "title" => "from-hash" }, Parse::ACL.new)
+    reply = post("/before_save/WebhookAuditDoc", create_body("title" => "t1"))["success"]
+    assert_equal({}, reply["ACL"])
+    assert_equal "from-hash", reply["title"]
+  end
+
+  def test_hash_acl_wins_over_the_handler_assigned_acl_on_create
+    hash_acl = { "u5" => { "read" => true, "write" => true } }
+    route_acl_then({ "ACL" => hash_acl }, Parse::ACL.new)
+    reply = post("/before_save/WebhookAuditDoc", create_body("title" => "t1"))["success"]
+    assert_equal hash_acl, reply["ACL"]
+  end
+
+  def test_true_return_without_acl_assignment_still_adds_no_acl_on_create
+    Parse::Webhooks.route(:before_save, "WebhookAuditDoc") { true }
+    reply = post("/before_save/WebhookAuditDoc", create_body("title" => "t1"))["success"]
+    refute reply.is_a?(Hash) && reply.key?("ACL"), "true/nil semantics are unchanged: no default ACL is injected"
+  end
+
+  def test_handler_empty_acl_with_true_return_on_update_is_written
+    route_acl_then(true, Parse::ACL.new)
+    reply = post("/before_save/WebhookAuditDoc", before_save_update("title" => "client"))["success"]
+    assert_equal({}, reply["ACL"])
+    assert_equal "client", reply["title"]
+  end
+
+  def test_handler_acl_with_nil_return_on_update_is_written
+    route_acl_then(nil, Parse::ACL.everyone(true, true))
+    reply = post("/before_save/WebhookAuditDoc", before_save_update("title" => "client"))["success"]
+    assert_equal({ "*" => { "read" => true, "write" => true } }, reply["ACL"])
+  end
+
+  def test_handler_acl_with_hash_return_on_update
+    route_acl_then({ "title" => "from-hash" }, Parse::ACL.new)
+    reply = post("/before_save/WebhookAuditDoc", before_save_update("title" => "client"))["success"]
+    assert_equal({}, reply["ACL"])
+    assert_equal "from-hash", reply["title"]
+    hash_acl = { "u5" => { "read" => true } }
+    route_acl_then({ "ACL" => hash_acl }, Parse::ACL.new)
+    reply = post("/before_save/WebhookAuditDoc", before_save_update("title" => "client"))["success"]
+    assert_equal hash_acl, reply["ACL"]
+  end
+
+  def test_changed_sub_document_is_written_as_dotted_sub_keys
+    Parse::Webhooks.route(:before_save, "WebhookAuditDoc") do
+      o = parse_object
+      o.title = "handled"
+      o
+    end
+    # Parse Server sends a client's `"meta.x"` write as the resulting
+    # sub-document; the stored sub-document is { "x" => 1 }.
+    reply = post("/before_save/WebhookAuditDoc",
+                 before_save_update("meta" => { "x" => 2, "z" => 1 }))["success"]
+    refute reply.key?("meta"), "the whole sub-document would overwrite concurrent sub-key writes"
+    assert_equal 2, reply["meta.x"]
+    assert_equal 1, reply["meta.z"]
+    assert_equal "handled", reply["title"]
+  end
+
+  def test_removed_sub_key_is_written_as_a_delete
+    Parse::Webhooks.route(:before_save, "WebhookAuditDoc") do
+      o = parse_object
+      o.title = "handled"
+      o
+    end
+    reply = post("/before_save/WebhookAuditDoc", before_save_update("meta" => { "y" => 1 }))["success"]
+    assert_equal({ "__op" => "Delete" }, reply["meta.x"])
+    assert_equal 1, reply["meta.y"]
+    refute reply.key?("meta")
+  end
+
+  def test_typed_sub_values_write_the_sub_document_whole
+    route_handler("WebhookAuditDoc")
+    date = { "__type" => "Date", "iso" => TS }
+    reply = post("/before_save/WebhookAuditDoc",
+                 before_save_update("meta" => { "x" => 1, "when" => date }))["success"]
+    assert_equal({ "x" => 1, "when" => date }, reply["meta"],
+                 "Parse Server stores a dotted typed value untransformed, so it is written whole")
+    assert_empty reply.keys.grep(/\Ameta\./)
+  end
+
+  def test_removed_typed_sub_value_is_deleted_by_path
+    # A Delete carries no typed value, so the removal stays a dotted write.
+    route_handler("WebhookAuditDoc")
+    stored = original_doc.merge("meta" => { "x" => 1, "when" => { "__type" => "Date", "iso" => TS } })
+    body = { "triggerName" => "beforeSave", "master" => false,
+             "object" => stored.merge("meta" => { "x" => 2 }), "original" => stored }
+    reply = post("/before_save/WebhookAuditDoc", body)["success"]
+    assert_equal 2, reply["meta.x"]
+    assert_equal({ "__op" => "Delete" }, reply["meta.when"])
+    refute reply.key?("meta")
+  end
+
+  def test_nested_typed_sub_value_writes_the_sub_document_whole
+    route_handler("WebhookAuditDoc")
+    nested = { "deep" => { "at" => { "__type" => "Date", "iso" => TS } } }
+    reply = post("/before_save/WebhookAuditDoc",
+                 before_save_update("meta" => { "x" => 1 }.merge(nested)))["success"]
+    assert_equal({ "x" => 1 }.merge(nested), reply["meta"])
+  end
+
+  def test_two_level_nested_change_is_written_at_the_leaf
+    route_handler("WebhookAuditDoc")
+    stored = original_doc.merge("meta" => { "count" => { "value" => 1, "other" => 1 }, "x" => 1 })
+    body = { "triggerName" => "beforeSave", "master" => false, "original" => stored,
+             "object" => stored.merge("meta" => { "count" => { "value" => 2, "other" => 1 }, "x" => 1 }) }
+    reply = post("/before_save/WebhookAuditDoc", body)["success"]
+    assert_equal 2, reply["meta.count.value"]
+    assert_empty reply.keys.grep(/\Ameta(\.count)?\z/), "no parent path beside the leaf write"
+    refute reply.key?("meta.count.other")
+  end
+
+  def test_three_level_nested_change_and_removal_are_written_at_the_leaves
+    route_handler("WebhookAuditDoc")
+    stored = original_doc.merge("meta" => { "a" => { "b" => { "c" => 1, "d" => 1, "e" => 1 } } })
+    body = { "triggerName" => "beforeSave", "master" => false, "original" => stored,
+             "object" => stored.merge("meta" => { "a" => { "b" => { "c" => 2, "d" => 1, "f" => 3 } } }) }
+    reply = post("/before_save/WebhookAuditDoc", body)["success"]
+    assert_equal 2, reply["meta.a.b.c"]
+    assert_equal 3, reply["meta.a.b.f"]
+    assert_equal({ "__op" => "Delete" }, reply["meta.a.b.e"])
+    assert_empty reply.keys.grep(/\Ameta(\.a(\.b)?)?\z/)
+  end
+
+  def test_unchanged_nested_typed_value_does_not_block_a_leaf_write
+    route_handler("WebhookAuditDoc")
+    date = { "__type" => "Date", "iso" => TS }
+    stored = original_doc.merge("meta" => { "x" => 1, "count" => { "value" => 1, "at" => date } })
+    body = { "triggerName" => "beforeSave", "master" => false, "original" => stored,
+             "object" => stored.merge("meta" => { "x" => 2, "count" => { "value" => 2, "at" => date } }) }
+    reply = post("/before_save/WebhookAuditDoc", body)["success"]
+    assert_equal 2, reply["meta.x"]
+    assert_equal 2, reply["meta.count.value"], "the unchanged Date is not rewritten"
+    refute reply.key?("meta")
+    refute reply.key?("meta.count")
+  end
+
+  def test_changed_nested_typed_value_writes_the_field_whole
+    route_handler("WebhookAuditDoc")
+    stored = original_doc.merge("meta" => { "x" => 1, "count" => { "value" => 1, "at" => { "__type" => "Date", "iso" => TS } } })
+    later = { "__type" => "Date", "iso" => "2026-10-07T01:00:00.000Z" }
+    body = { "triggerName" => "beforeSave", "master" => false, "original" => stored,
+             "object" => stored.merge("meta" => { "x" => 1, "count" => { "value" => 1, "at" => later } }) }
+    reply = post("/before_save/WebhookAuditDoc", body)["success"]
+    assert_equal({ "x" => 1, "count" => { "value" => 1, "at" => later } }, reply["meta"],
+                 "a dotted write carrying a Date would be stored untransformed")
+    assert_empty reply.keys.grep(/\Ameta\./)
+  end
+
+  def test_nested_array_is_written_whole
+    route_handler("WebhookAuditDoc")
+    stored = original_doc.merge("meta" => { "list" => { "items" => [1], "n" => 1 } })
+    body = { "triggerName" => "beforeSave", "master" => false, "original" => stored,
+             "object" => stored.merge("meta" => { "list" => { "items" => [1, 2], "n" => 1 } }) }
+    reply = post("/before_save/WebhookAuditDoc", body)["success"]
+    assert_equal [1, 2], reply["meta.list.items"]
+    refute reply.key?("meta.list.items.1")
+  end
+
+  def test_dotted_override_conflicting_with_a_nested_leaf_write
+    Parse::Webhooks.route(:before_save, "WebhookAuditDoc") { { "meta.count" => { "value" => 9 } } }
+    stored = original_doc.merge("meta" => { "count" => { "value" => 1, "other" => 1 } })
+    body = { "triggerName" => "beforeSave", "master" => false, "original" => stored,
+             "object" => stored.merge("meta" => { "count" => { "value" => 2, "other" => 1 } }) }
+    reply = post("/before_save/WebhookAuditDoc", body)["success"]
+    assert_equal({ "value" => 9 }, reply["meta.count"])
+    assert_empty reply.keys.grep(/\Ameta\.count\./), "the override replaces the client's child writes"
+  end
+
+  def test_dotted_override_folds_into_a_nested_whole_write
+    Parse::Webhooks.route(:before_save, "WebhookAuditDoc") { { "meta.count.extra" => 5 } }
+    stored = original_doc.merge("meta" => { "count" => 1, "x" => 1 })
+    body = { "triggerName" => "beforeSave", "master" => false, "original" => stored,
+             "object" => stored.merge("meta" => { "count" => { "value" => 1 }, "x" => 1 }) }
+    reply = post("/before_save/WebhookAuditDoc", body)["success"]
+    assert_equal({ "value" => 1, "extra" => 5 }, reply["meta.count"])
+    refute reply.key?("meta.count.extra")
+    refute reply.key?("meta")
+  end
+
+  def test_dotted_hash_override_folds_into_a_whole_field
+    # On create the client's `meta` is written whole; a dotted override for
+    # one of its sub-keys must fold into it rather than sit beside it.
+    Parse::Webhooks.route(:before_save, "WebhookAuditDoc") { { "meta.y" => 5 } }
+    reply = post("/before_save/WebhookAuditDoc", create_body("title" => "t1", "meta" => { "x" => 1 }))["success"]
+    assert_equal({ "x" => 1, "y" => 5 }, reply["meta"])
+    assert_empty reply.keys.grep(/\Ameta\./)
+  end
+
+  def test_dotted_hash_override_delete_folds_into_a_whole_field
+    Parse::Webhooks.route(:before_save, "WebhookAuditDoc") { { "meta.x" => { "__op" => "Delete" } } }
+    reply = post("/before_save/WebhookAuditDoc", create_body("title" => "t1", "meta" => { "x" => 1, "z" => 2 }))["success"]
+    assert_equal({ "z" => 2 }, reply["meta"])
+    assert_empty reply.keys.grep(/\Ameta\./)
+  end
+
+  def test_dotted_hash_override_on_an_update_stays_dotted
+    Parse::Webhooks.route(:before_save, "WebhookAuditDoc") { { "meta.y" => 5 } }
+    reply = post("/before_save/WebhookAuditDoc", before_save_update("meta" => { "x" => 2 }))["success"]
+    assert_equal 2, reply["meta.x"]
+    assert_equal 5, reply["meta.y"]
+    refute reply.key?("meta")
+  end
+
+  def test_handler_that_rewrites_a_sub_document_writes_it_whole
+    Parse::Webhooks.route(:before_save, "WebhookAuditDoc") do
+      o = parse_object
+      o.meta = { "w" => 9 }
+      o
+    end
+    reply = post("/before_save/WebhookAuditDoc", before_save_update("meta" => { "x" => 2 }))["success"]
+    assert_equal({ "w" => 9 }, reply["meta"])
+    assert_empty reply.keys.grep(/\Ameta\./), "dotted keys must not accompany the whole field"
+  end
+
+  def test_hash_override_of_a_sub_document_writes_it_whole
+    Parse::Webhooks.route(:before_save, "WebhookAuditDoc") { { "meta" => { "w" => 9 } } }
+    reply = post("/before_save/WebhookAuditDoc", before_save_update("meta" => { "x" => 2 }))["success"]
+    assert_equal({ "w" => 9 }, reply["meta"])
+    assert_empty reply.keys.grep(/\Ameta\./)
+  end
+
+  def test_acl_change_is_written_whole
+    Parse::Webhooks.route(:before_save, "WebhookAuditDoc") do
+      o = parse_object
+      o.title = "handled"
+      o
+    end
+    acl = { "u1" => { "read" => true } }
+    reply = post("/before_save/WebhookAuditDoc", before_save_update("ACL" => acl))["success"]
+    assert_equal acl, reply["ACL"]
+    assert_empty reply.keys.grep(/\AACL\./)
   end
 
   def test_user_signup_fields_survive_a_handler_change

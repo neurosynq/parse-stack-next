@@ -284,13 +284,48 @@ database untouched. When the handler changed fields, the reply is the client's
 full write with your changes layered on top: operators on fields you did not
 touch are passed through as operators, fields the model does not declare (and
 `_User` signup fields such as `password` and `authData`) are kept, and a field
-you set back to its stored value is dropped from the write. Two limits come
-from what Parse Server sends the webhook: a field you rewrite is written as an
-absolute value, and an operator on a dotted sub-key (`"meta.count"`) arrives
-only as its resulting sub-document and is written back that way. Edits made
-in place on `parse_object` count even if the handler returns `true`. On a
-create, returning `parse_object` also writes the model's declared defaults
-(including its default ACL) for fields the client did not send.
+you set back to its stored value is dropped from the write. A field you
+rewrite is written as an absolute value. Edits made in place on `parse_object`
+count even if the handler returns `true`.
+
+An operator on a dotted sub-key (`"meta.count"`) arrives only as its resulting
+sub-document, so on an update the SDK writes back just the sub-keys that
+changed, as dotted paths, and a removed sub-key as a `Delete`. The diff follows
+nested plain objects, so a change to `meta.count.value` is written as
+`"meta.count.value"` alone. Concurrent writes to other sub-keys at any depth
+survive. Some limits remain:
+
+- Two concurrent operators on the same sub-key can still overwrite each other.
+- An array is written whole at its path, so a concurrent `Add` to an array
+  inside a sub-document is lost. A value that changed shape (a number that
+  became an object) is also written whole at its path.
+- When a changed sub-key would carry a typed value (a Date, Bytes, Pointer, or
+  other `__type` value), the whole field is written instead, because Parse
+  Server stores a dotted typed value without converting it. Unchanged typed
+  values and deletes do not trigger this.
+- A client that replaces a whole sub-document gets a merge: the changed
+  sub-keys are written and the sub-keys it knew about and removed are
+  deleted, so a sub-key another request added in the meantime survives.
+- A dotted key in a Hash the handler returns (`{ "meta.y" => 5 }`) is folded
+  into the nearest parent path the reply writes whole, and replaces any
+  deeper writes under it, so the reply never names a path and its child.
+
+On a create, returning `parse_object` also writes the model's declared
+defaults for fields the client did not send, including its ACL policy. Parse
+Server stores a create without an `ACL` as public read and write, so the reply
+always carries the ACL your policy resolves, exactly as an SDK-side create
+would. Owner-based policies (`:owner_else_private`, the default, as well as
+`:owner_else_public` and `:owner_but_public_read`) take the owner from the
+declared `owner:` field and, when that is empty, from the user who made the
+request, so a signed-in client owns what it creates. A request without a user
+gets the policy's fallback (master-key only under `:owner_else_private`). An
+ACL the client sent is kept, and an ACL the handler sets always wins. Built-in
+classes such as `_User` that have no policy of their own keep Parse Server's
+defaults. A handler that returns `true`, `nil`, or a Hash keeps the client's
+write as sent, so a create without an ACL stays public; return
+`parse_object` to apply the policy. An ACL the handler assigns on
+`parse_object` (`parse_object.acl = Parse::ACL.new`) is written whatever the
+handler returns, unless a returned Hash sets `ACL` itself.
 
 `after_destroy` callbacks run in the `after_delete` handler (once per delivery,
 skipped for deletes the SDK itself made, whose callbacks already ran locally).

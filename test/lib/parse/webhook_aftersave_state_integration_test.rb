@@ -1,4 +1,5 @@
 require_relative "../../test_helper_integration"
+require_relative "../../support/webhook_global_state"
 require_relative "../../support/webhook_test_server"
 
 # End-to-end integration test for the state of the Parse::Object handed to an
@@ -94,6 +95,7 @@ module WebhookAfterSaveStateSetup
 end
 
 class WebhookAfterSaveStateIntegrationTest < Minitest::Test
+  include WebhookGlobalState
   include ParseStackIntegrationTest
   prepend WebhookAfterSaveStateSetup
 

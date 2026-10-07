@@ -2,11 +2,13 @@
 # frozen_string_literal: true
 
 require_relative "../../test_helper"
+require_relative "../../support/webhook_global_state"
 require "openssl"
 
 # Tests Parse::Webhooks::ReplayProtection: the nonce-keyed dedup LRU and
 # the opt-in HMAC freshness verification added for NEW-EXT-4.
 class WebhookReplayProtectionTest < Minitest::Test
+  include WebhookGlobalState
   WEBHOOK_HEADER = "HTTP_X_PARSE_WEBHOOK_KEY"
 
   def setup

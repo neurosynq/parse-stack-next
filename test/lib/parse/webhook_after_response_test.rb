@@ -1,4 +1,5 @@
 require_relative "../../test_helper"
+require_relative "../../support/webhook_global_state"
 require "minitest/autorun"
 require "stringio"
 
@@ -7,6 +8,7 @@ require "stringio"
 # client's critical path. Under a server exposing `rack.after_reply` the runner
 # is enqueued there (Puma/Unicorn); otherwise it falls back to a thread.
 class WebhookAfterResponseTest < Minitest::Test
+  include WebhookGlobalState
   WEBHOOK_HEADER = "HTTP_X_PARSE_WEBHOOK_KEY"
 
   class AfterRespProbe < Parse::Object

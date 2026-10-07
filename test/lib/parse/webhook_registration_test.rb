@@ -2,10 +2,12 @@
 # frozen_string_literal: true
 
 require_relative "../../test_helper"
+require_relative "../../support/webhook_global_state"
 
 # Unit tests for Parse::Webhooks::Registration URL validation
 # (NEW-EXT-7: register_webhook! must refuse SSRF-friendly destinations).
 class WebhookRegistrationTest < Minitest::Test
+  include WebhookGlobalState
   def setup
     @registry = Class.new do
       extend Parse::Webhooks::Registration
