@@ -12,17 +12,20 @@ class IdentityRevocation581Test < Minitest::Test
   CREATED = "2026-01-01T00:00:00.000Z"
 
   class FakeAuth
-    attr_reader :tokens, :users, :resets
+    attr_reader :tokens, :users, :resets, :owners
 
-    def initialize
+    def initialize(owners = {})
       @tokens = []
       @users = []
       @resets = 0
+      @owners = owners
     end
 
     def invalidate(token) = @tokens << token
     def invalidate_user(id) = @users << id
     def reset_caches! = @resets += 1
+    def remember_session_owner(sid, uid) = @owners[sid] = uid
+    def session_owner(sid) = @owners[sid]
   end
 
   def setup
@@ -248,18 +251,130 @@ class IdentityRevocation581Test < Minitest::Test
     Array.new(count) { |i| Parse::Session.build({ "objectId" => "bogus#{i}" }, "_Session") }
   end
 
-  def test_many_bogus_ids_never_reset_when_the_lookup_answers
+  def test_many_absent_ids_reset_at_most_once_per_interval_without_a_recorded_owner
     auth = FakeAuth.new
     client = Parse::Client.client
     client.stub(:authorization, auth) do
       client.stub(:find_objects, session_lookup([], [])) do
         client.stub(:batch_request, batch_responder((0...50).map { |i| "bogus#{i}" })) do
           bogus_sessions(50).destroy
+          bogus_sessions(50).destroy
         end
+      end
+    end
+    assert_equal 1, auth.resets, "an absent row deleted as not found falls back to one rate-limited reset"
+    assert_empty auth.users
+  end
+
+  def test_absent_session_with_recorded_owner_invalidates_that_owner
+    auth = FakeAuth.new("gone1" => "UOWN")
+    client = Parse::Client.client
+    client.stub(:authorization, auth) do
+      client.stub(:find_objects, session_lookup([], [])) do
+        client.stub(:batch_request, batch_responder(["gone1"])) do
+          [Parse::Session.build({ "objectId" => "gone1" }, "_Session")].destroy
+        end
+      end
+    end
+    assert_equal ["UOWN"], auth.users
+    assert_equal 0, auth.resets, "a recorded owner is targeted; no reset"
+  end
+
+  def test_absent_session_denied_delete_never_resets
+    auth = FakeAuth.new
+    client = Parse::Client.client
+    denied = lambda do |batch, **_opts|
+      batch.requests.map { Parse::Response.new({ "code" => 119, "error" => "Permission denied." }) }
+    end
+    client.stub(:authorization, auth) do
+      client.stub(:find_objects, session_lookup([], [])) do
+        client.stub(:batch_request, denied) { bogus_sessions(5).destroy }
       end
     end
     assert_equal 0, auth.resets
     assert_empty auth.users
+  end
+
+  def test_single_absent_destroy_uses_recorded_owner_and_never_resets
+    s = session_ref("gone2")
+    auth = FakeAuth.new("gone2" => "UOWN2")
+    client = s.client
+    client.stub(:authorization, auth) do
+      client.stub(:find_objects, session_lookup([], [])) do
+        client.stub(:delete_object, ->(*_a, **_k) { Parse::Response.new({ "code" => 101, "error" => "gone" }) }) do
+          s.destroy
+        end
+      end
+    end
+    assert_equal ["UOWN2"], auth.users
+    assert_equal 0, auth.resets
+
+    s2 = session_ref("gone3")
+    auth2 = FakeAuth.new
+    s2.client.stub(:authorization, auth2) do
+      s2.client.stub(:find_objects, session_lookup([], [])) do
+        s2.client.stub(:delete_object, ->(*_a, **_k) { Parse::Response.new({ "code" => 101, "error" => "gone" }) }) do
+          s2.destroy
+        end
+      end
+    end
+    assert_equal 0, auth2.resets, "a single delete cannot tell gone from denied, so it never resets"
+  end
+
+  def other_client(app)
+    Parse::Client.new(server_url: "http://localhost:1/parse", app_id: app, api_key: "k")
+  end
+
+  def test_querying_sessions_records_owners_in_the_fetching_client_without_the_token
+    default_auth = FakeAuth.new
+    other = other_client("owner-app-b")
+    other_auth = FakeAuth.new
+    rows = [session_row("SREC", "r:secret", "UREC")]
+    Parse::Client.client.stub(:authorization, default_auth) do
+      other.stub(:authorization, other_auth) do
+        query = Parse::Session.query
+        query.client = other
+        query.send(:decode, rows)
+      end
+    end
+    assert_equal({ "SREC" => "UREC" }, other_auth.owners, "recorded against the client that fetched the row")
+    assert_empty default_auth.owners, "never recorded in another application's context"
+    refute_includes other_auth.owners.values.join, "r:secret"
+  end
+
+  def test_building_a_session_records_nothing
+    auth = FakeAuth.new
+    Parse::Client.client.stub(:authorization, auth) { session("SB", "r:t", "UB") }
+    assert_empty auth.owners
+  end
+
+  def test_real_context_records_and_reads_session_owner
+    auth = other_client("owner-map").authorization
+    auth.remember_session_owner("S9", "U9")
+    assert_equal "U9", auth.session_owner("S9")
+    assert_nil auth.session_owner("S10")
+    # The records live outside the identity plane: a reset drops cached
+    # identities but keeps the owners a later delete may need.
+    auth.reset_caches!
+    assert_equal "U9", auth.session_owner("S9")
+    assert_nil auth.identity_cache.get("S9")
+  end
+
+  def test_owner_records_never_resolve_as_tokens
+    client = other_client("owner-forge")
+    auth = client.authorization
+    auth.remember_session_owner("S1", "U1")
+    lookups = 0
+    rejected = lambda do |_t, **_o|
+      lookups += 1
+      Parse::Response.new({ "code" => 209, "error" => "Invalid session token" })
+    end
+    client.stub(:current_user, rejected) do
+      ["S1", "sid\x1fS1", "session_owner", auth.session_owner_cache.class.name].each do |forged|
+        assert_raises(Parse::Authorization::InvalidSession) { auth.resolve(forged) }
+      end
+    end
+    assert_equal 4, lookups, "every crafted token went to Parse Server; none resolved from an owner record"
   end
 
   def test_many_bogus_ids_reset_at_most_once_when_the_lookup_raises

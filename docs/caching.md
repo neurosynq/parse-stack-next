@@ -373,15 +373,33 @@ Two behaviors to know before you rely on these:
   or reports the row already gone ("object not found"); a denied delete leaves
   the cache alone. A session fetched without its token is looked up first
   (with the master key when the client has one, otherwise with the delete's
-  `session:`). Only a lookup that fails outright clears the client's whole
-  identity and role cache, at most once every 5 seconds per client, so an
-  endpoint that deletes caller-supplied session ids cannot be used to flush a
-  shared plane on every request.
-* A token resolution that is in flight when an invalidation lands in the same
-  process does not cache its answer, so it cannot put a just-revoked token
-  back. Across processes the window is bounded by the generation check when a
-  stale entry for the token named its user, and by `identity_cache_ttl`
-  otherwise.
+  `session:`). When the lookup finds no row (the session is already gone or
+  not visible), the delete uses the owner recorded when a `_Session` query or
+  `Parse::Session.session` last fetched that session through the same client.
+  Only the owner's user id is recorded, never the token, for as long as an
+  identity entry lives. The records sit in their own store
+  (`client.authorization.session_owner_cache`, process-local by default, set
+  a shared store to share them), never in the identity plane, so no session
+  token can read one. With no
+  recorded owner, a batch delete that reports the row deleted or "object not
+  found" clears the client's identity and role cache, and so does a lookup
+  that fails outright. Either reset happens at most once every 5 seconds per
+  client, so an endpoint that deletes caller-supplied session ids cannot flush
+  a shared plane on every request. A single `destroy` cannot tell "already
+  gone" from "denied", so it uses the recorded owner but never resets. The
+  residual window is a session deleted elsewhere whose owner this process
+  never recorded: its cached token resolves until the next reset or until
+  `identity_cache_ttl`.
+* A token resolution that is in flight when an invalidation lands does not
+  cache its answer, so it cannot put a just-revoked token back. Every
+  invalidation moves a marker before it drops entries, and the resolver
+  checks the marker before writing and again after, evicting its own write
+  when it moved. On the Redis identity plane the marker is a random nonce
+  shared by every process, replaced on each invalidation, so this also holds
+  for invalidations made by other processes, including a full reset. A custom
+  plane with generation support shares a counter instead; one without gets
+  the guarantee within one process only, and across processes it is bounded
+  by `identity_cache_ttl`.
 
 On a Redis outage these planes behave differently from the response cache.
 The response cache degrades to a passthrough request; the identity and role

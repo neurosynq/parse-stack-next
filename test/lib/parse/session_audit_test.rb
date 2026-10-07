@@ -293,7 +293,11 @@ class SessionAuditTest < Minitest::Test
     ctx = build_client.authorization
     ctx.identity_cache = plane
     ctx.invalidate_user("UA")
-    assert_equal ["UA"], bumped
+    # The plane-wide invalidation counter moves too, so an in-flight
+    # resolution in another process cannot cache a revoked token.
+    epoch = Parse::Authorization::Context::PLANE_EPOCH_SUBJECT
+    assert_equal ["UA"], bumped - [epoch]
+    assert_includes bumped, epoch
   end
 
   def test_password_change_and_delete_through_the_api_evict_the_user

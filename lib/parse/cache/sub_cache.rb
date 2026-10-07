@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "digest"
+require "securerandom"
 require "set"
 
 module Parse
@@ -163,6 +164,25 @@ module Parse
         value
       end
 
+      # A random marker replaced on every identity invalidation, read by
+      # `Parse::Authorization` before and after it caches a token so an
+      # invalidation from any process in between is detected. A nonce rather
+      # than a counter: a plane clear drops it, and a counter restarting at
+      # 0 could repeat a value an in-flight lookup captured.
+      # @return [String, nil] nil when never set or cleared.
+      def invalidation_nonce
+        value = @store[invalidation_nonce_key]
+        value.nil? ? nil : value.to_s
+      end
+
+      # Replace the invalidation nonce.
+      # @return [String] the new nonce.
+      def bump_invalidation_nonce
+        nonce = SecureRandom.hex(16)
+        @store.store(invalidation_nonce_key, nonce, {})
+        nonce
+      end
+
       # @return [Float] the last invalidation epoch, 0.0 when never set.
       def epoch
         @store[epoch_key].to_f
@@ -251,6 +271,12 @@ module Parse
       # reserved segment so it cannot collide with a real entry.
       def epoch_key
         @keyspace.key(@family, "meta", "epoch")
+      end
+
+      # Sits beside the epoch under the reserved `meta` segment; a token key
+      # is a digest, so no token can name it.
+      def invalidation_nonce_key
+        @keyspace.key(@family, "meta", "invalidation")
       end
 
       # Generations live in the same family so a plane clear takes them with it,

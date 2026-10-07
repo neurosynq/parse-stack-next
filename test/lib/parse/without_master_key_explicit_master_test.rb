@@ -410,6 +410,191 @@ class WithoutMasterKeyExplicitMasterTest < Minitest::Test
   end
 
 
+  # A shared key-value store for two contexts standing in for two processes
+  # on one Redis identity plane.
+  class SharedStore
+    def initialize = @data = {}
+    def [](k) = @data[k]
+    def key?(k) = @data.key?(k)
+    def delete(k) = @data.delete(k)
+    def store(k, v, _o = {}) = @data[k] = v
+    def increment(k) = @data[k] = @data[k].to_i + 1
+
+    def delete_matching(pattern)
+      doomed = @data.keys.select { |k| File.fnmatch(pattern, k, File::FNM_NOESCAPE) }
+      doomed.each { |k| @data.delete(k) }
+      doomed.size
+    end
+  end
+
+  def race_client(app = "race")
+    Parse::Client.new(server_url: "http://localhost:1/parse", app_id: app, api_key: "k")
+  end
+
+  def users_me(user_id = "U1")
+    ->(_t, **_o) { Parse::Response.new({ "objectId" => user_id }) }
+  end
+
+  # Run `hook` inside the store step, either before or after the real write,
+  # to land an invalidation in the window between the epoch check and the
+  # write (or between the write and the re-check).
+  def with_store_hook(auth, position, hook)
+    original = auth.method(:store_user_id)
+    auth.define_singleton_method(:store_user_id) do |token, uid, gen: nil|
+      hook.call if position == :before
+      original.call(token, uid, gen: gen)
+      hook.call if position == :after
+    end
+    yield
+  ensure
+    auth.singleton_class.send(:remove_method, :store_user_id)
+  end
+
+  def test_invalidation_between_check_and_write_is_not_cached
+    client = race_client
+    auth = client.authorization
+    cache = auth.instance_variable_get(:@identity_cache)
+    client.stub(:current_user, users_me) do
+      with_store_hook(auth, :before, -> { auth.invalidate("r:revoked") }) do
+        auth.send(:lookup_user_id, "r:revoked")
+      end
+    end
+    assert_nil cache.get("r:revoked"), "an invalidation landing before the write must evict it"
+  end
+
+  def test_invalidation_between_write_and_recheck_is_evicted
+    client = race_client
+    auth = client.authorization
+    cache = auth.instance_variable_get(:@identity_cache)
+    client.stub(:current_user, users_me) do
+      # Only the counter moves here: the re-check alone must evict.
+      with_store_hook(auth, :after, -> { auth.send(:bump_invalidation_epoch!) }) do
+        auth.send(:lookup_user_id, "r:revoked")
+      end
+    end
+    assert_nil cache.get("r:revoked"), "a counter change seen after the write evicts the entry"
+  end
+
+  def shared_plane(store)
+    keyspace = Parse::Cache::Keyspace.new(app_id: "race-shared", server_url: "https://x")
+    Parse::Cache::SubCache.new(store: store, keyspace: keyspace, family: :idn, ttl: 3600)
+  end
+
+  def test_other_process_invalidating_during_lookup_is_not_cached
+    store = SharedStore.new
+    a = race_client("race-a").authorization
+    b = race_client("race-b").authorization
+    a.configure(identity_cache: shared_plane(store))
+    b.configure(identity_cache: shared_plane(store))
+    me = lambda do |_t, **_o|
+      # Another process revokes the user while this lookup is in flight.
+      b.invalidate_user("U1")
+      Parse::Response.new({ "objectId" => "U1" })
+    end
+    a.instance_variable_get(:@client).stub(:current_user, me) do
+      a.send(:lookup_user_id, "r:revoked")
+    end
+    assert_nil a.send(:cached_user_id, "r:revoked"),
+               "a cross-process invalidation during the lookup must not leave the token cached"
+  end
+
+  def test_other_process_invalidating_between_check_and_write_is_not_cached
+    store = SharedStore.new
+    a = race_client("race-a").authorization
+    b = race_client("race-b").authorization
+    a.configure(identity_cache: shared_plane(store))
+    b.configure(identity_cache: shared_plane(store))
+    [:before, :after].each do |position|
+      a.instance_variable_get(:@client).stub(:current_user, users_me) do
+        with_store_hook(a, position, -> { b.invalidate("r:revoked-#{position}") }) do
+          a.send(:lookup_user_id, "r:revoked-#{position}")
+        end
+      end
+      assert_nil a.send(:cached_user_id, "r:revoked-#{position}"),
+                 "cross-process invalidation #{position} the write must not leave the token cached"
+    end
+    # With no invalidation the answer is cached as before.
+    a.instance_variable_get(:@client).stub(:current_user, users_me) do
+      a.send(:lookup_user_id, "r:fresh")
+    end
+    assert_equal "U1", a.send(:cached_user_id, "r:fresh")
+  end
+
+  def test_unreadable_plane_marker_skips_caching
+    client = race_client
+    auth = client.authorization
+    plane = shared_plane(SharedStore.new)
+    auth.configure(identity_cache: plane)
+    plane.define_singleton_method(:invalidation_nonce) { raise "redis down" }
+    client.stub(:current_user, users_me) { auth.send(:lookup_user_id, "r:t") }
+    assert_nil plane.get("r:t")
+  end
+
+  def test_other_process_reset_during_lookup_is_not_cached_after_counter_reuse
+    store = SharedStore.new
+    a = race_client("race-a").authorization
+    b = race_client("race-b").authorization
+    a.configure(identity_cache: shared_plane(store))
+    b.configure(identity_cache: shared_plane(store))
+    # Bring the shared marker to a state a reset could return to.
+    b.reset_caches!
+    me = lambda do |_t, **_o|
+      b.reset_caches!
+      Parse::Response.new({ "objectId" => "U1" })
+    end
+    a.instance_variable_get(:@client).stub(:current_user, me) do
+      a.send(:lookup_user_id, "r:revoked")
+    end
+    assert_nil a.send(:cached_user_id, "r:revoked"),
+               "a reset in another process during the lookup must not leave the token cached"
+  end
+
+  # A reset in another process deletes the plane marker before it installs a
+  # new one. A lookup that started on a fresh plane (no marker yet) and wrote
+  # in that gap must not keep its entry.
+  def test_reset_gap_on_a_fresh_plane_does_not_leave_the_token_cached
+    [:before, :after].each do |position|
+      store = SharedStore.new
+      plane_a = shared_plane(store)
+      plane_b = shared_plane(store)
+      a = race_client("race-a").authorization
+      a.configure(identity_cache: plane_a)
+      assert_nil plane_b.invalidation_nonce, "the plane starts with no marker"
+      token = "r:revoked-#{position}"
+      a.instance_variable_get(:@client).stub(:current_user, users_me) do
+        # The other process's reset: its clear lands at `position` relative
+        # to the write, and its new marker only after the lookup returns.
+        with_store_hook(a, position, -> { plane_b.clear }) do
+          a.send(:lookup_user_id, token)
+        end
+      end
+      plane_b.bump_invalidation_nonce
+      assert_nil a.send(:cached_user_id, token),
+                 "a reset whose clear lands #{position} the write must not leave the token cached"
+    end
+  end
+
+  def test_fresh_plane_still_caches_without_a_reset
+    store = SharedStore.new
+    a = race_client("race-a").authorization
+    a.configure(identity_cache: shared_plane(store))
+    a.instance_variable_get(:@client).stub(:current_user, users_me) do
+      a.send(:lookup_user_id, "r:fresh")
+    end
+    assert_equal "U1", a.send(:cached_user_id, "r:fresh")
+  end
+
+  def test_invalidation_nonce_never_repeats_across_clears
+    plane = shared_plane(SharedStore.new)
+    seen = []
+    5.times do
+      seen << plane.bump_invalidation_nonce
+      plane.clear
+      assert_nil plane.invalidation_nonce
+    end
+    assert_equal seen.uniq.size, seen.size
+  end
+
   def test_atlas_dropped_master_honors_either_strict_flag
     Parse::ACLScope.require_session_token = true
     err = assert_raises(Parse::AtlasSearch::ACLRequired) do
