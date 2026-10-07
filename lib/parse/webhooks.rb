@@ -477,7 +477,10 @@ module Parse
                        payload&.raw&.dig("headers", "X-Parse-Request-Id")
           ruby_initiated = request_id&.start_with?("_RB_") || false
           payload.instance_variable_set(:@ruby_initiated, ruby_initiated)
-          trusted_ruby_initiated = ruby_initiated && payload.claimed_master?
+          # `master?` is the authenticated claim: on unauthenticated ingress
+          # it is false, so a forged `_RB_` id plus `"master": true` cannot
+          # suppress model callbacks.
+          trusted_ruby_initiated = ruby_initiated && payload.master?
         else
           trusted_ruby_initiated = false
         end
@@ -673,7 +676,7 @@ module Parse
         # matched route, so read that stamped value rather than recomputing via
         # `ruby_initiated?` -- whose `||=` memoization re-derives on a stamped
         # `false` and could disagree with call_route's header lookup.
-        return if payload.ruby_initiated? && payload.claimed_master?
+        return if payload.ruby_initiated? && payload.master?
 
         # By the time afterSave fires the object is ALREADY persisted in Parse
         # Server, and Parse Server discards the afterSave response body entirely
@@ -736,7 +739,7 @@ module Parse
         obj = payload.parse_object
         return unless obj.is_a?(Parse::Object)
         return unless route_registered?(:after_delete, payload.parse_class)
-        return if payload.ruby_initiated? && payload.claimed_master?
+        return if payload.ruby_initiated? && payload.master?
         obj.run_after_delete_callbacks
         nil
       rescue => e

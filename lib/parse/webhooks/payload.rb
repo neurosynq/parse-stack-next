@@ -368,7 +368,8 @@ module Parse
       # true if the request body says the master key was used. Parse Server
       # sends `master` as a JSON boolean. This is only what the body claims:
       # under `Parse::Webhooks.allow_unauthenticated` with no signature, any
-      # caller can set it. Use {#master?} for authorization decisions.
+      # caller can set it. Diagnostic only: every decision the SDK makes
+      # (field guards, ACL owner adoption, callback dedup) uses {#master?}.
       # @return [Boolean]
       def claimed_master?
         @master == true || @master == "true"

@@ -225,10 +225,16 @@ signature (`PARSE_WEBHOOK_SIGNING_SECRET`) verified. On unauthenticated ingress
 any caller can put `"master": true` in the body, so `master?` returns false
 there. Master-only field guards, ACL owner resolution, and handler checks
 built on `master?` therefore treat such a request as a normal client request.
-`payload.claimed_master?` returns the body's raw claim, and
-`payload.authenticated?` reports whether the request was authenticated. The
-claim alone still drives the Ruby-initiated callback dedup described below,
-since skipping a duplicate callback pass on a forged request grants nothing.
+The Ruby-initiated callback dedup uses `master?` too, so a forged `_RB_`
+request id plus `"master": true` cannot make a request skip model callbacks
+(including a `before_save` that would reject it). `payload.claimed_master?`
+returns the body's raw claim and `payload.authenticated?` reports whether the
+request was authenticated; both are for diagnostics only.
+
+The trade-off: on unauthenticated ingress, a save made by the SDK itself is
+not recognized as Ruby-initiated, so its model callbacks can run twice (once
+in process, once through the webhook). Configure a webhook key or a signing
+secret to keep the dedup.
 
 ## Auditing trigger coverage
 
@@ -506,8 +512,11 @@ master key). It has already run the model's `before_save` / `after_save` /
 The intent is to keep trigger logic local when possible and run it exactly once.
 Note that any logic in the **webhook block itself** still runs; only the
 duplicate ActiveModel callback pass is skipped. A spoofed `_RB_` marker without
-the master key does not get this treatment — the callbacks run in the webhook as
-usual.
+the master key does not get this treatment, and neither does a claimed master
+key on an unauthenticated request (no webhook key match and no verified
+signature): the callbacks run in the webhook as usual. On unauthenticated
+ingress this means SDK-initiated saves run their callbacks twice; configure a
+webhook key or signing secret to keep the dedup.
 
 ### 2. Server-initiated replay / freshness protection (inbound)
 

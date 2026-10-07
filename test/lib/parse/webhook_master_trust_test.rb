@@ -5,8 +5,9 @@ require_relative "../../support/webhook_global_state"
 # through authenticated ingress (webhook key or signature). Under
 # `allow_unauthenticated` with no signature, any caller can claim master, so
 # master-only field guards, ACL owner adoption, and handler `master?` checks
-# must treat it as a non-master request. The raw claim still drives the
-# callback dedup skip for SDK-originated writes.
+# must treat it as a non-master request. The callback dedup skip for
+# SDK-originated writes also requires the authenticated claim, so a forged
+# `_RB_` request id cannot suppress model callbacks.
 class WebhookMasterTrustTest < Minitest::Test
   include WebhookGlobalState
   WEBHOOK_HEADER = "HTTP_X_PARSE_WEBHOOK_KEY"
@@ -21,6 +22,14 @@ class WebhookMasterTrustTest < Minitest::Test
       attr_accessor :before_save_runs
     end
     before_save { self.class.before_save_runs = (self.class.before_save_runs || 0) + 1 }
+  end
+
+  # A model whose before_save rejects every write, so a reply that succeeds
+  # proves the model callbacks were skipped.
+  class RejectProbe < Parse::Object
+    parse_class "RejectProbe"
+    property :title, :string
+    before_save { throw :abort }
   end
 
   def setup
@@ -107,14 +116,44 @@ class WebhookMasterTrustTest < Minitest::Test
     assert_equal true, seen, "a verified signature authenticates the request"
   end
 
-  def test_dedup_skip_still_uses_the_claimed_master_flag
+  def reject_body(master:, request_id:)
+    before_save_body(master: master, request_id: request_id,
+                     object: { "className" => "RejectProbe", "title" => "t" })
+  end
+
+  def test_forged_ruby_initiated_claim_does_not_skip_callbacks
+    Parse::Webhooks.allow_unauthenticated = true
+    Parse::Webhooks.route(:before_save, "RejectProbe") { parse_object }
+    reply = call(build_env(reject_body(master: true, request_id: "_RB_forged"),
+                           path: "/before_save/RejectProbe"))
+    assert reply.key?("error"), "a forged _RB_ id plus master must not skip a rejecting before_save (got #{reply.inspect})"
+    refute reply.key?("success")
+    # The same request without the marker is rejected the same way.
+    reply = call(build_env(reject_body(master: true, request_id: "client-1"),
+                           path: "/before_save/RejectProbe"))
+    assert reply.key?("error")
+  end
+
+  def test_forged_ruby_initiated_claim_runs_counting_callbacks
     Parse::Webhooks.allow_unauthenticated = true
     Parse::Webhooks.route(:before_save, "TrustProbe") { parse_object }
     TrustProbe.before_save_runs = 0
     call(build_env(before_save_body(master: true, request_id: "_RB_abc")))
-    assert_equal 0, TrustProbe.before_save_runs,
-                 "an SDK-originated write keeps its callback dedup on unauthenticated ingress"
-    call(build_env(before_save_body(master: true, request_id: "client-1")))
+    assert_equal 1, TrustProbe.before_save_runs,
+                 "unauthenticated ingress cannot claim the Ruby-initiated dedup"
+  end
+
+  def test_authenticated_ruby_initiated_write_keeps_dedup
+    Parse::Webhooks.key = "secret"
+    Parse::Webhooks.route(:before_save, "RejectProbe") { parse_object }
+    reply = call(build_env(reject_body(master: true, request_id: "_RB_abc"),
+                           key_header: "secret", path: "/before_save/RejectProbe"))
+    assert reply.key?("success"), "an authenticated SDK-originated write skips the duplicate callback pass (got #{reply.inspect})"
+    Parse::Webhooks.route(:before_save, "TrustProbe") { parse_object }
+    TrustProbe.before_save_runs = 0
+    call(build_env(before_save_body(master: true, request_id: "_RB_abc"), key_header: "secret"))
+    assert_equal 0, TrustProbe.before_save_runs
+    call(build_env(before_save_body(master: true, request_id: "client-1"), key_header: "secret"))
     assert_equal 1, TrustProbe.before_save_runs, "a non-SDK write still runs model callbacks"
   end
 

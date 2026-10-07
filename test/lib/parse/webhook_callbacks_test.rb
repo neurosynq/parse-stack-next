@@ -695,7 +695,7 @@ class WebhookCallbacksTest < Minitest::Test
     Parse::Webhooks.route(:after_save, "*") { wildcard_fires += 1; true }
 
     # Trusted-Ruby-initiated: _RB_ request id (nested, as Parse Server sends it)
-    # AND master:true.
+    # AND master:true on an authenticated request (webhook key matched).
     body = JSON.generate(
       "triggerName" => "afterSave",
       "master" => true,
@@ -703,9 +703,9 @@ class WebhookCallbacksTest < Minitest::Test
       "headers" => { "x-parse-request-id" => "_RB_trusted_both_routes" },
     )
 
-    with_rack_webhook_env do
+    with_rack_webhook_env(key: "test-webhook-key") do
       status, _headers, resp = Parse::Webhooks.call(
-        rack_env(body: body, path: "/webhooks/afterSave/WebhookChainModel")
+        rack_env(body: body, path: "/webhooks/afterSave/WebhookChainModel", key: "test-webhook-key")
       )
       assert_equal 200, status
       assert_equal({ "success" => true }, JSON.parse(resp.join))
@@ -880,12 +880,15 @@ class WebhookCallbacksTest < Minitest::Test
   # Rack entry-point (#call!) harness -- drives the real production path on a
   # raw body. Mirrors the helper in webhook_non_object_triggers_test.rb.
   # ==========================================================================
-  def with_rack_webhook_env
+  # `key:` authenticates the request with a webhook key; without it the
+  # request arrives on unauthenticated ingress, where a body's master claim
+  # (and so the Ruby-initiated callback dedup) is not trusted.
+  def with_rack_webhook_env(key: nil)
     saved_key = Parse::Webhooks.instance_variable_get(:@key)
     saved_allow = Parse::Webhooks.instance_variable_get(:@allow_unauthenticated)
     saved_logging = Parse::Webhooks.logging
-    Parse::Webhooks.instance_variable_set(:@key, nil)
-    Parse::Webhooks.instance_variable_set(:@allow_unauthenticated, true)
+    Parse::Webhooks.instance_variable_set(:@key, key)
+    Parse::Webhooks.instance_variable_set(:@allow_unauthenticated, key.nil?)
     Parse::Webhooks.logging = false
     Parse::Webhooks::ReplayProtection.reset!
     capture_io { yield }
@@ -895,13 +898,15 @@ class WebhookCallbacksTest < Minitest::Test
     Parse::Webhooks.logging = saved_logging
   end
 
-  def rack_env(body:, path:)
-    {
+  def rack_env(body:, path:, key: nil)
+    env = {
       "REQUEST_METHOD" => "POST",
       "CONTENT_TYPE" => "application/json",
       "PATH_INFO" => path,
       "rack.input" => StringIO.new(body),
       "CONTENT_LENGTH" => body.bytesize.to_s,
     }
+    env["HTTP_X_PARSE_WEBHOOK_KEY"] = key if key
+    env
   end
 end
