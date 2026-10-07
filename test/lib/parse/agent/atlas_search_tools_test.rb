@@ -112,8 +112,15 @@ class AtlasSearchAgentToolsTest < Minitest::Test
   end
 
   def test_session_bound_agent_forwards_session_token
-    agent = agent_with(session_token: "tok-1")
-    Parse::Agent::Tools.atlas_text_search(agent, class_name: "Song", query: "love")
+    # The token must resolve: an unresolved session agent is refused before
+    # the CLP check rather than treated as master (TRACK-AGENT-4).
+    resolved = lambda do |_opts, **_kw|
+      Parse::ACLScope::Resolution.new(mode: :session, user_id: "u1", permission_strings: ["*", "u1"])
+    end
+    agent = Parse::ACLScope.stub(:resolve!, resolved) { agent_with(session_token: "tok-1") }
+    Parse::CLPScope.stub(:permits?, true) do
+      Parse::Agent::Tools.atlas_text_search(agent, class_name: "Song", query: "love")
+    end
     capture = @captures.first
     assert_equal :search, capture[:op]
     assert_equal "tok-1", capture[:opts][:session_token]
@@ -193,12 +200,17 @@ class AtlasSearchAgentToolsTest < Minitest::Test
     # be able to call this tool. Library-level FacetedSearchNotACLSafe
     # already enforces this at the AtlasSearch layer, but the agent
     # layer refuses earlier with a friendlier message.
-    agent = agent_with(session_token: "tok-1", master_atlas: false)
-    assert_raises(Parse::Agent::ValidationError) do
-      Parse::Agent::Tools.atlas_faceted_search(
-        agent, class_name: "Song",
-               facets: { genre: { type: :string, path: :genre } },
-      )
+    resolved = lambda do |_opts, **_kw|
+      Parse::ACLScope::Resolution.new(mode: :session, user_id: "u1", permission_strings: ["*", "u1"])
+    end
+    agent = Parse::ACLScope.stub(:resolve!, resolved) { agent_with(session_token: "tok-1", master_atlas: false) }
+    Parse::CLPScope.stub(:permits?, true) do
+      assert_raises(Parse::Agent::ValidationError) do
+        Parse::Agent::Tools.atlas_faceted_search(
+          agent, class_name: "Song",
+                 facets: { genre: { type: :string, path: :genre } },
+        )
+      end
     end
   end
 

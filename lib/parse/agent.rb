@@ -906,12 +906,30 @@ module Parse
     attr_reader :acl_role_scope
 
     # @return [Parse::ACLScope::Resolution, nil] the resolved ACL scope
-    #   for this agent. Frozen at construction. `nil` means master-key
-    #   posture — the agent runs every tool call with the application
-    #   master key, bypassing per-row ACL/CLP enforcement. Non-nil
-    #   carries a `permission_strings` allow-set that built-in tools
-    #   forward to mongo-direct / Atlas Search via {#acl_scope_kwargs}.
-    attr_reader :acl_scope
+    #   for this agent. `nil` means master-key posture: the agent runs
+    #   every tool call with the application master key, bypassing per-row
+    #   ACL/CLP enforcement. Non-nil carries a `permission_strings`
+    #   allow-set that built-in tools forward to mongo-direct / Atlas
+    #   Search via {#acl_scope_kwargs}.
+    #
+    #   A session-token agent is resolved eagerly at construction. When
+    #   that fails (Parse Server unreachable), or after {#impersonate}, the
+    #   scope is resolved again here on first use. It never reads as `nil`
+    #   for a session agent: if the token still cannot be resolved this
+    #   raises {Parse::Agent::UnresolvedIdentity} rather than letting a
+    #   caller mistake the agent for master-key posture.
+    # @raise [Parse::Agent::UnresolvedIdentity]
+    def acl_scope
+      ensure_session_scope! if session_scope_unresolved?
+      @acl_scope
+    end
+
+    # @return [Boolean] `true` when the agent has a session token whose
+    #   claim set has not been resolved yet (a failed eager resolution at
+    #   construction, or a fresh {#impersonate}).
+    def session_scope_unresolved?
+      @acl_scope.nil? && !@session_token.to_s.empty?
+    end
 
     # @return [Boolean] whether this agent may run Atlas Search tools
     #   in master-key-equivalent mode when no `session_token` is set.
@@ -1169,7 +1187,7 @@ module Parse
     #
     # @return [Array<String>, nil]
     def acl_permission_strings
-      @acl_scope&.permission_strings
+      acl_scope&.permission_strings
     end
 
     # A ready-to-prepend `$match` stage filtering an aggregation
@@ -1201,7 +1219,8 @@ module Parse
     end
 
     # `true` when the agent carries any non-master-key scope
-    # (session_token, acl_user, or acl_role). Use this when deciding
+    # (session_token, acl_user, or acl_role), resolved or not. Use this
+    # when deciding
     # whether a Parse Server endpoint that DOES NOT enforce ACL
     # (notably the REST `aggregate` endpoint) is safe to route through:
     # any `true` here means the REST path would silently bypass the
@@ -1210,7 +1229,7 @@ module Parse
     #
     # @return [Boolean]
     def acl_scope?
-      !@acl_scope.nil?
+      !@acl_scope.nil? || !@session_token.to_s.empty?
     end
 
     # `true` when the agent's ACL scope cannot be honored by Parse
@@ -1938,19 +1957,15 @@ module Parse
       @acl_scope = if @session_token
           # Best-effort eager resolution. If Parse Server's /users/me is
           # unreachable at construction time (network blip, test env, MCP
-          # bootstrap-before-server-ready), leave @acl_scope nil and let
-          # Parse Server validate the token per-call via REST. The banner
-          # check below keys on identity inputs, NOT on resolution success,
-          # so an unresolved-but-supplied session_token does not trip the
-          # master-key banner. Failure is silent — Parse Server's
-          # per-call validation will surface auth errors at the
-          # actual usage site where the operator can act on them.
-          begin
-            opts = { session_token: @session_token, client: @client }.compact
-            Parse::ACLScope.resolve!(opts, method_name: :agent_init)
-          rescue StandardError
-            nil
-          end
+          # bootstrap-before-server-ready), leave the scope unresolved:
+          # {#acl_scope} retries on first use and raises
+          # {Parse::Agent::UnresolvedIdentity} if it still fails, so an
+          # unresolved session agent is never read as master-key posture.
+          # Parse Server also validates the token on every REST call. The
+          # banner check below keys on identity inputs, NOT on resolution
+          # success, so an unresolved session_token does not trip the
+          # master-key banner.
+          resolve_session_scope
         elsif @acl_user_scope
           Parse::ACLScope.resolve_for_user(@acl_user_scope, client: @client)
         elsif @acl_role_scope
@@ -1975,8 +1990,20 @@ module Parse
       #     Same rationale.
       #   * Parent has explicit permission_strings → child MUST have a
       #     scope and child's permission_strings ⊆ parent's.
-      if parent && parent.acl_scope
-        parent_perms = parent.acl_scope.permission_strings
+      # A parent whose session token has not resolved yet has an unknown
+      # claim set. A child that inherits that same token is the same
+      # identity and needs no check; any other child identity cannot be
+      # proven a subset, so the parent's scope is resolved now (raising
+      # Parse::Agent::UnresolvedIdentity if it still cannot be).
+      parent_scope = if parent.nil?
+          nil
+        elsif parent.session_scope_unresolved? && @session_token == parent.session_token
+          nil
+        else
+          parent.acl_scope
+        end
+      if parent_scope
+        parent_perms = parent_scope.permission_strings
         if parent_perms && !parent_perms.empty?
           child_perms = @acl_scope&.permission_strings
           if child_perms.nil?
@@ -4158,6 +4185,54 @@ module Parse
     end
 
     private
+
+    public
+
+    # A redacted one-line summary. Never includes the session token, the
+    # client (whose inspect would print its keys), the conversation, or the
+    # last request and response: an agent is often logged or reported by an
+    # error tracker, and the default Ruby inspect dumped all of them.
+    # @return [String]
+    def inspect
+      parts = ["id=#{agent_id}", "permissions=#{@permissions}", "auth=#{auth_context[:type]}"]
+      parts << "scope=unresolved" if session_scope_unresolved?
+      parts << "parent=#{parent_agent_id}" if parent_agent_id
+      parts << "depth=#{agent_depth}" if agent_depth.to_i.positive?
+      parts << "tools_only=#{@tool_filter_only.size}" if @tool_filter_only
+      parts << "tools_except=#{@tool_filter_except.size}" if @tool_filter_except
+      parts << "classes_only=#{@class_filter_only.size}" if @class_filter_only
+      parts << "classes_except=#{@class_filter_except.size}" if @class_filter_except
+      parts << "method_layers=#{method_filter_layers.size}" unless method_filter_layers.empty?
+      parts << "client_mode" if @client_mode
+      "#<Parse::Agent #{parts.join(" ")}>"
+    end
+    alias_method :to_s, :inspect
+
+    # `pp` walks instance variables by default; print the redacted summary.
+    def pretty_print(q)
+      q.text(inspect)
+    end
+
+    private
+
+    # Resolve this agent's session token into a frozen ACL scope, or nil
+    # when it cannot be resolved (Parse Server unreachable, invalid token).
+    def resolve_session_scope
+      opts = { session_token: @session_token, client: @client }.compact
+      Parse::ACLScope.resolve!(opts, method_name: :agent_init)&.freeze
+    rescue StandardError
+      nil
+    end
+
+    # Retry resolving a session token whose eager resolution failed. Raises
+    # instead of leaving the scope nil, which every caller reads as master.
+    def ensure_session_scope!
+      resolved = resolve_session_scope
+      raise Parse::Agent::UnresolvedIdentity if resolved.nil?
+      @acl_scope = resolved
+      @auth_context = nil
+      resolved
+    end
 
     # Keys that should never be logged for security reasons.
     # Includes query-body keys (where, pipeline), credential keys (session_token,
