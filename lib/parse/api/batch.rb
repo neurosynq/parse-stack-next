@@ -19,13 +19,17 @@ module Parse
       # @overload batch_request(operation)
       #  Submit a batch operation.
       #  @param operation [Parse::BatchOperation] the batch operation.
+      # @param opts [Hash] request options for the `POST /batch` call itself,
+      #   such as `session_token:` or `use_master_key:`. Parse Server runs
+      #   every sub-request under the credentials of this one call (it ignores
+      #   per-sub-request headers), so the batch's authority is set here.
       # @return [Array<Parse::Response>] if successful, a set of responses for each operation in the batch.
       # @return [Parse::Response] if an error occurred, the error response.
-      def batch_request(batch_operations)
+      def batch_request(batch_operations, **opts)
         unless batch_operations.is_a?(Parse::BatchOperation)
           batch_operations = Parse::BatchOperation.new batch_operations
         end
-        response = request(:post, "batch", body: batch_operations.as_json)
+        response = request(:post, "batch", body: batch_operations.as_json, opts: opts)
         return response.batch_responses if response.success? && response.batch?
         return response if response.error?
         # A successful HTTP response whose body is not an array of results

@@ -41,6 +41,14 @@ module Parse
     # Used to correlate batching requests with their responses.
     attr_accessor :tag
 
+    # @!visibility private
+    # The client this request belongs to, when it was built for a specific
+    # one (an object's class client). A {Parse::BatchOperation} sends a
+    # request through this client, so a write built for a session-bound
+    # client is never batched through another client's credentials. nil
+    # means the batch's own client.
+    attr_accessor :client
+
     # @!attribute [rw] request_id
     #   @return [String] unique identifier for this request to enable idempotency
     attr_accessor :request_id

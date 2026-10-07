@@ -432,11 +432,20 @@ module Parse
         #   default; enable it only for writes that are safe to repeat (it
         #   works around Parse Server running a transaction's requests
         #   concurrently, which MongoDB intermittently rejects).
+        # @param session [String, #session_token, nil] run the transaction as
+        #   this user (ACL and CLP enforced). Without it, the transaction runs
+        #   with the credentials of its objects' class client, as a single
+        #   save does.
         # @yield [Parse::BatchOperation] the batch operation to add requests to
         # @return [Array<Parse::Response>] the responses from the transaction
         # @raise [Parse::Error] if the transaction fails
-        def transaction(retries: 5, retry_server_errors: false, &block)
+        # @raise [Parse::BatchOperation::MixedAuthorityError] if the objects
+        #   are bound to clients with different credentials. Parse Server runs
+        #   a transaction under one credential, so it is refused before
+        #   anything is sent.
+        def transaction(retries: 5, retry_server_errors: false, session: nil, &block)
           raise ArgumentError, "Block required for transaction" unless block_given?
+          session_token = Parse::BatchOperation.session_token_for!(session)
 
           previous_context = Fiber[TRANSACTION_CONTEXT_KEY]
           transaction_context = { snapshots: {}, created_objects: {} }
@@ -488,6 +497,10 @@ module Parse
               batch_wrapper.add(result)
             elsif result.is_a?(Array)
               result.each { |obj| batch_wrapper.add(obj) if obj.respond_to?(:change_requests) }
+            end
+
+            if session_token
+              batch.requests.each { |r| r.opts[:session_token] = session_token if r.opts.is_a?(Hash) }
             end
 
             # Submit with retry logic for transaction conflicts.
@@ -1266,6 +1279,9 @@ module Parse
         uri = self.uri_path
         r = Request.new(:delete, uri)
         r.tag = object_id
+        # A batch sends this through the class's client (and its bound
+        # session), as a single destroy does.
+        r.client = client
         r
       end
 
@@ -1276,6 +1292,8 @@ module Parse
 
       # Creates an array of all possible operations that need to be performed
       # on this object. This includes all property and relational operation changes.
+      # Each request carries this class's client, so a batch sends it with the
+      # same credentials as a single {#save}.
       #
       # This is the path batch saves ({Array#save}) and
       # {Parse::Object.transaction} use, so it applies the same save-time
@@ -1309,6 +1327,7 @@ module Parse
             body[Parse::Model::OBJECT_ID] = @id if @id.present?
             r = Request.new(:post, uri, body: body)
             r.tag = object_id
+            r.client = client
             requests << r
           end
           return requests
@@ -1318,6 +1337,7 @@ module Parse
         if attribute_changes? || force
           r = Request.new(:put, uri, body: attribute_updates)
           r.tag = object_id
+          r.client = client
           requests << r
         end
 
@@ -1328,6 +1348,7 @@ module Parse
             next if ops.empty?
             r = Request.new(:put, uri, body: ops)
             r.tag = object_id
+            r.client = client
             requests << r
           end
         end

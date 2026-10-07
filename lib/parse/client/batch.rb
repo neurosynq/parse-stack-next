@@ -5,6 +5,10 @@ require_relative "request"
 require_relative "response"
 
 module Parse
+  # Declared here because this file loads before lib/parse/client.rb, which
+  # reopens it with the same superclass and defines its subclasses.
+  class Error < StandardError; end
+
   # Create a new batch operation.
   # @param reqs [Array<Parse::Request>] a set of requests to batch.
   # @return [BatchOperation] a new {BatchOperation} with the given change requests.
@@ -36,6 +40,14 @@ module Parse
   class BatchOperation
     include Enumerable
 
+    # Raised when a batch would send requests built for different
+    # credentials (a different client, an explicit session token, or an
+    # explicit `use_master_key:`) as one transaction. Parse Server runs every
+    # sub-request of a `POST /batch` under that call's own credentials, so a
+    # mixed transaction cannot honor each request's authority. Nothing is
+    # sent when this is raised.
+    class MixedAuthorityError < Parse::Error; end
+
     # Default number of threads used to dispatch batch segments concurrently.
     # Raise via `Parse::BatchOperation.parallelism = N` (or pass `parallelism:`
     # to `#submit`) for higher throughput on bulk writes; 2 is intentionally
@@ -60,9 +72,21 @@ module Parse
     #  @return [Boolean] whether this batch should be executed as a transaction.
     attr_accessor :requests, :responses, :transaction
 
-    # @return [Parse::Client] the client to be used for the request.
+    # @return [Parse::Client] the client used for requests that were not
+    #   built for a specific client. Requests built from an object
+    #   ({Parse::Object#change_requests}, {Parse::Object#destroy_request})
+    #   carry their class's client and are sent through it.
     def client
       @client ||= Parse::Client.client
+    end
+
+    # Set the client used for requests that were not built for a specific
+    # client. A transaction whose requests were built for another client
+    # raises {MixedAuthorityError}.
+    # @param c [Parse::Client]
+    def client=(c)
+      @client = c
+      @explicit_client = !c.nil?
     end
 
     # @param reqs [Array<Parse::Request>] an array of requests.
@@ -185,22 +209,51 @@ module Parse
       failure = nil
       return @responses if @requests.empty?
 
+      # Parse Server runs every sub-request under the credentials of the one
+      # `POST /batch` call, so requests built for different credentials are
+      # sent as separate calls, each with its own client and options. This
+      # is decided before anything is sent.
+      groups = authority_groups
+
       if @transaction
+        if groups.size > 1
+          raise MixedAuthorityError,
+                "A transaction cannot mix requests built for different credentials " \
+                "(#{groups.size} distinct clients or session/master-key options). Parse Server " \
+                "runs a batch under one credential, so it cannot honor each request's own. " \
+                "Save these objects in separate transactions."
+        end
+        group = groups.first
+        if @explicit_client && !group[:client].equal?(client)
+          raise MixedAuthorityError,
+                "This transaction's requests were built for a different client than the " \
+                "one set on the batch. Use the objects' own client."
+        end
         # One request, one transaction. Exceptions propagate unchanged so the
         # caller can roll back its local state.
-        @responses = align_responses(@requests, client.batch_request(self))
+        result = group[:client].batch_request(self, **group[:opts])
+        @responses = align_responses(@requests, result)
       else
         segment = 50 if segment.nil? || segment < 1
         parallelism = 1 if parallelism.nil? || parallelism < 1
-        slices = @requests.each_slice(segment).to_a
+        # Each slice holds requests of one authority group, with their
+        # positions in the batch, so responses go back in request order.
+        slices = groups.flat_map do |g|
+          g[:entries].each_slice(segment).map { |entries| [g, entries] }
+        end
         outcomes = slices.threaded_map(parallelism) do |slice|
+          g, entries = slice
+          reqs = entries.map(&:last)
           begin
-            [align_responses(slice, client.batch_request(BatchOperation.new(slice))), nil]
+            [entries, align_responses(reqs, g[:client].batch_request(BatchOperation.new(reqs), **g[:opts])), nil]
           rescue StandardError => e
-            [Array.new(slice.size) { exception_response(e) }, e]
+            [entries, Array.new(reqs.size) { exception_response(e) }, e]
           end
         end
-        @responses = outcomes.flat_map(&:first)
+        @responses = Array.new(@requests.size)
+        outcomes.each do |entries, responses, _error|
+          entries.each_with_index { |(index, _req), i| @responses[index] = responses[i] }
+        end
         failure = outcomes.map(&:last).compact.first
       end
 
@@ -212,6 +265,36 @@ module Parse
     alias_method :save, :submit
 
     private
+
+    # Group the requests by the credentials they were built for: the client
+    # (a request's own, else this batch's) plus an explicit session token
+    # and an explicit `use_master_key:` from the request's options. Requests
+    # with no explicit authority on this batch's client form one group sent
+    # with no extra options, so an ambient `Parse.with_session`,
+    # `Parse.client_mode`, or `Parse.without_master_key` applies exactly as
+    # it does to a single request.
+    # @return [Array<Hash>] groups in first-appearance order, each with
+    #   `:client`, `:opts`, and `:entries` (`[index, request]` pairs).
+    def authority_groups
+      groups = {}
+      @requests.each_with_index do |req, index|
+        target = req.respond_to?(:client) && req.client ? req.client : client
+        opts = req.respond_to?(:opts) && req.opts.is_a?(Hash) ? req.opts : {}
+        token = opts[:session_token]
+        token = token.session_token if token.respond_to?(:session_token)
+        token = token.to_s unless token.nil?
+        master = opts.key?(:use_master_key) ? opts[:use_master_key] : nil
+        key = [target.object_id, token, master]
+        group = groups[key] ||= begin
+            call_opts = {}
+            call_opts[:session_token] = token unless token.nil?
+            call_opts[:use_master_key] = master unless master.nil?
+            { client: target, opts: call_opts, entries: [] }
+          end
+        group[:entries] << [index, req]
+      end
+      groups.values
+    end
 
     # Whether `req` repeats a request already in the batch for the same
     # tagged object.
@@ -275,10 +358,15 @@ class Array
   #  author = Author.first
   #  posts = Post.all author: author
   #  posts.destroy # batch destroy request
+  # @param session [String, #session_token, nil] send every delete as this
+  #   user (ACL and CLP enforced) instead of each object's client default.
   # @return [Parse::BatchOperation] the batch operation performed.
   # @raise ArgumentError if the array is not empty and holds no Parse objects.
+  # @raise Parse::BatchOperation::MixedAuthorityError never for a destroy;
+  #   objects bound to different clients are deleted in separate calls.
   # @see Parse::BatchOperation
-  def destroy
+  def destroy(session: nil)
+    token = Parse::BatchOperation.session_token_for!(session)
     targets = select { |o| o.respond_to?(:destroy_request) }
     if targets.empty? && !empty?
       raise ArgumentError, "Array#destroy requires Parse::Object elements; " \
@@ -287,8 +375,8 @@ class Array
     # A session deleted from a pointer or a partial fetch carries no token or
     # owner to drop from the identity cache; look them up first, in one
     # query per client.
-    Parse::Session.send(:_preload_identity_for_destroy!, targets) if defined?(Parse::Session)
-    _destroy_batch(targets)
+    Parse::Session.send(:_preload_identity_for_destroy!, targets, session_token: token) if defined?(Parse::Session)
+    _destroy_batch(targets, token)
   ensure
     # A looked-up session token is a live credential; never leave it on an
     # object whose delete was skipped or whose batch raised.
@@ -296,13 +384,14 @@ class Array
   end
 
   # @!visibility private
-  def _destroy_batch(targets)
+  def _destroy_batch(targets, token = nil)
     batch = Parse::BatchOperation.new
     objects = {}
     targets.each do |o|
       next if objects.key?(o.object_id)
       r = o.destroy_request
       next if r.nil?
+      r.opts[:session_token] = token if token
       objects[o.object_id] = o
       batch.add(r)
     end
@@ -356,16 +445,22 @@ class Array
   #  objects back to the original ones submitted. If you don't need the original objects
   #  to be updated with the changes, set this to false for improved performance.
   # @param force [Boolean] Do not skip objects that do not have pending changes (dirty tracking).
+  # @param session [String, #session_token, nil] send every write as this
+  #   user (ACL and CLP enforced) instead of each object's client default.
   # @example
   #  # assume Post and Author are Parse models
   #  author = Author.first
   #  posts = Post.first 100
   #  posts.each { |post| post.author = author }
   #  posts.save # batch save
+  # @note Each write is sent with the credentials of its object's class
+  #  client, as a single {Parse::Object#save} is. Objects bound to different
+  #  clients are saved in separate batch calls.
   # @return [Parse::BatchOperation] the batch operation performed.
   # @raise ArgumentError if the array is not empty and holds no Parse objects.
   # @see Parse::BatchOperation
-  def save(merge: true, force: false)
+  def save(merge: true, force: false, session: nil)
+    token = Parse::BatchOperation.session_token_for!(session)
     targets = select { |o| o.is_a?(Parse::Object) }
     if targets.empty? && !empty?
       raise ArgumentError, "Array#save requires Parse::Object elements; " \
@@ -376,7 +471,9 @@ class Array
     targets.each do |o|
       next if objects.key?(o.object_id)
       objects[o.object_id] = o
-      batch.add o.change_requests(force)
+      reqs = o.change_requests(force)
+      reqs.each { |r| r.opts[:session_token] = token } if token
+      batch.add reqs
     end
     if merge == false
       batch.submit
@@ -400,6 +497,21 @@ end
 
 module Parse
   class BatchOperation
+    # @!visibility private
+    # The session token named by a `session:` argument, or nil when none was
+    # given. A blank token is refused rather than treated as "no session".
+    # @param session [String, #session_token, nil]
+    # @return [String, nil]
+    # @raise ArgumentError for a blank or unusable session.
+    def self.session_token_for!(session)
+      return nil if session.nil?
+      token = session.respond_to?(:session_token) ? session.session_token : session
+      unless token.is_a?(String) && !token.strip.empty?
+        raise ArgumentError, "session: must be a session token or a user with one"
+      end
+      token
+    end
+
     # @!visibility private
     # Apply the batch responses for one object's requests to that object.
     # @param obj [Parse::Object] the object that was saved.
