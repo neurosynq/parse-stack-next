@@ -42,9 +42,19 @@ outcome is listed under Behavior Notes.
   master key when the client has one, otherwise with the delete's `session:`.
   A lookup that finds no row leaves nothing to forget; only a lookup that
   fails resets the client's identity cache, at most once every 5 seconds per
-  client. The looked-up token is used only for the delete, is never kept on
-  the object, and never enters the response cache. A token resolution in
-  flight when an invalidation lands does not cache its answer.
+  client. When the lookup finds no row, the delete uses the owner recorded
+  when a `_Session` query or `Parse::Session.session` last fetched that
+  session through the same client (only the user id, never the token, in a
+  store separate from the identity plane,
+  `client.authorization.session_owner_cache`). Without one, a batch delete
+  that applied or reported the row gone falls back to the rate-limited reset;
+  a denied delete never resets, and a single `destroy` never resets. The
+  looked-up token is used only for the delete, is never kept on the object,
+  and never enters the response cache. A token resolution in flight when an
+  invalidation lands, in this process or, on the Redis identity plane, in any
+  other, does not cache its answer: the resolver checks a shared invalidation
+  marker before and after writing and evicts its own write when the marker
+  moved.
 - **FIXED**: `Parse::User#signup!`, signup on save, and `upgrade_anonymous!`
   store `created_at` / `updated_at` as `Parse::Date` values. Reading
   `updated_at` on a newly signed-up user no longer marks it dirty.
@@ -176,7 +186,10 @@ outcome is listed under Behavior Notes.
   push reached a wider audience. A subquery with such a constraint is also
   refused, where it used to match every row. `Parse::Query#subscribe` and
   `client.subscribe(query)` run under the query's own session or `become`
-  client.
+  client, and such a subscription is refused with `ArgumentError` when the
+  LiveQuery client targets a different Parse application id than the query,
+  so one application's session token is never sent to another application's
+  LiveQuery server.
 - **FIXED**: A field repeated in `order` is sent once, at its first position
   with the last direction given, matching what MongoDB applies on direct
   reads. String forms such as `"-title"` are parsed as descending, so they
@@ -267,6 +280,8 @@ outcome is listed under Behavior Notes.
   `Parse.without_master_key`, because the role graph is read as SDK metadata.
 - `Parse::Session._preload_identity_for_destroy!` and the
   `_after_batch_destroy` hooks are now private.
+- A session deleted elsewhere whose owner this process never recorded keeps
+  resolving until the next rate-limited reset or `identity_cache_ttl`.
 - A sub-agent's `tools:` or `methods:` `only:` list that leaves nothing once
   the parent's `only:` and `except:` lists apply now raises `ArgumentError`.
   An explicitly empty `only: []` is accepted. A sub-agent passing
