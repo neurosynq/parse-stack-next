@@ -158,8 +158,12 @@ module Parse
                      use_master_key: NOT_PROVIDED, auto_connect: nil, auto_reconnect: nil)
         cfg = config
 
-        # Use provided values or fall back to configuration/environment
-        @url = url || cfg.url || derive_websocket_url
+        # Use provided values or fall back to configuration/environment. An
+        # explicit or configured URL is validated here; a derived one is
+        # validated by derive_websocket_url.
+        explicit_url = url || cfg.url
+        validate_websocket_url!(explicit_url) if explicit_url
+        @url = explicit_url || derive_websocket_url
         @application_id = application_id || cfg.application_id ||
                           parse_client_value(:application_id)
         @client_key = client_key || cfg.client_key ||
@@ -515,6 +519,37 @@ module Parse
       # apply — but we still emit a warning so the operator knows
       # they're on `ws://`.
       LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1 [::1] 0.0.0.0].freeze
+
+      # Validate an explicit or configured LiveQuery URL the same way a
+      # derived one is: the scheme must be ws or wss (compared case
+      # insensitively), and plaintext ws:// is refused on a non-loopback
+      # host unless `allow_insecure` is configured. Before this the
+      # constructor accepted any URL, so `WS://routable-host` or an
+      # `https://` URL (which the connector treats as plaintext) carried the
+      # master key and session tokens in cleartext.
+      def validate_websocket_url!(url)
+        scheme = Parse::Client.url_scheme(url)
+        host = Parse::Client.url_host(url).to_s
+        unless %w[ws wss].include?(scheme)
+          raise ArgumentError,
+            "[Parse::LiveQuery] LiveQuery URL #{url.to_s.inspect} must use wss:// " \
+            "(or ws:// on a loopback host). Got scheme #{scheme.inspect}."
+        end
+        return if scheme == "wss" || LOOPBACK_HOSTS.include?(host)
+
+        if config.allow_insecure
+          warn "[Parse::LiveQuery] Using insecure ws:// URL for #{host} " \
+               "(allow_insecure is enabled). Master key and session tokens " \
+               "will traverse a cleartext socket."
+        else
+          raise ArgumentError,
+            "[Parse::LiveQuery] Refusing insecure ws:// LiveQuery URL #{url.to_s.inspect}. " \
+            "The connect frame carries the master key and any session token in " \
+            "plaintext on this socket. Use wss:// for routable hosts, or set " \
+            "`Parse::LiveQuery.configure { |c| c.allow_insecure = true }` for " \
+            "local development."
+        end
+      end
 
       # Derive WebSocket URL from Parse server URL. Refuses to
       # synthesize a `ws://` URL from an `http://` server URL on any

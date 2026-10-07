@@ -115,6 +115,16 @@ module Parse
       # Loopback hosts that are safe to bind to without an API key.
       LOOPBACK_HOSTS = %w[127.0.0.1 ::1 localhost].freeze
 
+      # The API key to enforce, or nil when none is configured. Surrounding
+      # whitespace is stripped, and a blank result is no key.
+      # @param key [String, nil]
+      # @return [String, nil]
+      def self.normalize_api_key(key)
+        return nil if key.nil?
+        stripped = key.to_s.strip
+        stripped.empty? ? nil : stripped
+      end
+
       def initialize(port: 3001, host: "127.0.0.1", permissions: :readonly,
                      session_token: nil, api_key: nil, rate_limiter: nil,
                      pre_auth_rate_limiter: nil,
@@ -126,7 +136,12 @@ module Parse
           raise ArgumentError, "pre_auth_rate_limiter must respond to #check!"
         end
 
-        effective_api_key = api_key || ENV["MCP_API_KEY"]
+        # One normalization for every check below: surrounding whitespace is
+        # stripped and a key that is empty after stripping counts as no key.
+        # A whitespace-only key used to pass the non-loopback bind check
+        # (`"   ".to_s.empty?` is false) and then disable request auth
+        # (`"   ".present?` is false), leaving a public endpoint open.
+        effective_api_key = self.class.normalize_api_key(api_key || ENV["MCP_API_KEY"])
 
         # NEW-MCP-1: a non-loopback bind without an API key is an unauthenticated
         # network-exposed JSON-RPC endpoint. Refuse to start. Operators who
@@ -134,7 +149,7 @@ module Parse
         # auth — should bind to localhost and let the proxy forward, or
         # set MCP_API_KEY explicitly even when "the proxy authenticates"
         # (defense in depth).
-        if !LOOPBACK_HOSTS.include?(host.to_s) && effective_api_key.to_s.empty?
+        if !LOOPBACK_HOSTS.include?(host.to_s) && effective_api_key.nil?
           raise ArgumentError,
                 "MCPServer refuses to bind non-loopback host #{host.inspect} without an api_key. " \
                 "Set MCP_API_KEY in the environment, pass api_key: explicitly, or use a loopback " \
@@ -250,8 +265,8 @@ module Parse
 
         # Tool list endpoint (requires auth if API key is configured)
         @server.mount_proc("/tools") do |req, res|
-          if @api_key.present?
-            provided_key = req[MCP_API_KEY_HEADER].to_s
+          if @api_key
+            provided_key = req[MCP_API_KEY_HEADER].to_s.strip
             unless ActiveSupport::SecurityUtils.secure_compare(@api_key, provided_key)
               error_response(res, 401, "Unauthorized: invalid or missing API key")
               next
@@ -353,8 +368,8 @@ module Parse
       # counters on each returned agent are scoped to that single request
       # and discarded when it ends, eliminating cross-request leakage.
       def agent_factory(env)
-        if @api_key.present?
-          provided_key = env["HTTP_X_MCP_API_KEY"].to_s
+        if @api_key
+          provided_key = env["HTTP_X_MCP_API_KEY"].to_s.strip
           unless ActiveSupport::SecurityUtils.secure_compare(@api_key, provided_key)
             raise Parse::Agent::Unauthorized.new("invalid or missing API key", reason: :bad_api_key)
           end

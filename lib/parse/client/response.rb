@@ -264,19 +264,47 @@ module Parse
       self
     end
 
+    # A summary that never prints result values: login, signup, and
+    # `users/me` responses carry a live `sessionToken` (and sometimes
+    # `authData`), and any other row can carry private data, so inspect
+    # shows only the shape of the result.
     # @!visibility private
     def inspect
       if error?
-        "#<#{self.class} @code=#{code} @error='#{error}'>"
+        "#<#{self.class} @code=#{code} @error='#{error}' @http_status=#{http_status.inspect}>"
       else
-        "#<#{self.class} @result='#{@result}'>"
+        "#<#{self.class} @http_status=#{http_status.inspect} @result=#{result_summary}>"
       end
     end
 
-    # @return [String] JSON encoded object, or an error string.
+    # @return [String] JSON encoded object, or an error string. Credential
+    #   fields (`sessionToken`, `password`, `authData`, keys) are replaced
+    #   with a placeholder, so printing or logging a response cannot leak a
+    #   live session token. Read {#result} for the raw values.
     def to_s
       return "[E-#{@code}] #{@request} : #{@error} (#{@http_status})" if error?
-      @result.to_json
+      redacted_result.to_json
+    end
+
+    private
+
+    # Class and size of the result, without its values.
+    def result_summary
+      case @result
+      when Array then "Array(#{@result.size})"
+      when Hash then "Hash(#{@result.size} keys)"
+      when nil then "nil"
+      else @result.class.name
+      end
+    end
+
+    # A deep copy of the result with credential fields replaced.
+    def redacted_result
+      return @result unless @result.is_a?(Hash) || @result.is_a?(Array)
+      copy = JSON.parse(@result.to_json)
+      Parse::Middleware::BodyBuilder.scrub_sensitive!(copy)
+    rescue StandardError
+      "[unprintable result]"
     end
   end
 end

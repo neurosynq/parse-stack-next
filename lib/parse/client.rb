@@ -704,7 +704,9 @@ module Parse
       @allow_faraday_proxy = opts.fetch(:allow_faraday_proxy, false)
 
       # Security check for HTTP usage (except localhost/127.0.0.1 for development)
-      if @server_url&.start_with?("http://") && !@server_url.match?(%r{^http://(localhost|127\.0\.0\.1)(:|/)})
+      # The scheme and host come from URI parsing, so `HTTP://` and leading
+      # whitespace are treated as plain http, not as a secure URL.
+      if self.class.url_scheme(@server_url) == "http" && !%w[localhost 127.0.0.1].include?(self.class.url_host(@server_url))
         if @require_https
           raise ArgumentError, "[Parse::Client] HTTPS required but server URL uses HTTP: #{@server_url}. " \
                                "Set require_https: false or use an HTTPS URL."
@@ -992,7 +994,7 @@ module Parse
       ssl = faraday_opts[:ssl] || faraday_opts["ssl"]
       if ssl.is_a?(Hash)
         verify = ssl.key?(:verify) ? ssl[:verify] : ssl["verify"]
-        if verify == false && @server_url.to_s.start_with?("https://")
+        if verify == false && self.class.url_scheme(@server_url) == "https"
           raise ArgumentError,
             "[Parse::Client] Refusing to disable TLS certificate verification " \
             "(opts[:faraday][:ssl][:verify] = false) on an HTTPS server URL. " \
@@ -1027,6 +1029,31 @@ module Parse
     # {Parse::LiveQuery::Client::LOOPBACK_HOSTS} so the explicit-URL
     # path and the derived-URL path agree on what counts as local.
     LIVE_QUERY_LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1 [::1] 0.0.0.0].freeze
+
+    # The lowercased scheme of a URL String, or nil when it does not parse.
+    # Leading and trailing whitespace is ignored. Scheme checks go through
+    # this instead of a case-sensitive prefix match, which let `HTTP://` and
+    # `WS://` past the plaintext guards.
+    # @param url [String, nil]
+    # @return [String, nil]
+    # @api private
+    def self.url_scheme(url)
+      return nil if url.nil?
+      URI.parse(url.to_s.strip).scheme&.downcase
+    rescue URI::InvalidURIError
+      nil
+    end
+
+    # The lowercased host of a URL String, or nil when it does not parse.
+    # @param url [String, nil]
+    # @return [String, nil]
+    # @api private
+    def self.url_host(url)
+      return nil if url.nil?
+      URI.parse(url.to_s.strip).host&.downcase
+    rescue URI::InvalidURIError
+      nil
+    end
 
     # Configure LiveQuery with the given options
     # @param opts [Hash] configuration options
@@ -1081,9 +1108,9 @@ module Parse
 
     # @api private
     def validate_live_query_url!(url, allow_insecure:)
-      return unless url.is_a?(String) && url.start_with?("ws://")
+      return unless url.is_a?(String) && self.class.url_scheme(url) == "ws"
 
-      host = URI.parse(url).host.to_s rescue ""
+      host = self.class.url_host(url).to_s
       return if LIVE_QUERY_LOOPBACK_HOSTS.include?(host)
       return if allow_insecure
 
