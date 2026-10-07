@@ -15,32 +15,36 @@ outcome is listed under Behavior Notes.
   owner from the declared `owner:` field, or from the requesting user when that
   field is empty. Before, a signed-in client got the policy's no-owner
   fallback (`{}` under `:owner_else_private`) and could not read its own
-  record. A request without a user gets the policy fallback. An ACL the client
-  sent is kept, and an ACL the handler sets always wins, even when it equals
-  the class default. This holds whatever the handler returns: an ACL assigned
-  on `parse_object` is written for a `true`, `nil`, or Hash return too, unless
-  a returned Hash sets `ACL` itself.
+  record. A request without a user, or a master-key request, gets the policy
+  fallback. A `_User` class declared with `owner: :self` is owned by the new
+  user, never the requester. An ACL the client sent is kept, and an ACL the
+  handler sets always wins (through `acl=` or mass assignment), even when it
+  equals the class default. A `guard :acl, :master_only` revert on a create
+  returns the ACL to the class policy instead of `{}`. A handler-assigned ACL
+  is written whatever the handler returns (`parse_object`, `true`, `nil`, or
+  a Hash that does not set `ACL` itself).
 - **FIXED**: When a `before_save` handler changes a record, a sub-document the
-  client changed is written back as dotted paths at any depth of nested
-  objects (`"meta.count.value": 6`) instead of the whole sub-document, so
-  concurrent writes to other sub-keys of the same field are no longer
-  overwritten. A sub-key the client removed is
-  written as a `Delete`. A dotted key in a Hash the handler returns is folded
-  into the field when the reply writes that field whole.
+  client changed is written back as one-level dotted paths (`"meta.count":
+  {...}`) instead of the whole field, so concurrent writes to other sub-keys
+  survive. A removed sub-key is written as a `Delete`. Dotted keys in a
+  returned Hash are folded into the field or `field.sub` write they belong to,
+  with operators (`Increment`, `Add`, `AddUnique`, `Remove`, `Delete`) applied
+  rather than stored. Hash keys may use Ruby names.
 
 #### Sessions and master-key scope
 
 - **FIXED**: Deleting `Parse::Session` or `Parse::User` objects, one at a time
-  or with a batch `Array#destroy`, drops their identity-cache entries on every
-  attempted delete, including one that fails because the row is already gone.
-  A session that does not carry its token or owner (built from its objectId
-  alone, fetched without the master key, or fetched with `keys:` leaving them
-  out) has them looked up first, in one query per batch; if that lookup fails,
-  the client's whole identity cache is dropped instead of none of it. The
-  looked-up token is used only for the delete and is never kept on the
-  object. A revoked session token stops resolving for
-  mongo-direct and Atlas Search reads at once, instead of when its cached
-  entry expires.
+  or with a batch `Array#destroy`, drops their identity-cache entries when the
+  delete succeeds or reports the row already gone. A denied delete leaves the
+  cache alone. A session that does not carry its token or owner (built from
+  its objectId alone, fetched without the master key, or fetched with `keys:`
+  leaving them out) has them looked up first, in one query per batch: with the
+  master key when the client has one, otherwise with the delete's `session:`.
+  A lookup that finds no row leaves nothing to forget; only a lookup that
+  fails resets the client's identity cache, at most once every 5 seconds per
+  client. The looked-up token is used only for the delete, is never kept on
+  the object, and never enters the response cache. A token resolution in
+  flight when an invalidation lands does not cache its answer.
 - **FIXED**: `Parse::User#signup!`, signup on save, and `upgrade_anonymous!`
   store `created_at` / `updated_at` as `Parse::Date` values. Reading
   `updated_at` on a newly signed-up user no longer marks it dirty.
@@ -56,8 +60,11 @@ outcome is listed under Behavior Notes.
   block was cached and denied every scoped mongo-direct read of that class,
   for all callers, for 5 seconds. `Parse::AtlasSearch.faceted_search` raises
   `FacetedSearchNotACLSafe` inside the block, because its bucket counts are
-  not ACL-filtered. A LiveQuery admin connection opened inside the block sends
-  no master key.
+  not ACL-filtered. The metadata marker rides only on the outgoing request
+  copy, never on `response.request` or an error's request. A schema read that
+  fails inside the block is retried at most every 2 seconds there. A LiveQuery
+  admin client that first connected inside the block keeps withholding its
+  master key on every reconnect until `allow_master_key_connection!`.
 
 #### Agent policies
 
@@ -78,8 +85,24 @@ outcome is listed under Behavior Notes.
   `Installation` aliases) match whichever spelling the entry or the
   `call_method` caller uses. Before, `methods: { except: ["_User.x"] }` could
   be bypassed by calling the method on `"User"`.
+- **FIXED**: A sub-agent can no longer turn on `master_atlas` when its parent
+  does not have it. `Parse::Agent.new(parent: scoped_parent, master_atlas:
+  true)` raises `ArgumentError`; before, the child's `atlas_faceted_search` ran
+  with master-key semantics and returned every row under the parent's scoped
+  identity. Omitting `master_atlas` still inherits, and `false` still drops
+  it.
+- **FIXED**: The MCP dispatcher snapshots and restores an agent's own approval
+  gate, so driving a sub-agent through `tools/call` no longer pins its
+  parent's gate onto it. Assigning `approval_gate = nil` makes a sub-agent use
+  its parent's gate again.
+- **FIXED**: Qualified `methods:` entries may name a model by its Ruby
+  constant (`"Artist.purge"` for a class whose `parse_class` is `"Musician"`)
+  and are compared by Parse class name, so such an `except:` entry is no
+  longer bypassed through the Parse class name. An entry whose class resolves
+  to no loaded model warns at construction.
 - **IMPROVED**: The `parse.agent.tool_call` audit payload adds
-  `methods_layers` for sub-agents, and `describe[:methods][:layers]` lists
+  `methods_layers` whenever a sub-agent inherits a `methods:` filter
+  (including a single parent layer), and `describe[:methods][:layers]` lists
   every `methods:` filter in force, parent first.
 
 #### Associations
@@ -100,6 +123,12 @@ outcome is listed under Behavior Notes.
   or without `preserve_changes:`) keeps a relation's staged additions and
   removals and leaves the relation marked changed, including when the response
   carries the relation's descriptor, so the next save sends them.
+  `rollback!` drops a relation's staged additions and removals too, including
+  after a fetch.
+- **IMPROVED**: `RelationCollectionProxy#save` accepts `session:` to send the
+  staged operations as a given user (`nil` for no session token). Relation
+  writes on an owner whose objectId was assigned client-side during a create
+  are staged rather than sent until the create returns.
 - **FIXED**: Atomic relation operations (`add!` / `remove!` on a
   `through: :relation` collection) write to the relation's Parse column when
   its name differs from the Ruby name (`has_many :liked_items` maps to
@@ -123,20 +152,36 @@ outcome is listed under Behavior Notes.
   `Parse::Query.or`). Before, the branch was emitted as `{}` and matched every
   row, or lost part of its conditions, including in push targeting, which
   could reach every installation.
-- **FIXED**: `Parse::Query#clone`, `|`, `or_where(query)`, `Parse::Query.or`,
-  and `Parse::Query` branches inside `:or` keep the query's authority: session
-  token, a session-bound client from `Parse::Client#become`, scoped user or
-  role, master-key flag, and read preference. Queries combined with OR must
-  run under the same authority. An unscoped query takes the other query's
-  authority, and two different ones raise `ArgumentError`. Before, a session
-  combined with a `scope_to_user` ran as the scoped user, and a
-  `become`-client query composed into an OR ran as the master key. Changing
-  the authority of a combined query afterwards raises and leaves the query
-  unchanged, and a combined query re-checks its authority before it runs.
+- **FIXED**: `Parse::Query#clone`, `|`, `or_where`, `Parse::Query.or`, `:or`
+  branches (including Hash branches with `session:` / `use_master_key:` keys
+  or nested scoped queries), and subqueries (`$inQuery`, `$notInQuery`,
+  `$select`, `$dontSelect`) keep the query's authority and application:
+  session token, a session-bound client from `Parse::Client#become`, scoped
+  user or role, master-key flag, read preference, and the Parse application
+  the query targets. Queries combined this way must run under the same
+  authority against the same application. An unscoped query takes the
+  other's authority, and different authorities or applications raise
+  `ArgumentError`. Before, a session combined with `scope_to_user` ran as the
+  scoped user, a `become`-client query composed into an OR ran as the master
+  key, a scoped subquery ran under the outer query's master key, and a clone
+  could send one application's session token to the default application.
+  Changing the authority or client of a combined query raises and leaves the
+  query unchanged. A combined query re-checks its authority before it runs,
+  and explicit auth passed to `results_direct`, `count_direct`,
+  `distinct_direct`, or `atlas_search` must match it.
+- **FIXED**: LiveQuery subscriptions and push targeting refuse constraints that
+  only the aggregation pipeline or mongo-direct can run (`array_size`,
+  `set_equals`, `not_empty`, `elem_match`, `readable_by`, mongo-direct geo
+  operators). Before, those constraints were dropped and the subscription or
+  push reached a wider audience. A subquery with such a constraint is also
+  refused, where it used to match every row. `Parse::Query#subscribe` and
+  `client.subscribe(query)` run under the query's own session or `become`
+  client.
 - **FIXED**: A field repeated in `order` is sent once, at its first position
   with the last direction given, matching what MongoDB applies on direct
   reads. String forms such as `"-title"` are parsed as descending, so they
   deduplicate too, and the direct `$sort` stage sorts on the real field.
+  `order("title,-plays")` is parsed as two fields.
 - **FIXED**: A bare objectId compared to a declared pointer field
   (`Song.query(:artist => "abc123")`, `:artist.ne`, `:artist.in`) now matches
   on REST, in `Parse::Push` targeting, and in LiveQuery subscriptions from
@@ -166,6 +211,12 @@ outcome is listed under Behavior Notes.
   the search reruns once without it and skips it for the index cache TTL. A
   failed index lookup is also remembered for that TTL.
 
+- **FIXED**: A `$vectorSearch` refusal caused by the caller's own
+  `vector_filter` on an unindexed path no longer switches off the owner
+  prefilter for every caller on that index or clears the index cache; only a
+  refusal naming an owner `_p_<field>` path does. Native hybrid search uses
+  `Parse::VectorSearch.default_index` when the vector branch names no index.
+
 #### Documentation
 
 - **FIXED**: README and query YARD examples use `:field.pointer_id` and
@@ -179,12 +230,19 @@ outcome is listed under Behavior Notes.
   matches no rows.
 - A pipeline-only constraint inside an OR now raises `ArgumentError`. Apply it
   outside the OR, or run the branches as separate queries.
-- Combining queries that run under different authorities now raises
-  `ArgumentError`: different session tokens, a session against
-  `scope_to_user`, `scope_to_role`, or the master key, and different scoped
-  users or roles. Setting a new session token, master-key flag, or scope on a
-  query that took its authority from an OR branch also raises, as does
-  assigning a different `client`.
+- Combining queries that run under different authorities or against
+  different Parse applications now raises `ArgumentError`. That covers OR
+  composition, `:or` Hash branches, and subqueries, and includes different
+  session tokens, a session against `scope_to_user` / `scope_to_role` / the
+  master key, and different scoped users or roles. Setting a new session
+  token, master-key flag, scope, or client on a query that took its authority
+  from another query also raises, as does passing different explicit auth to
+  a direct or Atlas terminal. Query-shaping options (`limit`, `order`, `keys`,
+  `skip`, `include`) inside an `:or` branch raise.
+- LiveQuery subscriptions, push targeting, and subqueries with pipeline-only
+  constraints raise `ArgumentError`. Subscribing to a `scope_to_user` /
+  `scope_to_role` query, or passing a `session_token:` that differs from the
+  query's session, raises.
 - REST queries, LiveQuery subscriptions, and push targeting that compare a
   bare objectId to a declared pointer field now return the matching rows.
   Undeclared fields are unchanged. If a model declares `belongs_to` for a
@@ -199,26 +257,31 @@ outcome is listed under Behavior Notes.
   and no longer emits the no-ACL banner. The role-graph helpers
   (`users_in_role_subtree` and related) raise `ACLRequired` for
   `master: true` inside the block; pass `as:` instead.
-- A LiveQuery connection that already connected with the master key stays
-  elevated for subscriptions made inside `Parse.without_master_key`, because
-  Parse Server authorizes per connection; the SDK warns.
+- A LiveQuery connection that already connected with the master key outside
+  `Parse.without_master_key` stays elevated for subscriptions made inside the
+  block, because Parse Server authorizes per connection; the SDK warns.
 - `Parse.without_master_key` guards against accidental master-key use and is
   not an isolation boundary.
+- `Parse::Role.all_for_user` and `Parse::Role#all_parent_role_names` without
+  `master:` or `as:` return the full role closure inside
+  `Parse.without_master_key`, because the role graph is read as SDK metadata.
+- `Parse::Session._preload_identity_for_destroy!` and the
+  `_after_batch_destroy` hooks are now private.
 - A sub-agent's `tools:` or `methods:` `only:` list that leaves nothing once
   the parent's `only:` and `except:` lists apply now raises `ArgumentError`.
-  An explicitly empty `only: []` is accepted.
+  An explicitly empty `only: []` is accepted. A sub-agent passing
+  `master_atlas: true` under a parent without it raises `ArgumentError`.
 - Parse Server sends a `before_save` webhook only the resulting value of a
-  dotted sub-key operator, not the operator. When the handler changes the
-  record, the SDK writes back only the paths that changed and deletes removed
-  sub-keys by path. Two concurrent operators on the same path can still
-  overwrite each other. An array, or a value whose shape changed, is written
-  whole at its path, so a concurrent `Add` to an array inside a sub-document
-  is lost. When a changed path would carry a typed value (Date, Bytes,
-  Pointer), the whole field is written, because Parse Server stores a dotted
-  typed value unconverted. A client's whole replace of a sub-document becomes
-  a merge of the changed paths plus deletes. Top-level operators on fields the
-  handler does not touch reach the database unchanged; a field the handler
-  assigns is written as an absolute value.
+  dotted operator. When the handler changes the record, the SDK writes back
+  changed sub-keys one level deep and deletes removed ones by path. Two
+  concurrent writes inside the same sub-key (including deeper paths under it)
+  can still overwrite each other, an array is written whole, and a changed
+  sub-key carrying a typed value (Date, Bytes, Pointer) makes the whole field
+  be written. A client's whole replace of a sub-document becomes a merge. The
+  save response reports the dotted keys; the JavaScript SDK applies them, and
+  other clients may need a fetch. A handler operator that cannot be folded,
+  or two conflicting dotted keys from the handler, fail the save with an
+  error.
 - A `before_save` handler that returns `true`, `nil`, or a Hash keeps the
   client's write as sent, so a client create without an ACL through such a
   handler is stored public read and write, as before, unless the handler
