@@ -2,30 +2,53 @@
 
 ### 5.8.2
 
-A security and correctness patch. No new features; intentional master-key
-and analytics access is unchanged. Outcomes that change are listed under
+A security and correctness patch. No new features beyond the `session:`
+arguments and the cache opt-in the fixes need; intentional master-key and
+analytics access is unchanged. Outcomes that change are listed under
 Behavior Notes.
 
 #### Transport and MCP authentication
 
-- **FIXED**: A whitespace-only MCP API key (`api_key: "   "` or
-  `MCP_API_KEY="   "`) now counts as no key. Before, it passed the check that
-  refuses a non-loopback bind without a key and then disabled request
-  authentication, leaving a public MCP endpoint open. Keys are stripped once,
-  and the same value is enforced at startup and on every request.
-- **FIXED**: HTTPS and WebSocket scheme checks compare the scheme
-  case-insensitively. Before, `HTTP://` passed `require_https`, `HTTPS://`
-  with TLS verification turned off was not refused, and `WS://` got past the
-  plaintext LiveQuery guard.
+- **FIXED**: A whitespace-only MCP API key (`api_key: "   "`,
+  `MCP_API_KEY="   "`, or a non-breaking-space key) now counts as no key.
+  Before, it passed the check that refuses a non-loopback bind without a key
+  and then disabled request authentication, leaving a public MCP endpoint
+  open. The configured key and the provided `X-MCP-API-Key` header are
+  stripped the same way, an explicit blank `api_key:` no longer hides
+  `MCP_API_KEY`, and a non-loopback bind with a key shorter than 16
+  characters warns.
+- **FIXED**: HTTPS and WebSocket scheme checks parse the URL and compare the
+  scheme case-insensitively. Before, `HTTP://` passed `require_https`,
+  `HTTPS://` with TLS verification turned off was not refused, and `WS://` got
+  past the plaintext LiveQuery guard.
+- **FIXED**: The TLS guard also refuses `ssl: { verify_mode:
+  OpenSSL::SSL::VERIFY_NONE }`, `ssl: { verify_hostname: false }`, and a
+  `Faraday::SSLOptions` with verification off on an https server URL. Before,
+  only a Hash with `verify: false` was caught.
 - **FIXED**: `Parse::LiveQuery::Client.new` validates an explicit or
-  configured URL as it already did a derived one: it must be `wss://` (or
-  `ws://` on loopback, or with `allow_insecure`). Before, any URL was
-  accepted, including `ws://` to a routable host and `https://`, which was
-  opened as a plaintext socket carrying the master key and session tokens.
-- **FIXED**: `Parse::Response#inspect` no longer prints result values, and
-  `#to_s` replaces credential fields (`sessionToken`, `password`, `authData`,
-  keys) with `[FILTERED]`, so printing or logging a login or `users/me`
-  response no longer exposes a live session token. `#result` is unchanged.
+  configured URL as it already did a derived one. Plaintext `ws://` to a
+  routable host is refused without `allow_insecure`. **CHANGED**: an
+  `http://` or `https://` LiveQuery URL is used as `ws://` or `wss://` with a
+  one-time deprecation warning (it used to be opened without TLS), both at
+  configure time and in the client.
+- **FIXED**: `Parse::File` URLs hydrated from Parse JSON no longer skip the
+  `trusted_url_hosts` check when the scheme is uppercase (`HTTPS://`) or the
+  URL is malformed (`https:host`, `https:\\host`, `https:///host`, leading
+  whitespace), all of which browsers resolve to the remote host. Under
+  `untrusted_url_policy = :raise` or `:strip`, a malformed http(s) URL is
+  treated as untrusted. `force_ssl` upgrades `HTTP://` URLs too.
+- **FIXED**: `Parse::Response#inspect` prints only the status and the
+  result's shape, and `#to_s` replaces credential fields with `[FILTERED]`:
+  session tokens, passwords, `authData`, access and refresh tokens, API,
+  master, client, and JavaScript keys, MFA recovery codes and secrets
+  (`recovery`, `recoveryCodes`, `secret`, `authDataResponse`), and
+  storage-form columns (`_session_token`, `_hashed_password`,
+  `_email_verify_token`, `_perishable_token`, `_password_history`,
+  `_auth_data_*`). The same list drives log redaction. Error text in `to_s`
+  and `inspect` is redacted and escaped. `#result` is unchanged.
+- **IMPROVED**: Webhook endpoint registration accepts the scheme in any case
+  and warns when an `http://` endpoint on a routable host would carry the
+  webhook key in cleartext.
 
 #### Batches and transactions
 
@@ -38,12 +61,19 @@ Behavior Notes.
   `use_master_key: false`) ran with the master key and bypassed ACLs and CLPs.
   Writes are now sent through their own client and options, and a batch with
   mixed credentials goes out as separate calls with responses in request
-  order.
+  order. Credentials resolve exactly as for a single request: a request's
+  `session_token:` / `use_master_key:` options, its `X-Parse-Session-Token`
+  header, and its master-key suppression header (which keeps the master key
+  off even with `use_master_key: true`). The same rules apply to direct
+  `Parse::Client#batch_request` calls.
 - **FIXED**: `Parse::Object.transaction` runs with its objects' class client.
   A transaction that mixes credentials raises
   `Parse::BatchOperation::MixedAuthorityError` before anything is sent,
   because Parse Server runs a transaction under one credential and it cannot
-  be split.
+  be split. Clients are compared by their credentials (server, application,
+  keys, and bound session), not by object identity, so classes whose clients
+  were configured identically, such as before and after a second
+  `Parse.setup`, still share one transaction.
 - **NEW**: `Array#save(session:)`, `Array#destroy(session:)`, and
   `Parse::Object.transaction(session:)` send every write in the call as the
   given user.
@@ -60,6 +90,22 @@ Behavior Notes.
 - **FIXED**: `Parse::Agent#inspect`, `to_s`, and `pp` print a redacted summary
   and no longer show the session token, the client's keys, the conversation,
   or the last request and response.
+- **FIXED**: `Parse::Agent#as_json`, `#to_json`, and `#to_yaml`, and the same
+  methods on `Parse::Client`, return a redacted summary, so JSON log
+  formatters and error trackers that serialize an agent or client no longer
+  emit its session token, master key, or REST key.
+- **FIXED**: A sub-agent that holds its parent's session token reuses the
+  parent's resolved scope instead of resolving it again. A failed resolution
+  of a different child token is reported as `Parse::Agent::UnresolvedIdentity`,
+  not as an attempt to widen the parent's scope.
+- **FIXED**: Lazy session resolution, `impersonate`, and `refresh_scope!` are
+  serialized per agent, so a concurrent `impersonate` cannot leave one
+  token's scope bound to another token. A failed lazy resolution is retried
+  after 5 seconds, not on every call. `refresh_scope!` resolves or raises for
+  a session agent instead of returning nil, and an invalid or expired token
+  gets its own error message. `acl_scope` checks and reads the scope under
+  the same lock, and `acl_permission_strings` never returns nil for a
+  session-token agent.
 
 #### Response cache
 
@@ -72,24 +118,40 @@ Behavior Notes.
   `Parse.with_session`, or a session-bound client. Master-key and anonymous
   reads are cached as before, and writes made with a session still invalidate
   cached entries.
-- **NEW**: `Parse::Middleware::Caching.cache_session_requests = true` opts back
-  into caching session reads, for apps that accept revocation being bounded by
-  the cache TTL.
+- **NEW**: `Parse::Middleware::Caching.cache_session_requests = true` (or
+  per client, `Parse.setup(cache_session_requests: true)`, which overrides the
+  class default either way) opts back into caching session reads, for apps
+  that accept revocation being bounded by the cache TTL. The
+  `parse.cache.bypass` event includes `cache_tenant`.
 
 #### Regex validation and direct reads
 
 - **FIXED**: A raw `$regex` in a where hash
   (`Model.query(name: { "$regex" => ... })`, `:field.eq`, `:field.not`,
   `$elemMatch`, and `:or` branches) goes through the same ReDoS check as
-  `:field.like`, and `$options` is limited to `i`, `m`, `x`, `s`, and `u`.
-  Before, only the regex constraints themselves were checked.
+  `:field.like`. Before, only the regex constraints themselves were checked.
 - **FIXED**: Mongo-direct filters and pipelines (`results_direct`,
   `count_direct`, `Query#aggregate`, `Parse::MongoDB.aggregate` and `find`,
   Atlas Search and vector filters, LiveQuery `where`, and the agent
   `aggregate` tool) run every `$regex`, Ruby `Regexp`, BSON regex, and
   `$regexMatch` / `$regexFind` / `$regexFindAll` pattern through the ReDoS
   check. Before, only the pattern length was capped. The agent constraint
-  translator applies the check too.
+  translator applies the same check.
+- **FIXED**: `Parse::RegexSecurity` parses each caller-supplied pattern
+  instead of matching a few substrings. It refuses a group repeated more than
+  once whose body holds a variable-count quantifier (including an optional
+  `?`), an alternation, or a backreference (`(a+)+`, `(a|aa)+$`, `((a+))+`,
+  `(a+){2,}`, `(a+){20}`, `^(a?){100}a{100}$`), inline comments
+  `(?#...)`, extended mode, and patterns it cannot read. Before, several of
+  these shapes passed. Repeats of a single atom (`^.{1,255}$`, `\d{1,100}`)
+  and simple lookarounds (`^(?!test)`) are accepted. Escaped literal patterns
+  built by `contains`, `starts_with`, and `ends_with` get a longer length cap,
+  so long values keep compiling.
+- **FIXED**: `$regexMatch`, `$regexFind`, and `$regexFindAll` in
+  caller-supplied pipelines require a literal `regex` (a String that is not a
+  field path or variable, a Regexp, or a BSON regex). An expression or
+  `"$field"` operand raises `Parse::PipelineSecurity::Error`
+  (`reason: :regex_not_literal`).
 - **FIXED**: `Parse::MongoDB.find` raises `Parse::ACLScope::ACLRequired` inside
   `Parse.without_master_key` instead of reading raw documents unscoped.
   `Parse::MongoDB.indexes` (metadata only) stays available.
@@ -97,19 +159,28 @@ Behavior Notes.
 #### Webhooks
 
 - **FIXED**: A webhook request's `master` flag is trusted only when the
-  request is authenticated (the webhook key matched, or a configured
-  signature verified). Under `Parse::Webhooks.allow_unauthenticated` with no
+  request is authenticated: the webhook key matched, or a configured
+  signature verified. Under `Parse::Webhooks.allow_unauthenticated` with no
   signature, a body claiming `"master": true` no longer passes master-only
-  field guards, ACL owner resolution, or handler `payload.master?` checks.
-  `payload.claimed_master?` exposes the raw claim, which still drives
-  Ruby-initiated callback dedup. The string `"false"` no longer counts as
-  master.
+  field guards, ACL owner resolution, or handler `payload.master?` checks, and
+  no longer triggers the Ruby-initiated callback dedup, so a forged `_RB_`
+  request id cannot make a write skip model callbacks (including a
+  `before_save` that rejects it). Only `true` or `"true"` count as master, and
+  `payload.claimed_master?` exposes the raw claim for diagnostics only.
 
 #### Behavior Notes
 
-- A LiveQuery client given an `http://` or `https://` URL now raises instead
-  of connecting over plaintext; pass the `wss://` URL. A padded MCP API key is
-  enforced without its surrounding whitespace.
+- A LiveQuery `https://` URL is used as `wss://` (and a loopback `http://` as
+  `ws://`) with a deprecation warning; configure the `ws(s)://` URL directly.
+  A padded MCP API key is enforced without its surrounding whitespace.
+- `Parse::Response#to_s` replaces credential-bearing values with
+  `"[FILTERED]"` and `#inspect` no longer shows values; read `#result` (or
+  `#result.to_json`) for raw data.
+- `HTTP://` with `require_https`, and an https server URL with TLS
+  verification disabled through `verify_mode` or `verify_hostname`, now
+  raise. Hydrated `Parse::File` URLs that are malformed http(s) are refused or
+  stripped under `:raise` / `:strip`, and warn under `:warn`.
+- `Parse::Agent#inspect` and `#to_s` print a redacted one-line summary.
 - A session-token agent that cannot resolve its token refuses tool calls that
   need its permissions rather than running them without the SDK-side check. A
   sub-agent of such a parent can inherit the parent's token, but building one
@@ -122,7 +193,15 @@ Behavior Notes.
   rejects now raises: `ArgumentError` on REST queries,
   `Parse::PipelineSecurity::Error` (or `Parse::MongoDB::DeniedOperator`) on
   direct paths. Escaped literal patterns, including those built by
-  `starts_with`, `ends_with`, and `contains`, are always accepted.
+  `starts_with`, `ends_with`, and `contains`, are always accepted. Rejected
+  shapes are groups repeated more than once that contain a variable-count
+  quantifier (including `?`), alternation, or backreference, plus `(?#...)` comments and extended mode.
+- Caller-supplied regex `$options` (REST, mongo-direct, and the agent
+  translator) accept `i`, `m`, `s`, and `u`. The extended flag `x`, and
+  Regexp values built with `Regexp::EXTENDED`, raise because extended mode
+  lets comments hide a quantifier. The agent translator now accepts `s`.
+- `Parse::MongoDB.collection` returns raw driver access with no scope and is
+  not refused inside `Parse.without_master_key`.
 - Code that calls `Parse::MongoDB.find` inside `Parse.without_master_key`
   should wrap it in `Parse.with_master_key` or use a scoped read.
 - A batch or transaction of objects whose class is bound to a session client
@@ -130,6 +209,14 @@ Behavior Notes.
   make are refused instead of succeeding as master. A transaction mixing
   credentials raises `MixedAuthorityError`, and a non-transactional batch with
   mixed credentials is sent as several calls.
+- Under `Parse::Webhooks.allow_unauthenticated` with no signing secret,
+  `payload.master?` is false even for a master-key request Parse Server
+  forwards, so master-only field guards and handler `master?` checks refuse
+  it, and saves made by the SDK itself are no longer recognized as
+  Ruby-initiated, so their model callbacks run in process and again through
+  the webhook. Configure `PARSE_SERVER_WEBHOOK_KEY` (or a signing secret) to
+  restore master trust and dedup; use `payload.claimed_master?` only for
+  diagnostics.
 
 ### 5.8.1
 
