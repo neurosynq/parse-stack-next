@@ -419,6 +419,31 @@ module Parse
       "session_token=#{@session_token ? "[FILTERED]" : "nil"}>"
     end
 
+    # Redacted JSON form. ActiveSupport's default `as_json` serializes every
+    # instance variable, so a client in a JSON log or error-tracker context
+    # (or inside an object that serializes it, such as a {Parse::Agent})
+    # would emit the master key, REST key, and bound session token.
+    # @return [Hash]
+    def as_json(*)
+      {
+        "server_url" => @server_url,
+        "app_id" => @application_id,
+        "master_key" => @master_key ? "[FILTERED]" : nil,
+        "session_token" => @session_token ? "[FILTERED]" : nil,
+      }
+    end
+
+    # @return [String] the redacted {#as_json} summary as JSON.
+    def to_json(*args)
+      as_json.to_json(*args)
+    end
+
+    # YAML (Psych) serializes instance variables too; emit the redacted
+    # summary instead.
+    def encode_with(coder)
+      as_json.each { |k, v| coder[k] = v }
+    end
+
     # A NEW non-master {Parse::Client} that mirrors THIS client's connection
     # settings (`server_url` / `application_id` / `api_key`) but carries no
     # master key and binds `session_token`, so it acts on the server as that
@@ -706,7 +731,7 @@ module Parse
       # Security check for HTTP usage (except localhost/127.0.0.1 for development)
       # The scheme and host come from URI parsing, so `HTTP://` and leading
       # whitespace are treated as plain http, not as a secure URL.
-      if self.class.url_scheme(@server_url) == "http" && !%w[localhost 127.0.0.1].include?(self.class.url_host(@server_url))
+      if self.class.url_scheme(@server_url) == "http" && !self.class.loopback_host?(self.class.url_host(@server_url))
         if @require_https
           raise ArgumentError, "[Parse::Client] HTTPS required but server URL uses HTTP: #{@server_url}. " \
                                "Set require_https: false or use an HTTPS URL."
@@ -939,6 +964,10 @@ module Parse
               # old workers still read the legacy shape, so invalidation has to
               # hit both until every old worker is drained.
               delete_legacy_variants: opts.fetch(:cache_delete_legacy_variants, true),
+              # Per-client override of
+              # Parse::Middleware::Caching.cache_session_requests; omitted
+              # means the class default applies.
+              **(opts.key?(:cache_session_requests) ? { cache_session_requests: opts[:cache_session_requests] } : {}),
             }
 
             # Inform about opt-in cache behavior
@@ -992,15 +1021,12 @@ module Parse
       return unless faraday_opts.is_a?(Hash)
 
       ssl = faraday_opts[:ssl] || faraday_opts["ssl"]
-      if ssl.is_a?(Hash)
-        verify = ssl.key?(:verify) ? ssl[:verify] : ssl["verify"]
-        if verify == false && self.class.url_scheme(@server_url) == "https"
-          raise ArgumentError,
-            "[Parse::Client] Refusing to disable TLS certificate verification " \
-            "(opts[:faraday][:ssl][:verify] = false) on an HTTPS server URL. " \
-            "Fix the server certificate or downgrade the URL to http:// " \
-            "(with require_https: false) for explicit local testing."
-        end
+      if self.class.url_scheme(@server_url) == "https" && (setting = tls_verification_disabled(ssl))
+        raise ArgumentError,
+          "[Parse::Client] Refusing to disable TLS certificate verification " \
+          "(opts[:faraday][:ssl] #{setting}) on an HTTPS server URL. " \
+          "Fix the server certificate or downgrade the URL to http:// " \
+          "(with require_https: false) for explicit local testing."
       end
 
       proxy = faraday_opts[:proxy] || faraday_opts["proxy"]
@@ -1024,11 +1050,48 @@ module Parse
 
     private :validate_faraday_opts!
 
+    # Which TLS setting in a Faraday `ssl:` option (a Hash or a
+    # `Faraday::SSLOptions`) turns certificate or hostname verification off,
+    # or nil when none does: `verify: false`, `verify_mode: VERIFY_NONE`, or
+    # `verify_hostname: false`.
+    # @api private
+    def tls_verification_disabled(ssl)
+      read = lambda do |key|
+        if ssl.is_a?(Hash)
+          ssl.key?(key) ? ssl[key] : ssl[key.to_s]
+        elsif ssl.respond_to?(key)
+          ssl.public_send(key)
+        end
+      end
+      return nil if ssl.nil?
+      return "verify: false" if read.call(:verify) == false
+      if defined?(OpenSSL::SSL::VERIFY_NONE) && read.call(:verify_mode) == OpenSSL::SSL::VERIFY_NONE
+        return "verify_mode: VERIFY_NONE"
+      end
+      return "verify_hostname: false" if read.call(:verify_hostname) == false
+      nil
+    end
+    private :tls_verification_disabled
+
     # Hosts considered "loopback" for the cleartext-ws:// guard in
     # {#configure_live_query}. Mirrors
     # {Parse::LiveQuery::Client::LOOPBACK_HOSTS} so the explicit-URL
     # path and the derived-URL path agree on what counts as local.
     LIVE_QUERY_LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1 [::1] 0.0.0.0].freeze
+
+    # Whether a URL host is this machine: `localhost`, any `127.0.0.0/8`
+    # address, `::1`, or `0.0.0.0` (a connect to the unspecified address
+    # reaches the local host on Linux and macOS). Used by the http:// server
+    # warning and the LiveQuery cleartext guards so they agree.
+    # @param host [String, nil]
+    # @return [Boolean]
+    # @api private
+    def self.loopback_host?(host)
+      h = host.to_s.strip.downcase.delete_prefix("[").delete_suffix("]").chomp(".")
+      return false if h.empty?
+      return true if h == "localhost" || h == "::1" || h == "0.0.0.0"
+      h.match?(/\A127\.\d{1,3}\.\d{1,3}\.\d{1,3}\z/)
+    end
 
     # The lowercased scheme of a URL String, or nil when it does not parse.
     # Leading and trailing whitespace is ignored. Scheme checks go through
@@ -1076,7 +1139,7 @@ module Parse
       # `live_query: { url: "ws://prod-host" }` or
       # `live_query_url: "ws://prod-host"` bypassed it — the master key
       # and any session token would ride the connect frame in cleartext.
-      validate_live_query_url!(resolved_url, allow_insecure: live_query_opts[:allow_insecure])
+      resolved_url = validate_live_query_url!(resolved_url, allow_insecure: live_query_opts[:allow_insecure])
 
       # Warn (don't raise) on `live_query: { ... }` keys that are not
       # `Parse::LiveQuery::Configuration` setters. The block form would
@@ -1106,20 +1169,14 @@ module Parse
       end
     end
 
+    # Validate an explicit LiveQuery URL at configure time with the same
+    # rules {Parse::LiveQuery::Client} applies, and return the URL to use
+    # (`http://` and `https://` are mapped to `ws://` and `wss://`).
+    # @return [String, nil]
     # @api private
     def validate_live_query_url!(url, allow_insecure:)
-      return unless url.is_a?(String) && self.class.url_scheme(url) == "ws"
-
-      host = self.class.url_host(url).to_s
-      return if LIVE_QUERY_LOOPBACK_HOSTS.include?(host)
-      return if allow_insecure
-
-      raise ArgumentError,
-        "[Parse::Client] Refusing explicit insecure LiveQuery URL #{url.inspect}. " \
-        "The connect frame carries the master key and any session token in " \
-        "plaintext on this socket. Use wss:// for routable hosts, or pass " \
-        "`live_query: { allow_insecure: true }` to opt into cleartext for " \
-        "local development on a non-loopback address."
+      return url unless url.is_a?(String)
+      Parse::LiveQuery::Client.normalize_url(url, allow_insecure: allow_insecure)
     end
 
     # @api private
@@ -1410,7 +1467,9 @@ module Parse
         # `with_session(token_b)` resolved user B, and the identity cache
         # then mapped token A (or a garbage token) to user B for its TTL.
         if raw_token.nil?
-          header_token = headers[Parse::Protocol::SESSION_TOKEN]
+          # Same lookup a batch uses for each request's own credentials
+          # (Parse::Request#explicit_authority).
+          header_token = Parse::Request.header_value(headers, Parse::Protocol::SESSION_TOKEN)
           raw_token = header_token if header_token.is_a?(String)
         end
         # SEC-02:an EXPLICITLY-supplied session_token that is a blank /
