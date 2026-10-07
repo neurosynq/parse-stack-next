@@ -53,8 +53,22 @@ module Parse
     # An error when the Parse server returned invalid code.
     class ServerError < Error; end
 
-    # An error when a Parse server responds with HTTP 500.
-    class ServiceUnavailableError < Error; end
+    # An error when a Parse server (or a gateway in front of it) responds
+    # with HTTP 500, 502, 503, or 504.
+    class ServiceUnavailableError < Error
+      # @return [Parse::Response, nil] the response that raised the error.
+      attr_reader :response
+
+      def initialize(message = nil)
+        @response = message if message.is_a?(Parse::Response)
+        super
+      end
+
+      # @return [Integer, nil] the HTTP status of the response, when known.
+      def http_status
+        @response&.http_status&.to_i
+      end
+    end
 
     # An error when the authentication credentials in the request are invalid.
     class AuthenticationError < Error; end

@@ -32,6 +32,11 @@ class TransactionInventory < Parse::Object
   property :reserved_quantity, :integer, default: 0
 end
 
+# Parse Server runs a transaction's requests concurrently on one MongoDB
+# session, which MongoDB intermittently rejects with a bare 500. The data here
+# is fresh per test, so the success-path transactions opt into resending on
+# that 500 (`retry_server_errors: true`); the SDK never does so by default
+# because a 500 does not prove the transaction was not applied.
 class TransactionIntegrationTest < Minitest::Test
   include ParseStackIntegrationTest
 
@@ -58,7 +63,7 @@ class TransactionIntegrationTest < Minitest::Test
         assert product2.save, "Product 2 should save initially"
 
         # Execute transaction to update both products
-        responses = Parse::Object.transaction do |batch|
+        responses = Parse::Object.transaction(retry_server_errors: true) do |batch|
           product1.price = 12.00
           product1.stock_quantity = 95
           batch.add(product1)
@@ -102,7 +107,7 @@ class TransactionIntegrationTest < Minitest::Test
         assert product2.save, "Auto Product 2 should save initially"
 
         # Execute transaction using return value approach
-        responses = Parse::Object.transaction do
+        responses = Parse::Object.transaction(retry_server_errors: true) do
           product1.price = 18.00
           product2.price = 28.00
 
@@ -203,7 +208,7 @@ class TransactionIntegrationTest < Minitest::Test
         ]
         total_amount = (5 * 50.00) + (3 * 75.00)
 
-        responses = Parse::Object.transaction do |batch|
+        responses = Parse::Object.transaction(retry_server_errors: true) do |batch|
           # Create order
           order = TransactionOrder.new(
             order_number: "ORD-#{rand(10000)}",
@@ -274,7 +279,7 @@ class TransactionIntegrationTest < Minitest::Test
 
         # Test transaction with custom retry count
         retry_count = 0
-        responses = Parse::Object.transaction(retries: 3) do |batch|
+        responses = Parse::Object.transaction(retries: 3, retry_server_errors: true) do |batch|
           retry_count += 1
           puts "Transaction attempt ##{retry_count}"
 
@@ -312,7 +317,7 @@ class TransactionIntegrationTest < Minitest::Test
         end
         assert existing_product.save, "Existing product should save"
 
-        responses = Parse::Object.transaction do |batch|
+        responses = Parse::Object.transaction(retry_server_errors: true) do |batch|
           # Update existing product
           existing_product.price = 65.00
           existing_product.is_active = false
@@ -383,20 +388,20 @@ class TransactionIntegrationTest < Minitest::Test
         end
 
         # Test 2: Empty transaction should succeed
-        responses = Parse::Object.transaction do |batch|
+        responses = Parse::Object.transaction(retry_server_errors: true) do |batch|
           # Empty transaction
         end
         assert responses.is_a?(Array), "Empty transaction should return empty array"
         assert_empty responses, "Empty transaction should have no responses"
 
         # Test 3: Transaction with nil return should work
-        responses = Parse::Object.transaction do |batch|
+        responses = Parse::Object.transaction(retry_server_errors: true) do |batch|
           nil  # Return nil
         end
         assert responses.is_a?(Array), "Nil return transaction should return array"
 
         # Test 4: Transaction returning non-Parse objects should ignore them
-        responses = Parse::Object.transaction do
+        responses = Parse::Object.transaction(retry_server_errors: true) do
           ["string", 123, { hash: "object" }]  # Non-Parse objects
         end
         assert_empty responses, "Non-Parse objects should be ignored"
@@ -417,7 +422,7 @@ class TransactionIntegrationTest < Minitest::Test
         products = []
 
         # Create products in a transaction (test batch size handling)
-        responses = Parse::Object.transaction do |batch|
+        responses = Parse::Object.transaction(retry_server_errors: true) do |batch|
           10.times do |i|
             product = TransactionProduct.new(
               name: "Batch Product #{i + 1}",
@@ -439,7 +444,7 @@ class TransactionIntegrationTest < Minitest::Test
         assert_equal 10, created_products.count, "All 10 products should be created"
 
         # Test updating all in another transaction
-        responses = Parse::Object.transaction do
+        responses = Parse::Object.transaction(retry_server_errors: true) do
           products.each { |p| p.is_active = false }
           products  # Return array for auto-batch
         end
@@ -466,7 +471,7 @@ class TransactionIntegrationTest < Minitest::Test
         main_product = TransactionProduct.new(name: "Main Product", price: 200.00, sku: "MAIN-001")
         assert main_product.save, "Main product should save"
 
-        responses = Parse::Object.transaction do |batch|
+        responses = Parse::Object.transaction(retry_server_errors: true) do |batch|
           # Create inventory with pointer to main product
           inventory = TransactionInventory.new(
             product: main_product.pointer,  # Test pointer relationship
@@ -525,7 +530,7 @@ class TransactionIntegrationTest < Minitest::Test
         # Create NEW objects (not yet saved) within a transaction
         products = []
 
-        responses = Parse::Object.transaction do |batch|
+        responses = Parse::Object.transaction(retry_server_errors: true) do |batch|
           3.times do |i|
             product = TransactionProduct.new(name: "New Product #{i}", price: (i + 1) * 10.0, sku: "NEW-#{i}")
             products << product

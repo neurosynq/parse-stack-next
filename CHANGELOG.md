@@ -813,14 +813,14 @@
   classes and pass `tenant_from:` so each tenant has its own budget.
 - `Parse::Object.transaction` now really runs as a Parse Server transaction,
   which needs MongoDB to be a replica set or mongos. On a standalone server it
-  fails with a 500 instead of running without atomicity. Parse Server runs a
-  transaction's requests concurrently on one session, which MongoDB
-  intermittently rejects; Parse Server aborts and answers a bare 500, so the
-  SDK retries the transaction (up to `retries:`, default 5) as it does a 251
-  conflict. A transaction that fails for another reason is also answered with
-  a 500, so it is retried before the error is raised. Once retries run out,
-  the raised `Parse::Error` names the replica-set requirement and points to
-  `Array#save` for a non-atomic batch, with the original 500 as its `cause`.
+  fails with a 500 instead of running without atomicity, and the raised
+  `Parse::Error` says so and points to `Array#save` for a non-atomic batch.
+  Parse Server runs a transaction's requests concurrently on one session,
+  which MongoDB intermittently rejects with a bare 500. Because a 500 does
+  not prove the transaction was not applied (a failed commit looks the
+  same), the SDK resends only on a 251 conflict by default;
+  `transaction(retry_server_errors: true)` also resends on a 500 for writes
+  that are safe to repeat. A 502, 503, or 504 is never resent.
 - Mongo-direct, Atlas Search, and vector results for callers in a `role:` or
   `authenticated` protectedFields group now omit those fields, matching
   Parse Server.

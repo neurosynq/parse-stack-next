@@ -420,11 +420,22 @@ module Parse
         #     [user1, user2]  # Return array of objects to save
         #   end
         #
-        # @param retries [Integer] number of times to retry on transaction conflict (error 251)
+        # Transactions need MongoDB running as a replica set (or mongos) on
+        # the Parse Server side.
+        #
+        # @param retries [Integer] number of attempts on a transaction conflict
+        #   (error 251), which Parse Server reports only after rolling back.
+        # @param retry_server_errors [Boolean] also resend after a bare HTTP 500
+        #   from Parse Server. Parse Server answers both an aborted transaction
+        #   and a failed commit this way, and a commit can fail after it was
+        #   applied, so a resend can apply the transaction twice. Off by
+        #   default; enable it only for writes that are safe to repeat (it
+        #   works around Parse Server running a transaction's requests
+        #   concurrently, which MongoDB intermittently rejects).
         # @yield [Parse::BatchOperation] the batch operation to add requests to
         # @return [Array<Parse::Response>] the responses from the transaction
         # @raise [Parse::Error] if the transaction fails
-        def transaction(retries: 5, &block)
+        def transaction(retries: 5, retry_server_errors: false, &block)
           raise ArgumentError, "Block required for transaction" unless block_given?
 
           previous_context = Fiber[TRANSACTION_CONTEXT_KEY]
@@ -481,36 +492,41 @@ module Parse
 
             # Submit with retry logic for transaction conflicts.
             # Parse Server reports a write conflict inside a transaction as
-            # error code 251 in the failed response. Retry on that code (the
-            # error raised below carries it in its message so a conflict
-            # raised from a lower layer is retried the same way).
+            # error code 251, after rolling it back. Retry on that structured
+            # code only (a per-request response code, or the code of the
+            # response an error carries).
             attempts = 0
             loop do
               attempts += 1
               begin
                 responses = batch.submit
               rescue Parse::Error => e
-                conflict = e.message.match?(/\b#{TRANSACTION_CONFLICT_CODE}\b/)
-                # Parse Server runs a transaction's requests concurrently on
-                # one MongoDB session, which MongoDB intermittently rejects
-                # ("transaction number does not match"). Parse Server aborts
-                # the whole transaction and answers a bare 500, so nothing
-                # was applied and the transaction can be resent.
-                transient = e.is_a?(Parse::Error::ServiceUnavailableError)
-                if (conflict || transient) && attempts < retries
+                # A conflict is recognized only from the structured Parse
+                # error code in the response, never from message text, so an
+                # unrelated "251" in an error message cannot trigger a resend.
+                conflict = e.respond_to?(:response) && e.response.respond_to?(:code) &&
+                           e.response.code.to_i == TRANSACTION_CONFLICT_CODE
+                # A bare 500 does not say whether the transaction was applied:
+                # Parse Server answers an aborted transaction and a failed
+                # commit (which may have been applied) the same way, and a
+                # 502/503/504 comes from a gateway that may have timed out
+                # after the commit. Only a 251 conflict is a confirmed
+                # rollback; a 500 is resent only when the caller opted in.
+                server_500 = e.is_a?(Parse::Error::ServiceUnavailableError) && e.http_status == 500
+                if (conflict || (server_500 && retry_server_errors)) && attempts < retries
                   sleep(0.1 * attempts)
                   next
                 end
-                # Parse Server answers every aborted transaction with a bare
-                # 500, so name the likely causes rather than surfacing only
-                # "Internal server error". The original error is the cause.
-                if transient
+                # Name the likely causes rather than surfacing only "Internal
+                # server error". The original error is the cause.
+                if server_500
                   raise Parse::Error,
-                        "Transaction failed after #{attempts} attempts: Parse Server aborted it and " \
-                        "answered 500 (#{e.message}). Parse Server transactions need MongoDB running " \
-                        "as a replica set or mongos; on a standalone server every transaction fails " \
-                        "this way. Otherwise one of its requests failed (check the Parse Server log). " \
-                        "For a non-atomic batch, save the objects with Array#save instead."
+                        "Transaction failed: Parse Server answered 500 (#{e.message}) after " \
+                        "#{attempts} attempt(s). The transaction may or may not have been applied; " \
+                        "check before resending. Parse Server transactions need MongoDB running as " \
+                        "a replica set or mongos, and on a standalone server every transaction fails " \
+                        "this way; otherwise see the Parse Server log. For a non-atomic batch, save " \
+                        "the objects with Array#save instead."
                 end
                 raise
               end
