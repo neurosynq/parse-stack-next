@@ -68,8 +68,8 @@ class MCPApiKeyNormalizationTest < Minitest::Test
   end
 
   def test_padded_key_is_enforced_without_its_padding
-    server = Parse::Agent::MCPServer.new(host: "0.0.0.0", api_key: "  secret  ")
-    assert_equal "secret", server.instance_variable_get(:@api_key)
+    server = Parse::Agent::MCPServer.new(host: "0.0.0.0", api_key: "  secret-0123456789  ")
+    assert_equal "secret-0123456789", server.instance_variable_get(:@api_key)
     err = assert_raises(Parse::Agent::Unauthorized) do
       server.send(:agent_factory, { "HTTP_X_MCP_API_KEY" => "wrong" })
     end
@@ -148,15 +148,27 @@ class LiveQueryUrlValidationTest < Minitest::Test
   end
 
   def test_non_websocket_scheme_is_refused
-    ["https://prod.example.com", "http://prod.example.com", "ftp://prod.example.com"].each do |url|
-      err = assert_raises(ArgumentError) { lq(url) }
-      assert_match(/must use wss/, err.message)
+    err = assert_raises(ArgumentError) { lq("ftp://prod.example.com") }
+    assert_match(/must use wss/, err.message)
+  end
+
+  # http(s) LiveQuery URLs are mapped to ws(s) with a deprecation warning
+  # instead of refused, so harmless local configs keep working.
+  def test_http_schemes_map_to_websocket_schemes
+    Parse::LiveQuery::Client.instance_variable_set(:@warned_http_schemes, nil)
+    _out, err = capture_io do
+      assert_equal "ws://localhost:1337", lq("http://localhost:1337").url
+      assert_equal "wss://prod.example.com/lq", lq("HTTPS://prod.example.com/lq").url
     end
+    assert_match(/DEPRECATION.*http:\/\/.*ws:\/\//, err)
+    assert_match(/DEPRECATION.*https:\/\/.*wss:\/\//, err)
+    err = assert_raises(ArgumentError) { lq("http://prod.example.com") }
+    assert_match(/insecure ws:/, err.message)
   end
 
   def test_secure_and_loopback_urls_are_accepted
     assert_equal "wss://prod.example.com", lq("wss://prod.example.com").url
-    assert_equal "WSS://prod.example.com", lq("WSS://prod.example.com").url
+    assert_equal "wss://prod.example.com", lq("WSS://prod.example.com").url
     assert_equal "ws://localhost:1337", lq("ws://localhost:1337").url
     assert_equal "ws://127.0.0.1:1337", lq("ws://127.0.0.1:1337").url
   end

@@ -287,6 +287,9 @@ raw = Parse::MongoDB.find(
 Convenience wrapper around `db.find`. Accepts `limit:`, `skip:`, `sort:`,
 `projection:`, `hint:`, `max_time_ms:`. When `:limit` is omitted the call applies
 `DEFAULT_FIND_LIMIT = 1000` and warns; pass `limit: 0` to opt out.
+`find` reads raw documents unscoped, so it raises `Parse::ACLScope::ACLRequired`
+inside `Parse.without_master_key`; `Parse::MongoDB.indexes` (metadata only) is
+allowed there.
 
 ### Forcing an index with `hint`
 

@@ -271,22 +271,40 @@ module Parse
     # @!visibility private
     def inspect
       if error?
-        "#<#{self.class} @code=#{code} @error='#{error}' @http_status=#{http_status.inspect}>"
+        "#<#{self.class} @code=#{code} @error='#{safe_error_text}' @http_status=#{http_status.inspect}>"
       else
         "#<#{self.class} @http_status=#{http_status.inspect} @result=#{result_summary}>"
       end
     end
 
     # @return [String] JSON encoded object, or an error string. Credential
-    #   fields (`sessionToken`, `password`, `authData`, keys) are replaced
-    #   with a placeholder, so printing or logging a response cannot leak a
-    #   live session token. Read {#result} for the raw values.
+    #   fields (`sessionToken`, `password`, `authData`, MFA recovery codes
+    #   and secrets, keys) are replaced with a placeholder, so printing the
+    #   response with `to_s` or `inspect` does not leak a live session
+    #   token. The error form has its text redacted and control characters
+    #   escaped. `#result`, `#to_json`, and `#as_json` return the raw values
+    #   by design; do not log those.
     def to_s
-      return "[E-#{@code}] #{@request} : #{@error} (#{@http_status})" if error?
+      if error?
+        request_text = Parse::TerminalSafe.sanitize_line(@request.to_s)
+        return "[E-#{@code}] #{request_text} : #{safe_error_text} (#{@http_status})"
+      end
       redacted_result.to_json
     end
 
     private
+
+    # Maximum error text length kept in `to_s` / `inspect`.
+    SAFE_ERROR_TEXT_LENGTH = 1_000
+
+    # The server's error text with credentials redacted, truncated, and
+    # control characters escaped, matching what the client logs.
+    def safe_error_text
+      text = Parse::Middleware::BodyBuilder.redact(@error.to_s)[0, SAFE_ERROR_TEXT_LENGTH]
+      Parse::TerminalSafe.sanitize_line(text)
+    rescue StandardError
+      "[unprintable error]"
+    end
 
     # Class and size of the result, without its values.
     def result_summary

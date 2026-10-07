@@ -64,12 +64,12 @@ class MCPBindKeyCouplingTest < Minitest::Test
   end
 
   def test_non_loopback_with_explicit_api_key_is_allowed
-    Parse::Agent::MCPServer.new(host: "0.0.0.0", api_key: "trusted-secret")
+    Parse::Agent::MCPServer.new(host: "0.0.0.0", api_key: "trusted-secret-0123456789")
     pass
   end
 
   def test_non_loopback_with_env_api_key_is_allowed
-    ENV["MCP_API_KEY"] = "env-secret"
+    ENV["MCP_API_KEY"] = "env-secret-0123456789"
     Parse::Agent::MCPServer.new(host: "0.0.0.0", api_key: nil)
     pass
   ensure

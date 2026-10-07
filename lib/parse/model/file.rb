@@ -776,8 +776,8 @@ module Parse
     # set to true, it will make sure it returns a secure url.
     # @return [String] the url string for the file.
     def url
-      if @url.present? && Parse::File.force_ssl && @url.starts_with?("http://")
-        return @url.sub("http://", "https://")
+      if @url.present? && Parse::File.force_ssl && Parse::Client.url_scheme(@url) == "http"
+        return @url.strip.sub(/\Ahttp:/i, "https:")
       end
       @url
     end
@@ -958,27 +958,40 @@ module Parse
     # - raises {UntrustedHostError} when policy is `:raise`.
     #
     # On `:warn`, the URL is accepted but a single warning per host is
-    # emitted (deduplicated process-wide). Empty / non-string / non-http
-    # values pass through unchanged so callers can clear the field.
+    # emitted (deduplicated process-wide). Empty / non-string values and
+    # values without an http(s) scheme pass through unchanged so callers
+    # can clear the field.
+    #
+    # The scheme is matched case-insensitively after stripping whitespace,
+    # because browsers resolve `HTTPS://host`, ` https://host`,
+    # `https:host`, `https:\\host`, and `https:///host` to the same
+    # remote host. An http(s) value that is not a well-formed
+    # `scheme://host` URL, does not parse, or has no host is treated as an
+    # untrusted host rather than passed through.
     def self.sanitize_hydrated_url(raw, fallback: nil, name: nil)
       return raw if raw.nil?
       return raw unless raw.is_a?(String) && !raw.empty?
-      return raw unless raw.start_with?("http://") || raw.start_with?("https://")
+      candidate = raw.strip
+      return raw unless candidate.match?(HTTP_SCHEME_PREFIX)
 
-      uri = begin
-          URI.parse(raw)
-        rescue URI::InvalidURIError
-          return raw  # malformed URL — leave it alone; downstream code already handles
-        end
-      host = uri.host.to_s.downcase
-      return raw if host.empty?
+      host = nil
+      if candidate.match?(WELL_FORMED_HTTP_URL)
+        host = begin
+            URI.parse(candidate).host.to_s.downcase
+          rescue URI::InvalidURIError
+            nil
+          end
+        host = nil if host && host.empty?
+      end
 
-      # tfss-prefixed filenames can be served from arbitrary hosts (the
-      # legacy hosted-files contract). Accept those regardless of host.
-      basename = name || File.basename(raw)
-      return raw if basename.to_s.start_with?("tfss-")
-
-      return raw if trusted_url_host?(host)
+      if host
+        # tfss-prefixed filenames can be served from arbitrary hosts (the
+        # legacy hosted-files contract). Accept those regardless of host.
+        basename = name || File.basename(candidate)
+        return raw if basename.to_s.start_with?("tfss-")
+        return raw if trusted_url_host?(host)
+      end
+      host ||= "(malformed URL)"
 
       case untrusted_url_policy
       when :raise
@@ -993,6 +1006,15 @@ module Parse
         raw
       end
     end
+
+    # An http or https scheme, any case, at the start of a stripped value.
+    # @!visibility private
+    HTTP_SCHEME_PREFIX = /\Ahttps?:/i
+
+    # `http://` or `https://` (any case) followed by a host character, so
+    # `https:host`, `https:\\host`, and `https:///host` do not match.
+    # @!visibility private
+    WELL_FORMED_HTTP_URL = %r{\Ahttps?://[^/\\\s]}i
 
     # @!visibility private
     def self.trusted_url_host?(host)

@@ -115,13 +115,21 @@ module Parse
       # Loopback hosts that are safe to bind to without an API key.
       LOOPBACK_HOSTS = %w[127.0.0.1 ::1 localhost].freeze
 
+      # Shortest API key accepted for a non-loopback bind.
+      MIN_PUBLIC_API_KEY_LENGTH = 16
+
+      # Leading or trailing whitespace of any kind, including non-ASCII
+      # spaces such as NBSP that `String#strip` keeps.
+      SURROUNDING_WHITESPACE = /\A[[:space:]]+|[[:space:]]+\z/
+
       # The API key to enforce, or nil when none is configured. Surrounding
-      # whitespace is stripped, and a blank result is no key.
+      # whitespace (ASCII or Unicode) is stripped, and a blank result is no
+      # key.
       # @param key [String, nil]
       # @return [String, nil]
       def self.normalize_api_key(key)
         return nil if key.nil?
-        stripped = key.to_s.strip
+        stripped = key.to_s.gsub(SURROUNDING_WHITESPACE, "")
         stripped.empty? ? nil : stripped
       end
 
@@ -141,7 +149,10 @@ module Parse
         # A whitespace-only key used to pass the non-loopback bind check
         # (`"   ".to_s.empty?` is false) and then disable request auth
         # (`"   ".present?` is false), leaving a public endpoint open.
-        effective_api_key = self.class.normalize_api_key(api_key || ENV["MCP_API_KEY"])
+        # An explicit blank `api_key:` does not hide a configured
+        # MCP_API_KEY.
+        effective_api_key = self.class.normalize_api_key(api_key) ||
+                            self.class.normalize_api_key(ENV["MCP_API_KEY"])
 
         # NEW-MCP-1: a non-loopback bind without an API key is an unauthenticated
         # network-exposed JSON-RPC endpoint. Refuse to start. Operators who
@@ -154,6 +165,13 @@ module Parse
                 "MCPServer refuses to bind non-loopback host #{host.inspect} without an api_key. " \
                 "Set MCP_API_KEY in the environment, pass api_key: explicitly, or use a loopback " \
                 "host (one of: #{LOOPBACK_HOSTS.join(", ")})."
+        end
+        # A short key on a public bind is guessable. Warn rather than refuse
+        # in a patch release so existing deployments keep starting.
+        if !LOOPBACK_HOSTS.include?(host.to_s) && effective_api_key.length < MIN_PUBLIC_API_KEY_LENGTH
+          warn "[Parse::Agent::MCPServer:SECURITY] api_key for non-loopback host #{host.inspect} " \
+               "is shorter than #{MIN_PUBLIC_API_KEY_LENGTH} characters. Use a long random key " \
+               "(for example SecureRandom.hex(32))."
         end
 
         @port = port
@@ -266,7 +284,7 @@ module Parse
         # Tool list endpoint (requires auth if API key is configured)
         @server.mount_proc("/tools") do |req, res|
           if @api_key
-            provided_key = req[MCP_API_KEY_HEADER].to_s.strip
+            provided_key = self.class.normalize_api_key(req[MCP_API_KEY_HEADER]).to_s
             unless ActiveSupport::SecurityUtils.secure_compare(@api_key, provided_key)
               error_response(res, 401, "Unauthorized: invalid or missing API key")
               next
@@ -369,7 +387,7 @@ module Parse
       # and discarded when it ends, eliminating cross-request leakage.
       def agent_factory(env)
         if @api_key
-          provided_key = env["HTTP_X_MCP_API_KEY"].to_s.strip
+          provided_key = self.class.normalize_api_key(env["HTTP_X_MCP_API_KEY"]).to_s
           unless ActiveSupport::SecurityUtils.secure_compare(@api_key, provided_key)
             raise Parse::Agent::Unauthorized.new("invalid or missing API key", reason: :bad_api_key)
           end

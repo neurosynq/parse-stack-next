@@ -236,14 +236,22 @@ A read made with a session token is never read from or stored in the response
 cache unless the application opts in:
 
 ```ruby
-Parse::Middleware::Caching.cache_session_requests = true
+Parse::Middleware::Caching.cache_session_requests = true   # every client
+Parse.setup(cache_session_requests: true, ...)            # one client
 ```
+
+Only `true` enables it (a `"true"` String from an environment variable does
+not). A client's own `cache_session_requests:` option overrides the class
+default in either direction.
 
 A cached answer is served without contacting Parse Server, so it cannot notice
 that the session was revoked (logout, `Parse::Session#destroy`, `logout_all!`,
 a password change) or that the user lost a role or row access through a change
-this process did not make. With the default, every session read reaches Parse
-Server, which checks the token and the current ACLs and CLPs each time. This
+this process did not make. With the default, every REST session read reaches
+Parse Server, which checks the token and the current ACLs and CLPs each time.
+Mongo-direct reads and agent tools do not go through this cache; they resolve
+the session through the identity plane, whose revocation behavior is described
+in [Identity and role caching](#identity-and-role-caching). This
 applies however the session reached the request: an explicit `session_token:`,
 `Parse.with_session`, or a client bound to a session. Master-key and
 anonymous reads cache as before, and writes made with a session still

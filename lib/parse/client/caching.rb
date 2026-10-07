@@ -85,6 +85,12 @@ module Parse
         # and anonymous reads are cached as before. Turning this on trades that
         # guarantee for speed: a revoked or narrowed session keeps reading its
         # cached responses until they expire.
+        #
+        # Only `true` enables it; any other value (including the String
+        # `"true"` read from an environment variable) leaves session reads
+        # uncached. A client can override this default with
+        # `Parse.setup(cache_session_requests: true)` (the middleware option
+        # of the same name).
         # @return [Boolean]
         attr_writer :cache_session_requests
 
@@ -126,6 +132,10 @@ module Parse
         @opts = { expires: 0 }
         @opts.merge!(opts) if opts.is_a?(Hash)
         @expires = @opts[:expires]
+        # Per-middleware override of {.cache_session_requests}; nil defers to
+        # the class-level default.
+        @cache_session_requests =
+          @opts.key?(:cache_session_requests) ? (@opts[:cache_session_requests] == true) : nil
         # Optional cache key namespace so two Parse apps sharing one Redis don't
         # collide (e.g. `mk:/classes/Song/abc` is the same path for both apps).
         # When set, keys become `<namespace>:<existing-prefix>:<url>`. Empty
@@ -212,7 +222,9 @@ module Parse
         # session (an explicit `session_token:`, `Parse.with_session`, or a
         # session-bound client), so this one check covers all three. Writes
         # made with a session still run the invalidation below.
-        if method == :get && @request_headers.key?(SESSION_TOKEN) && !self.class.cache_session_requests
+        # Read the ambient cache tenant first so the bypass event carries it.
+        @cache_tenant = Parse.respond_to?(:current_cache_tenant) ? Parse.current_cache_tenant : nil
+        if method == :get && @request_headers.key?(SESSION_TOKEN) && !cache_session_requests?
           instrument_cache(:bypass, method: method, url_path: url.path, reason: :session)
           return @app.call(env)
         end
@@ -263,7 +275,6 @@ module Parse
         # and from `mk:`, so legacy cache entries written before the
         # tenant feature don't accidentally re-hydrate into a tenanted
         # request and vice versa.
-        @cache_tenant = Parse.respond_to?(:current_cache_tenant) ? Parse.current_cache_tenant : nil
         if @cache_tenant
           @cache_key = "T:#{@cache_tenant}:#{@cache_key}"
           @old_shape_key = "T:#{@cache_tenant}:#{@old_shape_key}"
@@ -493,6 +504,13 @@ module Parse
       # subscribers cheap — counter increments, in-memory accumulators, or
       # non-blocking sinks like StatsD-over-UDP.
       # @!visibility private
+      # Whether this middleware caches session reads: its own
+      # `cache_session_requests:` option when given, else the class default.
+      # @!visibility private
+      def cache_session_requests?
+        @cache_session_requests.nil? ? self.class.cache_session_requests : @cache_session_requests
+      end
+
       def instrument_cache(event, **extra)
         return unless defined?(ActiveSupport::Notifications)
         payload = {

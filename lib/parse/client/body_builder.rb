@@ -36,12 +36,24 @@ module Parse
       # Maximum url length for most server requests before HTTP Method Override is used.
       MAX_URL_LENGTH = 2_000.freeze
       # Fields that should be redacted from log output.
+      #
+      # Covers MFA material (`recovery` codes and the `secret` returned by
+      # MFA enrollment, also under `authDataResponse`) and the storage-form
+      # credential columns a raw MongoDB document carries (`_session_token`,
+      # `_hashed_password`, and the reset/verify tokens). Keys starting with
+      # {SENSITIVE_KEY_PREFIXES} (per-provider `_auth_data_<provider>`
+      # columns) are redacted too.
       SENSITIVE_FIELDS = %w[
         password token sessionToken session_token access_token authData
         masterKey master_key apiKey api_key clientKey client_key
         javascriptKey javascript_key refreshToken refresh_token
+        recovery recoveryCodes recovery_codes authDataResponse secret
+        _session_token _hashed_password _email_verify_token
+        _perishable_token _password_history
       ].freeze
-      SENSITIVE_PATTERN = /(#{SENSITIVE_FIELDS.join("|")})(["']?\s*[=:>]\s*["']?)([^"&\s,}\]]+)/i
+      # Key prefixes whose values are always redacted.
+      SENSITIVE_KEY_PREFIXES = %w[_auth_data_].freeze
+      SENSITIVE_PATTERN = /(#{(SENSITIVE_FIELDS + SENSITIVE_KEY_PREFIXES.map { |p| "#{p}\\w+" }).join("|")})(["']?\s*[=:>]\s*["']?)([^"&\s,}\]]+)/i
       # Lookup set of sensitive field names for structural (JSON) redaction
       # — case-insensitive match on the key, not the value. Walks the parsed
       # structure so nested objects like {"password":{"nested":"value"}}
@@ -178,6 +190,13 @@ module Parse
         nil
       end
 
+      # Whether a JSON key names a credential whose value must be redacted.
+      # @!visibility private
+      def self.sensitive_key?(key)
+        k = key.to_s.downcase
+        SENSITIVE_FIELDS_SET.include?(k) || SENSITIVE_KEY_PREFIXES.any? { |p| k.start_with?(p) }
+      end
+
       # @!visibility private
       # Recursively walks a parsed JSON structure replacing values under any
       # sensitive key with the redaction placeholder. Returns the same node
@@ -190,7 +209,7 @@ module Parse
         case node
         when Hash
           node.each do |key, value|
-            if key.is_a?(String) && SENSITIVE_FIELDS_SET.include?(key.downcase)
+            if key.is_a?(String) && sensitive_key?(key)
               node[key] = REDACTED_PLACEHOLDER
             elsif value.is_a?(Hash) || value.is_a?(Array)
               scrub_sensitive!(value)

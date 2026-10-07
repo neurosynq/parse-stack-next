@@ -162,8 +162,7 @@ module Parse
         # explicit or configured URL is validated here; a derived one is
         # validated by derive_websocket_url.
         explicit_url = url || cfg.url
-        validate_websocket_url!(explicit_url) if explicit_url
-        @url = explicit_url || derive_websocket_url
+        @url = explicit_url ? validate_websocket_url!(explicit_url) : derive_websocket_url
         @application_id = application_id || cfg.application_id ||
                           parse_client_value(:application_id)
         @client_key = client_key || cfg.client_key ||
@@ -520,35 +519,70 @@ module Parse
       # they're on `ws://`.
       LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1 [::1] 0.0.0.0].freeze
 
-      # Validate an explicit or configured LiveQuery URL the same way a
-      # derived one is: the scheme must be ws or wss (compared case
-      # insensitively), and plaintext ws:// is refused on a non-loopback
-      # host unless `allow_insecure` is configured. Before this the
-      # constructor accepted any URL, so `WS://routable-host` or an
-      # `https://` URL (which the connector treats as plaintext) carried the
-      # master key and session tokens in cleartext.
-      def validate_websocket_url!(url)
+      # Normalize and validate an explicit LiveQuery URL, returning the URL
+      # to connect to.
+      #
+      # - The scheme is compared case-insensitively and the URL is stripped.
+      # - `https://` is mapped to `wss://` and `http://` to `ws://`, with a
+      #   one-time deprecation warning. (5.8.2 briefly refused these; the
+      #   connector used to open them as a plaintext socket, so the `https`
+      #   mapping is strictly safer than before.)
+      # - Plaintext `ws://` (including a mapped `http://`) is refused on a
+      #   host that is not this machine ({Parse::Client.loopback_host?})
+      #   unless `allow_insecure` is set, in which case it warns.
+      # - Any other scheme raises `ArgumentError`.
+      #
+      # @param url [String]
+      # @param allow_insecure [Boolean]
+      # @return [String]
+      # @raise [ArgumentError]
+      def self.normalize_url(url, allow_insecure: false)
         scheme = Parse::Client.url_scheme(url)
-        host = Parse::Client.url_host(url).to_s
+        mapped = { "http" => "ws", "https" => "wss" }[scheme]
+        if mapped
+          warn_http_scheme_once(scheme, mapped)
+          scheme = mapped
+        end
         unless %w[ws wss].include?(scheme)
           raise ArgumentError,
             "[Parse::LiveQuery] LiveQuery URL #{url.to_s.inspect} must use wss:// " \
             "(or ws:// on a loopback host). Got scheme #{scheme.inspect}."
         end
-        return if scheme == "wss" || LOOPBACK_HOSTS.include?(host)
+        normalized = url.to_s.strip.sub(/\A[a-z][a-z0-9+.\-]*:/i, "#{scheme}:")
+        host = Parse::Client.url_host(normalized).to_s
+        return normalized if scheme == "wss" || Parse::Client.loopback_host?(host)
 
-        if config.allow_insecure
+        if allow_insecure
           warn "[Parse::LiveQuery] Using insecure ws:// URL for #{host} " \
                "(allow_insecure is enabled). Master key and session tokens " \
                "will traverse a cleartext socket."
+          normalized
         else
           raise ArgumentError,
             "[Parse::LiveQuery] Refusing insecure ws:// LiveQuery URL #{url.to_s.inspect}. " \
             "The connect frame carries the master key and any session token in " \
             "plaintext on this socket. Use wss:// for routable hosts, or set " \
-            "`Parse::LiveQuery.configure { |c| c.allow_insecure = true }` for " \
-            "local development."
+            "`Parse::LiveQuery.configure { |c| c.allow_insecure = true }` (or " \
+            "`live_query: { allow_insecure: true }`) for local development."
         end
+      end
+
+      # @!visibility private
+      def self.warn_http_scheme_once(scheme, mapped)
+        @warned_http_schemes ||= {}
+        return if @warned_http_schemes[scheme]
+        @warned_http_schemes[scheme] = true
+        warn "[Parse::LiveQuery] DEPRECATION: an #{scheme}:// LiveQuery URL is " \
+             "treated as #{mapped}://. Configure the #{mapped}:// URL directly; " \
+             "a later release will refuse #{scheme}://."
+      end
+
+      # Validate an explicit or configured LiveQuery URL the same way a
+      # derived one is, and return the URL to connect to. See
+      # {Parse::LiveQuery::Client.normalize_url}.
+      # @return [String]
+      def validate_websocket_url!(url)
+        self.class.normalize_url(url, allow_insecure: config.allow_insecure)
       end
 
       # Derive WebSocket URL from Parse server URL. Refuses to
@@ -565,7 +599,7 @@ module Parse
         scheme = uri.scheme == "https" ? "wss" : "ws"
         host = uri.host.to_s
 
-        if scheme == "ws" && !LOOPBACK_HOSTS.include?(host)
+        if scheme == "ws" && !Parse::Client.loopback_host?(host)
           if config.allow_insecure
             warn "[Parse::LiveQuery] Deriving insecure ws:// URL for #{host} " \
                  "(allow_insecure is enabled). Master key and session tokens " \
