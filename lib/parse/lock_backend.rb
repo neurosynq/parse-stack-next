@@ -164,9 +164,10 @@ module Parse
       # a holder whose lease expired and was re-acquired by someone else
       # can never delete the new holder's key. Falls back to a
       # best-effort GET-then-DEL for raw-Moneta stores, where the
-      # worst-case cross-holder-delete race is bounded by the short TTL
-      # (callers clamp `ttl:` to ≤ 30s) — documented residual risk for
-      # the non-Redis path.
+      # worst-case cross-holder-delete race is bounded by the lease TTL.
+      # `Parse::Lock` clamps `ttl:` to 30s and the `first_or_create!`
+      # create-lock to 300s. This is a documented residual risk for the
+      # non-Redis path.
       #
       # @param store [Object] Moneta-shaped store.
       # @param key [String] cache key.

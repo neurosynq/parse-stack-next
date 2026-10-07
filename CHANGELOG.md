@@ -1,5 +1,239 @@
 ## parse-stack-next Changelog
 
+### 5.8.1
+
+A correctness release for webhooks, sessions, associations, queries, search,
+and agent policies. No new defaults and no API changes; every corrected
+outcome is listed under Behavior Notes.
+
+#### Webhooks
+
+- **FIXED**: A client create through a `before_save` webhook whose handler
+  returns `parse_object` now gets the ACL its class policy resolves, exactly
+  as an SDK-side create would. Owner-based policies (`:owner_else_private`,
+  the default, plus `:owner_else_public` and `:owner_but_public_read`) take the
+  owner from the declared `owner:` field, or from the requesting user when that
+  field is empty. Before, a signed-in client got the policy's no-owner
+  fallback (`{}` under `:owner_else_private`) and could not read its own
+  record. A request without a user gets the policy fallback. An ACL the client
+  sent is kept, and an ACL the handler sets always wins, even when it equals
+  the class default. This holds whatever the handler returns: an ACL assigned
+  on `parse_object` is written for a `true`, `nil`, or Hash return too, unless
+  a returned Hash sets `ACL` itself.
+- **FIXED**: When a `before_save` handler changes a record, a sub-document the
+  client changed is written back as dotted paths at any depth of nested
+  objects (`"meta.count.value": 6`) instead of the whole sub-document, so
+  concurrent writes to other sub-keys of the same field are no longer
+  overwritten. A sub-key the client removed is
+  written as a `Delete`. A dotted key in a Hash the handler returns is folded
+  into the field when the reply writes that field whole.
+
+#### Sessions and master-key scope
+
+- **FIXED**: Deleting `Parse::Session` or `Parse::User` objects, one at a time
+  or with a batch `Array#destroy`, drops their identity-cache entries on every
+  attempted delete, including one that fails because the row is already gone.
+  A session that does not carry its token or owner (built from its objectId
+  alone, fetched without the master key, or fetched with `keys:` leaving them
+  out) has them looked up first, in one query per batch; if that lookup fails,
+  the client's whole identity cache is dropped instead of none of it. The
+  looked-up token is used only for the delete and is never kept on the
+  object. A revoked session token stops resolving for
+  mongo-direct and Atlas Search reads at once, instead of when its cached
+  entry expires.
+- **FIXED**: `Parse::User#signup!`, signup on save, and `upgrade_anonymous!`
+  store `created_at` / `updated_at` as `Parse::Date` values. Reading
+  `updated_at` on a newly signed-up user no longer marks it dirty.
+- **FIXED**: Inside `Parse.without_master_key`, an explicit `master: true`
+  passed to `Parse::MongoDB.aggregate`, `Parse::ACLScope`, `Parse::Query`
+  direct reads, vector and hybrid search, Atlas Search, or agent tools for
+  master-key agents no longer runs as master. The call runs in the public
+  scope, as the REST request does once the block strips its master key, and
+  the `parse.mongodb.aggregate` notification reports `master_dropped: true`.
+  The SDK's own metadata reads keep the master key without lifting the block:
+  the class schema and role graph read to enforce a scope, index statistics,
+  and the Atlas Search index listing. Before, a schema read refused inside the
+  block was cached and denied every scoped mongo-direct read of that class,
+  for all callers, for 5 seconds. `Parse::AtlasSearch.faceted_search` raises
+  `FacetedSearchNotACLSafe` inside the block, because its bucket counts are
+  not ACL-filtered. A LiveQuery admin connection opened inside the block sends
+  no master key.
+
+#### Agent policies
+
+- **FIXED**: A sub-agent's `tools:` and `methods:` filters now only narrow its
+  parent's, as `classes:` already did. A child `tools: { only: }` is
+  intersected with the parent's allowlist and `except:` sets are unioned; for
+  `methods:` the parent's filters stay in force alongside the child's. Before,
+  the child's filter replaced the parent's, so a sub-agent could enable a tool
+  or `agent_method` within its tier that the parent was not given. A child
+  `only:` list with nothing its parent allows raises `ArgumentError` at
+  construction.
+- **FIXED**: A sub-agent built with `parent:` uses its parent's approval gate,
+  read at call time, unless given its own. Before, it fell back to
+  `NullGate`, so a sub-agent built inside an MCP `tools/call` ran tools in
+  `require_approval_for` tiers without approval.
+- **FIXED**: Qualified `methods:` entries compare the class by its Parse class
+  name, so `"User.x"` and `"_User.x"` (and the `Role`, `Session`, and
+  `Installation` aliases) match whichever spelling the entry or the
+  `call_method` caller uses. Before, `methods: { except: ["_User.x"] }` could
+  be bypassed by calling the method on `"User"`.
+- **IMPROVED**: The `parse.agent.tool_call` audit payload adds
+  `methods_layers` for sub-agents, and `describe[:methods][:layers]` lists
+  every `methods:` filter in force, parent first.
+
+#### Associations
+
+- **FIXED**: `add!`, `add_unique!`, and `remove!` on a
+  `has_many through: :array` collection take the array Parse Server returns,
+  as plain array properties already did. A stale local copy is corrected,
+  objects already fetched locally are kept, and the field is not marked
+  changed. The array is adopted only when every entry is a pointer to the
+  declared class; otherwise the operation is applied locally.
+- **FIXED**: Saving a relation collection on its own (`owner.likes.save`)
+  sends the staged additions and removals and returns whether they were
+  applied. Before, it silently sent nothing.
+- **FIXED**: `Parse::Object#clear_changes!` (also called by `reload!`) drops
+  a relation's staged additions and removals and clears array collection
+  dirty state. Before, discarded relation changes were sent with the next
+  change to that relation. A fetch (`fetch!`, partial fetch, autofetch, with
+  or without `preserve_changes:`) keeps a relation's staged additions and
+  removals and leaves the relation marked changed, including when the response
+  carries the relation's descriptor, so the next save sends them.
+- **FIXED**: Atomic relation operations (`add!` / `remove!` on a
+  `through: :relation` collection) write to the relation's Parse column when
+  its name differs from the Ruby name (`has_many :liked_items` maps to
+  `likedItems`, or a relation declared with `field:`). Before, they targeted
+  the Ruby name.
+
+#### Queries
+
+- **FIXED**: An OR whose branch has no constraints now matches every row.
+  Previously `query | Model.query` and `Parse::Query.or(query, Model.query)`
+  dropped that branch and returned only the other side. An empty receiver of
+  `|` still starts a new OR, as `or_where` does, so
+  `[q1, q2].reduce(Model.query, :|)` builds `q1 OR q2`.
+- **FIXED**: `Model.query(:or => [{...}, {...}])` builds a `$or` group ANDed
+  with the query's other constraints, instead of a constraint on a literal
+  field named `or`. Branches can be constraint hashes, `Parse::Query` objects
+  of the same class, or arrays of constraints.
+- **FIXED**: A constraint that needs the aggregation pipeline or mongo-direct
+  (`readable_by`, `:ACL.readable_by`, `:field.array_size`, the mongo-direct geo
+  operators) raises `ArgumentError` inside an OR (`:or`, `or_where`, `|`,
+  `Parse::Query.or`). Before, the branch was emitted as `{}` and matched every
+  row, or lost part of its conditions, including in push targeting, which
+  could reach every installation.
+- **FIXED**: `Parse::Query#clone`, `|`, `or_where(query)`, `Parse::Query.or`,
+  and `Parse::Query` branches inside `:or` keep the query's authority: session
+  token, a session-bound client from `Parse::Client#become`, scoped user or
+  role, master-key flag, and read preference. Queries combined with OR must
+  run under the same authority. An unscoped query takes the other query's
+  authority, and two different ones raise `ArgumentError`. Before, a session
+  combined with a `scope_to_user` ran as the scoped user, and a
+  `become`-client query composed into an OR ran as the master key. Changing
+  the authority of a combined query afterwards raises and leaves the query
+  unchanged, and a combined query re-checks its authority before it runs.
+- **FIXED**: A field repeated in `order` is sent once, at its first position
+  with the last direction given, matching what MongoDB applies on direct
+  reads. String forms such as `"-title"` are parsed as descending, so they
+  deduplicate too, and the direct `$sort` stage sorts on the real field.
+- **FIXED**: A bare objectId compared to a declared pointer field
+  (`Song.query(:artist => "abc123")`, `:artist.ne`, `:artist.in`) now matches
+  on REST, in `Parse::Push` targeting, and in LiveQuery subscriptions from
+  `Parse::Query#subscribe`, `Model.subscribe`, and `client.subscribe(query)`.
+  Equality and `$in` used to return no rows and `$ne` every row, while direct
+  and aggregate reads already matched. The new
+  `Parse::Query#compile_rest_where` returns the where clause in that form.
+
+#### Search
+
+- **FIXED**: Atlas Search (`Parse::AtlasSearch.search`, `search_with_stage`,
+  `autocomplete`, `Parse::Query#atlas_search`) and native hybrid search apply
+  the CLP `pointerFields` / `readUserFields` ownership constraint before the
+  page is cut. For native hybrid, the lexical input filters before its
+  per-input `$limit`, and the fused result is filtered again before the final
+  `$limit`. Rows used to be filtered after the page was cut, so when the
+  top-ranked hits belonged to other users a scoped caller got a short or empty
+  page. Inaccessible rows are still never returned.
+- **IMPROVED**: `Parse::VectorSearch.search` and native hybrid search enforce
+  the `pointerFields` ownership constraint server-side across the whole
+  candidate window. When every owner field is declared as a scalar pointer
+  (`belongs_to`) and its storage path (`_p_<field>`) is a `type: "filter"`
+  field of the vectorSearch index, the constraint also goes
+  into `$vectorSearch.filter`, so other users' rows no longer use up the
+  candidate window. The prefilter is used only while the index is READY and
+  serving its latest definition. If Atlas refuses it (for example mid-rebuild),
+  the search reruns once without it and skips it for the index cache TTL. A
+  failed index lookup is also remembered for that TTL.
+
+#### Documentation
+
+- **FIXED**: README and query YARD examples use `:field.pointer_id` and
+  `:field.array_size`, the names the DSL has used since 5.8.0.
+
+#### Behavior Notes
+
+- An OR that includes an unconstrained branch now returns every row. The one
+  exception is an empty receiver of `|`, which starts the OR. Code that passed
+  an empty query for "no filter" should leave that branch out. `:or => []`
+  matches no rows.
+- A pipeline-only constraint inside an OR now raises `ArgumentError`. Apply it
+  outside the OR, or run the branches as separate queries.
+- Combining queries that run under different authorities now raises
+  `ArgumentError`: different session tokens, a session against
+  `scope_to_user`, `scope_to_role`, or the master key, and different scoped
+  users or roles. Setting a new session token, master-key flag, or scope on a
+  query that took its authority from an OR branch also raises, as does
+  assigning a different `client`.
+- REST queries, LiveQuery subscriptions, and push targeting that compare a
+  bare objectId to a declared pointer field now return the matching rows.
+  Undeclared fields are unchanged. If a model declares `belongs_to` for a
+  field whose server column holds a plain String, a bare string compared to
+  that field is now sent as a Pointer and stops matching those values;
+  declare such a field as a `:string` property instead.
+- Code that relied on `master: true` keeping master authority inside
+  `Parse.without_master_key` should wrap that call in `Parse.with_master_key`.
+  A dropped `master: true` raises `ACLRequired` under either
+  `Parse::ACLScope.require_session_token` or
+  `Parse::AtlasSearch.require_session_token`, with a message naming the block,
+  and no longer emits the no-ACL banner. The role-graph helpers
+  (`users_in_role_subtree` and related) raise `ACLRequired` for
+  `master: true` inside the block; pass `as:` instead.
+- A LiveQuery connection that already connected with the master key stays
+  elevated for subscriptions made inside `Parse.without_master_key`, because
+  Parse Server authorizes per connection; the SDK warns.
+- `Parse.without_master_key` guards against accidental master-key use and is
+  not an isolation boundary.
+- A sub-agent's `tools:` or `methods:` `only:` list that leaves nothing once
+  the parent's `only:` and `except:` lists apply now raises `ArgumentError`.
+  An explicitly empty `only: []` is accepted.
+- Parse Server sends a `before_save` webhook only the resulting value of a
+  dotted sub-key operator, not the operator. When the handler changes the
+  record, the SDK writes back only the paths that changed and deletes removed
+  sub-keys by path. Two concurrent operators on the same path can still
+  overwrite each other. An array, or a value whose shape changed, is written
+  whole at its path, so a concurrent `Add` to an array inside a sub-document
+  is lost. When a changed path would carry a typed value (Date, Bytes,
+  Pointer), the whole field is written, because Parse Server stores a dotted
+  typed value unconverted. A client's whole replace of a sub-document becomes
+  a merge of the changed paths plus deletes. Top-level operators on fields the
+  handler does not touch reach the database unchanged; a field the handler
+  assigns is written as an absolute value.
+- A `before_save` handler that returns `true`, `nil`, or a Hash keeps the
+  client's write as sent, so a client create without an ACL through such a
+  handler is stored public read and write, as before, unless the handler
+  assigns an ACL on `parse_object`.
+- Saving a relation collection on its own sends removals and additions as two
+  requests. If the second fails, the first stays applied and the unsent
+  operations stay staged.
+- Owner fields stored as arrays of pointers, undeclared, or not filter-indexed
+  get no `$vectorSearch` prefilter. Vector search then fills results only from
+  its existing candidate window.
+- A custom identity cache with neither `invalidate_value` nor generation
+  support (`generation`, `generation_current?`, `bump_generation`) only
+  expires a user's tokens at `identity_cache_ttl` after a password change,
+  account deletion, `logout_all!`, or a batch destroy of sessions.
+
 ### 5.8.0
 
 #### Breaking Changes
