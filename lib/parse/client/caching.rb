@@ -73,6 +73,25 @@ module Parse
         # @return [Boolean] whether the logging should be enabled.
         attr_accessor :logging
 
+        # @!attribute cache_session_requests
+        # Whether reads made with a session token are cached. Off by default.
+        #
+        # A cached session read is answered without contacting Parse Server,
+        # so it cannot notice that the session was revoked (logout,
+        # {Parse::Session#destroy}, `logout_all!`, a password change) or that
+        # the user lost a role or row access through a change the SDK did not
+        # make. With this off, every session read reaches Parse Server, which
+        # checks the token and the current ACLs and CLPs each time. Master-key
+        # and anonymous reads are cached as before. Turning this on trades that
+        # guarantee for speed: a revoked or narrowed session keeps reading its
+        # cached responses until they expire.
+        # @return [Boolean]
+        attr_writer :cache_session_requests
+
+        def cache_session_requests
+          @cache_session_requests == true
+        end
+
         def enabled
           @enabled = true if @enabled.nil?
           @enabled
@@ -185,6 +204,18 @@ module Parse
         # it as a write would retire every cached query of its class each
         # time a long query ran.
         return @app.call(env) if method != :get && @request_headers[METHOD_OVERRIDE].to_s.casecmp?("GET")
+
+        # A session read is never read from or stored in the cache unless the
+        # application opted in (see {.cache_session_requests}): a cached answer
+        # would keep serving a revoked or narrowed session until it expired.
+        # The token header is set by the request layer from the effective
+        # session (an explicit `session_token:`, `Parse.with_session`, or a
+        # session-bound client), so this one check covers all three. Writes
+        # made with a session still run the invalidation below.
+        if method == :get && @request_headers.key?(SESSION_TOKEN) && !self.class.cache_session_requests
+          instrument_cache(:bypass, method: method, url_path: url.path, reason: :session)
+          return @app.call(env)
+        end
 
         @cache_key = url.to_s
 

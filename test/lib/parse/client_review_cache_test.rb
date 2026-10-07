@@ -26,6 +26,10 @@ module ClientReviewCacheHarness
   def setup
     @store = Moneta.new(:Memory, expires: true)
     @prior_enabled = Parse::Middleware::Caching.enabled
+    # These tests cover session-keyed entries, which are cached only when
+    # the application opts in (SEC-16).
+    @prior_session_caching = Parse::Middleware::Caching.cache_session_requests
+    Parse::Middleware::Caching.cache_session_requests = true
     Parse::Middleware::Caching.enabled = true
     @server_calls = Hash.new(0)
   end
@@ -33,6 +37,7 @@ module ClientReviewCacheHarness
   def teardown
     @store.clear
     Parse::Middleware::Caching.enabled = @prior_enabled
+    Parse::Middleware::Caching.cache_session_requests = @prior_session_caching
   end
 
   # Subclasses return a keyspace, or nil for the legacy layout.
