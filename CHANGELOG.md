@@ -1,5 +1,136 @@
 ## parse-stack-next Changelog
 
+### 5.8.2
+
+A security and correctness patch. No new features; intentional master-key
+and analytics access is unchanged. Outcomes that change are listed under
+Behavior Notes.
+
+#### Transport and MCP authentication
+
+- **FIXED**: A whitespace-only MCP API key (`api_key: "   "` or
+  `MCP_API_KEY="   "`) now counts as no key. Before, it passed the check that
+  refuses a non-loopback bind without a key and then disabled request
+  authentication, leaving a public MCP endpoint open. Keys are stripped once,
+  and the same value is enforced at startup and on every request.
+- **FIXED**: HTTPS and WebSocket scheme checks compare the scheme
+  case-insensitively. Before, `HTTP://` passed `require_https`, `HTTPS://`
+  with TLS verification turned off was not refused, and `WS://` got past the
+  plaintext LiveQuery guard.
+- **FIXED**: `Parse::LiveQuery::Client.new` validates an explicit or
+  configured URL as it already did a derived one: it must be `wss://` (or
+  `ws://` on loopback, or with `allow_insecure`). Before, any URL was
+  accepted, including `ws://` to a routable host and `https://`, which was
+  opened as a plaintext socket carrying the master key and session tokens.
+- **FIXED**: `Parse::Response#inspect` no longer prints result values, and
+  `#to_s` replaces credential fields (`sessionToken`, `password`, `authData`,
+  keys) with `[FILTERED]`, so printing or logging a login or `users/me`
+  response no longer exposes a live session token. `#result` is unchanged.
+
+#### Batches and transactions
+
+- **FIXED**: A batch keeps each write's credentials. Parse Server runs every
+  sub-request of a `POST /batch` under that call's own credentials and ignores
+  per-sub-request headers. Before, `Array#save`, `Array#destroy`,
+  `Parse.batch`, and `Parse::Object.transaction` sent everything through the
+  default client, so a write built for a user session (a class bound to
+  `Parse.client.become(token)`, or a `Parse::Request` with `session_token:` /
+  `use_master_key: false`) ran with the master key and bypassed ACLs and CLPs.
+  Writes are now sent through their own client and options, and a batch with
+  mixed credentials goes out as separate calls with responses in request
+  order.
+- **FIXED**: `Parse::Object.transaction` runs with its objects' class client.
+  A transaction that mixes credentials raises
+  `Parse::BatchOperation::MixedAuthorityError` before anything is sent,
+  because Parse Server runs a transaction under one credential and it cannot
+  be split.
+- **NEW**: `Array#save(session:)`, `Array#destroy(session:)`, and
+  `Parse::Object.transaction(session:)` send every write in the call as the
+  given user.
+
+#### Agents
+
+- **FIXED**: A session-token agent whose token could not be resolved when it
+  was built (for example, Parse Server unreachable) is no longer treated as
+  master-key posture by the SDK-side permission checks. The scope is resolved
+  again on first use; if it still cannot be, the call fails with
+  `Parse::Agent::UnresolvedIdentity` (reported as `:access_denied`,
+  `kind: :unresolved_identity`) instead of skipping the CLP check. Parse
+  Server already validated the token on REST calls.
+- **FIXED**: `Parse::Agent#inspect`, `to_s`, and `pp` print a redacted summary
+  and no longer show the session token, the client's keys, the conversation,
+  or the last request and response.
+
+#### Response cache
+
+- **FIXED**: Reads made with a session token are no longer served from the
+  response cache. A cached answer was returned without contacting Parse
+  Server, so a revoked session (logout, `Parse::Session#destroy`,
+  `logout_all!`, a password change), or a user who lost a role or row access,
+  kept reading the cached rows until the entry expired. Session reads now
+  always reach Parse Server, whether the session came from `session_token:`,
+  `Parse.with_session`, or a session-bound client. Master-key and anonymous
+  reads are cached as before, and writes made with a session still invalidate
+  cached entries.
+- **NEW**: `Parse::Middleware::Caching.cache_session_requests = true` opts back
+  into caching session reads, for apps that accept revocation being bounded by
+  the cache TTL.
+
+#### Regex validation and direct reads
+
+- **FIXED**: A raw `$regex` in a where hash
+  (`Model.query(name: { "$regex" => ... })`, `:field.eq`, `:field.not`,
+  `$elemMatch`, and `:or` branches) goes through the same ReDoS check as
+  `:field.like`, and `$options` is limited to `i`, `m`, `x`, `s`, and `u`.
+  Before, only the regex constraints themselves were checked.
+- **FIXED**: Mongo-direct filters and pipelines (`results_direct`,
+  `count_direct`, `Query#aggregate`, `Parse::MongoDB.aggregate` and `find`,
+  Atlas Search and vector filters, LiveQuery `where`, and the agent
+  `aggregate` tool) run every `$regex`, Ruby `Regexp`, BSON regex, and
+  `$regexMatch` / `$regexFind` / `$regexFindAll` pattern through the ReDoS
+  check. Before, only the pattern length was capped. The agent constraint
+  translator applies the check too.
+- **FIXED**: `Parse::MongoDB.find` raises `Parse::ACLScope::ACLRequired` inside
+  `Parse.without_master_key` instead of reading raw documents unscoped.
+  `Parse::MongoDB.indexes` (metadata only) stays available.
+
+#### Webhooks
+
+- **FIXED**: A webhook request's `master` flag is trusted only when the
+  request is authenticated (the webhook key matched, or a configured
+  signature verified). Under `Parse::Webhooks.allow_unauthenticated` with no
+  signature, a body claiming `"master": true` no longer passes master-only
+  field guards, ACL owner resolution, or handler `payload.master?` checks.
+  `payload.claimed_master?` exposes the raw claim, which still drives
+  Ruby-initiated callback dedup. The string `"false"` no longer counts as
+  master.
+
+#### Behavior Notes
+
+- A LiveQuery client given an `http://` or `https://` URL now raises instead
+  of connecting over plaintext; pass the `wss://` URL. A padded MCP API key is
+  enforced without its surrounding whitespace.
+- A session-token agent that cannot resolve its token refuses tool calls that
+  need its permissions rather than running them without the SDK-side check. A
+  sub-agent of such a parent can inherit the parent's token, but building one
+  with a different identity raises until the parent's token resolves.
+- Queries that set `cache: true` (or run under `Parse.default_query_cache =
+  true`) with a session token no longer get cache hits. Set
+  `Parse::Middleware::Caching.cache_session_requests = true` to restore the
+  old behavior, and keep `expires:` short if you do.
+- A raw `$regex`, or a `Regexp` in a mongo-direct filter, that the ReDoS check
+  rejects now raises: `ArgumentError` on REST queries,
+  `Parse::PipelineSecurity::Error` (or `Parse::MongoDB::DeniedOperator`) on
+  direct paths. Escaped literal patterns, including those built by
+  `starts_with`, `ends_with`, and `contains`, are always accepted.
+- Code that calls `Parse::MongoDB.find` inside `Parse.without_master_key`
+  should wrap it in `Parse.with_master_key` or use a scoped read.
+- A batch or transaction of objects whose class is bound to a session client
+  now runs as that user, as a single save does, so writes the user may not
+  make are refused instead of succeeding as master. A transaction mixing
+  credentials raises `MixedAuthorityError`, and a non-transactional batch with
+  mixed credentials is sent as several calls.
+
 ### 5.8.1
 
 A correctness release for webhooks, sessions, associations, queries, search,
