@@ -880,6 +880,15 @@ The approval gate is a pluggable `agent.approval_gate` consulted inside
 unit-testable with a fake approver. `Parse::Agent::MCPElicitationGate` is the
 spec-native implementation; `Parse::Agent::NullGate` (the default) approves.
 
+A sub-agent built with `parent:` and no gate of its own uses its parent's gate,
+read at call time, so the gate the dispatcher installs on the parent for a
+`tools/call` also covers any sub-agent a tool builds during that call. Before
+5.8.1 a sub-agent fell back to `NullGate` and skipped approval. Assigning a
+gate on the sub-agent itself overrides this, and assigning `nil` removes the
+override so the sub-agent uses its parent's gate again. The dispatcher
+snapshots and restores the agent's own gate (`approval_gate_override`), so
+driving a sub-agent through `tools/call` never pins its parent's gate onto it.
+
 Round-trip over the streaming transport:
 
 1. A `tools/call` for a gated tier pauses before execution. The server builds an
@@ -1646,7 +1655,7 @@ agent = Parse::Agent.new(methods: [:archive, "Project.set_client_description"])
 agent = Parse::Agent.new(methods: { except: ["Account.delete_account"] })
 ```
 
-Entries are bare method names (`:archive` — matches the method on any class) or qualified names (`"Project.archive"` — matches only on that class). Both forms coexist in the same Set; matching is an OR.
+Entries are bare method names (`:archive`, which matches the method on any class) or qualified names (`"Project.archive"`, which matches only on that class). Both forms coexist in the same Set; matching is an OR. The class part is compared by its Parse class name, so `"User.reset"` and `"_User.reset"` name the same method (likewise `Role`, `Session`, and `Installation`), whichever spelling the entry or the `call_method` caller uses. An entry may also name the model by its Ruby constant (`"Artist.purge"` for `class Artist < Parse::Object; parse_class "Musician"; end`), which is compared by its Parse class name too. A qualified entry whose class resolves to no loaded model warns at construction and is matched by its class part as written. Before 5.8.1 an entry was matched against the raw string the caller passed, so `methods: { except: ["_User.reset"] }` could be bypassed by calling it on `"User"`.
 
 The filter **narrows declared methods** — it cannot expose a method that was not declared via the `agent_method` DSL, and it cannot bypass tier checks (`agent_can_call?`) or env-gates (`PARSE_AGENT_ALLOW_WRITE_TOOLS`, `PARSE_AGENT_ALLOW_SCHEMA_OPS`). A filtered-out invocation returns `error_code: :tool_filtered`.
 
@@ -1714,7 +1723,7 @@ Parse::Agent.new(classes: { only: [Pots] }, strict_class_filter: true)  # per-in
 
 `except:` is never validated — an operator may proactively block a class not yet loaded.
 
-**Sub-agent inheritance: intersect, never widen.** Unlike `tools:` (where a sub-agent's filter overrides the parent's outright), `classes:` is **intersected** with the parent's effective set so a sub-agent can NEVER widen the parent's data reach. A child `only:` that has no overlap with the parent's `only:` raises `ArgumentError` at construction. A child that omits `classes:` inherits the parent's filter verbatim. `except:` sets are unioned (a sub-agent cannot un-deny a class the parent denied). The asymmetry with `tools:` is intentional — class reach is data scope, closer to `permissions:` than to the UX-scoping `tools:` filter.
+**Sub-agent inheritance: intersect, never widen.** Like `tools:` and `methods:`, `classes:` is **intersected** with the parent's effective set so a sub-agent can NEVER widen the parent's data reach. A child `only:` that has no overlap with the parent's `only:` raises `ArgumentError` at construction. A child that omits `classes:` inherits the parent's filter verbatim. `except:` sets are unioned (a sub-agent cannot un-deny a class the parent denied).
 
 **Schema-catalog filtering.** `get_all_schemas` omits classes outside the per-agent allowlist from the catalog response so the LLM doesn't waste a tool call discovering classes it would be refused on.
 
@@ -1793,6 +1802,7 @@ Parse::Agent::Tools.register(
 | `session_token` | Yes (security-critical) | Without it, a session-token parent silently produces a master-key sub-agent — the constructor default is `nil`, which means master-key mode. This was the v4.2 advisor-flagged blocker; do not undo. |
 | `acl_user` (v4.4.0) | Yes (security-critical) | When the parent was constructed with `acl_user:` and the child supplies none of `session_token:` / `acl_user:` / `acl_role:`, the parent's identity inherits verbatim. Inheritance is conditional on the child supplying NO identity at all — explicit overrides on the child resolve normally and then face the subset check below. |
 | `acl_role` (v4.4.0) | Yes (security-critical) | Same rule as `acl_user`. A child that omits identity inherits the parent's role scope; one that supplies its own identity falls through to the subset check. |
+| `master_atlas` | Yes (security-critical) | `nil` inherits the parent's setting and `false` drops it. `true` is accepted only when the parent has it: since 5.8.1 a sub-agent of a parent without `master_atlas` raises `ArgumentError`, because master-key faceting would return every row's buckets and results under the parent's scoped identity. |
 | `tenant_id` | Yes (security-critical) | Without it, a tenant-bound parent produces an unbound sub-agent that escapes `agent_tenant_scope` rules. |
 | `recursion_depth` | Always (decremented) | The parent's budget is authoritative — the explicit `recursion_depth:` kwarg is ignored on inherited construction. |
 
@@ -1802,7 +1812,8 @@ Parse::Agent::Tools.register(
 |-------|---------|
 | `permissions` | The default of `:readonly` means `Parse::Agent.new(parent: write_agent)` produces a `:readonly` sub-agent. A sub-agent is at most as privileged as the parent by tier; this is enforced by a clamp check at construction, not by inheritance. An explicit override is accepted only if `≤ parent.permissions` — `Parse::Agent.new(parent: readonly_parent, permissions: :admin)` raises `ArgumentError`. Pass `permissions: parent.permissions` to maintain parity intentionally. |
 | `client` | The constructor default `:default` resolves to the same client in standard single-app deployments. Explicit passes through. |
-| `tools:` / `methods:` filters | The whole point of constructing a sub-agent is usually to give it a NARROWER surface. Explicit passes through. |
+
+**`tools:` and `methods:` narrow only (5.8.1).** A sub-agent's `tools:` and `methods:` filters can only remove from what its parent allows. A child `tools: { only: }` is intersected with the parent's allowlist and `except:` sets are unioned; a child that omits `tools:` inherits the parent's filter. For `methods:`, the parent's filters stay in force alongside the child's, so a call must pass every one (entries may be bare or `Class.method`, which plain set intersection would match wrongly). A child `only:` list with nothing its parent allows (after the parent's allowlist and `except:` lists apply) raises `ArgumentError` at construction; an explicitly empty `only: []` is the strictest narrowing and is accepted. Before 5.8.1 a child's filter replaced the parent's, so a sub-agent could enable a tool or agent method within its tier that the parent was not given.
 
 **The clamp invariant:** `sub.permissions ≤ parent.permissions` always holds. The default `:readonly` is always safe regardless of parent tier; only explicit overrides hit the clamp check, and overrides that exceed the parent's tier raise at construction. This is the structural guarantee that a `delegate_to_subagent` chain cannot escape the parent's tier through sub-agent construction — the only path to a more-privileged agent is at the MCP factory, where the explicit elevation is auditable.
 
@@ -2785,6 +2796,7 @@ Every tool call dispatched through `Agent#execute` fires the `"parse.agent.tool_
 | `:tools_except` | Array<Symbol> | v4.3.0+ — when the agent was constructed with `tools: { except: [...] }`. |
 | `:methods_only` | Array<String> | v4.3.0+ — when the agent was constructed with `methods: { only: [...] }`. Bare names and `"Class.method"` qualified names mix. |
 | `:methods_except` | Array<String> | v4.3.0+ — when the agent was constructed with `methods: { except: [...] }`. |
+| `:methods_layers` | Array<Hash> | 5.8.1+, sub-agents that inherit at least one `methods:` filter (including a single parent layer when the sub-agent has none of its own). Every `methods:` filter in force, parent layers first and the agent's own last, each `{only:, except:}` with sorted name strings (nil when absent). `:methods_only` / `:methods_except` describe only the agent's own layer. `describe[:methods][:layers]` carries the same list. |
 | `:filters` | Hash<String,Array<String>> | v4.4.0+ — when the agent was constructed with `filters: {...}`. Maps each filtered class name (or `"default"`) to the list of FIELD NAMES the filter constrains. Filter VALUES are intentionally NOT echoed — `filters: { Account => { user_id: "abc123" } }` would otherwise emit the user-identifying value on every audit-log line. Subscribers that need the actual constraint can call `agent.filter_for(class_name)` directly. |
 | `:denial_kind` | Symbol | v4.3.0+, AccessDenied failure path only — one of `:hidden_class` (global `agent_hidden`), `:class_filter` (per-agent `classes:` narrowing), `:field_denied` (outside `agent_fields`), or `:storage_form_field_ref` (referenced `_p_*` pointer-storage column). Lets SOC tooling distinguish operator narrowing from policy-level denials without parsing the message prose. |
 

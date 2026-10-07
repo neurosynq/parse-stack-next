@@ -1,5 +1,323 @@
 ## parse-stack-next Changelog
 
+### 5.8.1
+
+A correctness release for webhooks, sessions, associations, queries, search,
+and agent policies. No new defaults and no API changes; every corrected
+outcome is listed under Behavior Notes.
+
+#### Webhooks
+
+- **FIXED**: A client create through a `before_save` webhook whose handler
+  returns `parse_object` now gets the ACL its class policy resolves, exactly
+  as an SDK-side create would. Owner-based policies (`:owner_else_private`,
+  the default, plus `:owner_else_public` and `:owner_but_public_read`) take the
+  owner from the declared `owner:` field, or from the requesting user when that
+  field is empty. Before, a signed-in client got the policy's no-owner
+  fallback (`{}` under `:owner_else_private`) and could not read its own
+  record. A request without a user, or a master-key request, gets the policy
+  fallback. A `_User` class declared with `owner: :self` is owned by the new
+  user, never the requester. An ACL the client sent is kept, and an ACL the
+  handler sets always wins (through `acl=` or mass assignment), even when it
+  equals the class default. A `guard :acl, :master_only` revert on a create
+  returns the ACL to the class policy instead of `{}`. A handler-assigned ACL
+  is written whatever the handler returns (`parse_object`, `true`, `nil`, or
+  a Hash that does not set `ACL` itself).
+- **FIXED**: When a `before_save` handler changes a record, a sub-document the
+  client changed is written back as one-level dotted paths (`"meta.count":
+  {...}`) instead of the whole field, so concurrent writes to other sub-keys
+  survive. A removed sub-key is written as a `Delete`. Dotted keys in a
+  returned Hash are folded into the field or `field.sub` write they belong to,
+  with operators (`Increment`, `Add`, `AddUnique`, `Remove`, `Delete`) applied
+  rather than stored. Hash keys may use Ruby names.
+
+#### Sessions and master-key scope
+
+- **FIXED**: Deleting `Parse::Session` or `Parse::User` objects, one at a time
+  or with a batch `Array#destroy`, drops their identity-cache entries when the
+  delete succeeds or reports the row already gone. A denied delete leaves the
+  cache alone. A session that does not carry its token or owner (built from
+  its objectId alone, fetched without the master key, or fetched with `keys:`
+  leaving them out) has them looked up first, in one query per batch: with the
+  master key when the client has one, otherwise with the delete's `session:`.
+  A lookup that finds no row leaves nothing to forget; only a lookup that
+  fails resets the client's identity cache, at most once every 5 seconds per
+  client. When the lookup finds no row, the delete uses the owner recorded
+  when a `_Session` query or `Parse::Session.session` last fetched that
+  session through the same client (only the user id, never the token, in a
+  store separate from the identity plane,
+  `client.authorization.session_owner_cache`). Without one, a batch delete
+  that applied or reported the row gone falls back to the rate-limited reset;
+  a denied delete never resets, and a single `destroy` never resets. The
+  looked-up token is used only for the delete, is never kept on the object,
+  and never enters the response cache. A token resolution in flight when an
+  invalidation lands, in this process or, on the Redis identity plane, in any
+  other, does not cache its answer: the resolver checks a shared invalidation
+  marker before and after writing and evicts its own write when the marker
+  moved.
+- **FIXED**: `Parse::User#signup!`, signup on save, and `upgrade_anonymous!`
+  store `created_at` / `updated_at` as `Parse::Date` values. Reading
+  `updated_at` on a newly signed-up user no longer marks it dirty.
+- **FIXED**: Inside `Parse.without_master_key`, an explicit `master: true`
+  passed to `Parse::MongoDB.aggregate`, `Parse::ACLScope`, `Parse::Query`
+  direct reads, vector and hybrid search, Atlas Search, or agent tools for
+  master-key agents no longer runs as master. The call runs in the public
+  scope, as the REST request does once the block strips its master key, and
+  the `parse.mongodb.aggregate` notification reports `master_dropped: true`.
+  The SDK's own metadata reads keep the master key without lifting the block:
+  the class schema and role graph read to enforce a scope, index statistics,
+  and the Atlas Search index listing. Before, a schema read refused inside the
+  block was cached and denied every scoped mongo-direct read of that class,
+  for all callers, for 5 seconds. `Parse::AtlasSearch.faceted_search` raises
+  `FacetedSearchNotACLSafe` inside the block, because its bucket counts are
+  not ACL-filtered. The metadata marker rides only on the outgoing request
+  copy, never on `response.request` or an error's request. A schema read that
+  fails inside the block is retried at most every 2 seconds there. A LiveQuery
+  admin client that first connected inside the block keeps withholding its
+  master key on every reconnect until `allow_master_key_connection!`.
+
+#### Agent policies
+
+- **FIXED**: A sub-agent's `tools:` and `methods:` filters now only narrow its
+  parent's, as `classes:` already did. A child `tools: { only: }` is
+  intersected with the parent's allowlist and `except:` sets are unioned; for
+  `methods:` the parent's filters stay in force alongside the child's. Before,
+  the child's filter replaced the parent's, so a sub-agent could enable a tool
+  or `agent_method` within its tier that the parent was not given. A child
+  `only:` list with nothing its parent allows raises `ArgumentError` at
+  construction.
+- **FIXED**: A sub-agent built with `parent:` uses its parent's approval gate,
+  read at call time, unless given its own. Before, it fell back to
+  `NullGate`, so a sub-agent built inside an MCP `tools/call` ran tools in
+  `require_approval_for` tiers without approval.
+- **FIXED**: Qualified `methods:` entries compare the class by its Parse class
+  name, so `"User.x"` and `"_User.x"` (and the `Role`, `Session`, and
+  `Installation` aliases) match whichever spelling the entry or the
+  `call_method` caller uses. Before, `methods: { except: ["_User.x"] }` could
+  be bypassed by calling the method on `"User"`.
+- **FIXED**: A sub-agent can no longer turn on `master_atlas` when its parent
+  does not have it. `Parse::Agent.new(parent: scoped_parent, master_atlas:
+  true)` raises `ArgumentError`; before, the child's `atlas_faceted_search` ran
+  with master-key semantics and returned every row under the parent's scoped
+  identity. Omitting `master_atlas` still inherits, and `false` still drops
+  it.
+- **FIXED**: The MCP dispatcher snapshots and restores an agent's own approval
+  gate, so driving a sub-agent through `tools/call` no longer pins its
+  parent's gate onto it. Assigning `approval_gate = nil` makes a sub-agent use
+  its parent's gate again.
+- **FIXED**: Qualified `methods:` entries may name a model by its Ruby
+  constant (`"Artist.purge"` for a class whose `parse_class` is `"Musician"`)
+  and are compared by Parse class name, so such an `except:` entry is no
+  longer bypassed through the Parse class name. An entry whose class resolves
+  to no loaded model warns at construction.
+- **IMPROVED**: The `parse.agent.tool_call` audit payload adds
+  `methods_layers` whenever a sub-agent inherits a `methods:` filter
+  (including a single parent layer), and `describe[:methods][:layers]` lists
+  every `methods:` filter in force, parent first.
+
+#### Associations
+
+- **FIXED**: `add!`, `add_unique!`, and `remove!` on a
+  `has_many through: :array` collection take the array Parse Server returns,
+  as plain array properties already did. A stale local copy is corrected,
+  objects already fetched locally are kept, and the field is not marked
+  changed. The array is adopted only when every entry is a pointer to the
+  declared class; otherwise the operation is applied locally.
+- **FIXED**: Saving a relation collection on its own (`owner.likes.save`)
+  sends the staged additions and removals and returns whether they were
+  applied. Before, it silently sent nothing.
+- **FIXED**: `Parse::Object#clear_changes!` (also called by `reload!`) drops
+  a relation's staged additions and removals and clears array collection
+  dirty state. Before, discarded relation changes were sent with the next
+  change to that relation. A fetch (`fetch!`, partial fetch, autofetch, with
+  or without `preserve_changes:`) keeps a relation's staged additions and
+  removals and leaves the relation marked changed, including when the response
+  carries the relation's descriptor, so the next save sends them.
+  `rollback!` drops a relation's staged additions and removals too, including
+  after a fetch.
+- **IMPROVED**: `RelationCollectionProxy#save` accepts `session:` to send the
+  staged operations as a given user (`nil` for no session token). Relation
+  writes on an owner whose objectId was assigned client-side during a create
+  are staged rather than sent until the create returns.
+- **FIXED**: Atomic relation operations (`add!` / `remove!` on a
+  `through: :relation` collection) write to the relation's Parse column when
+  its name differs from the Ruby name (`has_many :liked_items` maps to
+  `likedItems`, or a relation declared with `field:`). Before, they targeted
+  the Ruby name.
+
+#### Queries
+
+- **FIXED**: An OR whose branch has no constraints now matches every row.
+  Previously `query | Model.query` and `Parse::Query.or(query, Model.query)`
+  dropped that branch and returned only the other side. An empty receiver of
+  `|` still starts a new OR, as `or_where` does, so
+  `[q1, q2].reduce(Model.query, :|)` builds `q1 OR q2`.
+- **FIXED**: `Model.query(:or => [{...}, {...}])` builds a `$or` group ANDed
+  with the query's other constraints, instead of a constraint on a literal
+  field named `or`. Branches can be constraint hashes, `Parse::Query` objects
+  of the same class, or arrays of constraints.
+- **FIXED**: A constraint that needs the aggregation pipeline or mongo-direct
+  (`readable_by`, `:ACL.readable_by`, `:field.array_size`, the mongo-direct geo
+  operators) raises `ArgumentError` inside an OR (`:or`, `or_where`, `|`,
+  `Parse::Query.or`). Before, the branch was emitted as `{}` and matched every
+  row, or lost part of its conditions, including in push targeting, which
+  could reach every installation.
+- **FIXED**: `Parse::Query#clone`, `|`, `or_where`, `Parse::Query.or`, `:or`
+  branches (including Hash branches with `session:` / `use_master_key:` keys
+  or nested scoped queries), and subqueries (`$inQuery`, `$notInQuery`,
+  `$select`, `$dontSelect`) keep the query's authority and application:
+  session token, a session-bound client from `Parse::Client#become`, scoped
+  user or role, master-key flag, read preference, and the Parse application
+  the query targets. Queries combined this way must run under the same
+  authority against the same application. An unscoped query takes the
+  other's authority, and different authorities or applications raise
+  `ArgumentError`. Before, a session combined with `scope_to_user` ran as the
+  scoped user, a `become`-client query composed into an OR ran as the master
+  key, a scoped subquery ran under the outer query's master key, and a clone
+  could send one application's session token to the default application.
+  Changing the authority or client of a combined query raises and leaves the
+  query unchanged. A combined query re-checks its authority before it runs,
+  and explicit auth passed to `results_direct`, `count_direct`,
+  `distinct_direct`, or `atlas_search` must match it.
+- **FIXED**: LiveQuery subscriptions and push targeting refuse constraints that
+  only the aggregation pipeline or mongo-direct can run (`array_size`,
+  `set_equals`, `not_empty`, `elem_match`, `readable_by`, mongo-direct geo
+  operators). Before, those constraints were dropped and the subscription or
+  push reached a wider audience. A subquery with such a constraint is also
+  refused, where it used to match every row. `Parse::Query#subscribe` and
+  `client.subscribe(query)` run under the query's own session or `become`
+  client, and such a subscription is refused with `ArgumentError` when the
+  LiveQuery client targets a different Parse application id than the query,
+  so one application's session token is never sent to another application's
+  LiveQuery server.
+- **FIXED**: A field repeated in `order` is sent once, at its first position
+  with the last direction given, matching what MongoDB applies on direct
+  reads. String forms such as `"-title"` are parsed as descending, so they
+  deduplicate too, and the direct `$sort` stage sorts on the real field.
+  `order("title,-plays")` is parsed as two fields.
+- **FIXED**: A bare objectId compared to a declared pointer field
+  (`Song.query(:artist => "abc123")`, `:artist.ne`, `:artist.in`) now matches
+  on REST, in `Parse::Push` targeting, and in LiveQuery subscriptions from
+  `Parse::Query#subscribe`, `Model.subscribe`, and `client.subscribe(query)`.
+  Equality and `$in` used to return no rows and `$ne` every row, while direct
+  and aggregate reads already matched. The new
+  `Parse::Query#compile_rest_where` returns the where clause in that form.
+
+#### Search
+
+- **FIXED**: Atlas Search (`Parse::AtlasSearch.search`, `search_with_stage`,
+  `autocomplete`, `Parse::Query#atlas_search`) and native hybrid search apply
+  the CLP `pointerFields` / `readUserFields` ownership constraint before the
+  page is cut. For native hybrid, the lexical input filters before its
+  per-input `$limit`, and the fused result is filtered again before the final
+  `$limit`. Rows used to be filtered after the page was cut, so when the
+  top-ranked hits belonged to other users a scoped caller got a short or empty
+  page. Inaccessible rows are still never returned.
+- **IMPROVED**: `Parse::VectorSearch.search` and native hybrid search enforce
+  the `pointerFields` ownership constraint server-side across the whole
+  candidate window. When every owner field is declared as a scalar pointer
+  (`belongs_to`) and its storage path (`_p_<field>`) is a `type: "filter"`
+  field of the vectorSearch index, the constraint also goes
+  into `$vectorSearch.filter`, so other users' rows no longer use up the
+  candidate window. The prefilter is used only while the index is READY and
+  serving its latest definition. If Atlas refuses it (for example mid-rebuild),
+  the search reruns once without it and skips it for the index cache TTL. A
+  failed index lookup is also remembered for that TTL.
+
+- **FIXED**: A `$vectorSearch` refusal caused by the caller's own
+  `vector_filter` on an unindexed path no longer switches off the owner
+  prefilter for every caller on that index or clears the index cache; only a
+  refusal naming an owner `_p_<field>` path does. Native hybrid search uses
+  `Parse::VectorSearch.default_index` when the vector branch names no index.
+
+#### Documentation
+
+- **FIXED**: README and query YARD examples use `:field.pointer_id` and
+  `:field.array_size`, the names the DSL has used since 5.8.0.
+
+#### Behavior Notes
+
+- An OR that includes an unconstrained branch now returns every row. The one
+  exception is an empty receiver of `|`, which starts the OR. Code that passed
+  an empty query for "no filter" should leave that branch out. `:or => []`
+  matches no rows.
+- A pipeline-only constraint inside an OR now raises `ArgumentError`. Apply it
+  outside the OR, or run the branches as separate queries.
+- Combining queries that run under different authorities or against
+  different Parse applications now raises `ArgumentError`. That covers OR
+  composition, `:or` Hash branches, and subqueries, and includes different
+  session tokens, a session against `scope_to_user` / `scope_to_role` / the
+  master key, and different scoped users or roles. Setting a new session
+  token, master-key flag, scope, or client on a query that took its authority
+  from another query also raises, as does passing different explicit auth to
+  a direct or Atlas terminal. Query-shaping options (`limit`, `order`, `keys`,
+  `skip`, `include`) inside an `:or` branch raise.
+- LiveQuery subscriptions, push targeting, and subqueries with pipeline-only
+  constraints raise `ArgumentError`. Subscribing to a `scope_to_user` /
+  `scope_to_role` query, or passing a `session_token:` that differs from the
+  query's session, raises.
+- REST queries, LiveQuery subscriptions, and push targeting that compare a
+  bare objectId to a declared pointer field now return the matching rows.
+  Undeclared fields are unchanged. If a model declares `belongs_to` for a
+  field whose server column holds a plain String, a bare string compared to
+  that field is now sent as a Pointer and stops matching those values;
+  declare such a field as a `:string` property instead.
+- Code that relied on `master: true` keeping master authority inside
+  `Parse.without_master_key` should wrap that call in `Parse.with_master_key`.
+  A dropped `master: true` raises `ACLRequired` under either
+  `Parse::ACLScope.require_session_token` or
+  `Parse::AtlasSearch.require_session_token`, with a message naming the block,
+  and no longer emits the no-ACL banner. The role-graph helpers
+  (`users_in_role_subtree` and related) raise `ACLRequired` for
+  `master: true` inside the block; pass `as:` instead.
+- A LiveQuery connection that already connected with the master key outside
+  `Parse.without_master_key` stays elevated for subscriptions made inside the
+  block, because Parse Server authorizes per connection; the SDK warns.
+- `Parse.without_master_key` guards against accidental master-key use and is
+  not an isolation boundary.
+- `Parse::Role.all_for_user` and `Parse::Role#all_parent_role_names` without
+  `master:` or `as:` return the full role closure inside
+  `Parse.without_master_key`, because the role graph is read as SDK metadata.
+- `Parse::Session._preload_identity_for_destroy!` and the
+  `_after_batch_destroy` hooks are now private.
+- A session deleted elsewhere whose owner this process never recorded keeps
+  resolving until the next rate-limited reset or `identity_cache_ttl`.
+- A custom identity plane gets the cross-process revocation-race guarantee by
+  implementing `invalidation_nonce` and `bump_invalidation_nonce`, as the
+  built-in Redis plane does. One with generation counters only is covered for
+  single-token and per-user invalidations, but a lookup racing another
+  process's full reset is bounded by `identity_cache_ttl` when the plane's
+  `clear` also deletes its counters.
+- A sub-agent's `tools:` or `methods:` `only:` list that leaves nothing once
+  the parent's `only:` and `except:` lists apply now raises `ArgumentError`.
+  An explicitly empty `only: []` is accepted. A sub-agent passing
+  `master_atlas: true` under a parent without it raises `ArgumentError`.
+- Parse Server sends a `before_save` webhook only the resulting value of a
+  dotted operator. When the handler changes the record, the SDK writes back
+  changed sub-keys one level deep and deletes removed ones by path. Two
+  concurrent writes inside the same sub-key (including deeper paths under it)
+  can still overwrite each other, an array is written whole, and a changed
+  sub-key carrying a typed value (Date, Bytes, Pointer) makes the whole field
+  be written. A client's whole replace of a sub-document becomes a merge. The
+  save response reports the dotted keys; the JavaScript SDK applies them, and
+  other clients may need a fetch. A handler operator that cannot be folded,
+  or two conflicting dotted keys from the handler, fail the save with an
+  error.
+- A `before_save` handler that returns `true`, `nil`, or a Hash keeps the
+  client's write as sent, so a client create without an ACL through such a
+  handler is stored public read and write, as before, unless the handler
+  assigns an ACL on `parse_object`.
+- Saving a relation collection on its own sends removals and additions as two
+  requests. If the second fails, the first stays applied and the unsent
+  operations stay staged.
+- Owner fields stored as arrays of pointers, undeclared, or not filter-indexed
+  get no `$vectorSearch` prefilter. Vector search then fills results only from
+  its existing candidate window.
+- A custom identity cache with neither `invalidate_value` nor generation
+  support (`generation`, `generation_current?`, `bump_generation`) only
+  expires a user's tokens at `identity_cache_ttl` after a password change,
+  account deletion, `logout_all!`, or a batch destroy of sessions.
+
 ### 5.8.0
 
 #### Breaking Changes

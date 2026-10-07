@@ -1,0 +1,70 @@
+[
+  {
+    "$vectorSearch": {
+      "filter": {
+        "$and": [
+          {
+            "genre": "rock"
+          },
+          {
+            "_p_owner": {
+              "$eq": "_User$u_alice"
+            }
+          }
+        ]
+      },
+      "index": "song_vec",
+      "limit": 50,
+      "numCandidates": 100,
+      "path": "embedding",
+      "queryVector": [
+        0.1,
+        0.2,
+        0.3
+      ]
+    }
+  },
+  {
+    "$addFields": {
+      "_vscore": {
+        "$meta": "vectorSearchScore"
+      }
+    }
+  },
+  {
+    "$match": {
+      "$or": [
+        {
+          "_rperm": {
+            "$in": [
+              "*",
+              "u_alice"
+            ]
+          }
+        },
+        {
+          "_rperm": {
+            "$exists": false
+          }
+        }
+      ]
+    }
+  },
+  {
+    "$match": {
+      "$or": [
+        {
+          "_p_owner": "_User$u_alice"
+        },
+        {
+          "owner": {
+            "$elemMatch": {
+              "className": "_User",
+              "objectId": "u_alice"
+            }
+          }
+        }
+      ]
+    }
+  }
+]

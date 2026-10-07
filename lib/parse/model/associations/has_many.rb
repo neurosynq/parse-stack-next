@@ -555,6 +555,17 @@ module Parse
               warn "[#{self.class}] has_many :#{key} expected className=#{klassName.inspect}, ignoring incoming className=#{val[Parse::Model::KEY_CLASS_NAME].inspect}"
             end
             if val.is_a?(Hash) && val["__type"] == "Relation"
+              current = instance_variable_get(ivar)
+              # A server descriptor carries no membership. When the current
+              # proxy holds staged additions or removals (a fetch of a record
+              # with unsaved relation changes), keep it so they are not lost.
+              if track != true && current.is_a?(Parse::RelationCollectionProxy) &&
+                 current.staged_changes?
+                # The loaded list predates this fetch. Unload it so the next
+                # read queries the server and re-applies the staged changes.
+                current.reset! if current.loaded?
+                return current
+              end
               relation_objects = val["objects"] || []
               val = Parse::RelationCollectionProxy.new relation_objects, delegate: self, key: key, parse_class: klassName
             elsif val.is_a?(Hash) && val["__op"] == "AddRelation" && val["objects"].present?

@@ -1,4 +1,5 @@
 require_relative "../../test_helper"
+require_relative "../../support/webhook_global_state"
 require "minitest/autorun"
 require "stringio"
 
@@ -82,6 +83,7 @@ class WebhookHaltModel < Parse::Object
 end
 
 class WebhookCallbacksTest < Minitest::Test
+  include WebhookGlobalState
   def setup
     # Clear any existing webhook routes
     Parse::Webhooks.instance_variable_set(:@routes, nil)

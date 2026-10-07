@@ -1,4 +1,5 @@
 require_relative "../../test_helper"
+require_relative "../../support/webhook_global_state"
 require "minitest/autorun"
 
 # Verifies the value-returning semantics of registered webhook handler blocks.
@@ -9,6 +10,7 @@ require "minitest/autorun"
 # handler result. `raise` must still propagate untouched so before_save
 # rejections / `error!` keep working.
 class WebhookHandlerReturnTest < Minitest::Test
+  include WebhookGlobalState
   class HandlerReturnObject < Parse::Object
     property :name
 

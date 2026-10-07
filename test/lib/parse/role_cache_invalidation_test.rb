@@ -78,4 +78,26 @@ class RoleCacheInvalidationTest < Minitest::Test
     assert_equal 1, auth.all
   end
 
+  # Saving the relation proxy on its own goes through the atomic relation
+  # operations, so it invalidates too.
+  def test_relation_proxy_save_invalidates
+    role = Parse::Role.build({ "objectId" => "r1", "name" => "Editor",
+                               "createdAt" => "2026-01-01T00:00:00.000Z",
+                               "updatedAt" => "2026-01-01T00:00:00.000Z" }, "_Role")
+    role.define_singleton_method(:users_fetch!) { [] }
+    role.define_singleton_method(:roles_fetch!) { [] }
+    auth = FakeAuth.new
+    ok = Parse::Response.new({ "updatedAt" => "2026-01-02T00:00:00.000Z" })
+    role.client.stub(:authorization, auth) do
+      role.client.stub(:update_object, ->(*_a, **_k) { ok }) do
+        role.users.add(Parse::User.new(objectId: "u4"))
+        assert role.users.save
+        role.roles.add(Parse::Role.new(objectId: "r2", name: "V"))
+        assert role.roles.save
+      end
+    end
+    assert_equal ["u4"], auth.users
+    assert_equal 1, auth.all
+  end
+
 end

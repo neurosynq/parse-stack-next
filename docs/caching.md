@@ -358,6 +358,56 @@ Two behaviors to know before you rely on these:
   triggers depend on. The deprecated `Parse::AtlasSearch::Session.invalidate` /
   `.invalidate_user_roles` forms still work through 5.x: they delegate to the
   default client's context, so they can only ever address `Parse.client`.
+* A custom identity plane you write yourself needs `get`, `set`, and
+  `invalidate`. Revoking one token (logout, `Parse::Session#destroy` on a
+  session that carries its token) works with those alone. Revoking every token
+  of a user (password change, account deletion, `logout_all!`, destroying a
+  session fetched without its token, or a batch `Array#destroy` of sessions or
+  users) also needs either `invalidate_value(user_id)` or generation support
+  (`generation`, `generation_current?`, and `bump_generation`), because the
+  plane is keyed by token. A plane with neither keeps resolving
+  those tokens until their cached entries expire, so revocation there is
+  bounded by `identity_cache_ttl`, not immediate. Lower the TTL if that window
+  is too long.
+* A session or user delete drops its cached identity when the delete succeeds
+  or reports the row already gone ("object not found"); a denied delete leaves
+  the cache alone. A session fetched without its token is looked up first
+  (with the master key when the client has one, otherwise with the delete's
+  `session:`). When the lookup finds no row (the session is already gone or
+  not visible), the delete uses the owner recorded when a `_Session` query or
+  `Parse::Session.session` last fetched that session through the same client.
+  Only the owner's user id is recorded, never the token, for as long as an
+  identity entry lives. The records sit in their own store
+  (`client.authorization.session_owner_cache`, process-local by default, set
+  a shared store to share them), never in the identity plane, so no session
+  token can read one. With no
+  recorded owner, a batch delete that reports the row deleted or "object not
+  found" clears the client's identity and role cache, and so does a lookup
+  that fails outright. Either reset happens at most once every 5 seconds per
+  client, so an endpoint that deletes caller-supplied session ids cannot flush
+  a shared plane on every request. A single `destroy` cannot tell "already
+  gone" from "denied", so it uses the recorded owner but never resets. The
+  residual window is a session deleted elsewhere whose owner this process
+  never recorded: its cached token resolves until the next reset or until
+  `identity_cache_ttl`.
+* A token resolution that is in flight when an invalidation lands does not
+  cache its answer, so it cannot put a just-revoked token back. Every
+  invalidation moves a marker before it drops entries, and the resolver
+  checks the marker before writing and again after, evicting its own write
+  when it moved. On the Redis identity plane the marker is a random nonce
+  shared by every process, replaced on each invalidation, so this also holds
+  for invalidations made by other processes, including a full reset. A custom
+  plane gets the same cross-process guarantee by implementing
+  `invalidation_nonce` (return the current marker String, or nil when none is
+  set) and `bump_invalidation_nonce` (store and return a new random String).
+  A custom plane with generation support but no nonce shares a generation
+  counter instead. That covers single-token and per-user invalidations made
+  by other processes, but not a full reset if the plane's `clear` also deletes
+  its generation counters: the counter restarts at a value an in-flight
+  lookup may already hold, so a lookup racing another process's reset can
+  keep its answer until `identity_cache_ttl`. A plane with neither gets the
+  guarantee within one process only, and across processes it is bounded by
+  `identity_cache_ttl`.
 
 On a Redis outage these planes behave differently from the response cache.
 The response cache degrades to a passthrough request; the identity and role

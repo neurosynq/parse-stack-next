@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require_relative "../../test_helper"
+require_relative "../../support/webhook_global_state"
 require "minitest/autorun"
 
 # Unit-level (no Docker) guards for the webhook "run as the calling user"
@@ -18,6 +19,7 @@ require "minitest/autorun"
 # still pass while the token started flowing into logs -- these would fail.
 # Mirrors the off-Docker style of webhook_aftersave_payload_fidelity_test.rb.
 class WebhookSessionTokenCaptureTest < Minitest::Test
+  include WebhookGlobalState
   LIVE = "r:live-token-abc"
 
   # Build a beforeSave trigger payload the way Parse Server sends one: the

@@ -712,7 +712,7 @@ module Parse
 
       if response.success?
         result = response.result || {}
-        @updated_at = result["updatedAt"] || @updated_at
+        @updated_at = _server_date(result["updatedAt"]) || @updated_at
         # Parse Server may rotate the session token on a credential
         # change; apply it narrowly if present without going through the
         # full property writer chain.
@@ -826,8 +826,8 @@ module Parse
         # save-as-signup path had already addressed.
         result = response.result
         @id = result[Parse::Model::OBJECT_ID] || @id
-        @created_at = result["createdAt"] || @created_at
-        @updated_at = result["updatedAt"] || result["createdAt"] || @updated_at
+        @created_at = _server_date(result["createdAt"]) || @created_at
+        @updated_at = _server_date(result["updatedAt"] || result["createdAt"]) || @updated_at
         set_attributes!(result.slice(*SIGNUP_RESPONSE_APPLY_KEYS))
         # Drop the plaintext password from memory now that the server
         # has it hashed and we no longer need it. Matches the Parse JS
@@ -956,19 +956,40 @@ module Parse
       result
     end
 
-    # Deletes the user. On success every cached identity entry for the user
-    # is dropped from this client's identity plane, since Parse Server
-    # removes the user's sessions with the account.
+    # Deletes the user. Every cached identity entry for the user is dropped
+    # from this client's identity plane, since Parse Server removes the
+    # user's sessions with the account. The entries are dropped when the
+    # delete returns, successful or not (a failure is usually "object not
+    # found": the account is already gone or not visible to the caller, and
+    # dropping cached entries is idempotent). A delete that raises leaves
+    # them alone.
     # @param session [String] (see Parse::Object#destroy)
     # @return [Boolean] whether the operation was successful.
     def destroy(session: nil)
       user_id = id
-      success = super
-      if success && client.respond_to?(:invalidate_user_identity)
-        client.invalidate_user_identity(user_id)
+      result = super
+      begin
+        client.invalidate_user_identity(user_id) if user_id.present? && client.respond_to?(:invalidate_user_identity)
+      rescue StandardError
+        # Never replace the delete's own outcome.
+        nil
       end
-      success
+      result
     end
+
+    # Called by `Array#destroy` for each user in the batch with its
+    # response. Drops the user's identity entries, as {#destroy} does, when
+    # the delete succeeded or the row is already gone; a denied delete
+    # leaves them alone.
+    # @!visibility private
+    def _after_batch_destroy(response = nil)
+      applied = response.nil? ||
+                (response.respond_to?(:success?) && response.success?) ||
+                (response.respond_to?(:object_not_found?) && response.object_not_found?)
+      return unless applied
+      client.invalidate_user_identity(id) if id.present? && client.respond_to?(:invalidate_user_identity)
+    end
+    private :_after_batch_destroy
 
     # Invalid the current session token for this logged in user.
     # @return [Boolean] True/false if successful
@@ -1729,8 +1750,8 @@ module Parse
         unless res.error?
           result = res.result
           @id = result[Parse::Model::OBJECT_ID] || @id
-          @created_at = result["createdAt"] || @created_at
-          @updated_at = result["updatedAt"] || result["createdAt"] || @updated_at
+          @created_at = _server_date(result["createdAt"]) || @created_at
+          @updated_at = _server_date(result["updatedAt"] || result["createdAt"]) || @updated_at
           # Plaintext password is no longer needed locally; the server
           # has it hashed. Direct ivar assignment avoids re-dirtying the
           # field.

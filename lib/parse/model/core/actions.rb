@@ -554,7 +554,13 @@ module Parse
 
                   # Apply any additional attributes returned by beforeSave hooks.
                   obj.set_attributes!(result) if obj.respond_to?(:set_attributes!)
-                  obj.send(:clear_changes!) if obj.respond_to?(:clear_changes!, true)
+                  # The transaction carried the record's relation ops too, so
+                  # settle them as a save does rather than discarding them.
+                  if obj.respond_to?(:changes_applied!, true)
+                    obj.send(:changes_applied!)
+                  elsif obj.respond_to?(:clear_changes!, true)
+                    obj.send(:clear_changes!)
+                  end
                 end
 
                 return responses
@@ -1108,6 +1114,8 @@ module Parse
       # @param op_hash [Hash] The operation hash. It may also be of type {Parse::RelationAction}.
       # @return [Boolean] whether the operation was successful.
       def operate_field!(field, op_hash)
+        # A reply from an earlier operation must never be read as this one's.
+        @_last_operation_result = nil
         field = field.to_sym
         field = self.field_map[field] || field
         if op_hash.is_a?(Parse::RelationAction)
@@ -1132,9 +1140,12 @@ module Parse
 
       # @!visibility private
       # The value Parse Server returned for `field` from the last
-      # {#operate_field!}, or nil when the reply did not include it.
+      # {#operate_field!}, or nil when the reply did not include it. The
+      # reply is read once: it is forgotten here so a later read cannot
+      # pick up a stale value.
       def _last_operation_value(field)
         result = @_last_operation_result
+        @_last_operation_result = nil
         return nil unless result.is_a?(Hash)
         wire = (self.field_map[field.to_sym] || field).to_s
         result[wire]
@@ -1198,7 +1209,9 @@ module Parse
       def op_add_relation!(field, objects = [])
         objects = [objects] unless objects.is_a?(Array)
         return false if objects.empty?
-        relation_action = Parse::RelationAction.new(field, polarity: true, objects: objects)
+        # The operation is keyed by the remote column, as a save sends it.
+        remote_field = self.field_map[field.to_sym] || field
+        relation_action = Parse::RelationAction.new(remote_field, polarity: true, objects: objects)
         operate_field! field, relation_action
       end
 
@@ -1210,7 +1223,9 @@ module Parse
       def op_remove_relation!(field, objects = [])
         objects = [objects] unless objects.is_a?(Array)
         return false if objects.empty?
-        relation_action = Parse::RelationAction.new(field, polarity: false, objects: objects)
+        # The operation is keyed by the remote column, as a save sends it.
+        remote_field = self.field_map[field.to_sym] || field
+        relation_action = Parse::RelationAction.new(remote_field, polarity: false, objects: objects)
         operate_field! field, relation_action
       end
 

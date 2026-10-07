@@ -1,8 +1,10 @@
 require_relative "../../test_helper"
+require_relative "../../support/webhook_global_state"
 
 # Tests the Rack-level Parse::Webhooks#call! entry point, in particular the
 # 3.4.0 fail-closed default when no webhook key is configured.
 class WebhookRackCallTest < Minitest::Test
+  include WebhookGlobalState
   WEBHOOK_HEADER = "HTTP_X_PARSE_WEBHOOK_KEY"
 
   # Real model so an after_save route's call_route can build the parse object.

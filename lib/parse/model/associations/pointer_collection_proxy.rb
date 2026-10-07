@@ -190,6 +190,42 @@ module Parse
       end
     end
 
+    # The server returns the field's array as pointer hashes. Each entry
+    # becomes an object of the declared class, reusing the local object with
+    # the same id so fetched data is kept. The array is adopted only when
+    # the declared class is a registered model and every entry is a pointer
+    # to that class; anything else (another class, a bare string, a value
+    # that is not a pointer) makes the operation apply locally instead,
+    # rather than relabeling the entry as the declared class.
+    # @return [Array<Parse::Pointer>, nil]
+    def adopt_server_items(value)
+      return nil if @parse_class.blank? || Parse::Model.find_class(@parse_class).nil?
+      local_by_id = {}
+      collection.to_a.each do |item|
+        id = item.respond_to?(:id) ? item.id : nil
+        local_by_id[id] ||= item if id.present?
+      end
+      value.map do |entry|
+        class_name, object_id = server_pointer_parts(entry)
+        return nil unless object_id.is_a?(String) && object_id.present?
+        return nil unless Parse::Model.same_parse_class?(class_name, @parse_class)
+        local_by_id[object_id] || typecast_item(entry) || (return nil)
+      end
+    end
+
+    # @return [Array(String, String), nil] the className and objectId of a
+    #   pointer entry from a server reply, or nil when it is not a pointer.
+    def server_pointer_parts(entry)
+      case entry
+      when Parse::Pointer
+        [entry.parse_class, entry.id]
+      when Hash
+        type = entry["__type"] || entry[:__type]
+        return nil unless %w[Pointer Object].include?(type.to_s)
+        [entry["className"] || entry[:className], entry["objectId"] || entry[:objectId]]
+      end
+    end
+
     # @return [Parse::Pointer, nil] the item as a Parse object, or nil.
     def typecast_item(item)
       case item

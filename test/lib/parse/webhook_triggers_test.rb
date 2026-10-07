@@ -1,4 +1,5 @@
 require_relative "../../test_helper"
+require_relative "../../support/webhook_global_state"
 require "minitest/autorun"
 
 # Test class for webhook testing
@@ -12,6 +13,7 @@ class TestObject < Parse::Object
 end
 
 class WebhookTriggersTest < Minitest::Test
+  include WebhookGlobalState
   def setup
     # Clear any existing webhook routes
     Parse::Webhooks.instance_variable_set(:@routes, nil)

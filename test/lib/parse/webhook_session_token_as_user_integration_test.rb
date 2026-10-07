@@ -1,4 +1,5 @@
 require_relative "../../test_helper_integration"
+require_relative "../../support/webhook_global_state"
 require_relative "../../support/webhook_test_server"
 require "securerandom"
 
@@ -91,6 +92,7 @@ module WebhookSessionTokenSetup
 end
 
 class WebhookSessionTokenAsUserIntegrationTest < Minitest::Test
+  include WebhookGlobalState
   include ParseStackIntegrationTest
   prepend WebhookSessionTokenSetup
 

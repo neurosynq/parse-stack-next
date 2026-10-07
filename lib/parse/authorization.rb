@@ -116,6 +116,49 @@ module Parse
       end
     end
 
+    # Process-local record of session objectId to owning user id, kept apart
+    # from the identity plane so no session token can ever read a record.
+    # Entries expire after `ttl` and the map holds at most {MAX_ENTRIES},
+    # dropping the oldest first. Values are stored typed
+    # (`{"session_owner" => user_id}`) so a shared store passed in its place
+    # cannot confuse a record with an identity entry either.
+    class SessionOwnerMap
+      MAX_ENTRIES = 10_000
+
+      def initialize
+        @data = {}
+        @mutex = Mutex.new
+      end
+
+      def get(key)
+        @mutex.synchronize do
+          entry = @data[key]
+          return nil if entry.nil?
+          if entry[:expires_at] < Time.now
+            @data.delete(key)
+            return nil
+          end
+          entry[:value]
+        end
+      end
+
+      def set(key, value, ttl:)
+        @mutex.synchronize do
+          @data.delete(key)
+          @data[key] = { value: value, expires_at: Time.now + ttl }
+          @data.shift while @data.size > MAX_ENTRIES
+        end
+      end
+
+      def invalidate(key)
+        @mutex.synchronize { @data.delete(key) }
+      end
+
+      def clear
+        @mutex.synchronize { @data.clear }
+      end
+    end
+
     # The outcome of resolving a caller. `user_id` is the `_User.objectId`
     # owning the session, or `nil` for an anonymous caller. `role_names` is a
     # `Set` of bare role names (no `role:` prefix) the user inherits
@@ -189,7 +232,25 @@ module Parse
         @role_cache_ttl = DEFAULT_ROLE_TTL
         @upstream_role_reader = nil
         @compare_upstream_roles = false
+        # Bumped by every invalidation. A token resolution captures it before
+        # calling `/users/me` and does not cache its answer when it moved, so
+        # a resolve already in flight when a session is revoked cannot put
+        # the revoked token back into the plane. A generation-capable plane
+        # (the shared Redis identity plane) keeps a plane-wide counter too,
+        # so the same holds across processes. See {#lookup_user_id}.
+        @invalidation_epoch = 0
+        @epoch_mutex = Mutex.new
+        @session_owner_cache = SessionOwnerMap.new
       end
+
+      # Where {#remember_session_owner} records which user owns a session
+      # objectId. A separate store from the identity plane, so a session
+      # token can never read a record. Defaults to a process-local
+      # {SessionOwnerMap}; set a shared store (anything with `get`, `set`
+      # with `ttl:`, `invalidate`, and `clear`) to share records across
+      # processes.
+      # @return [Object]
+      attr_accessor :session_owner_cache
 
       # Apply settings, leaving anything not passed unchanged.
       # @return [self]
@@ -246,6 +307,7 @@ module Parse
       # @param session_token [String]
       def invalidate(session_token)
         return if session_token.nil?
+        bump_invalidation_epoch!
         @identity_cache.invalidate(session_token.to_s)
       end
 
@@ -268,6 +330,7 @@ module Parse
       def invalidate_user(user_id)
         return if user_id.nil? || user_id.to_s.empty?
         uid = user_id.to_s
+        bump_invalidation_epoch!
         cache = @identity_cache
         if generation_capable?(cache) && cache.respond_to?(:bump_generation)
           cache.bump_generation(uid)
@@ -294,8 +357,42 @@ module Parse
 
       # Drop every entry in both planes.
       def reset_caches!
+        bump_invalidation_epoch!
         @identity_cache.clear if @identity_cache.respond_to?(:clear)
         @role_cache.clear if @role_cache.respond_to?(:clear)
+        # A plane clear takes the plane-wide marker with it. Bump it again so
+        # it does not sit at a value a lookup that started before the reset
+        # could have captured.
+        bump_plane_epoch!
+      end
+
+      # Record which user owns a session objectId, so a later delete of that
+      # session can drop the owner's cached identities even when the delete
+      # can no longer read the session row (it is already gone, or not
+      # visible to the caller). Only the owner's user id is stored, never the
+      # token. Called when a `_Session` row with both is loaded from the
+      # server. The entry lives as long as an identity entry.
+      # @param session_id [String]
+      # @param user_id [String]
+      # @return [void]
+      def remember_session_owner(session_id, user_id)
+        return if session_id.to_s.empty? || user_id.to_s.empty?
+        @session_owner_cache.set(session_id.to_s, { "session_owner" => user_id.to_s }, ttl: @identity_cache_ttl)
+        nil
+      rescue StandardError
+        nil
+      end
+
+      # The owner recorded by {#remember_session_owner}, or nil.
+      # @param session_id [String]
+      # @return [String, nil]
+      def session_owner(session_id)
+        return nil if session_id.to_s.empty?
+        value = @session_owner_cache.get(session_id.to_s)
+        owner = value.is_a?(Hash) ? value["session_owner"] : nil
+        owner.is_a?(String) && !owner.empty? ? owner : nil
+      rescue StandardError
+        nil
       end
 
       def inspect
@@ -314,6 +411,14 @@ module Parse
         cached = cached_user_id(session_token)
         return cached unless cached.nil?
 
+        # Captured before `/users/me`: an invalidation that lands while the
+        # lookup is in flight must win over the answer it returns. The plane
+        # marker is created first if a clear removed it, so the snapshot
+        # never holds "no marker", which a concurrent reset also produces.
+        ensure_plane_marker!
+        snapshot = invalidation_snapshot
+        prior_uid, prior_gen = prior_generation(session_token)
+
         response = begin
             # cache: false: a revoked or expired token must not re-resolve
             # from a cached /users/me response after its identity entry is
@@ -331,8 +436,134 @@ module Parse
         raise InvalidSession, "session token resolved no user objectId" if user_id.nil? || user_id.to_s.empty?
 
         user_id = user_id.to_s
-        store_user_id(session_token, user_id)
+        # A stale entry for the same user tells us its generation from
+        # before the lookup; storing under it lets a bump made across
+        # processes during the lookup still reject the entry.
+        store_unless_invalidated(session_token, user_id, snapshot,
+                                 gen: prior_uid == user_id ? prior_gen : nil)
         user_id
+      end
+
+      # Cache a resolved identity only if no invalidation happened since
+      # `snapshot` was taken, without a window between the check and the
+      # write.
+      #
+      # Every invalidation bumps the counters BEFORE it drops entries. The
+      # write is checked before and re-checked after; a change seen by the
+      # second check evicts what was just written. So an invalidation either
+      # bumped before the re-check (the entry is evicted here) or bumped
+      # after it, which means it also drops entries after the write (the
+      # entry is removed, or its generation goes stale, by the invalidation
+      # itself). Either way the revoked identity does not stay cached. The
+      # plane-wide counter extends this to invalidations made by other
+      # processes sharing a generation-capable plane.
+      def store_unless_invalidated(session_token, user_id, snapshot, gen: nil)
+        return unless snapshot_usable?(snapshot)
+        return unless invalidation_snapshot == snapshot
+        store_user_id(session_token, user_id, gen: gen)
+        return if invalidation_snapshot == snapshot
+        @identity_cache.invalidate(session_token)
+      rescue StandardError
+        # Not caching is always safe: the next read resolves again.
+        begin
+          @identity_cache.invalidate(session_token)
+        rescue StandardError
+          nil
+        end
+      end
+
+      # The process counter plus, on a generation-capable plane, the
+      # plane-wide counter shared by every process using that plane.
+      def invalidation_snapshot
+        [current_invalidation_epoch, plane_epoch]
+      end
+
+      # A snapshot whose plane counter could not be read cannot prove that no
+      # other process invalidated during the lookup, so it never caches.
+      #
+      # An absent marker on a plane that keeps one is not usable either: a
+      # reset in another process deletes the marker before it installs a new
+      # one, so "absent" before and after the write cannot prove that no reset
+      # ran in between. The re-check after the write compares against a
+      # present marker, so reading it absent there evicts the write.
+      def snapshot_usable?(snapshot)
+        snapshot[1] != :unavailable && snapshot[1] != :absent
+      end
+
+      # Create the plane-wide marker when the plane keeps one and it is
+      # missing (a fresh plane, or one a reset has just cleared).
+      def ensure_plane_marker!
+        cache = @identity_cache
+        if cache.respond_to?(:invalidation_nonce)
+          cache.bump_invalidation_nonce if cache.invalidation_nonce.nil?
+        elsif generation_capable?(cache) && cache.respond_to?(:bump_generation)
+          gen = cache.generation(PLANE_EPOCH_SUBJECT)
+          cache.bump_generation(PLANE_EPOCH_SUBJECT) if gen.nil? || gen.to_i.zero?
+        end
+      rescue StandardError
+        nil
+      end
+
+      def bump_invalidation_epoch!
+        @epoch_mutex.synchronize { @invalidation_epoch += 1 }
+        bump_plane_epoch!
+      end
+
+      def current_invalidation_epoch
+        @epoch_mutex.synchronize { @invalidation_epoch }
+      end
+
+      # Reserved generation subject for the plane-wide invalidation counter
+      # on a custom generation-capable plane without an invalidation nonce.
+      # Parse objectIds are alphanumeric, so it cannot name a real user.
+      PLANE_EPOCH_SUBJECT = "~identity-invalidations"
+
+      # The plane-wide invalidation marker: a random nonce replaced on every
+      # invalidation when the plane offers one ({Parse::Cache::SubCache}
+      # does), else a generation counter. nil when the plane has neither,
+      # `:absent` when the plane keeps one but it is missing (fresh or just
+      # cleared), `:unavailable` when reading it failed. A nonce never repeats,
+      # so a plane clear that drops it cannot make an old value come back. A
+      # generation counter can: a custom plane whose `clear` also deletes its
+      # generations restarts the counter, so a lookup racing another
+      # process's reset is bounded by `identity_cache_ttl`. Such a plane
+      # should implement `invalidation_nonce` / `bump_invalidation_nonce`.
+      def plane_epoch
+        cache = @identity_cache
+        if cache.respond_to?(:invalidation_nonce)
+          nonce = cache.invalidation_nonce
+          return nonce.nil? ? :absent : nonce
+        end
+        return nil unless generation_capable?(cache)
+        gen = cache.generation(PLANE_EPOCH_SUBJECT)
+        gen.nil? || gen.to_i.zero? ? :absent : gen
+      rescue StandardError
+        :unavailable
+      end
+
+      def bump_plane_epoch!
+        cache = @identity_cache
+        if cache.respond_to?(:bump_invalidation_nonce)
+          cache.bump_invalidation_nonce
+        elsif generation_capable?(cache) && cache.respond_to?(:bump_generation)
+          cache.bump_generation(PLANE_EPOCH_SUBJECT)
+        end
+      rescue StandardError
+        nil
+      end
+
+      # The user id and that user's current generation from a stale entry
+      # already stored for the token, read before `/users/me`.
+      # @return [Array(String, Object), Array(nil, nil)]
+      def prior_generation(session_token)
+        cache = @identity_cache
+        return [nil, nil] unless generation_capable?(cache)
+        raw = cache.get(session_token)
+        uid = raw.is_a?(Hash) ? (raw["user_id"] || raw[:user_id]) : nil
+        return [nil, nil] if uid.nil?
+        [uid.to_s, cache.generation(uid.to_s)]
+      rescue StandardError
+        [nil, nil]
       end
 
       # Read the identity plane and, where the plane supports it, check that
@@ -369,10 +600,11 @@ module Parse
 
       # Write the identity entry, tagging it with the subject's current
       # generation when the plane can track one.
-      def store_user_id(session_token, user_id)
+      def store_user_id(session_token, user_id, gen: nil)
         cache = @identity_cache
         if generation_capable?(cache)
-          cache.set(session_token, { "user_id" => user_id, "gen" => cache.generation(user_id) },
+          gen = cache.generation(user_id) if gen.nil?
+          cache.set(session_token, { "user_id" => user_id, "gen" => gen },
                     ttl: @identity_cache_ttl)
         else
           cache.set(session_token, user_id, ttl: @identity_cache_ttl)

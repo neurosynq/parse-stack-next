@@ -1035,11 +1035,35 @@ module Parse
     #   `progress_callback` / `cancellation_token` are threaded. An
     #   embedder on the non-MCP path may assign any object responding to
     #   `#review`.
+    #
+    #   A sub-agent built with `parent:` and no gate of its own uses its
+    #   parent's gate, read at call time: the dispatcher swaps the
+    #   parent's gate per request, so a copy taken at construction would
+    #   go stale. Without this a sub-agent fell back to {NullGate} and
+    #   ran tools in `require_approval_for` tiers with no approval.
     def approval_gate
-      @approval_gate ||= Parse::Agent::NullGate.new
+      return @approval_gate if @approval_gate
+      return @approval_parent.approval_gate if @approval_parent
+      @approval_gate_defaulted = true
+      @approval_gate = Parse::Agent::NullGate.new
     end
 
-    attr_writer :approval_gate
+    # Assign this agent's own approval gate. Assigning nil removes it, so
+    # a sub-agent goes back to using its parent's gate.
+    def approval_gate=(gate)
+      @approval_gate_defaulted = false
+      @approval_gate = gate
+    end
+
+    # @return [Parse::Agent::ApprovalGate, nil] the gate assigned on this
+    #   agent itself, or nil when it uses its parent's (or the default).
+    #   The MCP dispatcher snapshots and restores this rather than
+    #   {#approval_gate}, so restoring never pins a parent's gate.
+    # @api private
+    def approval_gate_override
+      gate = @approval_gate
+      gate.is_a?(Parse::Agent::NullGate) && @approval_gate_defaulted ? nil : gate
+    end
 
     # @return [Boolean] true if the active cancellation token has been
     #   tripped; false otherwise. Returns false when no token is
@@ -1736,8 +1760,10 @@ module Parse
         #
         #   * nil    — inherit from parent (the common case; the
         #              child wants whatever the parent had).
-        #   * true   — explicit opt-in (caller wants faceted_search
-        #              authority regardless of parent).
+        #   * true:  keep faceted_search authority. Allowed only when
+        #              the parent has it: a child cannot turn on
+        #              master-key faceting under a scoped parent, which
+        #              would return every row's buckets and results.
         #   * false  — explicit opt-OUT: the sub-agent should DROP
         #              faceted_search authority even if the parent
         #              had it. Previously `false` was the default
@@ -1753,6 +1779,13 @@ module Parse
         # per-row ACL via Parse::ACLScope's `_rperm` match and do
         # NOT consult master_atlas.
         master_atlas = parent.master_atlas if master_atlas.nil?
+        if master_atlas == true && !parent.master_atlas
+          raise ArgumentError,
+                "sub-agent master_atlas: true exceeds parent's master_atlas: false. " \
+                "A sub-agent cannot turn on master-key Atlas faceting its parent " \
+                "was not given. Omit master_atlas to inherit the parent's setting, " \
+                "or pass master_atlas: false."
+        end
 
         # Inherit cooperative cancellation surface. Without this, a
         # delegating tool that constructs a sub-agent and drives it
@@ -1764,6 +1797,9 @@ module Parse
         @cancellation_token = parent.cancellation_token
         @progress_callback = parent.progress_callback
         @log_callback = parent.log_callback
+        # Approval gate: delegate to the parent's current gate (see
+        # {#approval_gate}).
+        @approval_parent = parent
 
         # Clamp the sub-agent's permission tier at the parent's. The
         # default :readonly is always ≤ any parent tier, so this fires
@@ -2054,8 +2090,63 @@ module Parse
           Parse::AggregationResult.normalize_field_names!(field_names)
         end
 
-      # Sub-agent class-filter inheritance. Unlike `tools:` (which overrides
-      # outright), `classes:` clamps to the parent's effective set so a
+      # Sub-agent `tools:` inheritance: narrow only, same rule as `classes:`
+      # below. Intersect onlies, union excepts. A child `only:` that leaves
+      # nothing once the parent's allowlist and excepts apply raises; an
+      # explicitly empty `only: []` is the strictest narrowing and is kept.
+      if parent
+        parent_tools_only = parent.instance_variable_get(:@tool_filter_only)
+        parent_tools_except = parent.instance_variable_get(:@tool_filter_except)
+        requested_tools = @tool_filter_only
+        if parent_tools_only && @tool_filter_only
+          @tool_filter_only = (@tool_filter_only & parent_tools_only).freeze
+        elsif parent_tools_only
+          @tool_filter_only = parent_tools_only
+        end
+        if parent_tools_except
+          @tool_filter_except = (@tool_filter_except ? (@tool_filter_except | parent_tools_except) : parent_tools_except).freeze
+        end
+        if requested_tools && !requested_tools.empty? &&
+           (parent_tools_only || parent_tools_except)
+          reachable = @tool_filter_only - (@tool_filter_except || Set.new)
+          if reachable.empty?
+            raise ArgumentError,
+                  "sub-agent tools: { only: } would have no overlap with the parent's " \
+                  "tools: filter (parent only: #{parent_tools_only&.to_a&.sort.inspect}, " \
+                  "except: #{parent_tools_except&.to_a&.sort.inspect}; the child requested " \
+                  "#{requested_tools.to_a.sort.inspect}). A sub-agent cannot enable tools its " \
+                  "parent was not given. Pass a subset of the parent's tools, or omit tools: " \
+                  "to inherit the parent's filter."
+          end
+        end
+      end
+
+      # Sub-agent `methods:` inheritance. Entries can be bare (`:archive`) or
+      # qualified (`"Post.archive"`), so plain set intersection would get the
+      # matching wrong. Instead the parent's filters are kept as layers and
+      # {#method_filtered?} refuses a call any layer refuses. A child
+      # `only:` that no parent layer could permit raises; an explicitly
+      # empty `only: []` is kept.
+      @method_filter_layers = (parent ? parent.method_filter_layers : []).dup
+      if parent && @method_filter_only && !@method_filter_only.empty? && !@method_filter_layers.empty?
+        reachable = @method_filter_only.any? do |entry|
+          @method_filter_layers.all? { |layer_only, layer_except| method_entry_reachable?(entry, layer_only, layer_except) }
+        end
+        unless reachable
+          raise ArgumentError,
+                "sub-agent methods: { only: } would have no overlap with the parent's " \
+                "methods: filter (child requested #{@method_filter_only.to_a.map(&:to_s).sort.inspect}). " \
+                "A sub-agent cannot call agent methods its parent was not given. Pass a " \
+                "subset of the parent's methods, or omit methods: to inherit them."
+        end
+      end
+      if @method_filter_only || @method_filter_except
+        @method_filter_layers << [@method_filter_only, @method_filter_except].freeze
+      end
+      @method_filter_layers.freeze
+
+      # Sub-agent class-filter inheritance. Like `tools:` above,
+      # `classes:` clamps to the parent's effective set so a
       # sub-agent can NEVER widen its parent's data-reach. Intersect onlies,
       # union excepts. A child `only:` that would have no overlap with the
       # parent's effective set raises at construction — empty-onlyset means
@@ -2253,29 +2344,77 @@ module Parse
     #
     # An entry matches the invocation if it equals either the bare
     # method name (`:archive`) or the qualified form (`"Class.archive"`).
+    # The class part is compared by its Parse class name on both sides, so
+    # `"User.reset"` and `"_User.reset"` name the same method whichever
+    # spelling the entry or the caller used.
     #
     # @param method_name [Symbol, String]
     # @param class_name  [String]
     # @return [Boolean] true if filtered (refuse), false if permitted
     def method_filtered?(method_name, class_name:)
-      return false if @method_filter_only.nil? && @method_filter_except.nil?
-
       method_sym = method_name.to_sym
-      qualified = "#{class_name}.#{method_name}"
+      parse_class = Parse::Agent.canonical_method_class(class_name)
 
-      if @method_filter_only
-        permitted = @method_filter_only.include?(method_sym) ||
-                    @method_filter_only.include?(qualified)
-        return true unless permitted
+      # A sub-agent carries its parent's filters as earlier layers; its own
+      # filter is the last layer. Any layer can refuse.
+      method_filter_layers.any? do |only, except|
+        (only && !method_entry_matches?(only, method_sym, parse_class)) ||
+          (except && method_entry_matches?(except, method_sym, parse_class))
       end
+    end
 
-      if @method_filter_except
-        excluded = @method_filter_except.include?(method_sym) ||
-                   @method_filter_except.include?(qualified)
-        return true if excluded
+    # The Parse class name for the class part of a qualified `methods:`
+    # entry or a `call_method` class argument: `"User"` and `"_User"`
+    # both give `"_User"`. A name that resolves to no model is returned
+    # unchanged.
+    # @api private
+    # @param name [String, Class]
+    # @return [String]
+    def self.canonical_method_class(name)
+      return name.parse_class if name.is_a?(Class) && name.respond_to?(:parse_class)
+      str = name.to_s
+      klass = resolve_method_filter_class(str)
+      klass ? klass.parse_class : str
+    end
+
+    # Ruby constant names a `methods:` entry may use for a model whose Parse
+    # class name differs (`class Artist < Parse::Object; parse_class
+    # "Musician"; end`).
+    RUBY_CONSTANT_NAME_RE = /\A[A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*\z/
+
+    # @!visibility private
+    # The Parse::Object subclass a `methods:` class name refers to, by
+    # Parse class name first and then by Ruby constant name, or nil.
+    def self.resolve_method_filter_class(str)
+      klass = begin
+          Parse::Model.find_class(str)
+        rescue StandardError
+          nil
+        end
+      return klass if klass.is_a?(Class) && klass < Parse::Object
+      return nil unless str.match?(RUBY_CONSTANT_NAME_RE)
+      klass = begin
+          Object.const_get(str)
+        rescue StandardError, LoadError
+          nil
+        end
+      klass.is_a?(Class) && klass < Parse::Object ? klass : nil
+    end
+
+    # @return [Array<Array(Set, Set)>] the `methods:` filters in effect as
+    #   `[only, except]` pairs, own filter last; a sub-agent carries its
+    #   parent's layers first.
+    def method_filter_layers
+      @method_filter_layers || []
+    end
+
+    # @return [Array<Hash>] {#method_filter_layers} as `{only:, except:}`
+    #   hashes of sorted name strings (nil when a layer has no such list),
+    #   parent layers first. Used by the audit payload and {#describe}.
+    def method_filter_layers_descriptor
+      method_filter_layers.map do |only, except|
+        { only: only && only.to_a.map(&:to_s).sort, except: except && except.to_a.map(&:to_s).sort }
       end
-
-      false
     end
 
     # @return [Boolean] whether unknown names in tools: raise vs. warn at
@@ -2507,6 +2646,15 @@ module Parse
       payload[:tools_except] = @tool_filter_except.to_a.sort if @tool_filter_except
       payload[:methods_only] = @method_filter_only.to_a.map(&:to_s).sort if @method_filter_only
       payload[:methods_except] = @method_filter_except.to_a.map(&:to_s).sort if @method_filter_except
+      # `methods_only` / `methods_except` are this agent's own filter. A
+      # sub-agent is also bound by its parent's filters, so the full set in
+      # force is emitted as layers (parent first) whenever any layer was
+      # inherited, including a single parent layer on a child with no
+      # filter of its own.
+      own_method_layers = (@method_filter_only || @method_filter_except) ? 1 : 0
+      if method_filter_layers.size > own_method_layers
+        payload[:methods_layers] = method_filter_layers_descriptor
+      end
       # Per-agent per-class filters — emit class-name → field-name list,
       # NOT the constraint values. Filter values can contain user-identifying
       # data (`{ user_id: "abc123" }`, `{ org_id: tenant_uuid }`) that
@@ -3393,7 +3541,44 @@ module Parse
     # strings (qualified-class.method match).
     def normalize_method_filter_entry(value)
       str = value.to_s
-      str.include?(".") ? str : str.to_sym
+      return str.to_sym unless str.include?(".")
+      class_part, method_part = str.split(".", 2)
+      if Parse::Agent.resolve_method_filter_class(class_part).nil?
+        warn "[Parse::Agent] methods: entry #{str.inspect} names a class that does not " \
+             "resolve to a loaded Parse::Object model (by Parse class name or Ruby " \
+             "constant). It is matched by its class part as written; check the spelling."
+      end
+      "#{Parse::Agent.canonical_method_class(class_part)}.#{method_part}"
+    end
+
+    # Whether a `methods:` filter set names this invocation, either bare or
+    # qualified. Qualified entries are compared by Parse class name, which
+    # also covers an entry whose class was not loaded at construction.
+    def method_entry_matches?(set, method_sym, parse_class)
+      return true if set.include?(method_sym) || set.include?("#{parse_class}.#{method_sym}")
+      set.any? do |entry|
+        next false unless entry.is_a?(String)
+        class_part, method_part = entry.split(".", 2)
+        method_part == method_sym.to_s && Parse::Agent.canonical_method_class(class_part) == parse_class
+      end
+    end
+
+    # Whether a child `methods:` only-entry could pass one parent layer.
+    # A qualified entry ("Post.archive") passes when the layer names it or
+    # its bare method. A bare entry (:archive) passes when the layer names
+    # it bare or qualified on any class.
+    def method_entry_reachable?(entry, layer_only, layer_except)
+      if entry.is_a?(String)
+        bare = entry.split(".", 2).last.to_sym
+        return false if layer_except && (layer_except.include?(entry) || layer_except.include?(bare))
+        return true unless layer_only
+        layer_only.include?(entry) || layer_only.include?(bare)
+      else
+        return false if layer_except&.include?(entry)
+        return true unless layer_only
+        layer_only.include?(entry) ||
+          layer_only.any? { |e| e.is_a?(String) && e.split(".", 2).last == entry.to_s }
+      end
     end
 
     # Normalize the constructor's `classes:` kwarg into a [only_set,

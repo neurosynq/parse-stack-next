@@ -266,7 +266,10 @@ class Array
   # Each object whose delete succeeds has its local state updated the same
   # way {Parse::Object#destroy} updates it. Objects whose delete fails are
   # left untouched; inspect the returned batch's responses to find them.
-  # Destroy callbacks are not run.
+  # Destroy callbacks are not run. Every {Parse::Session} and {Parse::User}
+  # whose delete succeeded, or reported "object not found" (the row is
+  # already gone, for example revoked elsewhere), is dropped from its
+  # client's identity plane, as their single-object destroy does.
   # @example
   #  # assume Post and Author are Parse models
   #  author = Author.first
@@ -281,6 +284,19 @@ class Array
       raise ArgumentError, "Array#destroy requires Parse::Object elements; " \
                            "this array holds none (#{first.class})"
     end
+    # A session deleted from a pointer or a partial fetch carries no token or
+    # owner to drop from the identity cache; look them up first, in one
+    # query per client.
+    Parse::Session.send(:_preload_identity_for_destroy!, targets) if defined?(Parse::Session)
+    _destroy_batch(targets)
+  ensure
+    # A looked-up session token is a live credential; never leave it on an
+    # object whose delete was skipped or whose batch raised.
+    targets&.each { |o| o.send(:_clear_identity_for_destroy!) if _batch_identity_hook?(o, :_clear_identity_for_destroy!) }
+  end
+
+  # @!visibility private
+  def _destroy_batch(targets)
     batch = Parse::BatchOperation.new
     objects = {}
     targets.each do |o|
@@ -292,7 +308,13 @@ class Array
     end
     batch.submit do |request, response|
       o = objects[request.tag]
-      next unless o && response.respond_to?(:success?) && response.success?
+      next unless o
+      # Sessions and users drop their identity-plane entries when the delete
+      # applied or the row is already gone ("object not found"), so a revoked
+      # token stops resolving now. They decide from the response; a denied
+      # delete leaves the cache alone.
+      o.send(:_after_batch_destroy, response) if _batch_identity_hook?(o, :_after_batch_destroy)
+      next unless response.respond_to?(:success?) && response.success?
       # Mirror Parse::Object#destroy: keep the id and mark the object
       # destroyed so it reports `destroyed?` and a later save refuses.
       o.instance_variable_set(:@_destroyed, true)
@@ -300,6 +322,17 @@ class Array
     end
     batch
   end
+  private :_destroy_batch
+
+  # Whether `o`'s class defines the internal (non-public) identity hook
+  # `name`. Checked on the class rather than with `respond_to?(name, true)`
+  # so a duck-typed element overriding `respond_to?` cannot break the batch.
+  # @!visibility private
+  def _batch_identity_hook?(o, name)
+    klass = o.class
+    klass.private_method_defined?(name) || klass.method_defined?(name)
+  end
+  private :_batch_identity_hook?
 
   # Do not alias method as :delete is already part of array.
   # alias_method :delete, :destroy

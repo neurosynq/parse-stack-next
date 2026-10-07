@@ -197,20 +197,28 @@ module Parse
 
         if respond_to?(:relations) && relations[field_sym]
           proxy = public_send(field_sym)
-          # Reset the pending add/remove ledger that backs
-          # relation_change_operations. The proxy itself has no public reset
-          # API for these (its rollback!/restore_attributes path expects
-          # setters that don't exist for additions/removals), so we clear
-          # them directly and then drop the proxy's dirty markers.
-          proxy.instance_variable_set(:@additions, []) if proxy.instance_variable_defined?(:@additions)
-          proxy.instance_variable_set(:@removals, []) if proxy.instance_variable_defined?(:@removals)
+          # Drop the pending add/remove ledger that backs
+          # relation_change_operations, and the proxy's dirty markers. The
+          # relation proxy's clear_changes! also reloads its list on next
+          # access, since the loaded list included the discarded items. A
+          # handler that reads the relation after the revert therefore
+          # triggers one query for the stored members (on a saved owner).
           proxy.clear_changes! if proxy.respond_to?(:clear_changes!)
           clear_attribute_changes([field_str])
           return
         end
 
         if is_new
-          public_send("#{field_str}=", nil)
+          if field_sym == :acl && !self.class.builtin_acl_default_active?
+            # The class's ACL policy still decides a new record's ACL: put
+            # back the init-time default stamp and let the save-time
+            # resolver run, instead of a nil ACL that a reply would send
+            # as `{}` (master-key only).
+            public_send(:acl=, self.class.default_acls.as_json)
+            @_acl_pristine = true
+          else
+            public_send("#{field_str}=", nil)
+          end
         else
           restore_attributes([field_str])
         end

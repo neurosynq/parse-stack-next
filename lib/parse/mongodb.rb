@@ -1481,6 +1481,15 @@ module Parse
                 "They are mutually exclusive."
         end
 
+        if master == true && Parse::ACLScope.master_key_suppressed?
+          # The role graph has no public mode to fall back to, so a master
+          # call inside `Parse.without_master_key` is refused outright.
+          raise Parse::ACLScope::ACLRequired,
+                "Parse::MongoDB.#{method_name}: master: true is dropped inside " \
+                "Parse.without_master_key. Pass `as: <Parse::User|Parse::Pointer>`, " \
+                "or run the call inside Parse.with_master_key."
+        end
+
         if master == true
           return Parse::ACLScope::Resolution.new(
                    mode: :master, permission_strings: nil, user_id: nil, session: nil,
@@ -1782,6 +1791,10 @@ module Parse
           # database with this application's permission strings.
           verify_client!(resolution.client)
           payload[:scope] = __scope_label(resolution)
+          # `master: true` inside Parse.without_master_key, downgraded to the
+          # public scope. Lets a subscriber explain a master-key caller that
+          # sees only public rows inside the block.
+          payload[:master_dropped] = true if resolution.respond_to?(:master_dropped?) && resolution.master_dropped?
 
           # Validate BEFORE rewrite so the security denylist is applied to the
           # caller's original pipeline (which an attacker controls), not to
@@ -2303,7 +2316,12 @@ module Parse
                 "the caller is authorized. Callers without master scope (e.g. agent " \
                 "tools, request handlers) must not invoke this method."
         end
-        results = aggregate(collection_name, [{ "$indexStats" => {} }], master: true)
+        # Index metadata, not rows: keep master mode inside
+        # `Parse.without_master_key`, which only governs row access. The
+        # sentinel elevates scope resolution only; it leaves the block's
+        # fiber state alone, so notification subscribers still see it.
+        results = aggregate(collection_name, [{ "$indexStats" => {} }],
+                            master: Parse::ACLScope::METADATA_MASTER)
         results.each_with_object({}) do |row, h|
           name = row["name"] || row[:name]
           next unless name

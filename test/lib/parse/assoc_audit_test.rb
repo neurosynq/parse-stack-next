@@ -35,14 +35,28 @@ class AssocAuditTest < Minitest::Test
   class FakeClient
     attr_reader :calls
 
-    def initialize(update_result: nil)
+    def initialize(update_result: nil, fetch_result: nil, update_results: nil)
       @calls = []
       @update_result = update_result
+      @fetch_result = fetch_result
+      @update_results = update_results
     end
 
     def update_object(klass, id, body, **_opts)
       @calls << [:update, klass, id, body.as_json]
+      if @update_results
+        next_result = @update_results.shift
+        return next_result if next_result.is_a?(Parse::Response)
+        return Parse::Response.new(next_result || { "updatedAt" => "2026-01-02T00:00:00.000Z" })
+      end
       Parse::Response.new(@update_result || { "updatedAt" => "2026-01-02T00:00:00.000Z" })
+    end
+
+    def fetch_object(klass, id, **_opts)
+      @calls << [:fetch, klass, id]
+      Parse::Response.new(@fetch_result || { "objectId" => id, "name" => "server name",
+                                             "createdAt" => "2026-01-01T00:00:00.000Z",
+                                             "updatedAt" => "2026-01-03T00:00:00.000Z" })
     end
 
     def create_object(klass, body, **_opts)
@@ -468,6 +482,486 @@ class AssocAuditTest < Minitest::Test
     assert_includes obj.tags.to_a, "atomic"
     assert obj.tags_changed?, "the pending edit is still sent on save"
   end
+
+  # 5.8.1: pointer collections ----------------------------------------
+
+  # A pointer array adopts the server's array after an atomic op, keeping
+  # the local object for an id it already holds.
+  def test_pointer_collection_add_adopts_the_server_array
+    a = saved(AssocAuditAuthor, "a1", "items" => [item_ptr("i1")])
+    local = a.items.first
+    attach_client(a, update_result: { "items" => [item_ptr("i1"), item_ptr("i9"), item_ptr("i3")],
+                                      "updatedAt" => "2026-01-02T00:00:00.000Z" })
+    assert a.items.add!(item("i3"))
+    assert_equal %w[i1 i9 i3], a.items.map(&:id)
+    assert a.items.all? { |o| o.is_a?(AssocAuditItem) }
+    assert_same local, a.items.first
+    refute_includes a.changed, "items"
+  end
+
+  def test_pointer_collection_remove_adopts_the_server_array
+    a = saved(AssocAuditAuthor, "a1", "items" => [item_ptr("i1"), item_ptr("i2")])
+    attach_client(a, update_result: { "items" => [item_ptr("i5")] })
+    assert a.items.remove!(item("i1"))
+    assert_equal %w[i5], a.items.map(&:id)
+    refute_includes a.changed, "items"
+  end
+
+  # An entry that cannot be read as a pointer leaves the server array
+  # unused, and the operation is applied locally.
+  def test_pointer_collection_unreadable_server_array_applies_locally
+    a = saved(AssocAuditAuthor, "a1", "items" => [item_ptr("i1")])
+    attach_client(a, update_result: { "items" => [item_ptr("i1"), 42] })
+    assert a.items.add!(item("i3"))
+    assert_equal %w[i1 i3], a.items.map(&:id)
+  end
+
+  # 5.8.1: relation save and clear_changes! ----------------------------
+
+  def test_relation_proxy_save_sends_only_staged_ops
+    a = saved(AssocAuditAuthor, "a1")
+    stub_fetch(a, :likes)
+    fake = attach_client(a)
+    a.likes.add(item("i1"))
+    a.likes.remove(item("i2"))
+    a.name = "unsaved name"
+    assert_equal true, a.likes.save
+    bodies = fake.calls.map { |c| c[3] }
+    assert_equal({ "likes" => { "__op" => "RemoveRelation", "objects" => [item_ptr("i2")] } }, bodies[0])
+    assert_equal({ "likes" => { "__op" => "AddRelation", "objects" => [item_ptr("i1")] } }, bodies[1])
+    assert_empty a.likes.additions
+    assert_empty a.likes.removals
+    refute_includes a.changed, "likes"
+    assert_includes a.changed, "name", "the rest of the owner is not saved"
+
+    # A later owner save does not send the relation ops again.
+    a.save
+    refute fake.calls.last[3].key?("likes")
+  end
+
+  def test_relation_proxy_save_uses_the_remote_column
+    a = saved(AssocAuditAuthor, "a1")
+    stub_fetch(a, :fans)
+    fake = attach_client(a)
+    a.fans.add(item("i1"))
+    assert a.fans.save
+    assert_equal ["awesomeFans"], fake.calls.last[3].keys
+  end
+
+  def test_relation_atomic_ops_use_the_remote_column
+    a = saved(AssocAuditAuthor, "a1")
+    fake = attach_client(a)
+    assert a.fans.add!(item("i1"))
+    assert_equal ["awesomeFans"], fake.calls.last[3].keys
+    assert a.fans.remove!(item("i1"))
+    assert_equal ["awesomeFans"], fake.calls.last[3].keys
+  end
+
+  def test_relation_proxy_save_keeps_ops_on_failure
+    a = saved(AssocAuditAuthor, "a1")
+    stub_fetch(a, :likes)
+    a.define_singleton_method(:operate_field!) { |*| false }
+    a.likes.add(item("i1"))
+    assert_equal false, a.likes.save
+    assert_equal %w[i1], a.likes.additions.map(&:id)
+    assert_includes a.changed, "likes"
+  end
+
+  def test_relation_proxy_save_on_unsaved_owner_returns_false
+    a = AssocAuditAuthor.new
+    a.likes.add(item("i1"))
+    assert_equal false, a.likes.save
+    assert_equal %w[i1], a.likes.additions.map(&:id)
+  end
+
+  def test_relation_proxy_save_with_nothing_staged
+    a = saved(AssocAuditAuthor, "a1")
+    fake = attach_client(a)
+    assert_equal true, a.likes.save
+    assert_empty fake.calls
+  end
+
+  def test_owner_clear_changes_drops_staged_relation_ops
+    a = saved(AssocAuditAuthor, "a1")
+    calls = stub_fetch(a, :likes, [item("i7")])
+    fake = attach_client(a)
+    a.likes.add(item("i1"))
+    a.likes.remove(item("i2"))
+    a.clear_changes!
+    assert_empty a.likes.additions
+    assert_empty a.likes.removals
+    refute a.likes.changed?
+    refute_includes a.changed, "likes"
+
+    # The staged items were in the local list, so it reloads from the server.
+    assert_equal %w[i7], a.likes.map(&:id)
+    assert_equal [:likes], calls
+
+    # A later change to the relation sends only that change.
+    a.likes.add(item("i3"))
+    a.save
+    assert_equal({ "likes" => { "__op" => "AddRelation", "objects" => [item_ptr("i3")] } }, fake.calls.last[3])
+  end
+
+  def test_owner_clear_changes_clears_array_proxy_dirty_state
+    a = saved(AssocAuditAuthor, "a1", "items" => [item_ptr("i1")])
+    a.items.add(item("i2"))
+    assert a.items.changed?
+    a.clear_changes!
+    refute a.items.changed?
+    refute_includes a.changed, "items"
+    assert_equal %w[i1 i2], a.items.map(&:id)
+  end
+
+  # 5.8.1 review: a fetch keeps staged relation ops ----------------------
+
+  def staged_likes_author
+    a = saved(AssocAuditAuthor, "a1", "name" => "local")
+    stub_fetch(a, :likes)
+    fake = attach_client(a)
+    a.likes.add(item("i1"))
+    [a, fake]
+  end
+
+  def assert_likes_still_staged(a, fake)
+    assert_equal %w[i1], a.likes.additions.map(&:id)
+    assert_includes a.changed, "likes"
+    a.save
+    assert_equal({ "likes" => { "__op" => "AddRelation", "objects" => [item_ptr("i1")] } }, fake.calls.last[3])
+  end
+
+  def test_fetch_preserving_changes_keeps_staged_relation_ops
+    a, fake = staged_likes_author
+    capture_io { a.fetch!(preserve_changes: true) }
+    assert_likes_still_staged(a, fake)
+  end
+
+  def test_full_fetch_keeps_staged_relation_ops
+    a, fake = staged_likes_author
+    capture_io { a.fetch! }
+    assert_likes_still_staged(a, fake)
+  end
+
+  def test_partial_fetch_keeps_staged_relation_ops
+    a, fake = staged_likes_author
+    capture_io { a.fetch!(keys: [:name]) }
+    assert_likes_still_staged(a, fake)
+  end
+
+  def test_autofetch_keeps_staged_relation_ops
+    a, fake = staged_likes_author
+    a.fetched_keys = [:likes]
+    assert a.has_selective_keys?
+    capture_io { a.autofetch!(:name) }
+    assert_includes fake.calls.map(&:first), :fetch
+    assert_likes_still_staged(a, fake)
+  end
+
+  # A real fetch response carries the relation's descriptor. Applying it
+  # must neither replace the proxy holding staged ops nor leave the owner
+  # clean.
+
+  def relation_descriptor_result(extra = {})
+    { "objectId" => "a1", "name" => "server name",
+      "likes" => { "__type" => "Relation", "className" => "AssocAuditItem" },
+      "awesomeFans" => { "__type" => "Relation", "className" => "AssocAuditItem" },
+      "createdAt" => "2026-01-01T00:00:00.000Z",
+      "updatedAt" => "2026-01-03T00:00:00.000Z" }.merge(extra)
+  end
+
+  def staged_likes_author_with_descriptor
+    a = saved(AssocAuditAuthor, "a1", "name" => "local")
+    stub_fetch(a, :likes)
+    fake = attach_client(a, fetch_result: relation_descriptor_result)
+    a.likes.add(item("i1"))
+    [a, fake]
+  end
+
+  def test_descriptor_fetch_preserving_changes_keeps_staged_relation_ops
+    a, fake = staged_likes_author_with_descriptor
+    proxy = a.likes
+    capture_io { a.fetch!(preserve_changes: true) }
+    assert_same proxy, a.likes
+    assert_likes_still_staged(a, fake)
+  end
+
+  def test_descriptor_full_fetch_keeps_staged_relation_ops
+    a, fake = staged_likes_author_with_descriptor
+    capture_io { a.fetch! }
+    assert_likes_still_staged(a, fake)
+  end
+
+  def test_descriptor_partial_fetch_including_relation_keeps_staged_ops
+    a, fake = staged_likes_author_with_descriptor
+    capture_io { a.fetch!(keys: [:name, :likes]) }
+    assert_likes_still_staged(a, fake)
+  end
+
+  def test_descriptor_partial_fetch_excluding_relation_keeps_staged_ops
+    a, fake = staged_likes_author_with_descriptor
+    capture_io { a.fetch!(keys: [:name]) }
+    assert_likes_still_staged(a, fake)
+  end
+
+  def test_descriptor_autofetch_keeps_staged_relation_ops
+    a, fake = staged_likes_author_with_descriptor
+    a.fetched_keys = [:likes]
+    capture_io { a.autofetch!(:name) }
+    assert_includes fake.calls.map(&:first), :fetch
+    assert_likes_still_staged(a, fake)
+  end
+
+  def test_descriptor_fetch_keeps_staged_removal_on_mapped_column
+    a = saved(AssocAuditAuthor, "a1", "name" => "local")
+    stub_fetch(a, :fans, [item("i1")])
+    fake = attach_client(a, fetch_result: relation_descriptor_result)
+    a.fans.remove(item("i1"))
+    capture_io { a.fetch!(preserve_changes: true) }
+    assert_equal %w[i1], a.fans.removals.map(&:id)
+    assert_includes a.changed, "fans"
+    a.save
+    assert_equal({ "awesomeFans" => { "__op" => "RemoveRelation", "objects" => [item_ptr("i1")] } }, fake.calls.last[3])
+  end
+
+  def test_descriptor_fetch_without_staged_ops_replaces_the_proxy
+    a = saved(AssocAuditAuthor, "a1", "name" => "local")
+    attach_client(a, fetch_result: relation_descriptor_result)
+    before = a.likes
+    capture_io { a.fetch! }
+    refute_same before, a.likes
+    refute_includes a.changed, "likes"
+  end
+
+  def test_reload_discards_staged_relation_ops
+    a, fake = staged_likes_author
+    capture_io { a.reload! }
+    assert_empty a.likes.additions
+    refute_includes a.changed, "likes"
+    a.save
+    refute(fake.calls.any? { |c| c.first == :update && c[3].key?("likes") })
+  end
+
+  # 5.8.1 review: pointer array adoption checks each entry ----------------
+
+  def test_pointer_collection_foreign_class_entry_applies_locally
+    a = saved(AssocAuditAuthor, "a1", "items" => [item_ptr("i1")])
+    other = { "__type" => "Pointer", "className" => "AssocAuditOther", "objectId" => "z1" }
+    attach_client(a, update_result: { "items" => [item_ptr("i1"), other] })
+    assert a.items.add!(item("i3"))
+    assert_equal %w[i1 i3], a.items.map(&:id)
+    assert a.items.all? { |o| o.is_a?(AssocAuditItem) }
+  end
+
+  def test_pointer_collection_string_entry_applies_locally
+    a = saved(AssocAuditAuthor, "a1", "items" => [item_ptr("i1")])
+    attach_client(a, update_result: { "items" => [item_ptr("i1"), "AssocAuditItem$i9"] })
+    assert a.items.add!(item("i3"))
+    assert_equal %w[i1 i3], a.items.map(&:id)
+  end
+
+  def test_pointer_collection_add_unique_adopts_the_server_array
+    a = saved(AssocAuditAuthor, "a1", "items" => [item_ptr("i1")])
+    attach_client(a, update_result: { "items" => [item_ptr("i8"), item_ptr("i1"), item_ptr("i2")] })
+    assert a.items.add_unique!(item("i1"), item("i2"))
+    assert_equal %w[i8 i1 i2], a.items.map(&:id)
+    refute_includes a.changed, "items"
+  end
+
+  def test_pointer_collection_reply_without_field_applies_locally
+    a = saved(AssocAuditAuthor, "a1", "items" => [item_ptr("i1")])
+    attach_client(a, update_result: { "updatedAt" => "2026-01-02T00:00:00.000Z" })
+    assert a.items.add!(item("i3"))
+    assert_equal %w[i1 i3], a.items.map(&:id)
+    refute_includes a.changed, "items"
+  end
+
+  def test_pointer_collection_with_pending_edits_applies_locally
+    a = saved(AssocAuditAuthor, "a1", "items" => [item_ptr("i1")])
+    attach_client(a, update_result: { "items" => [item_ptr("i1"), item_ptr("i9"), item_ptr("i3")] })
+    a.items.add(item("i2"))
+    assert a.items.add!(item("i3"))
+    assert_equal %w[i1 i2 i3], a.items.map(&:id)
+    assert_includes a.changed, "items", "the pending local edit is still sent on save"
+  end
+
+  def test_last_operation_reply_is_read_once
+    a = saved(AssocAuditAuthor, "a1", "items" => [item_ptr("i1")])
+    attach_client(a, update_result: { "items" => [item_ptr("i1"), item_ptr("i3")] })
+    assert a.items.add!(item("i3"))
+    assert_nil a.send(:_last_operation_value, :items)
+  end
+
+  # 5.8.1 review: relation save partial failure ---------------------------
+
+  def test_relation_proxy_save_partial_failure_keeps_unsent_additions
+    a = saved(AssocAuditAuthor, "a1")
+    stub_fetch(a, :likes)
+    failed = Parse::Response.new("code" => 141, "error" => "boom")
+    fake = attach_client(a, update_results: [nil, failed])
+    a.likes.add(item("i1"))
+    a.likes.remove(item("i2"))
+    capture_io { assert_equal false, a.likes.save }
+    assert_equal 2, fake.calls.size
+    assert_empty a.likes.removals, "the removal was applied, so it is no longer staged"
+    assert_equal %w[i1], a.likes.additions.map(&:id)
+    assert_includes a.changed, "likes"
+  end
+
+
+  # PR review: rollback, transactions, stale lists, new owners, sessions --
+
+  def test_rollback_after_descriptor_fetch_drops_staged_relation_ops
+    a, fake = staged_likes_author_with_descriptor
+    capture_io { a.fetch! }
+    a.rollback!
+    assert_empty a.likes.additions
+    refute_includes a.changed, "likes"
+    a.likes.add(item("i2"))
+    a.save
+    assert_equal({ "likes" => { "__op" => "AddRelation", "objects" => [item_ptr("i2")] } }, fake.calls.last[3])
+  end
+
+  def test_rollback_after_preserving_fetch_drops_staged_relation_ops
+    a, _fake = staged_likes_author_with_descriptor
+    capture_io { a.fetch!(preserve_changes: true) }
+    a.rollback!
+    assert_empty a.likes.additions
+    assert_equal [{}, {}], a.relation_change_operations
+  end
+
+  SuccessResponse = Struct.new(:result) do
+    def success?
+      true
+    end
+  end
+
+  def test_successful_transaction_settles_staged_relation_ops
+    a, fake = staged_likes_author
+    fake.define_singleton_method(:url_prefix) { URI("http://localhost:1/parse/") }
+    original_new = Parse::BatchOperation.method(:new)
+    Parse::BatchOperation.define_singleton_method(:new) do |*args, **kwargs|
+      batch = original_new.call(*args, **kwargs)
+      batch.define_singleton_method(:submit) do
+        requests.map { SuccessResponse.new({ "updatedAt" => "2026-01-05T00:00:00.000Z" }) }
+      end
+      batch
+    end
+    begin
+      Parse::Object.transaction { |batch| batch.add(a) }
+    ensure
+      Parse::BatchOperation.define_singleton_method(:new, &original_new)
+    end
+    assert_empty a.likes.additions
+    refute_includes a.changed, "likes"
+    calls_before = fake.calls.size
+    a.likes.add(item("i2"))
+    a.save
+    sent = fake.calls[calls_before..].map { |c| c[3] }
+    assert_equal [{ "likes" => { "__op" => "AddRelation", "objects" => [item_ptr("i2")] } }], sent
+  end
+
+  def test_descriptor_fetch_unloads_a_stale_loaded_list
+    a = saved(AssocAuditAuthor, "a1", "name" => "local")
+    fetches = stub_fetch(a, :likes, [item("old")])
+    attach_client(a, fetch_result: relation_descriptor_result)
+    assert_equal %w[old], a.likes.map(&:id)
+    a.likes.add(item("i1"))
+    fresh = item("fresh")
+    a.define_singleton_method(:likes_fetch!) do
+      fetches << :likes
+      [fresh]
+    end
+    capture_io { a.fetch! }
+    refute a.likes.loaded?
+    assert_equal %w[fresh i1], a.likes.map(&:id)
+    assert_equal %w[i1], a.likes.additions.map(&:id)
+  end
+
+  def test_relation_writes_during_a_create_with_a_client_side_id_stage_locally
+    a = AssocAuditAuthor.new
+    a.instance_variable_set(:@id, "precomputed")
+    a.instance_variable_set(:@_creating_record, true)
+    a.define_singleton_method(:autofetch!) { |*| nil }
+    refute a.persisted?
+    fake = attach_client(a)
+    a.likes.add(item("i1"))
+    assert_equal false, a.likes.save
+    assert a.likes.add!(item("i2"))
+    assert a.likes.remove!(item("i3"))
+    assert_empty fake.calls
+    assert_equal %w[i1 i2], a.likes.additions.map(&:id)
+    assert_equal %w[i3], a.likes.removals.map(&:id)
+  end
+
+  def test_relation_writes_on_an_id_only_handle_are_sent
+    a = AssocAuditAuthor.new(id: "existing")
+    assert a.persisted?
+    stub_fetch(a, :likes)
+    fake = attach_client(a)
+    a.likes.add(item("i1"))
+    assert a.likes.save
+    assert_equal({ "likes" => { "__op" => "AddRelation", "objects" => [item_ptr("i1")] } }, fake.calls.last[3])
+  end
+
+  class SessionRecordingClient < FakeClient
+    attr_reader :sessions
+
+    def update_object(klass, id, body, **opts)
+      (@sessions ||= []) << opts[:session_token]
+      super
+    end
+  end
+
+  def test_relation_proxy_save_sends_with_the_given_session
+    a = saved(AssocAuditAuthor, "a1")
+    stub_fetch(a, :likes)
+    fake = SessionRecordingClient.new
+    a.define_singleton_method(:client) { fake }
+    a.likes.add(item("i1"))
+    a.likes.remove(item("i2"))
+    assert a.likes.save(session: "r:alice")
+    assert_equal ["r:alice", "r:alice"], fake.sessions
+    refute a.instance_variable_defined?(:@_session_token), "the owner's session is restored"
+  end
+
+  def test_relation_proxy_save_restores_the_owners_previous_session
+    a = saved(AssocAuditAuthor, "a1")
+    stub_fetch(a, :likes)
+    fake = SessionRecordingClient.new
+    a.define_singleton_method(:client) { fake }
+    a.instance_variable_set(:@_session_token, "r:owner")
+    a.likes.add(item("i1"))
+    assert a.likes.save(session: nil)
+    assert_equal [nil], fake.sessions
+    assert_equal "r:owner", a.instance_variable_get(:@_session_token)
+    a.likes.add(item("i2"))
+    assert a.likes.save
+    assert_equal [nil, "r:owner"], fake.sessions
+  end
+
+  def test_relation_proxy_save_rejects_an_invalid_session
+    a = saved(AssocAuditAuthor, "a1")
+    stub_fetch(a, :likes)
+    attach_client(a)
+    a.likes.add(item("i1"))
+    assert_raises(ArgumentError) { a.likes.save(session: "") }
+    assert_equal %w[i1], a.likes.additions.map(&:id)
+  end
+
+  class ProxyIvarsModel < Parse::Object
+    property :tags, :array
+    has_many :likes, as: :assoc_audit_item, through: :relation
+  end
+
+  def test_proxy_change_ivars_tracks_later_declarations
+    klass = ProxyIvarsModel
+    before = klass.proxy_change_ivars
+    assert_includes before, :@likes
+    assert_includes before, :@tags
+    klass.property :later_list, :array
+    assert_includes klass.proxy_change_ivars, :@later_list
+  end
+
 
   private
 

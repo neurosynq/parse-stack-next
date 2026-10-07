@@ -86,7 +86,14 @@ module Parse
     # at request rate.
     NEGATIVE_TTL = 5
 
+    # How long a schema fetch that failed inside `Parse.without_master_key`
+    # is remembered. Kept apart from the shared cache and consulted only
+    # inside the block, so it never denies another caller's reads; it only
+    # stops a down server from being refetched on every read in the block.
+    SUPPRESSED_NEGATIVE_TTL = 2
+
     @cache = {}
+    @suppressed_failures = {}
     @cache_mutex = Mutex.new
     @cache_ttl = POSITIVE_TTL
 
@@ -490,7 +497,10 @@ module Parse
       end
 
       def reset_cache!
-        @cache_mutex.synchronize { @cache.clear }
+        @cache_mutex.synchronize do
+          @cache.clear
+          @suppressed_failures.clear
+        end
         # Also drop the unresolvable-class warned-once registry so
         # tests that assert on `warn` emission for a class don't get
         # silenced by an earlier test's call.
@@ -599,6 +609,12 @@ module Parse
         cached = @cache_mutex.synchronize { @cache[key] }
         return cached if cached && !stale?(cached)
 
+        suppressed = Parse.respond_to?(:master_key_disabled?) && Parse.master_key_disabled?
+        if suppressed
+          failed_at = @cache_mutex.synchronize { @suppressed_failures[key] }
+          return unresolvable_entry if failed_at && monotonic_now - failed_at < SUPPRESSED_NEGATIVE_TTL
+        end
+
         entry = if resolved_client.nil?
             # No client configured (Parse.setup never called, etc.) —
             # treat as unresolvable so we fail closed instead of
@@ -620,7 +636,17 @@ module Parse
             end
           end
 
-        @cache_mutex.synchronize { @cache[key] = entry }
+        # A failure inside `Parse.without_master_key` is not put in the
+        # shared cache. The request keeps the master key there, but a custom
+        # schema source may not, and a negative entry is shared by every
+        # caller of this class for {NEGATIVE_TTL}: one block must not deny
+        # every other request's scoped reads. It is remembered briefly in a
+        # separate table read only inside the block.
+        if entry.kind == :unresolvable && suppressed
+          @cache_mutex.synchronize { @suppressed_failures[key] = monotonic_now }
+        else
+          @cache_mutex.synchronize { @cache[key] = entry }
+        end
         entry
       end
 
@@ -637,6 +663,13 @@ module Parse
       # and the client-bound session token. A client that holds no master key
       # still cannot read schemas, which stays fail-closed.
       #
+      # The schema is metadata, so the request also carries the SDK's
+      # metadata marker: it keeps the master key inside
+      # `Parse.without_master_key`, which strips it from every other request
+      # in the block. Without it the fetch was refused there and the
+      # `:unresolvable` entry denied every scoped read of the class, for all
+      # callers, until it expired.
+      #
       # Objects that only implement `#schema` (test doubles, custom schema
       # sources installed via {.schema_client}), and clients whose `#schema`
       # was overridden on the instance, keep the old call.
@@ -649,7 +682,8 @@ module Parse
         if resolved_client.is_a?(Parse::Client) && stock_schema
           safe = Parse::API::PathSegment.identifier!(class_key, kind: "class name")
           resolved_client.request(:get, "schemas/#{safe}",
-                                  opts: { cache: false, use_master_key: true })
+                                  opts: { cache: false, use_master_key: true,
+                                          metadata_master: Parse::Client::METADATA_MASTER_REQUEST })
         else
           resolved_client.schema(class_key)
         end

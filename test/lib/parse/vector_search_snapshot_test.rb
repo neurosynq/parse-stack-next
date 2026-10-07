@@ -6,6 +6,7 @@ require_relative "../../support/snapshot_helper"
 require "minitest/autorun"
 require "set"
 require "parse/vector_search/hybrid"
+require "parse/atlas_search"
 
 # Snapshot regression coverage for three security-relevant shapes that
 # had none (roadmap PC-6):
@@ -39,11 +40,30 @@ class VectorSearchSnapshotTest < Minitest::Test
 
   def setup
     Parse::CLPScope.reset_cache!
+    Parse::VectorSearch.clear_prefilter_cache!
   end
 
   def teardown
     Parse::CLPScope.reset_cache!
+    Parse::VectorSearch.clear_prefilter_cache!
   end
+
+  # A class whose `owner` is a scalar pointer, so the owner prefilter can
+  # be pushed into `$vectorSearch.filter`.
+  class SnapOwnedSong < Parse::Object
+    parse_class "SnapOwnedSong"
+    belongs_to :owner, as: :user
+  end
+
+  # A served vectorSearch index declaring `_p_owner` as a filter path.
+  OWNER_FILTER_INDEX = {
+    "name" => "song_vec", "type" => "vectorSearch", "status" => "READY",
+    "latestDefinition" => { "fields" => [
+      { "type" => "vector", "path" => "embedding", "numDimensions" => 3, "similarity" => "cosine" },
+      { "type" => "filter", "path" => "_p_owner" },
+      { "type" => "filter", "path" => "genre" },
+    ] },
+  }.freeze
 
   def resolution(mode:, permission_strings:, user_id: nil, strict_role: false)
     Parse::ACLScope::Resolution.new(
@@ -57,7 +77,7 @@ class VectorSearchSnapshotTest < Minitest::Test
 
   # ---- $vectorSearch ---------------------------------------------------
 
-  def vector_pipeline(res, **search_opts)
+  def vector_pipeline(res, pointer_fields: nil, collection: "Song", **search_opts)
     coll = CapturingColl.new
     Parse::MongoDB.stub(:require_gem!, nil) do
       Parse::MongoDB.stub(:available?, true) do
@@ -65,9 +85,11 @@ class VectorSearchSnapshotTest < Minitest::Test
           Parse::ACLScope.stub(:resolve!, ->(*, **) { res }) do
             Parse::CLPScope.stub(:permits?, ->(*, **) { true }) do
               Parse::CLPScope.stub(:protected_fields_for, ->(*, **) { Set.new }) do
-                Parse::CLPScope.stub(:row_constraint_for!, ->(*, **) { nil }) do
-                  Parse::VectorSearch.search("Song", field: "embedding", query_vector: [0.1, 0.2, 0.3],
-                                                     k: 5, index: "song_vec", **search_opts)
+                Parse::CLPScope.stub(:row_constraint_for!, ->(*, **) { pointer_fields }) do
+                  Parse::AtlasSearch::IndexManager.stub(:get_index, ->(*) { OWNER_FILTER_INDEX }) do
+                    Parse::VectorSearch.search(collection, field: "embedding", query_vector: [0.1, 0.2, 0.3],
+                                                           k: 5, index: "song_vec", **search_opts)
+                  end
                 end
               end
             end
@@ -105,17 +127,40 @@ class VectorSearchSnapshotTest < Minitest::Test
     assert_snapshot(pipe, name: "user_session_with_filters", group: "vector_search")
   end
 
+  def test_vector_search_owner_prefilter_and_match
+    res = resolution(mode: :session, permission_strings: ["u_alice", "*"], user_id: "u_alice")
+    pipe = vector_pipeline(res, pointer_fields: ["owner"], collection: "SnapOwnedSong",
+                                vector_filter: { "genre" => "rock" })
+    assert_equal({ "$and" => [{ "genre" => "rock" }, { "_p_owner" => { "$eq" => "_User$u_alice" } }] },
+                 pipe.dig(0, "$vectorSearch", "filter"))
+    assert(pipe.drop(1).any? { |s| s["$match"].to_s.include?("_p_owner") })
+    assert_snapshot(pipe, name: "user_session_owner_prefilter", group: "vector_search")
+  end
+
   # ---- native $rankFusion ----------------------------------------------
 
-  def native_pipeline(res)
+  def native_pipeline(res, pointer_fields: nil, collection: "Song")
     Parse::ACLScope.stub(:resolve!, ->(*, **) { res }) do
-      Parse::VectorSearch::Hybrid.send(
-        :native_pipeline, "Song",
-        lexical: { query: "rain", index: "song_search" },
-        vector: { query_vector: [0.1, 0.2], field: "embedding", index: "song_vec" },
-        k: 5, fusion: { weights: { lexical: 0.4, vector: 0.6 } },
-      )
+      Parse::CLPScope.stub(:row_constraint_for!, ->(*, **) { pointer_fields }) do
+        Parse::AtlasSearch::IndexManager.stub(:get_index, ->(*) { OWNER_FILTER_INDEX }) do
+          Parse::VectorSearch::Hybrid.send(
+            :native_pipeline, collection,
+            lexical: { query: "rain", index: "song_search" },
+            vector: { query_vector: [0.1, 0.2], field: "embedding", index: "song_vec" },
+            k: 5, fusion: { weights: { lexical: 0.4, vector: 0.6 } },
+          )
+        end
+      end
     end
+  end
+
+  def test_rank_fusion_owner_scoped
+    res = resolution(mode: :session, permission_strings: ["u_alice", "*"], user_id: "u_alice")
+    pipe = native_pipeline(res, pointer_fields: ["owner"], collection: "SnapOwnedSong")
+    inputs = pipe.dig(0, "$rankFusion", "input", "pipelines")
+    assert_equal({ "_p_owner" => { "$eq" => "_User$u_alice" } }, inputs["vector"].dig(0, "$vectorSearch", "filter"))
+    assert(inputs["lexical"].any? { |s| s["$match"].to_s.include?("_p_owner") })
+    assert_snapshot(pipe, name: "user_session_owner", group: "rank_fusion")
   end
 
   def test_rank_fusion_master

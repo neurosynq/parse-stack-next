@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "faraday"
+require "securerandom"
 require "active_support"
 require "active_support/core_ext"
 
@@ -15,6 +16,18 @@ module Parse
       include Parse::Protocol
       # @!visibility private
       DISABLE_MASTER_KEY = "X-Disable-Parse-Master-Key".freeze
+      # SDK-internal marker for a request that reads metadata (a class
+      # schema, the role graph) while enforcing a scope. Such a request keeps
+      # the master key inside {Parse.without_master_key}, which governs row
+      # access. The header carries a random per-process token and is removed
+      # before the request is logged or sent, so a header copied from user
+      # input cannot set it. {Parse::Client#request} adds it only for the
+      # `metadata_master:` request option set to
+      # {Parse::Client::METADATA_MASTER_REQUEST}.
+      # @!visibility private
+      METADATA_MASTER = "X-Parse-Stack-Metadata-Master".freeze
+      # @!visibility private
+      METADATA_MASTER_TOKEN = SecureRandom.hex(32).freeze
       # @return [String] the application id for this Parse endpoint.
       attr_accessor :application_id
       # @return [String] the REST API Key for this Parse endpoint.
@@ -67,7 +80,12 @@ module Parse
         #   3. A session-token-authenticated request (the existing check
         #      below; session token wins over master key).
         header_disable = env[:request_headers][DISABLE_MASTER_KEY].present?
-        fiber_disable = Parse.master_key_disabled?
+        # An SDK metadata read keeps the master key inside the block. Always
+        # remove the marker so it never reaches the logger or the server.
+        metadata_value = env[:request_headers].delete(METADATA_MASTER)
+        metadata_master = metadata_value.is_a?(String) &&
+                          ActiveSupport::SecurityUtils.secure_compare(metadata_value, METADATA_MASTER_TOKEN)
+        fiber_disable = Parse.master_key_disabled? && !metadata_master
         unless @master_key.blank? || header_disable || fiber_disable
           headers[MASTER_KEY] = @master_key
         end

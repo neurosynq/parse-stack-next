@@ -1,0 +1,120 @@
+[
+  {
+    "$rankFusion": {
+      "combination": {
+        "weights": {
+          "lexical": 0.4,
+          "vector": 0.6
+        }
+      },
+      "input": {
+        "pipelines": {
+          "lexical": [
+            {
+              "$search": {
+                "index": "song_search",
+                "text": {
+                  "path": {
+                    "wildcard": "*"
+                  },
+                  "query": "rain"
+                }
+              }
+            },
+            {
+              "$match": {
+                "$or": [
+                  {
+                    "_p_owner": "_User$u_alice"
+                  },
+                  {
+                    "owner": {
+                      "$elemMatch": {
+                        "className": "_User",
+                        "objectId": "u_alice"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "$limit": 50
+            }
+          ],
+          "vector": [
+            {
+              "$vectorSearch": {
+                "filter": {
+                  "_p_owner": {
+                    "$eq": "_User$u_alice"
+                  }
+                },
+                "index": "song_vec",
+                "limit": 50,
+                "numCandidates": 1000,
+                "path": "embedding",
+                "queryVector": [
+                  0.1,
+                  0.2
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "scoreDetails": false
+    }
+  },
+  {
+    "$addFields": {
+      "_hybrid_score": {
+        "$meta": "score"
+      }
+    }
+  },
+  {
+    "$match": {
+      "$or": [
+        {
+          "_rperm": {
+            "$in": [
+              "*",
+              "u_alice"
+            ]
+          }
+        },
+        {
+          "_rperm": {
+            "$exists": false
+          }
+        }
+      ]
+    }
+  },
+  {
+    "$match": {
+      "$or": [
+        {
+          "_p_owner": "_User$u_alice"
+        },
+        {
+          "owner": {
+            "$elemMatch": {
+              "className": "_User",
+              "objectId": "u_alice"
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "$sort": {
+      "_hybrid_score": -1
+    }
+  },
+  {
+    "$limit": 50
+  }
+]

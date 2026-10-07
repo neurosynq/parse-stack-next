@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require_relative "../../test_helper"
+require_relative "../../support/webhook_global_state"
 
 # Whether one raising `after_*` handler prevents the rest from running.
 #
@@ -14,6 +15,7 @@ require_relative "../../test_helper"
 #
 # `Parse::Webhooks.abort_after_callbacks_on_error` makes it a decision.
 class WebhookHandlerIsolationTest < Minitest::Test
+  include WebhookGlobalState
   def setup
     @previous = Parse::Webhooks.abort_after_callbacks_on_error
     Parse::Webhooks.instance_variable_set(:@routes, nil)

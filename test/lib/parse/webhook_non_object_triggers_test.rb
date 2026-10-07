@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require_relative "../../test_helper"
+require_relative "../../support/webhook_global_state"
 require "minitest/autorun"
 
 # Tests for first-class routing of the NON-OBJECT webhook trigger shapes:
@@ -21,6 +22,7 @@ require "minitest/autorun"
 #   * None of these run ActiveModel save/create/destroy callbacks even though
 #     the auth triggers carry a _User / _Session object.
 class WebhookNonObjectTriggersTest < Minitest::Test
+  include WebhookGlobalState
   def setup
     Parse::Webhooks.instance_variable_set(:@routes, nil)
   end
@@ -412,6 +414,7 @@ end
 # registration replaced rather than composed, that would silently clobber an
 # application's handler, with the winner decided by file load order.
 class WebhookAfterTriggerCompositionTest < Minitest::Test
+  include WebhookGlobalState
   def setup
     Parse::Webhooks.instance_variable_set(:@routes, nil)
   end

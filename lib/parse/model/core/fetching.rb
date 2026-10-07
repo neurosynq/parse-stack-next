@@ -55,6 +55,9 @@ module Parse
       # @param preserve_changes [Boolean] if true, re-apply local dirty values to fetched fields.
       #   By default (false), fetched fields accept server values and local changes are discarded.
       #   Unfetched fields always preserve their dirty state regardless of this setting.
+      #   A relation's staged additions and removals are kept in both modes (they are
+      #   operations, not field values) and the relation stays marked changed, so the
+      #   next save sends them. Use {Parse::Object#reload!} or `clear_changes!` to drop them.
       # @param opts [Hash] a set of options to pass to the client request.
       # @option opts [Boolean, Symbol] :cache (:write_only) caching mode:
       #   - :write_only (default) - skip cache read, but update cache with fresh data
@@ -220,11 +223,13 @@ module Parse
           respond_to?(:record_authorization_hydration!)
 
         begin
-          clear_changes!
+          # Not clear_changes!: that also drops a relation's staged
+          # additions and removals, which a fetch must keep.
+          clear_dirty_tracking!
         rescue => e
           # Log the error for debugging purposes
           warn "[Parse::Fetch] Warning: clear_changes! failed: #{e.class}: #{e.message}"
-          # If clear_changes! fails, manually reset change tracking
+          # If clearing fails, manually reset change tracking
           @changed_attributes = {} if instance_variable_defined?(:@changed_attributes)
           @mutations_from_database = nil if instance_variable_defined?(:@mutations_from_database)
           @mutations_before_last_save = nil if instance_variable_defined?(:@mutations_before_last_save)
@@ -266,7 +271,29 @@ module Parse
           end
         end
 
+        # A relation whose proxy still holds staged additions or removals
+        # must stay dirty, or the next save sends nothing. The loop above
+        # cannot guarantee it: when the response carries the relation's
+        # descriptor, re-applying the same proxy is not a change.
+        remark_staged_relations_dirty!
+
         self
+      end
+
+      # @!visibility private
+      # Marks dirty every relation whose proxy holds staged additions or
+      # removals. Used after a fetch has cleared the record's dirty tracking.
+      def remark_staged_relations_dirty!
+        return unless respond_to?(:relations)
+        relations.each_key do |key|
+          ivar = :"@#{key}"
+          next unless instance_variable_defined?(ivar)
+          proxy = instance_variable_get(ivar)
+          next unless proxy.respond_to?(:staged_changes?) && proxy.staged_changes?
+          next if changed.include?(key.to_s)
+          will_change_method = "#{key}_will_change!"
+          send(will_change_method) if respond_to?(will_change_method)
+        end
       end
 
       # Fetches the object with explicit caching enabled.

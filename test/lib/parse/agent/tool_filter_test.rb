@@ -11,6 +11,16 @@ require_relative "../../../test_helper"
 # (tier never allowed it) so consumers see meaningful diagnostics.
 # ============================================================================
 class AgentToolFilterTest < Minitest::Test
+  class FilterRubyArtist < Parse::Object
+    parse_class "FilterMusician"
+    property :name, :string
+
+    agent_method :purge, "Purge this record", permission: :readonly
+    def self.purge
+      "purged"
+    end
+  end
+
   class FilterArticle < Parse::Object
     parse_class "FilterArticle"
     property :title, :string
@@ -446,6 +456,280 @@ class AgentToolFilterTest < Minitest::Test
     a = Parse::Agent.new(methods: [:undeclared_method])
     r = a.execute(:call_method, class_name: "FilterArticle", method_name: "undeclared_method")
     refute r[:success], "filter never exposes a method that was not declared agent_method"
+  end
+
+  # ---- Sub-agent tools: / methods: narrow only (5.8.1) ------------------
+
+  def test_sub_agent_tools_only_intersects_parent
+    root = Parse::Agent.new(tools: { only: [:query_class, :count_objects] })
+    sub = Parse::Agent.new(parent: root, tools: { only: [:count_objects, :get_schema] })
+    assert_equal [:count_objects], sub.allowed_tools
+  end
+
+  def test_sub_agent_tools_only_without_overlap_raises
+    root = Parse::Agent.new(tools: { only: [:query_class] })
+    err = assert_raises(ArgumentError) { Parse::Agent.new(parent: root, tools: { only: [:get_schema] }) }
+    assert_match(/no overlap with the parent's tools: filter/, err.message)
+  end
+
+  def test_sub_agent_without_tools_inherits_parent_filter
+    root = Parse::Agent.new(tools: { only: [:query_class] })
+    sub = Parse::Agent.new(parent: root)
+    assert_equal [:query_class], sub.allowed_tools
+  end
+
+  def test_sub_agent_tools_except_unions_with_parent
+    root = Parse::Agent.new(tools: { except: [:query_class] })
+    sub = Parse::Agent.new(parent: root, tools: { except: [:count_objects] })
+    refute_includes sub.allowed_tools, :query_class
+    refute_includes sub.allowed_tools, :count_objects
+  end
+
+  def test_sub_agent_tools_only_cannot_reenable_parent_except
+    root = Parse::Agent.new(tools: { except: [:query_class] })
+    sub = Parse::Agent.new(parent: root, tools: { only: [:query_class, :count_objects] })
+    assert_equal [:count_objects], sub.allowed_tools
+    r = sub.execute(:query_class, class_name: "FilterArticle")
+    refute r[:success]
+    assert_equal :tool_filtered, r[:error_code]
+  end
+
+  def test_sub_agent_cannot_call_method_parent_was_not_given
+    root = Parse::Agent.new(methods: { only: [:archive] })
+    err = assert_raises(ArgumentError) { Parse::Agent.new(parent: root, methods: { only: [:delete_all] }) }
+    assert_match(/no overlap with the parent's methods: filter/, err.message)
+  end
+
+  def test_sub_agent_method_filter_keeps_parent_layer
+    root = Parse::Agent.new(methods: { only: [:archive] })
+    sub = Parse::Agent.new(parent: root, methods: { only: [:archive, :delete_all] })
+    refute sub.method_filtered?(:archive, class_name: "FilterArticle")
+    assert sub.method_filtered?(:delete_all, class_name: "FilterArticle")
+    r = sub.execute(:call_method, class_name: "FilterArticle", method_name: "delete_all")
+    refute r[:success]
+    assert_equal :tool_filtered, r[:error_code]
+  end
+
+  def test_sub_agent_without_methods_inherits_parent_filter
+    root = Parse::Agent.new(methods: { except: ["FilterArticle.delete_all"] })
+    sub = Parse::Agent.new(parent: root)
+    assert sub.method_filtered?(:delete_all, class_name: "FilterArticle")
+    refute sub.method_filtered?(:archive, class_name: "FilterArticle")
+  end
+
+  def test_sub_agent_methods_except_cannot_be_undone_by_child_only
+    root = Parse::Agent.new(methods: { except: [:delete_all] })
+    err = assert_raises(ArgumentError) { Parse::Agent.new(parent: root, methods: { only: [:delete_all] }) }
+    assert_match(/no overlap/, err.message)
+  end
+
+  def test_sub_agent_qualified_entry_narrows_bare_parent_entry
+    root = Parse::Agent.new(methods: { only: [:archive] })
+    sub = Parse::Agent.new(parent: root, methods: { only: ["FilterArticle.archive"] })
+    refute sub.method_filtered?(:archive, class_name: "FilterArticle")
+    assert sub.method_filtered?(:archive, class_name: "OtherClass")
+  end
+
+  def test_sub_agent_bare_entry_under_qualified_parent_stays_class_bound
+    root = Parse::Agent.new(methods: { only: ["FilterArticle.archive"] })
+    sub = Parse::Agent.new(parent: root, methods: { only: [:archive] })
+    refute sub.method_filtered?(:archive, class_name: "FilterArticle")
+    assert sub.method_filtered?(:archive, class_name: "OtherClass")
+  end
+
+  def test_grandchild_keeps_every_ancestor_method_layer
+    root = Parse::Agent.new(methods: { only: [:archive, :delete_all] })
+    mid = Parse::Agent.new(parent: root, methods: { except: [:delete_all] })
+    leaf = Parse::Agent.new(parent: mid)
+    assert leaf.method_filtered?(:delete_all, class_name: "FilterArticle")
+    refute leaf.method_filtered?(:archive, class_name: "FilterArticle")
+  end
+
+  def test_sub_agent_tools_only_empty_is_kept
+    root = Parse::Agent.new(tools: { only: [:query_class] })
+    sub = Parse::Agent.new(parent: root, tools: { only: [] })
+    assert_empty sub.allowed_tools
+  end
+
+  def test_sub_agent_methods_only_empty_is_kept
+    root = Parse::Agent.new(methods: { only: [:archive] })
+    sub = Parse::Agent.new(parent: root, methods: { only: [] })
+    assert sub.method_filtered?(:archive, class_name: "FilterArticle")
+  end
+
+  def test_sub_agent_tools_only_fully_excluded_by_parent_raises
+    root = Parse::Agent.new(tools: { only: [:query_class, :count_objects], except: [:query_class] })
+    err = assert_raises(ArgumentError) { Parse::Agent.new(parent: root, tools: { only: [:query_class] }) }
+    assert_match(/no overlap with the parent's tools: filter/, err.message)
+  end
+
+  def test_sub_agent_tools_only_inside_parent_except_only_raises
+    root = Parse::Agent.new(tools: { except: [:query_class] })
+    err = assert_raises(ArgumentError) { Parse::Agent.new(parent: root, tools: { only: [:query_class] }) }
+    assert_match(/no overlap/, err.message)
+  end
+
+  # ---- Class aliases in methods: entries ------------------------------
+
+  def test_qualified_method_entry_matches_user_alias_both_ways
+    a = Parse::Agent.new(methods: { except: ["_User.reset_all"] })
+    assert a.method_filtered?(:reset_all, class_name: "_User")
+    assert a.method_filtered?(:reset_all, class_name: "User")
+
+    b = Parse::Agent.new(methods: { except: ["User.reset_all"] })
+    assert b.method_filtered?(:reset_all, class_name: "_User")
+    assert b.method_filtered?(:reset_all, class_name: "User")
+  end
+
+  def test_qualified_method_only_entry_matches_alias
+    a = Parse::Agent.new(methods: { only: ["User.reset_all"] })
+    refute a.method_filtered?(:reset_all, class_name: "_User")
+    assert a.method_filtered?(:other, class_name: "_User")
+  end
+
+  def test_qualified_method_entries_match_other_system_aliases
+    %w[Role Session Installation].each do |name|
+      a = Parse::Agent.new(methods: { except: ["_#{name}.purge"] })
+      assert a.method_filtered?(:purge, class_name: name), "#{name} alias should match _#{name}"
+    end
+  end
+
+  # ---- Sub-agent approval gate (5.8.1) ---------------------------------
+
+  class DenyGate < Parse::Agent::ApprovalGate
+    attr_reader :calls
+    def initialize; @calls = 0; end
+    def review(**)
+      @calls += 1
+      Parse::Agent::ApprovalDecision.deny("denied by test gate")
+    end
+  end
+
+  def with_required_approval(tiers)
+    prior = Parse::Agent.require_approval_for
+    Parse::Agent.require_approval_for = tiers
+    yield
+  ensure
+    Parse::Agent.require_approval_for = prior
+  end
+
+  def test_sub_agent_uses_parent_approval_gate
+    with_required_approval([:readonly]) do
+      root = Parse::Agent.new
+      gate = DenyGate.new
+      root.approval_gate = gate
+      sub = Parse::Agent.new(parent: root)
+      r = sub.execute(:get_all_schemas)
+      refute r[:success]
+      assert_equal :approval_denied, r[:error_code]
+      assert_equal 1, gate.calls
+    end
+  end
+
+  def test_sub_agent_sees_gate_swapped_on_parent_after_construction
+    with_required_approval([:readonly]) do
+      root = Parse::Agent.new
+      sub = Parse::Agent.new(parent: root)
+      gate = DenyGate.new
+      root.approval_gate = gate
+      r = sub.execute(:get_all_schemas)
+      assert_equal :approval_denied, r[:error_code]
+      root.approval_gate = Parse::Agent::NullGate.new
+      assert_kind_of Parse::Agent::NullGate, sub.approval_gate
+    end
+  end
+
+  def test_sub_agent_own_gate_takes_precedence
+    root = Parse::Agent.new
+    root.approval_gate = DenyGate.new
+    sub = Parse::Agent.new(parent: root)
+    own = Parse::Agent::NullGate.new
+    sub.approval_gate = own
+    assert_same own, sub.approval_gate
+  end
+
+  def test_restoring_own_gate_snapshot_keeps_delegation
+    root = Parse::Agent.new
+    sub = Parse::Agent.new(parent: root)
+    prev = sub.approval_gate_override
+    assert_nil prev
+    sub.approval_gate = DenyGate.new
+    sub.approval_gate = prev
+    real = DenyGate.new
+    root.approval_gate = real
+    assert_same real, sub.approval_gate
+  end
+
+  def test_dispatcher_does_not_pin_parent_gate_on_sub_agent
+    require "parse/agent/mcp_dispatcher"
+    root = Parse::Agent.new
+    sub = Parse::Agent.new(parent: root)
+    root.approval_gate = DenyGate.new
+    Parse::Agent::MCPDispatcher.call(
+      body: { "jsonrpc" => "2.0", "id" => 1, "method" => "ping" },
+      agent: sub, approval_gate: DenyGate.new,
+    )
+    real = DenyGate.new
+    root.approval_gate = real
+    assert_same real, sub.approval_gate
+  end
+
+  def test_root_agent_default_gate_is_not_reported_as_override
+    root = Parse::Agent.new
+    assert_kind_of Parse::Agent::NullGate, root.approval_gate
+    assert_nil root.approval_gate_override
+    own = Parse::Agent::NullGate.new
+    root.approval_gate = own
+    assert_same own, root.approval_gate_override
+  end
+
+  def test_qualified_entry_with_ruby_constant_matches_parse_class
+    a = Parse::Agent.new(methods: { except: ["AgentToolFilterTest::FilterRubyArtist.purge"] })
+    assert a.method_filtered?(:purge, class_name: "FilterMusician")
+    r = a.execute(:call_method, class_name: "FilterMusician", method_name: "purge")
+    refute r[:success]
+    assert_equal :tool_filtered, r[:error_code]
+  end
+
+  def test_unresolved_qualified_entry_warns_at_construction
+    _out, err = capture_io { Parse::Agent.new(methods: { except: ["NoSuchModelAnywhere.purge"] }) }
+    assert_match(/NoSuchModelAnywhere\.purge/, err)
+  end
+
+  # ---- Effective method layers in audit / describe ---------------------
+  def tool_call_payload_for(agent)
+    payload = nil
+    sub = ActiveSupport::Notifications.subscribe("parse.agent.tool_call") { |*args| payload = args.last }
+    agent.execute(:call_method, class_name: "FilterArticle", method_name: "delete_all")
+    payload
+  ensure
+    ActiveSupport::Notifications.unsubscribe(sub) if sub
+  end
+
+  def test_audit_payload_reports_single_inherited_method_layer
+    root = Parse::Agent.new(methods: { except: [:delete_all] })
+    child = Parse::Agent.new(parent: root)
+    payload = tool_call_payload_for(child)
+    assert payload, "expected a parse.agent.tool_call event"
+    assert_nil payload[:methods_except]
+    assert_equal [{ only: nil, except: ["delete_all"] }], payload[:methods_layers]
+  end
+
+  def test_audit_payload_omits_layers_when_only_own_filter
+    agent = Parse::Agent.new(methods: { except: [:delete_all] })
+    payload = tool_call_payload_for(agent)
+    assert_equal ["delete_all"], payload[:methods_except]
+    refute payload.key?(:methods_layers)
+  end
+
+
+  def test_describe_reports_inherited_method_layers
+    root = Parse::Agent.new(methods: { except: [:delete_all] })
+    sub = Parse::Agent.new(parent: root)
+    methods = sub.describe[:methods]
+    assert_nil methods[:only]
+    assert_nil methods[:except]
+    assert_equal [{ only: nil, except: ["delete_all"] }], methods[:layers]
   end
 
   # ---- v4.2 follow-up safety fixes ------------------------------------

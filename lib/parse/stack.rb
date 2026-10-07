@@ -62,6 +62,25 @@ module Parse
   # the first attempt and gone by the retry; the fiber-local state lives
   # for the lifetime of the block).
   #
+  # Mongo-direct reads follow the same rule: an explicit `master: true`
+  # passed to `Parse::MongoDB.aggregate`, a `Parse::Query` direct terminal,
+  # Atlas Search, or vector search runs in the public scope inside the
+  # block (or raises `ACLRequired` when `require_session_token` is on), and
+  # the `parse.mongodb.aggregate` notification payload carries
+  # `master_dropped: true`. `Parse::AtlasSearch.faceted_search` refuses to
+  # run inside the block. A LiveQuery admin connection opened inside the
+  # block sends no master key; one that already connected with it stays
+  # elevated, because Parse Server authorizes per connection.
+  #
+  # The SDK's own metadata reads keep the master key inside the block: the
+  # class schemas and role graph it reads to enforce a scope, index
+  # statistics, and the Atlas Search index listing. Those requests are
+  # marked individually; the block's state is never lifted while they run.
+  #
+  # This is a guard against accidental master-key use, not an isolation
+  # boundary. Code inside the block can call {Parse.with_master_key}, and
+  # `Parse::MongoDB.find` and `Parse::MongoDB.indexes` take no scope at all.
+  #
   # @yield runs the block with master-key disabled
   # @return [Object] the block's return value
   # @example

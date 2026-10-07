@@ -47,8 +47,10 @@ module Parse
   #
   # * CLP `find` boundary check — refuses calls the equivalent REST
   #   find would refuse.
-  # * Optional `pointerFields` post-filter — drops rows that don't
-  #   name the current user_id in the configured pointer fields.
+  # * `pointerFields` / `readUserFields` ownership `$match` after
+  #   `$vectorSearch`, pushed into the `$vectorSearch.filter` prefilter
+  #   when every owner pointer (`_p_<field>`) is declared as a
+  #   `type: "filter"` field of the index.
   # * Post-`$vectorSearch` ACL `$match` injection (Parse Server's
   #   `_rperm` predicate).
   # * Post-fetch `protectedFields` redaction.
@@ -124,9 +126,10 @@ module Parse
     #
     # * `candidate_limit` / `num_candidates` — the requested window.
     # * `post_filter_count` — rows returned by the pipeline, i.e. after
-    #   the server-side ACL `$match` and any caller `filter`.
+    #   the server-side ACL `$match`, the pointerFields `$match`, and any
+    #   caller `filter`.
     # * `post_pointer_count` — rows left after client-side redaction and
-    #   pointer-field filtering.
+    #   the defense-in-depth pointer-field re-check.
     # * `returned_count` — rows handed back, after trimming to `k`.
     # * `underfilled` — the caller received fewer than `k`.
     #
@@ -136,6 +139,10 @@ module Parse
 
     # Accepted {.index_drift_policy} values.
     INDEX_DRIFT_POLICIES = %i[warn raise ignore].freeze
+
+    # Guards the lazy creation of the owner-prefilter negative cache mutex.
+    PREFILTER_MUTEX_INIT = Mutex.new
+    private_constant :PREFILTER_MUTEX_INIT
 
     class << self
       # Policy applied when first-query index verification (see
@@ -319,7 +326,14 @@ module Parse
           # result set is trimmed to `k` after enforcement runs.
           "limit" => candidate_limit,
         }
-        vs_stage["filter"] = vector_filter if vector_filter && !vector_filter.empty?
+        caller_prefilter = vector_filter if vector_filter && !vector_filter.empty?
+        owner_prefilter = unless resolution.master?
+            owner_vector_prefilter(collection_name, index_name, pointer_fields, resolution)
+          end
+        prefilter = [caller_prefilter, owner_prefilter].compact
+        unless prefilter.empty?
+          vs_stage["filter"] = prefilter.size == 1 ? prefilter.first : { "$and" => prefilter }
+        end
         pipeline = [{ "$vectorSearch" => vs_stage }]
 
         pipeline << {
@@ -337,12 +351,39 @@ module Parse
         unless resolution.master?
           acl_match = Parse::ACLScope.match_stage_for(resolution)
           pipeline << acl_match if acl_match
+          # pointerFields / readUserFields ownership, server-side so it
+          # runs on the whole candidate window before the trim to `k`.
+          # When every owner pointer is filter-indexed it also ran as the
+          # `$vectorSearch.filter` prefilter above; this stage then drops
+          # nothing but still covers the array-of-pointers storage form.
+          if pointer_fields
+            pipeline << {
+              "$match" => Parse::CLPScope.pointer_fields_predicate(pointer_fields, resolution.user_id),
+            }
+          end
         end
 
         pipeline << { "$match" => filter } if filter
 
-        raw_results = run_pipeline!(collection_name, pipeline, max_time_ms: max_time_ms,
-                                                               authorizing_client: Parse::ACLScope.client_of(resolution))
+        authorizing_client = Parse::ACLScope.client_of(resolution)
+        raw_results = begin
+            run_pipeline!(collection_name, pipeline, max_time_ms: max_time_ms,
+                                                     authorizing_client: authorizing_client)
+          rescue StandardError => e
+            raise unless owner_prefilter && owner_prefilter_rejected?(e, owner_prefilter)
+            # Atlas is serving an index version without the owner filter
+            # path (a rebuild in progress, or a stale cached definition).
+            # Stop pushing it down and rerun once without it; the
+            # ownership `$match` after `$vectorSearch` still enforces it.
+            owner_prefilter_unavailable!(collection_name, index_name)
+            if caller_prefilter
+              vs_stage["filter"] = caller_prefilter
+            else
+              vs_stage.delete("filter")
+            end
+            run_pipeline!(collection_name, pipeline, max_time_ms: max_time_ms,
+                                                     authorizing_client: authorizing_client)
+          end
         # Already past the server-side ACL `$match` and any caller
         # `filter` — NOT the number $vectorSearch emitted.
         post_filter_count = raw_results.length
@@ -353,6 +394,8 @@ module Parse
         unless resolution.master?
           Parse::ACLScope.redact_results!(raw_results, resolution)
           Parse::CLPScope.redact_protected_fields!(raw_results, protected_fields) if protected_fields.any?
+          # Defense in depth: the pointerFields `$match` already ran in
+          # the pipeline, so this should drop nothing.
           if pointer_fields
             raw_results = Parse::CLPScope.filter_by_pointer_fields(
               raw_results, pointer_fields, resolution.user_id,
@@ -442,6 +485,52 @@ module Parse
       #   @return [String, nil]
       attr_accessor :default_index
 
+      # @!visibility private
+      # Whether an error is Atlas refusing one of the owner prefilter's
+      # paths because the served index does not declare it as
+      # `type: "filter"`. Atlas words the refusal the same way for any
+      # path, so the message must name an owner path: a caller
+      # `vector_filter` on an unindexed field raises as it always did and
+      # does not switch the owner prefilter off for other callers.
+      # @param error [Exception]
+      # @param owner_prefilter [Hash] the owner clause that was pushed down.
+      # @return [Boolean]
+      def owner_prefilter_rejected?(error, owner_prefilter)
+        message = error.message.to_s
+        return false unless message.match?(PREFILTER_REJECTED_PATTERN)
+        owner_prefilter_paths(owner_prefilter).any? { |path| message.include?(path) }
+      end
+
+      # @!visibility private
+      # The `_p_<field>` paths an owner prefilter clause names.
+      # @param owner_prefilter [Hash]
+      # @return [Array<String>]
+      def owner_prefilter_paths(owner_prefilter)
+        return [] unless owner_prefilter.is_a?(Hash)
+        clauses = owner_prefilter.key?("$or") ? Array(owner_prefilter["$or"]) : [owner_prefilter]
+        clauses.flat_map { |c| c.is_a?(Hash) ? c.keys.map(&:to_s) : [] }.select { |k| k.start_with?("_p_") }
+      end
+
+      # @!visibility private
+      # Stop pushing the owner prefilter down for this index until the
+      # index cache TTL passes, and drop the cached index definition so
+      # the next lookup reads what Atlas now reports.
+      # @param collection_name [String]
+      # @param index_name [String, Symbol]
+      def owner_prefilter_unavailable!(collection_name, index_name)
+        require_relative "atlas_search"
+        Parse::AtlasSearch::IndexManager.clear_cache(collection_name)
+        mark_prefilter_unavailable(prefilter_cache_key(collection_name, index_name))
+      end
+
+      # @!visibility private
+      # Forget every negative prefilter lookup (tests, or after an
+      # operator fixes the index and does not want to wait out the TTL).
+      def clear_prefilter_cache!
+        prefilter_mutex.synchronize { @prefilter_unavailable = {} }
+        nil
+      end
+
       private
 
       def require_available!
@@ -505,6 +594,124 @@ module Parse
         # and over-restricted a public grant that also listed pointerFields.
         Parse::CLPScope.row_constraint_for!(collection_name, :find, resolution,
                                             label: "VectorSearch")
+      end
+
+      # The pointerFields ownership constraint as a `$vectorSearch.filter`
+      # clause, or nil when it cannot be pushed down. Atlas only accepts a
+      # prefilter on paths declared `type: "filter"` in the index, so this
+      # applies only when every owner pointer's storage path
+      # (`_p_<field>`) is filter-indexed. A prefilter keeps other users'
+      # rows out of the candidate window entirely, so an owner-scoped
+      # caller is not underfilled by higher-ranked rows they cannot read.
+      # Any lookup failure returns nil: the post-`$vectorSearch` `$match`
+      # still enforces ownership, only the fill is weaker.
+      #
+      # The prefilter matches only the scalar `_p_<field>` storage form.
+      # CLP ownership also accepts an array of pointers stored under the
+      # bare field name, so pushing down on such a field would drop rows
+      # the caller owns. It is therefore used only when every owner field
+      # is declared as a scalar pointer on the local model.
+      def owner_vector_prefilter(collection_name, index_name, pointer_fields, resolution)
+        return nil if pointer_fields.nil? || pointer_fields.empty?
+        uid = resolution.user_id.to_s
+        return nil if uid.empty?
+        return nil unless scalar_pointer_fields?(collection_name, pointer_fields)
+        paths = pointer_fields.map { |f| "_p_#{f}" }
+        indexed = vector_filter_paths(collection_name, index_name)
+        return nil unless paths.all? { |path| indexed.include?(path) }
+        storage = "#{Parse::Model::CLASS_USER}$#{uid}"
+        clauses = paths.map { |path| { path => { "$eq" => storage } } }
+        clauses.size == 1 ? clauses.first : { "$or" => clauses }
+      end
+
+      # Whether every owner field is declared as a scalar pointer
+      # (`belongs_to`) on the local model for the collection. Read from the
+      # model's declared fields, so no schema request is made. An unknown
+      # class, an undeclared field, or an array field all answer false.
+      def scalar_pointer_fields?(collection_name, pointer_fields)
+        klass = Parse::Model.find_class(collection_name.to_s)
+        return false unless klass.respond_to?(:fields)
+        fields = klass.fields
+        pointer_fields.all? { |f| fields[f.to_s.to_sym] == :pointer }
+      rescue StandardError
+        false
+      end
+
+      # Paths the named vectorSearch index declares as `type: "filter"`.
+      # Read through {Parse::AtlasSearch::IndexManager}, which caches the
+      # `$listSearchIndexes` result. Empty unless the index is READY and
+      # serving its latest definition: during a rebuild
+      # `latestDefinition` already lists the new filter path while Atlas
+      # still serves the old version, and a prefilter on that path is
+      # refused. A lookup error is remembered for the index cache TTL so a
+      # deployment without the `listSearchIndexes` privilege does not pay
+      # a failing round trip on every search.
+      def vector_filter_paths(collection_name, index_name)
+        key = prefilter_cache_key(collection_name, index_name)
+        return Set.new if prefilter_unavailable?(key)
+        require_relative "atlas_search"
+        idx = begin
+            Parse::AtlasSearch::IndexManager.get_index(collection_name, index_name.to_s)
+          rescue StandardError
+            mark_prefilter_unavailable(key)
+            return Set.new
+          end
+        return Set.new unless idx && index_serving_latest?(idx)
+        defn = idx["latestDefinition"] || idx[:latestDefinition] || {}
+        Array(defn["fields"] || defn[:fields]).each_with_object(Set.new) do |f, set|
+          next unless (f["type"] || f[:type]).to_s == "filter"
+          set << (f["path"] || f[:path]).to_s
+        end
+      end
+
+      # Whether Atlas is serving the index's latest definition: status
+      # READY and, when per-host `statusDetail` is reported, every host's
+      # main index at `latestDefinitionVersion`. Missing status fails
+      # toward "not serving" so the prefilter is simply skipped.
+      def index_serving_latest?(idx)
+        return false unless (idx["status"] || idx[:status]).to_s.upcase == "READY"
+        latest = definition_version(idx["latestDefinitionVersion"] || idx[:latestDefinitionVersion])
+        details = Array(idx["statusDetail"] || idx[:statusDetail])
+        return true if latest.nil? || details.empty?
+        details.all? do |detail|
+          main = detail["mainIndex"] || detail[:mainIndex]
+          main && definition_version(main["definitionVersion"] || main[:definitionVersion]) == latest
+        end
+      end
+
+      def definition_version(value)
+        return nil unless value.is_a?(Hash)
+        value["version"] || value[:version]
+      end
+
+      PREFILTER_REJECTED_PATTERN = /indexed as (?:a )?filter/i
+      private_constant :PREFILTER_REJECTED_PATTERN
+
+      def prefilter_cache_key(collection_name, index_name)
+        "#{collection_name}\x1f#{index_name}"
+      end
+
+      def prefilter_mutex
+        @prefilter_mutex ||= PREFILTER_MUTEX_INIT.synchronize { @prefilter_mutex ||= Mutex.new }
+      end
+
+      def prefilter_unavailable?(key)
+        prefilter_mutex.synchronize do
+          expires = (@prefilter_unavailable ||= {})[key]
+          next false unless expires
+          next true if Process.clock_gettime(Process::CLOCK_MONOTONIC) < expires
+          @prefilter_unavailable.delete(key)
+          false
+        end
+      end
+
+      def mark_prefilter_unavailable(key)
+        require_relative "atlas_search"
+        ttl = Parse::AtlasSearch::IndexManager.cache_ttl.to_f
+        return if ttl <= 0
+        prefilter_mutex.synchronize do
+          (@prefilter_unavailable ||= {})[key] = Process.clock_gettime(Process::CLOCK_MONOTONIC) + ttl
+        end
       end
 
       # Execute the pipeline directly against the MongoDB collection.

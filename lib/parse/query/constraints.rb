@@ -94,7 +94,7 @@ module Parse
     #  # where this Parse object equals the object in the column `field`.
     #  q.where :field => Parse::Pointer("Field", "someObjectId")
     #  # alias, shorthand when we infer `:field` maps to `Field` parse class.
-    #  q.where :field.id => "someObjectId"
+    #  q.where :field.pointer_id => "someObjectId"
     #  # "field":{"__type":"Pointer","className":"Field","objectId":"someObjectId"}}
     #
     #  class Artist < Parse::Object
@@ -114,19 +114,21 @@ module Parse
     # You can use the objectId in the query as follows:
     #
     #  # shorthand if you are using convention. Will infer class `Artist`
-    #  Song.all :artist.id => artist_id
+    #  Song.all :artist.pointer_id => artist_id
     #
     #  # other approaches, same result
-    #  Song.all :artist.id => artist # safely supported Parse::Pointer
+    #  Song.all :artist.pointer_id => artist # safely supported Parse::Pointer
     #  Song.all :artist => Artist.pointer(artist_id)
     #  Song.all :artist => Parse::Pointer.new("Artist", artist_id)
     #
     class ObjectIdConstraint < Constraint
-      # @!method id
-      # A registered method on a symbol to create the constraint.
+      # @!method pointer_id
+      # A registered method on a symbol to create the constraint. The
+      # operator is registered as `:id` and installed on `Symbol` as
+      # `pointer_id`.
       # @example
-      #  q.where :field.id => "someObjectId"
-      #  q.where :field.id => pointer # safely supported
+      #  q.where :field.pointer_id => "someObjectId"
+      #  q.where :field.pointer_id => pointer # safely supported
       # @return [ObjectIdConstraint]
       register :id
 
@@ -554,18 +556,18 @@ module Parse
     # MongoDB aggregation pipeline with $expr and $size to check array length.
     #
     #  # Exact size match
-    #  q.where :field.size => 2
-    #  q.where :tags.size => 5
+    #  q.where :field.array_size => 2
+    #  q.where :tags.array_size => 5
     #
     #  # Comparison operators via hash
-    #  q.where :tags.size => { gt: 3 }      # size > 3
-    #  q.where :tags.size => { gte: 2 }     # size >= 2
-    #  q.where :tags.size => { lt: 5 }      # size < 5
-    #  q.where :tags.size => { lte: 4 }     # size <= 4
-    #  q.where :tags.size => { ne: 0 }      # size != 0
+    #  q.where :tags.array_size => { gt: 3 }      # size > 3
+    #  q.where :tags.array_size => { gte: 2 }     # size >= 2
+    #  q.where :tags.array_size => { lt: 5 }      # size < 5
+    #  q.where :tags.array_size => { lte: 4 }     # size <= 4
+    #  q.where :tags.array_size => { ne: 0 }      # size != 0
     #
     #  # Combine for range
-    #  q.where :tags.size => { gte: 2, lt: 10 }  # 2 <= size < 10
+    #  q.where :tags.array_size => { gte: 2, lt: 10 }  # 2 <= size < 10
     #
     # @note This constraint uses aggregation pipeline because Parse Server
     #   does not support the $size query operator natively.
@@ -577,11 +579,13 @@ module Parse
     # @see ContainsAllConstraint
     # @see ArraySetEqualsConstraint
     class ArraySizeConstraint < Constraint
-      # @!method size
-      # A registered method on a symbol to create the constraint.
+      # @!method array_size
+      # A registered method on a symbol to create the constraint. The
+      # operator is registered as `:size` and installed on `Symbol` as
+      # `array_size`.
       # @example
-      #  q.where :field.size => 2
-      #  q.where :field.size => { gt: 3, lte: 10 }
+      #  q.where :field.array_size => 2
+      #  q.where :field.array_size => { gt: 3, lte: 10 }
       # @return [ArraySizeConstraint]
       register :size
 
@@ -1584,10 +1588,10 @@ module Parse
           unless query.is_a?(Parse::Query)
             raise ArgumentError, "Invalid Parse::Query object provided in :query field of value: #{@operation.operand}.#{$dontSelect} => #{@value}"
           end
-          query = query.compile(encode: false, includeClassName: true)
+          query = query.compile_subquery
         elsif @value.is_a?(Parse::Query)
           # if its a query, then assume dontSelect key is the same name as operand.
-          query = @value.compile(encode: false, includeClassName: true)
+          query = @value.compile_subquery
         else
           raise ArgumentError, "Invalid `:select` query constraint. It should follow the format: :field.select => { key: 'key', query: '<Parse::Query>' }"
         end
@@ -1635,10 +1639,10 @@ module Parse
           unless query.is_a?(Parse::Query)
             raise ArgumentError, "Invalid Parse::Query object provided in :query field of value: #{@operation.operand}.#{$dontSelect} => #{@value}"
           end
-          query = query.compile(encode: false, includeClassName: true)
+          query = query.compile_subquery
         elsif @value.is_a?(Parse::Query)
           # if its a query, then assume dontSelect key is the same name as operand.
-          query = @value.compile(encode: false, includeClassName: true)
+          query = @value.compile_subquery
         else
           raise ArgumentError, "Invalid `:reject` query constraint. It should follow the format: :field.reject => { key: 'key', query: '<Parse::Query>' }"
         end
@@ -2285,10 +2289,10 @@ module Parse
           unless query.is_a?(Parse::Query)
             raise ArgumentError, "Invalid Parse::Query object provided in :query field of value: #{@operation.operand}.matches_key_in_query => #{@value}"
           end
-          query = query.compile(encode: false, includeClassName: true)
+          query = query.compile_subquery
         elsif @value.is_a?(Parse::Query)
           # if its a query, then assume key is the same name as operand.
-          query = @value.compile(encode: false, includeClassName: true)
+          query = @value.compile_subquery
         else
           raise ArgumentError, "Invalid `:matches_key_in_query` query constraint. It should follow the format: :field.matches_key_in_query => { key: 'key', query: '<Parse::Query>' }"
         end
@@ -2335,10 +2339,10 @@ module Parse
           unless query.is_a?(Parse::Query)
             raise ArgumentError, "Invalid Parse::Query object provided in :query field of value: #{@operation.operand}.does_not_match_key_in_query => #{@value}"
           end
-          query = query.compile(encode: false, includeClassName: true)
+          query = query.compile_subquery
         elsif @value.is_a?(Parse::Query)
           # if its a query, then assume key is the same name as operand.
-          query = @value.compile(encode: false, includeClassName: true)
+          query = @value.compile_subquery
         else
           raise ArgumentError, "Invalid `:does_not_match_key_in_query` query constraint. It should follow the format: :field.does_not_match_key_in_query => { key: 'key', query: '<Parse::Query>' }"
         end

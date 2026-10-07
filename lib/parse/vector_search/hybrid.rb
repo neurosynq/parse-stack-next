@@ -399,9 +399,10 @@ module Parse
         # Build the native `$rankFusion` pipeline (without ACL/CLP
         # stages). Public-ish via {.native_pipeline} for snapshot tests;
         # the live path appends ACL enforcement in {#run_native}.
-        def build_rank_fusion_stage(lex, vec, oversample, k_constant:, weights:)
-          vsel = vector_search_stage(vec, oversample)
-          lsel = lexical_search_stage(lex, oversample)
+        def build_rank_fusion_stage(lex, vec, oversample, k_constant:, weights:,
+                                    owner_vector_filter: nil, owner_match: nil)
+          vsel = vector_search_stage(vec, oversample, owner_filter: owner_vector_filter)
+          lsel = lexical_search_stage(lex, oversample, owner_match: owner_match)
           stage = {
             "input" => {
               "pipelines" => { "vector" => vsel, "lexical" => lsel },
@@ -437,19 +438,44 @@ module Parse
           # AFTER the ACL `$match`, so trimming to `k` there would
           # reintroduce the underfill the window exists to prevent. The
           # trim to `k` happens client-side once enforcement is done.
+          pointer_fields = resolve_pointer_fields!(collection_name, resolution)
           native_pipeline_for(lex, vec, candidate_window, resolution,
                               k_constant: fusion[:k_constant] || DEFAULT_K_CONSTANT,
-                              weights: fusion[:weights], limit: candidate_window)
+                              weights: fusion[:weights], limit: candidate_window,
+                              pointer_fields: pointer_fields,
+                              owner_vector_filter: owner_vector_filter(collection_name, vec, pointer_fields, resolution))
         end
 
-        def native_pipeline_for(lex, vec, oversample, resolution, k_constant:, weights:, limit:)
-          pipeline = [build_rank_fusion_stage(lex, vec, oversample, k_constant: k_constant, weights: weights)]
+        def native_pipeline_for(lex, vec, oversample, resolution, k_constant:, weights:, limit:,
+                                pointer_fields: nil, owner_vector_filter: nil)
+          scoped = !(resolution.nil? || resolution.master?)
+          # Ownership inside each `$rankFusion` input as well as after it:
+          # every input is capped at `oversample`, so a final `$match`
+          # alone only sees the fused top rows and can underfill when
+          # other users' rows dominate both branches. The lexical input
+          # filters before its `$limit`; the vector input uses the
+          # `$vectorSearch.filter` prefilter when the owner path is
+          # filter-indexed and served (see Parse::VectorSearch).
+          owner_match = if scoped && pointer_fields
+              Parse::CLPScope.pointer_fields_predicate(pointer_fields, resolution.user_id)
+            end
+          pipeline = [build_rank_fusion_stage(lex, vec, oversample, k_constant: k_constant, weights: weights,
+                                                                    owner_vector_filter: (owner_vector_filter if scoped),
+                                                                    owner_match: owner_match)]
           # The fused RRF score is surfaced via `{ $meta: "score" }`
           # (a numeric), not "scoreDetails" (a breakdown document).
           pipeline << { "$addFields" => { "_hybrid_score" => { "$meta" => "score" } } }
           unless resolution.nil? || resolution.master?
             acl_match = Parse::ACLScope.match_stage_for(resolution)
             pipeline << acl_match if acl_match
+            # pointerFields / readUserFields ownership before `$limit`, so
+            # rows ranked above the caller's own rows cannot crowd them
+            # out of the page.
+            if pointer_fields
+              pipeline << {
+                "$match" => Parse::CLPScope.pointer_fields_predicate(pointer_fields, resolution.user_id),
+              }
+            end
           end
           pipeline << { "$sort" => { "_hybrid_score" => -1 } }
           pipeline << { "$limit" => limit }
@@ -491,8 +517,11 @@ module Parse
             )
           end
 
+          owner_filter = owner_vector_filter(collection_name, vec, pointer_fields, resolution)
           pipeline = native_pipeline_for(lex, vec, oversample, resolution,
-                                         k_constant: k_constant, weights: weights, limit: oversample)
+                                         k_constant: k_constant, weights: weights, limit: oversample,
+                                         pointer_fields: pointer_fields,
+                                         owner_vector_filter: owner_filter)
           rows = run_pipeline!(collection_name, pipeline,
                                authorizing_client: Parse::ACLScope.client_of(resolution))
 
@@ -516,6 +545,8 @@ module Parse
             rows.select! { |doc| native_row_visible?(doc, perms_set) }
             Parse::ACLScope.redact_results!(rows, resolution)
             Parse::CLPScope.redact_protected_fields!(rows, protected_fields) if protected_fields.any?
+            # Defense in depth: the pointerFields `$match` already ran
+            # before `$limit`, so this should drop nothing.
             if pointer_fields
               rows = Parse::CLPScope.filter_by_pointer_fields(rows, pointer_fields, resolution.user_id)
             end
@@ -535,7 +566,13 @@ module Parse
           rows
         rescue Parse::CLPScope::Denied
           raise
-        rescue StandardError
+        rescue StandardError => e
+          # A refused owner prefilter means Atlas serves an index version
+          # without that filter path; stop pushing it down so the client
+          # fallback below (and later searches) run without it.
+          if owner_filter && Parse::VectorSearch.owner_prefilter_rejected?(e, owner_filter)
+            Parse::VectorSearch.owner_prefilter_unavailable!(collection_name, vector_index_name(vec))
+          end
           # Native execution failed (e.g. a cluster that probed as
           # supported but rejects this exact shape, or a transient error).
           # Fall back to the client-side path rather than failing the
@@ -543,7 +580,23 @@ module Parse
           nil
         end
 
-        def vector_search_stage(vec, oversample)
+        # The owner prefilter for the native vector input, or nil when it
+        # cannot be pushed down (master, no pointerFields, or the owner
+        # path not filter-indexed in the index Atlas is serving).
+        def owner_vector_filter(collection_name, vec, pointer_fields, resolution)
+          return nil if resolution.nil? || resolution.master? || pointer_fields.nil?
+          Parse::VectorSearch.send(:owner_vector_prefilter, collection_name, vector_index_name(vec),
+                                   pointer_fields, resolution)
+        end
+
+        # The vector index the native input searches: the branch's
+        # `index:` or {Parse::VectorSearch.default_index}, the same
+        # fallback {Parse::VectorSearch.search} uses on the client path.
+        def vector_index_name(vec)
+          vec[:index] || Parse::VectorSearch.default_index
+        end
+
+        def vector_search_stage(vec, oversample, owner_filter: nil)
           # Parity with Parse::VectorSearch: Atlas requires
           # `numCandidates >= limit` and caps it at 10_000. The default
           # (`oversample * MULTIPLIER`) can blow past 10_000 for a large
@@ -554,19 +607,23 @@ module Parse
           num_candidates = (vec[:num_candidates] || oversample * Parse::VectorSearch::DEFAULT_NUM_CANDIDATES_MULTIPLIER).to_i
           num_candidates = [[num_candidates, oversample].max, 10_000].min
           stage = {
-            "index" => vec[:index].to_s,
+            "index" => vector_index_name(vec).to_s,
             "path" => vec[:field].to_s,
             "queryVector" => vec[:query_vector],
             "numCandidates" => num_candidates,
             "limit" => oversample,
           }
-          stage["filter"] = vec[:vector_filter] if vec[:vector_filter] && !vec[:vector_filter].empty?
+          caller_filter = vec[:vector_filter] if vec[:vector_filter] && !vec[:vector_filter].empty?
+          prefilter = [caller_filter, owner_filter].compact
+          unless prefilter.empty?
+            stage["filter"] = prefilter.size == 1 ? prefilter.first : { "$and" => prefilter }
+          end
           inner = [{ "$vectorSearch" => stage }]
           inner << { "$match" => vec[:filter] } if vec[:filter]
           inner
         end
 
-        def lexical_search_stage(lex, oversample)
+        def lexical_search_stage(lex, oversample, owner_match: nil)
           require_relative "../atlas_search" if defined?(Parse::AtlasSearch::SearchBuilder).nil?
           builder = Parse::AtlasSearch::SearchBuilder.new(index_name: lex[:index])
           fields = lex[:fields]
@@ -575,7 +632,9 @@ module Parse
           else
             Array(fields).each { |f| builder.text(query: lex[:query], path: f.to_s, fuzzy: lex[:fuzzy]) }
           end
-          inner = [builder.build, { "$limit" => oversample }]
+          inner = [builder.build]
+          inner << { "$match" => owner_match } if owner_match
+          inner << { "$limit" => oversample }
           inner << { "$match" => lex[:filter] } if lex[:filter]
           inner
         end
