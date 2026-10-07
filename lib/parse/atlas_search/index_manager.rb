@@ -65,7 +65,11 @@ module Parse
             # `master: true` so the SDK's CLP layer skips this metadata
             # pipeline. The mongo-side privilege check still applies
             # (the underlying connection must hold `listSearchIndexes`).
-            results = Parse::MongoDB.aggregate(collection_name, pipeline, master: true)
+            # The metadata sentinel keeps that master mode inside a
+            # `Parse.without_master_key` block, which governs row access,
+            # without re-enabling the master key for anything else.
+            results = Parse::MongoDB.aggregate(collection_name, pipeline,
+                                               master: Parse::ACLScope::METADATA_MASTER)
             cache_mutex.synchronize { cache_indexes(collection_name, results) }
             results
           rescue => e

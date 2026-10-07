@@ -559,6 +559,7 @@ module Parse
         unless resolution.master?
           acl_match = Parse::ACLScope.match_stage_for(resolution)
           pipeline << acl_match if acl_match
+          pipeline << pointer_fields_match_stage(pointer_fields, resolution) if pointer_fields
         end
 
         # Add filter if provided
@@ -658,6 +659,17 @@ module Parse
                 "ACL on $searchMeta bucket counts (got #{offending.first}:). " \
                 "Pass `master: true` to run with master-key semantics and " \
                 "accept that bucket counts include all rows, or use " \
+                "#search for ACL-scoped results without facets."
+        end
+        # Inside Parse.without_master_key the only scope left is public,
+        # and $searchMeta bucket counts are not ACL-filtered there either,
+        # so they would count rows the block is meant to hide. Fail closed.
+        if Parse::ACLScope.master_key_suppressed?
+          raise FacetedSearchNotACLSafe,
+                "Parse::AtlasSearch.faceted_search cannot run inside " \
+                "Parse.without_master_key: $searchMeta bucket counts include " \
+                "rows the caller cannot read. Wrap the call in " \
+                "Parse.with_master_key to accept master-key counts, or use " \
                 "#search for ACL-scoped results without facets."
         end
         # Wave-3b READPREF-4: see #search for rationale. Captured
@@ -815,6 +827,7 @@ module Parse
         unless resolution.master?
           acl_match = Parse::ACLScope.match_stage_for(resolution)
           pipeline << acl_match if acl_match
+          pipeline << pointer_fields_match_stage(pointer_fields, resolution) if pointer_fields
         end
 
         # Caller-supplied filter, sanitized against operator injection
@@ -851,6 +864,8 @@ module Parse
         unless resolution.master?
           Parse::ACLScope.redact_results!(raw_results, resolution)
           Parse::CLPScope.redact_protected_fields!(raw_results, protected_fields) if protected_fields.any?
+          # The pointerFields `$match` above already ran before `$limit`;
+          # this re-check is defense in depth and should drop nothing.
           if pointer_fields
             raw_results = Parse::CLPScope.filter_by_pointer_fields(
               raw_results, pointer_fields, resolution.user_id,
@@ -972,10 +987,34 @@ module Parse
           return Parse::ACLScope.resolve_for_role(acl_role, client: auth_client)
         end
 
-        if master == true
+        if master == true && !Parse::ACLScope.master_key_suppressed?
           return Parse::ACLScope::Resolution.new(
                    mode: :master, permission_strings: nil, user_id: nil, session: nil,
                    client: auth_client,
+                 )
+        end
+
+        # Inside `Parse.without_master_key` an explicit master request runs
+        # in the public scope, as Parse::ACLScope.resolve! does: no
+        # no-ACL banner (the caller did pass a scope), and either strict
+        # flag refuses the fallback.
+        if master == true
+          if @require_session_token == true || Parse::ACLScope.require_session_token == true
+            raise ACLRequired,
+                  "Parse::AtlasSearch.#{method_name} was called with master: true " \
+                  "inside Parse.without_master_key, which drops master mode, and " \
+                  "require_session_token refuses the public fallback. Pass " \
+                  "session_token:, or run the call inside Parse.with_master_key " \
+                  "if it needs master authority."
+          end
+          anonymous = Session::Resolved.new(nil, Set.new)
+          return Parse::ACLScope::Resolution.new(
+                   mode: :public,
+                   permission_strings: anonymous.permission_strings,
+                   user_id: nil,
+                   session: anonymous,
+                   client: auth_client,
+                   master_dropped: true,
                  )
         end
 
@@ -1035,6 +1074,15 @@ module Parse
         # and over-restricted a public grant that also listed pointerFields.
         Parse::CLPScope.row_constraint_for!(collection_name, :find, resolution,
                                             label: "Atlas Search")
+      end
+
+      # The pointerFields / readUserFields ownership constraint as a
+      # `$match` stage, placed after the ACL `$match` and before `$sort` /
+      # `$limit`. Filtering the fetched rows afterwards returned short or
+      # empty pages whenever the top-ranked hits belonged to other users,
+      # even though eligible matches ranked below them.
+      def pointer_fields_match_stage(pointer_fields, resolution)
+        { "$match" => Parse::CLPScope.pointer_fields_predicate(pointer_fields, resolution.user_id) }
       end
 
       # ATLAS-4: refuse `highlight_field:` when the field is in the
