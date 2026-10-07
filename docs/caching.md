@@ -358,6 +358,17 @@ Two behaviors to know before you rely on these:
   triggers depend on. The deprecated `Parse::AtlasSearch::Session.invalidate` /
   `.invalidate_user_roles` forms still work through 5.x: they delegate to the
   default client's context, so they can only ever address `Parse.client`.
+* A custom identity plane you write yourself needs `get`, `set`, and
+  `invalidate`. Revoking one token (logout, `Parse::Session#destroy` on a
+  session that carries its token) works with those alone. Revoking every token
+  of a user (password change, account deletion, `logout_all!`, destroying a
+  session fetched without its token, or a batch `Array#destroy` of sessions or
+  users) also needs either `invalidate_value(user_id)` or generation support
+  (`generation`, `generation_current?`, and `bump_generation`), because the
+  plane is keyed by token. A plane with neither keeps resolving
+  those tokens until their cached entries expire, so revocation there is
+  bounded by `identity_cache_ttl`, not immediate. Lower the TTL if that window
+  is too long.
 
 On a Redis outage these planes behave differently from the response cache.
 The response cache degrades to a passthrough request; the identity and role

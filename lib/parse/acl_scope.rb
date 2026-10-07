@@ -74,12 +74,31 @@ module Parse
     #     agree; see {Parse::MongoDB.verify_client!}. Per-client
     #     authorization plus a process-global MongoDB connection is safe only
     #     when they belong to the same application.
-    Resolution = Struct.new(:mode, :permission_strings, :user_id, :session, :strict_role, :client, keyword_init: true) do
+    # @!attribute master_dropped
+    #   @return [Boolean, nil] `true` when the caller asked for `master: true`
+    #     inside {Parse.without_master_key} and the call was downgraded to
+    #     the public scope. Reported on the `parse.mongodb.aggregate`
+    #     notification so a master-key caller that sees only public rows
+    #     inside the block can be diagnosed.
+    Resolution = Struct.new(:mode, :permission_strings, :user_id, :session, :strict_role, :client,
+                            :master_dropped, keyword_init: true) do
       def master?; mode == :master; end
       def session?; mode == :session; end
       def public?; mode == :public; end
       def strict_role?; strict_role == true; end
+      def master_dropped?; master_dropped == true; end
     end
+
+    # SDK-internal value for `master:` on calls that read metadata, not rows
+    # (index statistics, the Atlas Search index listing). It resolves to
+    # master mode even inside {Parse.without_master_key}, which governs row
+    # access. Unlike wrapping the call in {Parse.with_master_key}, it changes
+    # no fiber state, so notification subscribers and threads started during
+    # the call still see the caller's block.
+    # @!visibility private
+    METADATA_MASTER = Object.new.tap do |o|
+      def o.inspect = "#<Parse::ACLScope::METADATA_MASTER>"
+    end.freeze
 
     # The client a resolution was produced by, or nil when it cannot say.
     #
@@ -125,6 +144,12 @@ module Parse
       #   `master: true` are supplied — they are mutually exclusive.
       # @raise [ACLRequired] when neither is supplied and
       #   {.require_session_token} is `true`.
+      #
+      # Inside a {Parse.without_master_key} block an explicit `master: true`
+      # is dropped and the call runs in the public scope, as a REST request
+      # does once the block strips its master key. With
+      # {.require_session_token} set, the dropped call raises {ACLRequired}
+      # instead. A nested {Parse.with_master_key} block restores master mode.
       def resolve!(options, method_name:)
         session_token = options.delete(:session_token)
         master = options.delete(:master)
@@ -140,12 +165,22 @@ module Parse
         # the legacy behavior.
         strict_role = options.delete(:strict_role) == true
 
+        # SDK metadata reads keep master mode whatever the block says.
+        metadata_master = master.equal?(METADATA_MASTER)
+        master = true if metadata_master
+
         provided = [session_token, master == true ? master : nil, acl_user, acl_role].compact
         if provided.length > 1
           raise ArgumentError,
                 "Parse::ACLScope.#{method_name}: cannot pass more than one of " \
                 "session_token:, master: true, acl_user:, or acl_role:. Pick one."
         end
+
+        # `Parse.without_master_key` strips the master key from every REST
+        # request in the block, an explicit `use_master_key: true` included.
+        # A direct read must not keep master authority the REST call loses.
+        master_dropped = master == true && !metadata_master && master_key_suppressed?
+        master = nil if master_dropped
 
         if acl_user
           # Pre-resolved User-pointer path used by
@@ -186,6 +221,18 @@ module Parse
                                 client: authorization_client(options))
         end
 
+        if master_dropped
+          if @require_session_token == true
+            raise ACLRequired,
+                  "Parse::#{method_name} was called with master: true inside " \
+                  "Parse.without_master_key, which drops master mode, and " \
+                  "Parse::ACLScope.require_session_token refuses the public " \
+                  "fallback. Pass session_token:, or run the call inside " \
+                  "Parse.with_master_key if it needs master authority."
+          end
+          return public_resolution(options, master_dropped: true)
+        end
+
         if @require_session_token == true
           raise ACLRequired,
                 "Parse::#{method_name} requires session_token: or master: true. " \
@@ -196,14 +243,7 @@ module Parse
         end
 
         warn_no_acl_context_once!(method_name)
-        anonymous = Parse::Authorization::Resolved.new(nil, Set.new)
-        Resolution.new(
-          mode: :public,
-          permission_strings: anonymous.permission_strings,
-          user_id: nil,
-          session: anonymous,
-          client: authorization_client(options),
-        )
+        public_resolution(options)
       end
 
       # Compile the `_rperm` `$match` stage to prepend to a mongo-direct
@@ -845,7 +885,29 @@ module Parse
         @warned_malformed_rperm_classes = Set.new
       end
 
+      # Whether an explicit `master: true` must be dropped: true inside a
+      # {Parse.without_master_key} block that no nested
+      # {Parse.with_master_key} has re-enabled.
+      # @!visibility private
+      # @return [Boolean]
+      def master_key_suppressed?
+        Parse.respond_to?(:master_key_disabled?) && Parse.master_key_disabled?
+      end
+
       private
+
+      # The anonymous public-scope resolution: `"*"` grants only.
+      def public_resolution(options, master_dropped: nil)
+        anonymous = Parse::Authorization::Resolved.new(nil, Set.new)
+        Resolution.new(
+          mode: :public,
+          permission_strings: anonymous.permission_strings,
+          user_id: nil,
+          session: anonymous,
+          client: authorization_client(options),
+          master_dropped: master_dropped,
+        )
+      end
 
       # Emit the once-per-process security banner the first time a
       # mongo-direct path runs without `session_token:` and without

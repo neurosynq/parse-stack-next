@@ -423,6 +423,18 @@ module Parse
       end
 
       def role_query_all(constraints, client: nil)
+        # Inside `Parse.without_master_key` the role graph is still read with
+        # the master key. It is metadata the SDK needs to enforce a scope, as
+        # Parse Server reads it itself; read without the key it returned only
+        # publicly readable roles, and that short closure was then cached for
+        # the user and served to every caller until it expired.
+        if Parse.respond_to?(:master_key_disabled?) && Parse.master_key_disabled?
+          query = Parse::Role.query(constraints.reverse_merge(limit: :max))
+          query.client = client if client
+          query.instance_variable_set(:@_metadata_master, true)
+          return query.results
+        end
+
         # No explicit client means the historical path, unchanged. This is not
         # only for compatibility: `Parse::Role.all` is what callers and tests
         # observe and stub, and routing around it when nothing asked us to

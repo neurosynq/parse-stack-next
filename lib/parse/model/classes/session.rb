@@ -205,27 +205,106 @@ module Parse
       destroy
     end
 
-    # Deletes the session and, on success, forgets it in the client's
-    # identity plane so mongo-direct and Atlas Search reads stop resolving
-    # the token at once instead of when the cached entry expires. The token
-    # is dropped when this instance carries it; the owning user's entries
-    # are dropped as well, since a session fetched without the master key
-    # does not carry its token.
+    # Deletes the session and forgets it in the client's identity plane, so
+    # mongo-direct and Atlas Search reads stop resolving the token at once
+    # instead of when the cached entry expires. Both the token and the owning
+    # user's entries are dropped. A session that does not carry them (a
+    # pointer, or a fetch without the master key or with `keys:` leaving
+    # them out) has them looked up first with the master key; if that
+    # lookup fails, every cached identity on the client is dropped instead.
+    # The entries are dropped on every attempt, not only on success.
+    #
+    # A batch delete through `Array#destroy` drops the same entries for
+    # each session in it. With an identity plane that cannot drop a
+    # single user's entries (a custom plane without `bump_generation` or
+    # `invalidate_value`), a revoked token keeps resolving until its cached
+    # entry expires.
     # @param session [String] (see Parse::Object#destroy)
     # @return [Boolean] whether the operation was successful.
     def destroy(session: nil)
-      token = @session_token
-      # Read the association ivar directly: calling `user` on a partially
-      # fetched session could trigger an autofetch just to learn the owner.
-      owner = @user
-      owner_id = owner.respond_to?(:id) ? owner.id : nil
-      success = super
-      if success
-        cl = client
-        cl.invalidate_session_identity(token) if token.is_a?(String) && cl.respond_to?(:invalidate_session_identity)
-        cl.invalidate_user_identity(owner_id) if owner_id && cl.respond_to?(:invalidate_user_identity)
+      # A session never saved is not deleted (see Parse::Object#destroy), so
+      # there is nothing to forget either.
+      return super if new?
+      begin
+        Parse::Session._preload_identity_for_destroy!([self])
+        token, owner_id = _identity_for_destroy
+      ensure
+        # The looked-up token is a live credential: keep it in locals only.
+        _clear_identity_for_destroy!
       end
-      success
+      begin
+        super
+      ensure
+        # Dropped on every attempt, not only on success: a failed delete may
+        # mean the session is already gone (revoked elsewhere) while its
+        # token is still cached here. Dropping cached entries is idempotent.
+        _forget_identity!(token, owner_id)
+      end
+    end
+
+    # Called by `Array#destroy` for each session in the batch, whether or
+    # not its delete succeeded.
+    # @!visibility private
+    def _after_batch_destroy
+      identity = _identity_for_destroy
+      _clear_identity_for_destroy!
+      _forget_identity!(*identity)
+    end
+
+    # Remove the token and owner {._preload_identity_for_destroy!} looked
+    # up. The token is a live credential and must not outlive the delete
+    # (it would show in `inspect` or `instance_variables`).
+    # @!visibility private
+    def _clear_identity_for_destroy!
+      remove_instance_variable(:@_identity_for_destroy) if instance_variable_defined?(:@_identity_for_destroy)
+    end
+
+    # Whether this session lacks the token or the owner its identity-plane
+    # entries are keyed by: a fetch without the master key (no token) or
+    # with `keys:` leaving them out.
+    # @!visibility private
+    def _identity_lookup_needed?
+      # Keyed on the objectId, not `new?`: `Array#destroy` deletes by id
+      # alone, so a session built from an id (no timestamps loaded) is still
+      # deleted and its token must still be dropped.
+      return false if @id.blank?
+      !@session_token.is_a?(String) || @session_token.empty? || _identity_owner_id.nil?
+    end
+
+    # Look up the token and owner of every session about to be deleted that
+    # does not carry them, so the delete can drop their identity entries.
+    # One `_Session` query per client, read with the master key as SDK
+    # metadata (it works inside `Parse.without_master_key`). A session the
+    # lookup could not answer for is marked so its delete falls back to
+    # dropping the whole identity plane rather than silently skipping.
+    # @param sessions [Array<Parse::Session>]
+    # @!visibility private
+    def self._preload_identity_for_destroy!(sessions)
+      pending = sessions.select { |o| o.is_a?(Parse::Session) && o._identity_lookup_needed? }
+      return if pending.empty?
+      pending.group_by(&:client).each do |cl, group|
+        ids = group.map(&:id).uniq
+        found = begin
+            query = Parse::Session.query(:objectId.in => ids, limit: ids.size)
+            query.keys(:session_token, :user)
+            query.client = cl
+            query.instance_variable_set(:@_metadata_master, true)
+            query.results.to_h do |row|
+              owner = row.instance_variable_get(:@user)
+              [row.id, [row.instance_variable_get(:@session_token), owner.respond_to?(:id) ? owner.id : nil]]
+            end
+          rescue StandardError => e
+            warn "[Parse::Session] could not look up the token and owner of " \
+                 "#{ids.size} session(s) before deleting them (#{e.class}); " \
+                 "dropping the whole identity cache instead."
+            nil
+          end
+        group.each do |o|
+          token, owner_id = found && found[o.id]
+          o.instance_variable_set(:@_identity_for_destroy,
+                                  token.is_a?(String) || owner_id ? [token, owner_id] : :unknown)
+        end
+      end
     end
 
     # Serialization omits `sessionToken` unless `include_session_token: true`
@@ -245,7 +324,57 @@ module Parse
     # Redacts the session token from the default inspect output.
     # @return [String]
     def inspect
-      Parse::User.redact_session_token(super, @session_token)
+      looked_up = @_identity_for_destroy
+      Parse::User.redact_session_token(super, @session_token, looked_up.is_a?(Array) ? looked_up[0] : nil)
+    end
+
+    private
+
+    # The token and owner id to forget for this delete: what this instance
+    # carries, completed by {._preload_identity_for_destroy!} when it did
+    # not, or `:unknown` when that lookup failed.
+    # @!visibility private
+    def _identity_for_destroy
+      looked_up = @_identity_for_destroy
+      token = @session_token.is_a?(String) && !@session_token.empty? ? @session_token : nil
+      owner_id = _identity_owner_id
+      return [:unknown, owner_id] if looked_up == :unknown
+      if looked_up.is_a?(Array)
+        token ||= looked_up[0]
+        owner_id ||= looked_up[1]
+      end
+      [token, owner_id]
+    end
+
+    # The owning user's id, read from the association ivar directly:
+    # calling `user` on a partially fetched session could trigger an
+    # autofetch just to learn the owner.
+    # @!visibility private
+    def _identity_owner_id
+      owner = @user
+      owner.respond_to?(:id) ? owner.id : nil
+    end
+
+    # Drop the token and the owner's entries from this session's client's
+    # identity plane.
+    # @!visibility private
+    def _forget_identity!(token, owner_id)
+      cl = client
+      if token == :unknown
+        # The token could not be learned, so its entry cannot be named. Drop
+        # every cached identity on this client (the next read of each token
+        # re-resolves it, which is safe), and the owner's entries as well
+        # when the owner is known, since a shared plane may be read by other
+        # processes too.
+        auth = cl.respond_to?(:authorization) ? cl.authorization : nil
+        auth.reset_caches! if auth.respond_to?(:reset_caches!)
+        token = nil
+      end
+      cl.invalidate_session_identity(token) if token.is_a?(String) && cl.respond_to?(:invalidate_session_identity)
+      cl.invalidate_user_identity(owner_id) if owner_id && cl.respond_to?(:invalidate_user_identity)
+    rescue StandardError
+      # Runs from an `ensure`: never replace the delete's own outcome.
+      nil
     end
   end
 end

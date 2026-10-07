@@ -620,7 +620,14 @@ module Parse
             end
           end
 
-        @cache_mutex.synchronize { @cache[key] = entry }
+        # A failure inside `Parse.without_master_key` is not cached. The
+        # request below keeps the master key there, but a custom schema
+        # source may not, and a negative entry is shared by every caller of
+        # this class for {NEGATIVE_TTL}: one block must not deny every other
+        # request's scoped reads.
+        unless entry.kind == :unresolvable && Parse.respond_to?(:master_key_disabled?) && Parse.master_key_disabled?
+          @cache_mutex.synchronize { @cache[key] = entry }
+        end
         entry
       end
 
@@ -637,6 +644,13 @@ module Parse
       # and the client-bound session token. A client that holds no master key
       # still cannot read schemas, which stays fail-closed.
       #
+      # The schema is metadata, so the request also carries the SDK's
+      # metadata marker: it keeps the master key inside
+      # `Parse.without_master_key`, which strips it from every other request
+      # in the block. Without it the fetch was refused there and the
+      # `:unresolvable` entry denied every scoped read of the class, for all
+      # callers, until it expired.
+      #
       # Objects that only implement `#schema` (test doubles, custom schema
       # sources installed via {.schema_client}), and clients whose `#schema`
       # was overridden on the instance, keep the old call.
@@ -649,7 +663,8 @@ module Parse
         if resolved_client.is_a?(Parse::Client) && stock_schema
           safe = Parse::API::PathSegment.identifier!(class_key, kind: "class name")
           resolved_client.request(:get, "schemas/#{safe}",
-                                  opts: { cache: false, use_master_key: true })
+                                  opts: { cache: false, use_master_key: true,
+                                          metadata_master: Parse::Client::METADATA_MASTER_REQUEST })
         else
           resolved_client.schema(class_key)
         end
