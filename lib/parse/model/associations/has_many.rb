@@ -561,6 +561,9 @@ module Parse
               # with unsaved relation changes), keep it so they are not lost.
               if track != true && current.is_a?(Parse::RelationCollectionProxy) &&
                  current.staged_changes?
+                # The loaded list predates this fetch. Unload it so the next
+                # read queries the server and re-applies the staged changes.
+                current.reset! if current.loaded?
                 return current
               end
               relation_objects = val["objects"] || []

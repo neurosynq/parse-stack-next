@@ -1618,14 +1618,43 @@ module Parse
     # cleared too, so a relation's staged additions and removals are dropped
     # rather than sent by a later save.
     def clear_changes!
-      (fields(:array).keys + relations.keys).uniq.each do |key|
-        ivar = :"@#{key}"
+      clear_proxy_changes!
+      clear_dirty_tracking!
+    end
+
+    # @!visibility private
+    # Instance variable names of the array and relation proxies a class can
+    # hold. Cached per class because {#clear_changes!} runs for every record
+    # built with an id (every query row). The cache is rebuilt when a field
+    # or relation is declared after it was computed.
+    # @return [Array<Symbol>]
+    def self.proxy_change_ivars
+      all_fields = fields
+      all_relations = relations
+      signature = [all_fields.size, all_relations.size]
+      return @_proxy_change_ivars if @_proxy_change_ivars_signature == signature
+      ivars = (all_fields.select { |_, type| type == :array }.keys + all_relations.keys)
+        .uniq.map { |key| :"@#{key}" }.freeze
+      # Assign the list before its signature so a concurrent reader that
+      # sees the new signature also sees the new list.
+      @_proxy_change_ivars = ivars
+      @_proxy_change_ivars_signature = signature
+      ivars
+    end
+
+    # @!visibility private
+    # Clears the dirty state of every array and relation proxy this record
+    # holds, dropping a relation's staged additions and removals.
+    def clear_proxy_changes!
+      ivars = self.class.proxy_change_ivars
+      return if ivars.empty?
+      ivars.each do |ivar|
         next unless instance_variable_defined?(ivar)
         proxy = instance_variable_get(ivar)
         proxy.clear_changes! if proxy.respond_to?(:clear_changes!)
       end
-      clear_dirty_tracking!
     end
+    private :clear_proxy_changes!
 
     # @!visibility private
     # Clears the record's own dirty tracking but leaves array and relation
@@ -1943,6 +1972,11 @@ module Parse
       # so a later edit captures a fresh baseline.
       @acl = Parse::ACL.typecast(snapshot.as_json, self) if snapshot && !@acl.nil?
       @_acl_snapshot_before_change = nil
+      # A relation's staged additions and removals live on its proxy, not in
+      # the attribute ActiveModel restores (after a fetch the restored value
+      # is the proxy with the operations still staged). Drop them so a later
+      # save does not send what was rolled back.
+      clear_proxy_changes!
     end
 
     # Keys that mass assignment never applies to an object: the objectId

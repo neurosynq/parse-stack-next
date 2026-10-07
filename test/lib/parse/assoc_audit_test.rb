@@ -807,6 +807,162 @@ class AssocAuditTest < Minitest::Test
     assert_includes a.changed, "likes"
   end
 
+
+  # PR review: rollback, transactions, stale lists, new owners, sessions --
+
+  def test_rollback_after_descriptor_fetch_drops_staged_relation_ops
+    a, fake = staged_likes_author_with_descriptor
+    capture_io { a.fetch! }
+    a.rollback!
+    assert_empty a.likes.additions
+    refute_includes a.changed, "likes"
+    a.likes.add(item("i2"))
+    a.save
+    assert_equal({ "likes" => { "__op" => "AddRelation", "objects" => [item_ptr("i2")] } }, fake.calls.last[3])
+  end
+
+  def test_rollback_after_preserving_fetch_drops_staged_relation_ops
+    a, _fake = staged_likes_author_with_descriptor
+    capture_io { a.fetch!(preserve_changes: true) }
+    a.rollback!
+    assert_empty a.likes.additions
+    assert_equal [{}, {}], a.relation_change_operations
+  end
+
+  SuccessResponse = Struct.new(:result) do
+    def success?
+      true
+    end
+  end
+
+  def test_successful_transaction_settles_staged_relation_ops
+    a, fake = staged_likes_author
+    fake.define_singleton_method(:url_prefix) { URI("http://localhost:1/parse/") }
+    original_new = Parse::BatchOperation.method(:new)
+    Parse::BatchOperation.define_singleton_method(:new) do |*args, **kwargs|
+      batch = original_new.call(*args, **kwargs)
+      batch.define_singleton_method(:submit) do
+        requests.map { SuccessResponse.new({ "updatedAt" => "2026-01-05T00:00:00.000Z" }) }
+      end
+      batch
+    end
+    begin
+      Parse::Object.transaction { |batch| batch.add(a) }
+    ensure
+      Parse::BatchOperation.define_singleton_method(:new, &original_new)
+    end
+    assert_empty a.likes.additions
+    refute_includes a.changed, "likes"
+    calls_before = fake.calls.size
+    a.likes.add(item("i2"))
+    a.save
+    sent = fake.calls[calls_before..].map { |c| c[3] }
+    assert_equal [{ "likes" => { "__op" => "AddRelation", "objects" => [item_ptr("i2")] } }], sent
+  end
+
+  def test_descriptor_fetch_unloads_a_stale_loaded_list
+    a = saved(AssocAuditAuthor, "a1", "name" => "local")
+    fetches = stub_fetch(a, :likes, [item("old")])
+    attach_client(a, fetch_result: relation_descriptor_result)
+    assert_equal %w[old], a.likes.map(&:id)
+    a.likes.add(item("i1"))
+    fresh = item("fresh")
+    a.define_singleton_method(:likes_fetch!) do
+      fetches << :likes
+      [fresh]
+    end
+    capture_io { a.fetch! }
+    refute a.likes.loaded?
+    assert_equal %w[fresh i1], a.likes.map(&:id)
+    assert_equal %w[i1], a.likes.additions.map(&:id)
+  end
+
+  def test_relation_writes_during_a_create_with_a_client_side_id_stage_locally
+    a = AssocAuditAuthor.new
+    a.instance_variable_set(:@id, "precomputed")
+    a.instance_variable_set(:@_creating_record, true)
+    a.define_singleton_method(:autofetch!) { |*| nil }
+    refute a.persisted?
+    fake = attach_client(a)
+    a.likes.add(item("i1"))
+    assert_equal false, a.likes.save
+    assert a.likes.add!(item("i2"))
+    assert a.likes.remove!(item("i3"))
+    assert_empty fake.calls
+    assert_equal %w[i1 i2], a.likes.additions.map(&:id)
+    assert_equal %w[i3], a.likes.removals.map(&:id)
+  end
+
+  def test_relation_writes_on_an_id_only_handle_are_sent
+    a = AssocAuditAuthor.new(id: "existing")
+    assert a.persisted?
+    stub_fetch(a, :likes)
+    fake = attach_client(a)
+    a.likes.add(item("i1"))
+    assert a.likes.save
+    assert_equal({ "likes" => { "__op" => "AddRelation", "objects" => [item_ptr("i1")] } }, fake.calls.last[3])
+  end
+
+  class SessionRecordingClient < FakeClient
+    attr_reader :sessions
+
+    def update_object(klass, id, body, **opts)
+      (@sessions ||= []) << opts[:session_token]
+      super
+    end
+  end
+
+  def test_relation_proxy_save_sends_with_the_given_session
+    a = saved(AssocAuditAuthor, "a1")
+    stub_fetch(a, :likes)
+    fake = SessionRecordingClient.new
+    a.define_singleton_method(:client) { fake }
+    a.likes.add(item("i1"))
+    a.likes.remove(item("i2"))
+    assert a.likes.save(session: "r:alice")
+    assert_equal ["r:alice", "r:alice"], fake.sessions
+    refute a.instance_variable_defined?(:@_session_token), "the owner's session is restored"
+  end
+
+  def test_relation_proxy_save_restores_the_owners_previous_session
+    a = saved(AssocAuditAuthor, "a1")
+    stub_fetch(a, :likes)
+    fake = SessionRecordingClient.new
+    a.define_singleton_method(:client) { fake }
+    a.instance_variable_set(:@_session_token, "r:owner")
+    a.likes.add(item("i1"))
+    assert a.likes.save(session: nil)
+    assert_equal [nil], fake.sessions
+    assert_equal "r:owner", a.instance_variable_get(:@_session_token)
+    a.likes.add(item("i2"))
+    assert a.likes.save
+    assert_equal [nil, "r:owner"], fake.sessions
+  end
+
+  def test_relation_proxy_save_rejects_an_invalid_session
+    a = saved(AssocAuditAuthor, "a1")
+    stub_fetch(a, :likes)
+    attach_client(a)
+    a.likes.add(item("i1"))
+    assert_raises(ArgumentError) { a.likes.save(session: "") }
+    assert_equal %w[i1], a.likes.additions.map(&:id)
+  end
+
+  class ProxyIvarsModel < Parse::Object
+    property :tags, :array
+    has_many :likes, as: :assoc_audit_item, through: :relation
+  end
+
+  def test_proxy_change_ivars_tracks_later_declarations
+    klass = ProxyIvarsModel
+    before = klass.proxy_change_ivars
+    assert_includes before, :@likes
+    assert_includes before, :@tags
+    klass.property :later_list, :array
+    assert_includes klass.proxy_change_ivars, :@later_list
+  end
+
+
   private
 
   def silence_warnings_for

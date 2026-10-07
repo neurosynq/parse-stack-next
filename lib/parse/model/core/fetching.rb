@@ -55,6 +55,9 @@ module Parse
       # @param preserve_changes [Boolean] if true, re-apply local dirty values to fetched fields.
       #   By default (false), fetched fields accept server values and local changes are discarded.
       #   Unfetched fields always preserve their dirty state regardless of this setting.
+      #   A relation's staged additions and removals are kept in both modes (they are
+      #   operations, not field values) and the relation stays marked changed, so the
+      #   next save sends them. Use {Parse::Object#reload!} or `clear_changes!` to drop them.
       # @param opts [Hash] a set of options to pass to the client request.
       # @option opts [Boolean, Symbol] :cache (:write_only) caching mode:
       #   - :write_only (default) - skip cache read, but update cache with fresh data
