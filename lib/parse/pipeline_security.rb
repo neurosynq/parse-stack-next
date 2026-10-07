@@ -983,35 +983,23 @@ module Parse
               )
             end
           end
-          # Cap caller-supplied regex pattern length. Catches the two
-          # shapes Mongo accepts: the find-form `{ field: { $regex: "..." } }`
-          # (key == "$regex", value a String), and the aggregation-form
-          # `{ $regexMatch: { input: ..., regex: "..." } }` (key ==
-          # "$regexMatch"/"$regexFind"/"$regexFindAll", value a Hash with
-          # a "regex"/"pattern" String inside). Stops a multi-KB pattern
-          # from reaching MongoDB regardless of where in the pipeline it
-          # appears.
-          if key_str == "$regex" && value.is_a?(String) && value.bytesize > MAX_REGEX_PATTERN_LENGTH
-            raise Error.new(
-              "SECURITY: $regex pattern exceeds #{MAX_REGEX_PATTERN_LENGTH} bytes " \
-              "(got #{value.bytesize}). Long caller-supplied regex patterns are a " \
-              "ReDoS vector; refuse caller-supplied regexes longer than this cap.",
-              stage: stage_idx,
-              operator: "$regex",
-              reason: :regex_pattern_too_long,
-            )
+          # Caller-supplied regex patterns. Catches the two shapes Mongo
+          # accepts: the find-form `{ field: { $regex: "..." } }` (key ==
+          # "$regex", value a String or a Regexp) and the aggregation-form
+          # `{ $regexMatch: { input: ..., regex: "...", options: "..." } }`.
+          # Each pattern goes through Parse::RegexSecurity (length cap plus
+          # the nested-quantifier and backtracking shapes), and `$options`
+          # through its flag allowlist, wherever it appears in the pipeline.
+          if key_str == "$regex"
+            check_regex_pattern!(value, operator: "$regex", stage_idx: stage_idx)
+          elsif key_str == "$options" && (node.key?("$regex") || node.key?(:$regex))
+            check_regex_options!(value, operator: "$options", stage_idx: stage_idx)
           end
           if %w[$regexMatch $regexFind $regexFindAll].include?(key_str) && value.is_a?(Hash)
             pat = value["regex"] || value[:regex] || value["pattern"] || value[:pattern]
-            if pat.is_a?(String) && pat.bytesize > MAX_REGEX_PATTERN_LENGTH
-              raise Error.new(
-                "SECURITY: #{key_str} regex pattern exceeds #{MAX_REGEX_PATTERN_LENGTH} bytes " \
-                "(got #{pat.bytesize}). Refuse caller-supplied regexes longer than this cap.",
-                stage: stage_idx,
-                operator: key_str,
-                reason: :regex_pattern_too_long,
-              )
-            end
+            check_regex_pattern!(pat, operator: key_str, stage_idx: stage_idx)
+            opts = value["options"] || value[:options]
+            check_regex_options!(opts, operator: key_str, stage_idx: stage_idx) unless opts.nil?
           end
           child_inside_expr = inside_expr || key_str == "$expr"
           if child_inside_expr && FORENSIC_OPERATORS.include?(key_str)
@@ -1061,11 +1049,65 @@ module Parse
             reason: :denied_field_ref_in_expr,
           )
         end
+      when Regexp
+        # A Regexp value is a regex match in a MongoDB filter.
+        check_regex_pattern!(node, operator: "$regex", stage_idx: stage_idx)
+      else
+        if defined?(BSON::Regexp::Raw) && node.is_a?(BSON::Regexp::Raw)
+          check_regex_pattern!(node, operator: "$regex", stage_idx: stage_idx)
+          check_regex_options!(node.options, operator: "$options", stage_idx: stage_idx) if node.options.is_a?(String) && !node.options.empty?
+        end
       end
       # Other primitives (Integer, etc.) are always safe.
       nil
     end
 
     private_class_method :walk_for_denied!
+
+    # @!visibility private
+    # Run a caller-supplied regex pattern (String, Regexp, or
+    # BSON::Regexp::Raw) through Parse::RegexSecurity with this module's
+    # length cap. Non-pattern values are left to MongoDB to reject.
+    def check_regex_pattern!(pattern, operator:, stage_idx:)
+      source = if pattern.is_a?(String) then pattern
+        elsif pattern.is_a?(Regexp) then pattern.source
+        elsif defined?(BSON::Regexp::Raw) && pattern.is_a?(BSON::Regexp::Raw) then pattern.pattern.to_s
+        end
+      return if source.nil?
+      if source.bytesize > MAX_REGEX_PATTERN_LENGTH
+        raise Error.new(
+          "SECURITY: #{operator} regex pattern exceeds #{MAX_REGEX_PATTERN_LENGTH} bytes " \
+          "(got #{source.bytesize}). Long caller-supplied regex patterns are a " \
+          "ReDoS vector; refuse caller-supplied regexes longer than this cap.",
+          stage: stage_idx,
+          operator: operator,
+          reason: :regex_pattern_too_long,
+        )
+      end
+      Parse::RegexSecurity.validate!(source, max_length: MAX_REGEX_PATTERN_LENGTH)
+    rescue ArgumentError => e
+      raise Error.new(
+        "SECURITY: #{operator} #{e.message}",
+        stage: stage_idx,
+        operator: operator,
+        reason: :regex_unsafe,
+      )
+    end
+
+    private_class_method :check_regex_pattern!
+
+    # @!visibility private
+    def check_regex_options!(options, operator:, stage_idx:)
+      Parse::RegexSecurity.validate_options!(options)
+    rescue ArgumentError => e
+      raise Error.new(
+        "SECURITY: #{operator} #{e.message}",
+        stage: stage_idx,
+        operator: operator,
+        reason: :regex_options_unsupported,
+      )
+    end
+
+    private_class_method :check_regex_options!
   end
 end

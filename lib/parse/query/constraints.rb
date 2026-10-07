@@ -27,6 +27,17 @@ module Parse
       /\(\?[^)]*\([^)]*(\+|\*)[^)]*\)[^)]*(\+|\*)\)/, # More complex nested quantifiers
     ].freeze
 
+    # `$options` flags MongoDB accepts on `$regex`: case-insensitive,
+    # multiline, extended, dot-all, and Unicode (`u`, emitted by the
+    # unicode form of the regex constraints).
+    ALLOWED_OPTIONS = "imxsu"
+
+    # A literal text optionally anchored or wrapped in `.*`: what
+    # `starts_with`, `ends_with`, and `contains` build from escaped input.
+    # Every regex metacharacter in the body is backslash-escaped, so the
+    # pattern cannot backtrack catastrophically.
+    LITERAL_BODY = /\A(?:\\.|[^\\.^$|?*+()\[\]{}])*\z/m
+
     class << self
       # Validates a regex pattern for potential ReDoS vulnerabilities.
       # @param pattern [String, Regexp] the pattern to validate
@@ -41,6 +52,8 @@ module Parse
                                "Long patterns can cause performance issues."
         end
 
+        return pattern_str if literal_pattern?(pattern_str)
+
         DANGEROUS_PATTERNS.each do |dangerous|
           if pattern_str.match?(dangerous)
             raise ArgumentError, "Regex pattern contains potentially dangerous constructs that could cause " \
@@ -49,6 +62,67 @@ module Parse
         end
 
         pattern_str
+      end
+
+      # Whether a pattern is escaped literal text, optionally anchored
+      # (`^text`, `text$`) or wrapped in `.*` (`.*text.*`).
+      # @param pattern_str [String]
+      # @return [Boolean]
+      def literal_pattern?(pattern_str)
+        body = pattern_str.dup
+        if body.start_with?("^")
+          body = body[1..]
+        elsif body.start_with?(".*")
+          body = body[2..]
+        end
+        if body.end_with?(".*") && !body.end_with?("\\.*")
+          body = body[0..-3]
+        elsif body.end_with?("$") && !body.end_with?("\\$")
+          body = body[0..-2]
+        end
+        LITERAL_BODY.match?(body)
+      end
+
+      # Validates `$options` flags against {ALLOWED_OPTIONS}.
+      # @param options [Object]
+      # @raise [ArgumentError] on a non-String or an unknown flag.
+      def validate_options!(options)
+        unless options.is_a?(String)
+          raise ArgumentError, "Regex $options must be a String (got #{options.class})."
+        end
+        bad = options.chars.uniq.reject { |c| ALLOWED_OPTIONS.include?(c) }
+        unless bad.empty?
+          raise ArgumentError, "Regex $options contains unsupported flags #{bad.join.inspect}. " \
+                               "Allowed: #{ALLOWED_OPTIONS.chars.join(", ")}."
+        end
+        options
+      end
+
+      # Validates every `$regex` (and its `$options`) inside a compiled where
+      # clause, at any depth: field values, `$not` / `$elemMatch` wrappers,
+      # and `$or` / `$and` / `$nor` branches. SDK routing markers (`__`
+      # keys) are skipped. Literal patterns built from escaped input pass.
+      # @param node [Object] a compiled where clause or part of one.
+      # @raise [ArgumentError] when a pattern or its options are unsafe.
+      # @return [void]
+      def validate_where!(node)
+        case node
+        when Hash
+          node.each do |key, value|
+            key_str = key.to_s
+            next if key_str.start_with?("__")
+            if key_str == "$regex"
+              validate!(value) if value.is_a?(String) || value.is_a?(Regexp)
+            elsif key_str == "$options" && (node.key?("$regex") || node.key?(:$regex))
+              validate_options!(value)
+            else
+              validate_where!(value)
+            end
+          end
+        when Array
+          node.each { |item| validate_where!(item) }
+        end
+        nil
       end
 
       # Checks if a pattern is safe without raising an exception.

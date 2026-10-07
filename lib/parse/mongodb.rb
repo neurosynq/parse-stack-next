@@ -2181,6 +2181,16 @@ module Parse
       #   $where, $function, or $accumulator at any depth.
       # @raise [Parse::MongoDB::ExecutionTimeout] if the query exceeds max_time_ms
       def find(collection_name, filter = {}, **options)
+        if Parse::ACLScope.master_key_suppressed?
+          # `find` reads raw documents with no ACL scope, which is master
+          # authority. Inside `Parse.without_master_key` that is refused
+          # rather than silently running unscoped.
+          raise Parse::ACLScope::ACLRequired,
+                "Parse::MongoDB.find runs unscoped (master authority) and is refused " \
+                "inside Parse.without_master_key. Use a scoped read (Parse::MongoDB.aggregate " \
+                "with session_token:, or Parse::Query#results_direct), or run the call inside " \
+                "Parse.with_master_key."
+        end
         max_time_ms = options.delete(:max_time_ms)
         # Consumed like the other auth kwargs so it never reaches the driver.
         find_client = options.delete(:client)
@@ -2261,7 +2271,9 @@ module Parse
       # Hits the system catalog via the driver's `indexes.list` and returns
       # the raw definitions — distinct from {.list_search_indexes}, which
       # only enumerates Atlas Search indexes. Operator-facing introspection
-      # used by `Parse::Core::Describe`.
+      # used by `Parse::Core::Describe`. Index definitions are metadata, not
+      # row data, so this stays available inside `Parse.without_master_key`
+      # (unlike {.find}, which is refused there).
       #
       # @param collection_name [String] the Parse collection / class name
       # @return [Array<Hash>] each entry includes at least `"name"` and

@@ -465,12 +465,12 @@ module Parse
               reason: :regex_too_long,
             )
           end
-          if REDOS_NESTED_QUANTIFIER_RE.match?(val)
+          if REDOS_NESTED_QUANTIFIER_RE.match?(val) || !Parse::RegexSecurity.safe?(val, max_length: MAX_REGEX_PATTERN_LENGTH)
             raise ConstraintSecurityError.new(
               "$regex pattern #{val.inspect} contains a nested quantifier " \
-              "(`(...x+...)+` shape) that can trigger catastrophic " \
-              "backtracking on MongoDB's PCRE engine. Rewrite the pattern " \
-              "without nested quantifier groups.",
+              "or another backtracking-prone construct that can trigger " \
+              "catastrophic backtracking on MongoDB's PCRE engine. Rewrite " \
+              "the pattern without nested quantifier groups.",
               operator: op,
               reason: :regex_redos,
             )
