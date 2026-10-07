@@ -11,6 +11,16 @@ require_relative "../../../test_helper"
 # (tier never allowed it) so consumers see meaningful diagnostics.
 # ============================================================================
 class AgentToolFilterTest < Minitest::Test
+  class FilterRubyArtist < Parse::Object
+    parse_class "FilterMusician"
+    property :name, :string
+
+    agent_method :purge, "Purge this record", permission: :readonly
+    def self.purge
+      "purged"
+    end
+  end
+
   class FilterArticle < Parse::Object
     parse_class "FilterArticle"
     property :title, :string
@@ -638,7 +648,80 @@ class AgentToolFilterTest < Minitest::Test
     assert_same own, sub.approval_gate
   end
 
+  def test_restoring_own_gate_snapshot_keeps_delegation
+    root = Parse::Agent.new
+    sub = Parse::Agent.new(parent: root)
+    prev = sub.approval_gate_override
+    assert_nil prev
+    sub.approval_gate = DenyGate.new
+    sub.approval_gate = prev
+    real = DenyGate.new
+    root.approval_gate = real
+    assert_same real, sub.approval_gate
+  end
+
+  def test_dispatcher_does_not_pin_parent_gate_on_sub_agent
+    require "parse/agent/mcp_dispatcher"
+    root = Parse::Agent.new
+    sub = Parse::Agent.new(parent: root)
+    root.approval_gate = DenyGate.new
+    Parse::Agent::MCPDispatcher.call(
+      body: { "jsonrpc" => "2.0", "id" => 1, "method" => "ping" },
+      agent: sub, approval_gate: DenyGate.new,
+    )
+    real = DenyGate.new
+    root.approval_gate = real
+    assert_same real, sub.approval_gate
+  end
+
+  def test_root_agent_default_gate_is_not_reported_as_override
+    root = Parse::Agent.new
+    assert_kind_of Parse::Agent::NullGate, root.approval_gate
+    assert_nil root.approval_gate_override
+    own = Parse::Agent::NullGate.new
+    root.approval_gate = own
+    assert_same own, root.approval_gate_override
+  end
+
+  def test_qualified_entry_with_ruby_constant_matches_parse_class
+    a = Parse::Agent.new(methods: { except: ["AgentToolFilterTest::FilterRubyArtist.purge"] })
+    assert a.method_filtered?(:purge, class_name: "FilterMusician")
+    r = a.execute(:call_method, class_name: "FilterMusician", method_name: "purge")
+    refute r[:success]
+    assert_equal :tool_filtered, r[:error_code]
+  end
+
+  def test_unresolved_qualified_entry_warns_at_construction
+    _out, err = capture_io { Parse::Agent.new(methods: { except: ["NoSuchModelAnywhere.purge"] }) }
+    assert_match(/NoSuchModelAnywhere\.purge/, err)
+  end
+
   # ---- Effective method layers in audit / describe ---------------------
+  def tool_call_payload_for(agent)
+    payload = nil
+    sub = ActiveSupport::Notifications.subscribe("parse.agent.tool_call") { |*args| payload = args.last }
+    agent.execute(:call_method, class_name: "FilterArticle", method_name: "delete_all")
+    payload
+  ensure
+    ActiveSupport::Notifications.unsubscribe(sub) if sub
+  end
+
+  def test_audit_payload_reports_single_inherited_method_layer
+    root = Parse::Agent.new(methods: { except: [:delete_all] })
+    child = Parse::Agent.new(parent: root)
+    payload = tool_call_payload_for(child)
+    assert payload, "expected a parse.agent.tool_call event"
+    assert_nil payload[:methods_except]
+    assert_equal [{ only: nil, except: ["delete_all"] }], payload[:methods_layers]
+  end
+
+  def test_audit_payload_omits_layers_when_only_own_filter
+    agent = Parse::Agent.new(methods: { except: [:delete_all] })
+    payload = tool_call_payload_for(agent)
+    assert_equal ["delete_all"], payload[:methods_except]
+    refute payload.key?(:methods_layers)
+  end
+
 
   def test_describe_reports_inherited_method_layers
     root = Parse::Agent.new(methods: { except: [:delete_all] })

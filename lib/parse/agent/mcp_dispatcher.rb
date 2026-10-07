@@ -229,7 +229,14 @@ module Parse
         # token.
         prev_progress_callback = agent.progress_callback if agent.respond_to?(:progress_callback)
         prev_cancellation_token = agent.cancellation_token if agent.respond_to?(:cancellation_token)
-        prev_approval_gate = agent.approval_gate if agent.respond_to?(:approval_gate)
+        # Snapshot the agent's OWN gate, not the effective one: a sub-agent
+        # with no gate of its own reads its parent's, and restoring that
+        # copy would pin it and stop the delegation.
+        prev_approval_gate = if agent.respond_to?(:approval_gate_override)
+            agent.approval_gate_override
+          elsif agent.respond_to?(:approval_gate)
+            agent.approval_gate
+          end
         prev_log_callback = agent.log_callback if agent.respond_to?(:log_callback)
 
         # Install the progress callback and cancellation token on the

@@ -370,7 +370,7 @@ module Parse
             run_pipeline!(collection_name, pipeline, max_time_ms: max_time_ms,
                                                      authorizing_client: authorizing_client)
           rescue StandardError => e
-            raise unless owner_prefilter && owner_prefilter_rejected?(e)
+            raise unless owner_prefilter && owner_prefilter_rejected?(e, owner_prefilter)
             # Atlas is serving an index version without the owner filter
             # path (a rebuild in progress, or a stale cached definition).
             # Stop pushing it down and rerun once without it; the
@@ -486,12 +486,29 @@ module Parse
       attr_accessor :default_index
 
       # @!visibility private
-      # Whether an error is Atlas refusing a `$vectorSearch.filter` path
-      # the served index does not declare as `type: "filter"`.
+      # Whether an error is Atlas refusing one of the owner prefilter's
+      # paths because the served index does not declare it as
+      # `type: "filter"`. Atlas words the refusal the same way for any
+      # path, so the message must name an owner path: a caller
+      # `vector_filter` on an unindexed field raises as it always did and
+      # does not switch the owner prefilter off for other callers.
       # @param error [Exception]
+      # @param owner_prefilter [Hash] the owner clause that was pushed down.
       # @return [Boolean]
-      def owner_prefilter_rejected?(error)
-        error.message.to_s.match?(PREFILTER_REJECTED_PATTERN)
+      def owner_prefilter_rejected?(error, owner_prefilter)
+        message = error.message.to_s
+        return false unless message.match?(PREFILTER_REJECTED_PATTERN)
+        owner_prefilter_paths(owner_prefilter).any? { |path| message.include?(path) }
+      end
+
+      # @!visibility private
+      # The `_p_<field>` paths an owner prefilter clause names.
+      # @param owner_prefilter [Hash]
+      # @return [Array<String>]
+      def owner_prefilter_paths(owner_prefilter)
+        return [] unless owner_prefilter.is_a?(Hash)
+        clauses = owner_prefilter.key?("$or") ? Array(owner_prefilter["$or"]) : [owner_prefilter]
+        clauses.flat_map { |c| c.is_a?(Hash) ? c.keys.map(&:to_s) : [] }.select { |k| k.start_with?("_p_") }
       end
 
       # @!visibility private

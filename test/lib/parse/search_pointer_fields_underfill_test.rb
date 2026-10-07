@@ -391,6 +391,59 @@ class SearchPointerFieldsUnderfillTest < Minitest::Test
     refute coll2.pipelines.first.dig(0, "$vectorSearch").key?("filter")
   end
 
+  # Atlas words the refusal the same way for a caller's own unindexed path.
+  class CallerPathRejectingColl < EvalColl
+    def aggregate(pipeline, opts = {})
+      if pipeline.dig(0, "$vectorSearch", "filter").to_s.include?("kind")
+        @pipelines << pipeline
+        raise StandardError, "PlanExecutor error during aggregation :: caused by :: " \
+                             "Path 'kind' needs to be indexed as filter"
+      end
+      super
+    end
+  end
+
+  def test_caller_filter_refusal_does_not_disable_owner_prefilter
+    coll = CallerPathRejectingColl.new(ranked_rows)
+    cleared = []
+    Parse::AtlasSearch::IndexManager.stub(:clear_cache, ->(c = nil) { cleared << c }) do
+      err = assert_raises(StandardError) do
+        vector_search(coll, index_def: vector_index(["_p_owner"]), vector_filter: { "kind" => "x" })
+      end
+      assert_match(/Path 'kind'/, err.message)
+    end
+    assert_equal 1, coll.pipelines.size, "a caller-path refusal is not retried"
+    assert_empty cleared, "the index cache is left alone"
+
+    coll2 = EvalColl.new(deep_vector_rows)
+    vector_search(coll2, index_def: vector_index(["_p_owner"]))
+    assert_equal({ "_p_owner" => { "$eq" => "_User$u1" } }, coll2.pipelines.first.dig(0, "$vectorSearch", "filter"),
+                 "the owner prefilter is still pushed down for the next caller")
+  end
+
+  def test_native_hybrid_uses_default_vector_index_for_prefilter
+    prior = Parse::VectorSearch.default_index
+    Parse::VectorSearch.default_index = "vec_idx"
+    looked_up = []
+    pipe = Parse::ACLScope.stub(:resolve!, ->(*, **) { session_resolution }) do
+      lookup = ->(_coll, name) { looked_up << name; vector_index(["_p_owner"]) }
+      Parse::AtlasSearch::IndexManager.stub(:get_index, lookup) do
+        Parse::VectorSearch::Hybrid.send(
+          :native_pipeline, "Doc",
+          lexical: { query: "t", index: "default" },
+          vector: { query_vector: [0.1, 0.2], field: "embedding" },
+          k: 5,
+        )
+      end
+    end
+    vs = pipe.dig(0, "$rankFusion", "input", "pipelines", "vector", 0, "$vectorSearch")
+    assert_equal "vec_idx", vs["index"]
+    assert_equal ["vec_idx"], looked_up.uniq
+    assert_equal({ "_p_owner" => { "$eq" => "_User$u1" } }, vs["filter"])
+  ensure
+    Parse::VectorSearch.default_index = prior
+  end
+
   def test_vector_other_errors_are_not_retried
     coll = EvalColl.new(ranked_rows)
     def coll.aggregate(pipeline, _opts = {})

@@ -884,7 +884,10 @@ A sub-agent built with `parent:` and no gate of its own uses its parent's gate,
 read at call time, so the gate the dispatcher installs on the parent for a
 `tools/call` also covers any sub-agent a tool builds during that call. Before
 5.8.1 a sub-agent fell back to `NullGate` and skipped approval. Assigning a
-gate on the sub-agent itself overrides this.
+gate on the sub-agent itself overrides this, and assigning `nil` removes the
+override so the sub-agent uses its parent's gate again. The dispatcher
+snapshots and restores the agent's own gate (`approval_gate_override`), so
+driving a sub-agent through `tools/call` never pins its parent's gate onto it.
 
 Round-trip over the streaming transport:
 
@@ -1652,7 +1655,7 @@ agent = Parse::Agent.new(methods: [:archive, "Project.set_client_description"])
 agent = Parse::Agent.new(methods: { except: ["Account.delete_account"] })
 ```
 
-Entries are bare method names (`:archive`, which matches the method on any class) or qualified names (`"Project.archive"`, which matches only on that class). Both forms coexist in the same Set; matching is an OR. The class part is compared by its Parse class name, so `"User.reset"` and `"_User.reset"` name the same method (likewise `Role`, `Session`, and `Installation`), whichever spelling the entry or the `call_method` caller uses. Before 5.8.1 an entry was matched against the raw string the caller passed, so `methods: { except: ["_User.reset"] }` could be bypassed by calling it on `"User"`.
+Entries are bare method names (`:archive`, which matches the method on any class) or qualified names (`"Project.archive"`, which matches only on that class). Both forms coexist in the same Set; matching is an OR. The class part is compared by its Parse class name, so `"User.reset"` and `"_User.reset"` name the same method (likewise `Role`, `Session`, and `Installation`), whichever spelling the entry or the `call_method` caller uses. An entry may also name the model by its Ruby constant (`"Artist.purge"` for `class Artist < Parse::Object; parse_class "Musician"; end`), which is compared by its Parse class name too. A qualified entry whose class resolves to no loaded model warns at construction and is matched by its class part as written. Before 5.8.1 an entry was matched against the raw string the caller passed, so `methods: { except: ["_User.reset"] }` could be bypassed by calling it on `"User"`.
 
 The filter **narrows declared methods** — it cannot expose a method that was not declared via the `agent_method` DSL, and it cannot bypass tier checks (`agent_can_call?`) or env-gates (`PARSE_AGENT_ALLOW_WRITE_TOOLS`, `PARSE_AGENT_ALLOW_SCHEMA_OPS`). A filtered-out invocation returns `error_code: :tool_filtered`.
 
@@ -1799,6 +1802,7 @@ Parse::Agent::Tools.register(
 | `session_token` | Yes (security-critical) | Without it, a session-token parent silently produces a master-key sub-agent — the constructor default is `nil`, which means master-key mode. This was the v4.2 advisor-flagged blocker; do not undo. |
 | `acl_user` (v4.4.0) | Yes (security-critical) | When the parent was constructed with `acl_user:` and the child supplies none of `session_token:` / `acl_user:` / `acl_role:`, the parent's identity inherits verbatim. Inheritance is conditional on the child supplying NO identity at all — explicit overrides on the child resolve normally and then face the subset check below. |
 | `acl_role` (v4.4.0) | Yes (security-critical) | Same rule as `acl_user`. A child that omits identity inherits the parent's role scope; one that supplies its own identity falls through to the subset check. |
+| `master_atlas` | Yes (security-critical) | `nil` inherits the parent's setting and `false` drops it. `true` is accepted only when the parent has it: since 5.8.1 a sub-agent of a parent without `master_atlas` raises `ArgumentError`, because master-key faceting would return every row's buckets and results under the parent's scoped identity. |
 | `tenant_id` | Yes (security-critical) | Without it, a tenant-bound parent produces an unbound sub-agent that escapes `agent_tenant_scope` rules. |
 | `recursion_depth` | Always (decremented) | The parent's budget is authoritative — the explicit `recursion_depth:` kwarg is ignored on inherited construction. |
 
@@ -2792,7 +2796,7 @@ Every tool call dispatched through `Agent#execute` fires the `"parse.agent.tool_
 | `:tools_except` | Array<Symbol> | v4.3.0+ — when the agent was constructed with `tools: { except: [...] }`. |
 | `:methods_only` | Array<String> | v4.3.0+ — when the agent was constructed with `methods: { only: [...] }`. Bare names and `"Class.method"` qualified names mix. |
 | `:methods_except` | Array<String> | v4.3.0+ — when the agent was constructed with `methods: { except: [...] }`. |
-| `:methods_layers` | Array<Hash> | 5.8.1+, sub-agents only. Every `methods:` filter in force, parent layers first and the agent's own last, each `{only:, except:}` with sorted name strings (nil when absent). `:methods_only` / `:methods_except` describe only the agent's own layer. `describe[:methods][:layers]` carries the same list. |
+| `:methods_layers` | Array<Hash> | 5.8.1+, sub-agents that inherit at least one `methods:` filter (including a single parent layer when the sub-agent has none of its own). Every `methods:` filter in force, parent layers first and the agent's own last, each `{only:, except:}` with sorted name strings (nil when absent). `:methods_only` / `:methods_except` describe only the agent's own layer. `describe[:methods][:layers]` carries the same list. |
 | `:filters` | Hash<String,Array<String>> | v4.4.0+ — when the agent was constructed with `filters: {...}`. Maps each filtered class name (or `"default"`) to the list of FIELD NAMES the filter constrains. Filter VALUES are intentionally NOT echoed — `filters: { Account => { user_id: "abc123" } }` would otherwise emit the user-identifying value on every audit-log line. Subscribers that need the actual constraint can call `agent.filter_for(class_name)` directly. |
 | `:denial_kind` | Symbol | v4.3.0+, AccessDenied failure path only — one of `:hidden_class` (global `agent_hidden`), `:class_filter` (per-agent `classes:` narrowing), `:field_denied` (outside `agent_fields`), or `:storage_form_field_ref` (referenced `_p_*` pointer-storage column). Lets SOC tooling distinguish operator narrowing from policy-level denials without parsing the message prose. |
 

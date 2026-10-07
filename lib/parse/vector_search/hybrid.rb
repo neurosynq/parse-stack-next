@@ -517,11 +517,11 @@ module Parse
             )
           end
 
+          owner_filter = owner_vector_filter(collection_name, vec, pointer_fields, resolution)
           pipeline = native_pipeline_for(lex, vec, oversample, resolution,
                                          k_constant: k_constant, weights: weights, limit: oversample,
                                          pointer_fields: pointer_fields,
-                                         owner_vector_filter: owner_vector_filter(collection_name, vec,
-                                                                                  pointer_fields, resolution))
+                                         owner_vector_filter: owner_filter)
           rows = run_pipeline!(collection_name, pipeline,
                                authorizing_client: Parse::ACLScope.client_of(resolution))
 
@@ -570,8 +570,8 @@ module Parse
           # A refused owner prefilter means Atlas serves an index version
           # without that filter path; stop pushing it down so the client
           # fallback below (and later searches) run without it.
-          if Parse::VectorSearch.owner_prefilter_rejected?(e)
-            Parse::VectorSearch.owner_prefilter_unavailable!(collection_name, vec[:index])
+          if owner_filter && Parse::VectorSearch.owner_prefilter_rejected?(e, owner_filter)
+            Parse::VectorSearch.owner_prefilter_unavailable!(collection_name, vector_index_name(vec))
           end
           # Native execution failed (e.g. a cluster that probed as
           # supported but rejects this exact shape, or a transient error).
@@ -585,8 +585,15 @@ module Parse
         # path not filter-indexed in the index Atlas is serving).
         def owner_vector_filter(collection_name, vec, pointer_fields, resolution)
           return nil if resolution.nil? || resolution.master? || pointer_fields.nil?
-          Parse::VectorSearch.send(:owner_vector_prefilter, collection_name, vec[:index],
+          Parse::VectorSearch.send(:owner_vector_prefilter, collection_name, vector_index_name(vec),
                                    pointer_fields, resolution)
+        end
+
+        # The vector index the native input searches: the branch's
+        # `index:` or {Parse::VectorSearch.default_index}, the same
+        # fallback {Parse::VectorSearch.search} uses on the client path.
+        def vector_index_name(vec)
+          vec[:index] || Parse::VectorSearch.default_index
         end
 
         def vector_search_stage(vec, oversample, owner_filter: nil)
@@ -600,7 +607,7 @@ module Parse
           num_candidates = (vec[:num_candidates] || oversample * Parse::VectorSearch::DEFAULT_NUM_CANDIDATES_MULTIPLIER).to_i
           num_candidates = [[num_candidates, oversample].max, 10_000].min
           stage = {
-            "index" => vec[:index].to_s,
+            "index" => vector_index_name(vec).to_s,
             "path" => vec[:field].to_s,
             "queryVector" => vec[:query_vector],
             "numCandidates" => num_candidates,

@@ -572,6 +572,24 @@ class TrackAgentFixC2Test < Minitest::Test
     assert child.master_atlas?
   end
 
+  def test_agent5_subagent_cannot_enable_master_atlas_under_parent_without_it
+    parent = silence_master_key { Parse::Agent.new(master_atlas: false) }
+    err = assert_raises(ArgumentError) { Parse::Agent.new(parent: parent, master_atlas: true) }
+    assert_match(/master_atlas: true exceeds parent/, err.message)
+  end
+
+  def test_agent5_scoped_parent_child_cannot_enable_master_atlas
+    parent = Parse::Agent.new(acl_user: Parse::User.pointer("u1"))
+    refute parent.master_atlas?
+    assert_raises(ArgumentError) { Parse::Agent.new(parent: parent, master_atlas: true) }
+  end
+
+  def test_agent5_grandchild_cannot_reenable_dropped_master_atlas
+    parent = silence_master_key { Parse::Agent.new(master_atlas: true) }
+    child = Parse::Agent.new(parent: parent, master_atlas: false)
+    assert_raises(ArgumentError) { Parse::Agent.new(parent: child, master_atlas: true) }
+  end
+
   def test_agent5_root_default_master_atlas_is_false
     a = silence_master_key { Parse::Agent.new }
     refute a.master_atlas?, "root-level default must remain false"

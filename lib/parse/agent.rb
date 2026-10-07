@@ -1044,10 +1044,26 @@ module Parse
     def approval_gate
       return @approval_gate if @approval_gate
       return @approval_parent.approval_gate if @approval_parent
+      @approval_gate_defaulted = true
       @approval_gate = Parse::Agent::NullGate.new
     end
 
-    attr_writer :approval_gate
+    # Assign this agent's own approval gate. Assigning nil removes it, so
+    # a sub-agent goes back to using its parent's gate.
+    def approval_gate=(gate)
+      @approval_gate_defaulted = false
+      @approval_gate = gate
+    end
+
+    # @return [Parse::Agent::ApprovalGate, nil] the gate assigned on this
+    #   agent itself, or nil when it uses its parent's (or the default).
+    #   The MCP dispatcher snapshots and restores this rather than
+    #   {#approval_gate}, so restoring never pins a parent's gate.
+    # @api private
+    def approval_gate_override
+      gate = @approval_gate
+      gate.is_a?(Parse::Agent::NullGate) && @approval_gate_defaulted ? nil : gate
+    end
 
     # @return [Boolean] true if the active cancellation token has been
     #   tripped; false otherwise. Returns false when no token is
@@ -1744,8 +1760,10 @@ module Parse
         #
         #   * nil    — inherit from parent (the common case; the
         #              child wants whatever the parent had).
-        #   * true   — explicit opt-in (caller wants faceted_search
-        #              authority regardless of parent).
+        #   * true:  keep faceted_search authority. Allowed only when
+        #              the parent has it: a child cannot turn on
+        #              master-key faceting under a scoped parent, which
+        #              would return every row's buckets and results.
         #   * false  — explicit opt-OUT: the sub-agent should DROP
         #              faceted_search authority even if the parent
         #              had it. Previously `false` was the default
@@ -1761,6 +1779,13 @@ module Parse
         # per-row ACL via Parse::ACLScope's `_rperm` match and do
         # NOT consult master_atlas.
         master_atlas = parent.master_atlas if master_atlas.nil?
+        if master_atlas == true && !parent.master_atlas
+          raise ArgumentError,
+                "sub-agent master_atlas: true exceeds parent's master_atlas: false. " \
+                "A sub-agent cannot turn on master-key Atlas faceting its parent " \
+                "was not given. Omit master_atlas to inherit the parent's setting, " \
+                "or pass master_atlas: false."
+        end
 
         # Inherit cooperative cancellation surface. Without this, a
         # delegating tool that constructs a sub-agent and drives it
@@ -2348,12 +2373,32 @@ module Parse
     def self.canonical_method_class(name)
       return name.parse_class if name.is_a?(Class) && name.respond_to?(:parse_class)
       str = name.to_s
+      klass = resolve_method_filter_class(str)
+      klass ? klass.parse_class : str
+    end
+
+    # Ruby constant names a `methods:` entry may use for a model whose Parse
+    # class name differs (`class Artist < Parse::Object; parse_class
+    # "Musician"; end`).
+    RUBY_CONSTANT_NAME_RE = /\A[A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*\z/
+
+    # @!visibility private
+    # The Parse::Object subclass a `methods:` class name refers to, by
+    # Parse class name first and then by Ruby constant name, or nil.
+    def self.resolve_method_filter_class(str)
       klass = begin
           Parse::Model.find_class(str)
         rescue StandardError
           nil
         end
-      klass.is_a?(Class) && klass < Parse::Object ? klass.parse_class : str
+      return klass if klass.is_a?(Class) && klass < Parse::Object
+      return nil unless str.match?(RUBY_CONSTANT_NAME_RE)
+      klass = begin
+          Object.const_get(str)
+        rescue StandardError, LoadError
+          nil
+        end
+      klass.is_a?(Class) && klass < Parse::Object ? klass : nil
     end
 
     # @return [Array<Array(Set, Set)>] the `methods:` filters in effect as
@@ -2603,9 +2648,13 @@ module Parse
       payload[:methods_except] = @method_filter_except.to_a.map(&:to_s).sort if @method_filter_except
       # `methods_only` / `methods_except` are this agent's own filter. A
       # sub-agent is also bound by its parent's filters, so the full set in
-      # force is emitted as layers (parent first) whenever there is more
-      # than the own layer.
-      payload[:methods_layers] = method_filter_layers_descriptor if method_filter_layers.size > 1
+      # force is emitted as layers (parent first) whenever any layer was
+      # inherited, including a single parent layer on a child with no
+      # filter of its own.
+      own_method_layers = (@method_filter_only || @method_filter_except) ? 1 : 0
+      if method_filter_layers.size > own_method_layers
+        payload[:methods_layers] = method_filter_layers_descriptor
+      end
       # Per-agent per-class filters — emit class-name → field-name list,
       # NOT the constraint values. Filter values can contain user-identifying
       # data (`{ user_id: "abc123" }`, `{ org_id: tenant_uuid }`) that
@@ -3494,6 +3543,11 @@ module Parse
       str = value.to_s
       return str.to_sym unless str.include?(".")
       class_part, method_part = str.split(".", 2)
+      if Parse::Agent.resolve_method_filter_class(class_part).nil?
+        warn "[Parse::Agent] methods: entry #{str.inspect} names a class that does not " \
+             "resolve to a loaded Parse::Object model (by Parse class name or Ruby " \
+             "constant). It is matched by its class part as written; check the spelling."
+      end
       "#{Parse::Agent.canonical_method_class(class_part)}.#{method_part}"
     end
 
