@@ -330,7 +330,7 @@ module Parse
       def inspect
         "#<#{self.class.name} trigger=#{@trigger_name.inspect} " \
         "function=#{@function_name.inspect} class=#{parse_class.inspect} " \
-        "id=#{parse_id.inspect} master=#{@master ? true : false} " \
+        "id=#{parse_id.inspect} master=#{master?} " \
         "session_token=#{@session_token ? "[FILTERED]" : "nil"}>"
       end
 
@@ -350,9 +350,37 @@ module Parse
         @function_name.present?
       end
 
-      # true if the master key was used for this request.
+      # Whether the request reached the SDK through authenticated ingress (the
+      # webhook key matched, or a configured HMAC signature verified). Set by
+      # {Parse::Webhooks.call!}. A payload built in-process (local callbacks,
+      # tests) is treated as authenticated.
+      # @return [Boolean]
+      def authenticated?
+        @authenticated != false
+      end
+
+      # @!visibility private
+      # @param value [Boolean]
+      def authenticated=(value)
+        @authenticated = value ? true : false
+      end
+
+      # true if the request body says the master key was used. Parse Server
+      # sends `master` as a JSON boolean. This is only what the body claims:
+      # under `Parse::Webhooks.allow_unauthenticated` with no signature, any
+      # caller can set it. Use {#master?} for authorization decisions.
+      # @return [Boolean]
+      def claimed_master?
+        @master == true || @master == "true"
+      end
+
+      # true if the master key was used for this request. Only an
+      # authenticated request (webhook key or signature) can claim master; on
+      # unauthenticated ingress this is always false, so field guards, ACL
+      # owner adoption, and handler checks never trust a forged body.
+      # @return [Boolean]
       def master?
-        @master.present?
+        authenticated? && claimed_master?
       end
 
       # true if this payload carried a caller session token -- i.e. the

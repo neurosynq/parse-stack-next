@@ -210,6 +210,26 @@ run Parse::Webhooks
 See [`examples/webhook_server.rb`](../examples/webhook_server.rb) for a complete,
 runnable setup.
 
+### Authenticating requests, and what `master?` means
+
+Requests are accepted only when `X-Parse-Webhook-Key` matches
+`Parse::Webhooks.key` (`PARSE_SERVER_WEBHOOK_KEY`). With no key configured the
+Rack app refuses every request unless you opt in with
+`Parse::Webhooks.allow_unauthenticated = true` (or
+`PARSE_WEBHOOK_ALLOW_UNAUTHENTICATED=true`), which is meant for local
+development and tests.
+
+`payload.master?` is true only when the body says the master key was used AND
+the request was authenticated: the webhook key matched, or a configured
+signature (`PARSE_WEBHOOK_SIGNING_SECRET`) verified. On unauthenticated ingress
+any caller can put `"master": true` in the body, so `master?` returns false
+there. Master-only field guards, ACL owner resolution, and handler checks
+built on `master?` therefore treat such a request as a normal client request.
+`payload.claimed_master?` returns the body's raw claim, and
+`payload.authenticated?` reports whether the request was authenticated. The
+claim alone still drives the Ruby-initiated callback dedup described below,
+since skipping a duplicate callback pass on a forged request grants nothing.
+
 ## Auditing trigger coverage
 
 The wiring above has three independent moving parts, and a callback runs

@@ -477,7 +477,7 @@ module Parse
                        payload&.raw&.dig("headers", "X-Parse-Request-Id")
           ruby_initiated = request_id&.start_with?("_RB_") || false
           payload.instance_variable_set(:@ruby_initiated, ruby_initiated)
-          trusted_ruby_initiated = ruby_initiated && (payload.master? == true)
+          trusted_ruby_initiated = ruby_initiated && payload.claimed_master?
         else
           trusted_ruby_initiated = false
         end
@@ -673,7 +673,7 @@ module Parse
         # matched route, so read that stamped value rather than recomputing via
         # `ruby_initiated?` -- whose `||=` memoization re-derives on a stamped
         # `false` and could disagree with call_route's header lookup.
-        return if payload.ruby_initiated? && payload.master? == true
+        return if payload.ruby_initiated? && payload.claimed_master?
 
         # By the time afterSave fires the object is ALREADY persisted in Parse
         # Server, and Parse Server discards the afterSave response body entirely
@@ -736,7 +736,7 @@ module Parse
         obj = payload.parse_object
         return unless obj.is_a?(Parse::Object)
         return unless route_registered?(:after_delete, payload.parse_class)
-        return if payload.ruby_initiated? && payload.master? == true
+        return if payload.ruby_initiated? && payload.claimed_master?
         obj.run_after_delete_callbacks
         nil
       rescue => e
@@ -1421,7 +1421,12 @@ module Parse
         request = Rack::Request.new env
         response = Rack::Response.new
 
+        # Whether this request proved it came from Parse Server: the webhook
+        # key matched, or (below) a configured signature verified. Without
+        # either, the body's `master` flag is only a claim.
+        authenticated = false
         if self.key.present?
+          authenticated = true
           provided_key = request.env[HTTP_PARSE_WEBHOOK].to_s
           unless ActiveSupport::SecurityUtils.secure_compare(self.key, provided_key)
             puts "[Parse::Webhooks] Invalid Parse-Webhook Key received"
@@ -1475,6 +1480,8 @@ module Parse
           response.write error(replay_error)
           return response.finish
         end
+        secret = ReplayProtection.signing_secret
+        authenticated ||= !(secret.nil? || secret.to_s.empty?)
 
         # Parse Server registers each trigger at
         # `<endpoint>/<triggerName>/<className>`. For beforeFind/afterFind the
@@ -1487,6 +1494,7 @@ module Parse
         webhook_class = Parse::Webhooks.trigger_class_from_path(request.path)
         begin
           payload = Parse::Webhooks::Payload.new(body_str, webhook_class)
+          payload.authenticated = authenticated
         rescue => e
           warn "Invalid webhook payload format: #{Parse::TerminalSafe.sanitize_line(e.to_s)}"
           response.write error("Invalid payload format. Should be valid JSON.")
