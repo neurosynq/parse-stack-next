@@ -104,6 +104,12 @@ module Parse
           type: type_str,
         }.freeze
 
+        if generated_vector_search_indexes.any? { |e| e[:name] == name_str }
+          raise ArgumentError,
+                "#{self}.mongo_search_index #{name_str.inspect} is already declared by " \
+                "vector_search_index. Each name may have one declaration per class."
+        end
+
         existing = mongo_search_index_declarations.find { |d| d[:name] == name_str }
         if existing
           # Idempotent redeclaration with identical content — common in
@@ -121,6 +127,63 @@ module Parse
 
         mongo_search_index_declarations << declaration
         declaration
+      end
+
+      # Declare a vectorSearch index whose definition is GENERATED from the
+      # model's declarations by {Parse::VectorSearch::IndexDefinition.build}
+      # (vector path, dimensions, similarity, quantization, agent_searchable
+      # filter fields, agent_tenant_scope field), instead of written by hand.
+      #
+      # The definition is computed when the migrator plans, not at class
+      # load, so `agent_searchable` / `agent_tenant_scope` may be declared in
+      # any order. Nothing is applied until {#apply_search_indexes!} runs.
+      #
+      # @param name [String] the search index name ({INDEX_NAME_PATTERN}).
+      # @param field [Symbol, nil] the `:vector` property; may be omitted
+      #   when the class has exactly one searchable vector.
+      # @return [Hash] the registered `{ name:, field: }` entry (frozen).
+      # @raise [ArgumentError] on a bad name, or a name already declared
+      #   with a different field or via {#mongo_search_index}.
+      def vector_search_index(name, field: nil)
+        name_str = name.to_s
+        unless name_str.match?(INDEX_NAME_PATTERN)
+          raise ArgumentError,
+                "#{self}.vector_search_index name #{name.inspect} must match #{INDEX_NAME_PATTERN.inspect}"
+        end
+        if mongo_search_index_declarations.any? { |d| d[:name] == name_str }
+          raise ArgumentError,
+                "#{self}.vector_search_index #{name_str.inspect} is already declared by " \
+                "mongo_search_index. Each name may have one declaration per class."
+        end
+        entry = { name: name_str, field: field&.to_sym }.freeze
+        existing = generated_vector_search_indexes.find { |e| e[:name] == name_str }
+        if existing
+          return existing if existing == entry
+          raise ArgumentError,
+                "#{self}.vector_search_index #{name_str.inspect} re-declared for a different field."
+        end
+        generated_vector_search_indexes << entry
+        entry
+      end
+
+      # @return [Array<Hash>] `{ name:, field: }` entries registered by
+      #   {#vector_search_index}.
+      def generated_vector_search_indexes
+        @generated_vector_search_indexes ||= []
+      end
+
+      # Materialize {#generated_vector_search_indexes} into migrator
+      # declarations (`{ name:, definition:, type: "vectorSearch" }`),
+      # generating each definition from the current model declarations.
+      # @return [Array<Hash>]
+      def generated_vector_search_index_declarations
+        generated_vector_search_indexes.map do |entry|
+          {
+            name: entry[:name],
+            definition: Parse::VectorSearch::IndexDefinition.build(self, field: entry[:field]),
+            type: "vectorSearch",
+          }.freeze
+        end
       end
 
       # Dry-run reconciliation between declared search indexes and what

@@ -1176,6 +1176,17 @@ server-side on every event before it goes out the WebSocket — Bob will
 not receive an event for an ACL-private row Alice creates, even if his
 subscription matches the `where` clause.
 
+> **Role-based CLP grants need a server option.** Parse Server does not
+> resolve the subscriber's roles when LiveQuery evaluates Class Level
+> Permissions unless `enableLiveQueryClassLevelPermissionRoles: true` is
+> set (env `PARSE_SERVER_ENABLE_LIVE_QUERY_CLASS_LEVEL_PERMISSION_ROLES`,
+> available from Parse Server 9.10.3, default `false`). With the default,
+> a CLP such as `"find" => { "role:Editor" => true }` admits role members
+> over REST but rejects their LiveQuery subscription. Deployments that
+> grant LiveQuery access through `role:` entries in CLP must turn it on.
+> Object ACL `role:` entries are honored either way. The SDK test stack
+> enables it in `scripts/start-parse.sh`.
+
 > **Master-key authorization is per-CONNECTION, not per-subscription.**
 > Parse Server resolves master-key (ACL/CLP-bypass) authorization once,
 > from the connect frame; once set, EVERY subscription on that socket

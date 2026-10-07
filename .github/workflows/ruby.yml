@@ -36,3 +36,26 @@ jobs:
         run: bundle install
       - name: Run unit tests
         run: bundle exec rake test:unit
+
+  # The gemspec allows activemodel/activesupport >= 6.1, < 9, while the lock
+  # pins the newest. These lanes run the unit suite against older lines so a
+  # change that only works on the locked version is caught before release.
+  compat:
+    name: compat (${{ matrix.gemfile }})
+    strategy:
+      fail-fast: false
+      matrix:
+        gemfile: [activemodel_7_1, activemodel_7_2, activemodel_8_0]
+    runs-on: ubuntu-latest
+    env:
+      BUNDLE_GEMFILE: ${{ github.workspace }}/gemfiles/${{ matrix.gemfile }}.gemfile
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          ruby-version: "3.4"
+      - name: Install dependencies
+        run: bundle install
+      - name: Run unit tests
+        run: bundle exec rake test:unit

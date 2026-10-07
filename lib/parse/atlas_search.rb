@@ -8,6 +8,7 @@ require_relative "atlas_search/index_manager"
 require_relative "atlas_search/search_builder"
 require_relative "atlas_search/result"
 require_relative "atlas_search/session"
+require_relative "atlas_search/protected_paths"
 
 module Parse
   # Atlas Search module for MongoDB Atlas full-text search capabilities.
@@ -363,6 +364,7 @@ module Parse
 
         index_name = options[:index] || @default_index
         fields = normalize_fields(options[:fields])
+        assert_search_fields_allowed!(fields, protected_fields, resolution)
         limit = options[:limit] || 100
         skip_val = options[:skip] || 0
 
@@ -436,6 +438,15 @@ module Parse
           collection_name, resolution.permission_strings,
         )
         assert_highlight_field_allowed!(options[:highlight_field], protected_fields, resolution)
+        # The caller built this stage, so any operator path, sort key, or
+        # highlight inside it may name a protected field. Walk it and
+        # refuse before it runs: a protected field that decides matches
+        # or ranking leaks its value even though the output strips it.
+        ProtectedPaths.assert_search_stage_allowed!(
+          search_stage, protected_fields, resolution,
+          collection_name: collection_name,
+          method_name: "Parse::AtlasSearch.search_with_stage",
+        )
 
         search_pipeline!(
           collection_name, search_stage,
@@ -512,7 +523,8 @@ module Parse
           collection_name, resolution.permission_strings,
         )
         field_str = field.to_s
-        if !resolution.master? && protected_fields.include?(field_str)
+        if ProtectedPaths.enforce?(resolution, protected_fields) &&
+           ProtectedPaths.touches?(field_str, protected_fields)
           raise Parse::CLPScope::Denied.new(
             collection_name, :find,
             "Parse::AtlasSearch.autocomplete refused: field '#{field_str}' is in " \
@@ -689,6 +701,21 @@ module Parse
           end
         end
 
+        # A non-master caller (the public fallback when no auth kwargs are
+        # passed) must not facet on, or text-match against, a protected
+        # field: bucket values and counts would reveal it directly, and a
+        # wildcard operator lets it decide which rows are counted.
+        unless resolution.master?
+          facet_protected = Parse::CLPScope.protected_fields_for(
+            collection_name, resolution.permission_strings,
+          )
+          ProtectedPaths.assert_search_stage_allowed!(
+            search_meta_stage, facet_protected, resolution,
+            collection_name: collection_name,
+            method_name: "Parse::AtlasSearch.faceted_search",
+          )
+        end
+
         # Execute facet query. $searchMeta MUST be the only / first
         # stage of its pipeline — Atlas rejects anything prepended.
         # Bypass Parse::MongoDB.aggregate (which would prepend a
@@ -797,6 +824,14 @@ module Parse
           pipeline << { "$match" => mongo_filter }
         end
 
+        # Sorting on a protected field orders rows by its value, which is
+        # the same oracle as matching on it.
+        if sort.is_a?(Hash) && !sort.empty?
+          ProtectedPaths.assert_paths_allowed!(
+            sort.keys.map(&:to_s), protected_fields, resolution,
+            collection_name: collection_name, what: "sort key",
+          )
+        end
         pipeline << { "$sort" => (sort || { "_score" => -1 }) }
         pipeline << { "$skip" => skip } if skip.to_i > 0
         pipeline << { "$limit" => limit }
@@ -980,13 +1015,12 @@ module Parse
       # does inline (we can't reuse that path because of the $search-
       # at-stage-0 invariant).
       def assert_clp_find!(collection_name, resolution)
-        return if resolution.nil? || resolution.master?
-        unless Parse::CLPScope.permits?(collection_name, :find, resolution.permission_strings)
-          raise Parse::CLPScope::Denied.new(
-            collection_name, :find,
-            "CLP refuses find on '#{collection_name}' for the current Atlas Search scope.",
-          )
-        end
+        # Same CLP branch evaluation as Parse::MongoDB.aggregate (public,
+        # user, and role grants first; then pointerFields / readUserFields).
+        # Raises Parse::CLPScope::Denied when the scope cannot find at all.
+        Parse::CLPScope.row_constraint_for!(collection_name, :find, resolution,
+                                            label: "Atlas Search")
+        nil
       end
 
       # Resolve and return pointerFields for `find` on the collection.
@@ -994,17 +1028,13 @@ module Parse
       # current scope has no user_id (acl_role-only / public agents).
       # Returns nil when master-mode or no pointerFields entry exists.
       def resolve_pointer_fields!(collection_name, resolution)
-        return nil if resolution.nil? || resolution.master?
-        pointer_fields = Parse::CLPScope.pointer_fields_for(collection_name, :find)
-        return nil if pointer_fields.nil?
-        if resolution.user_id.nil?
-          raise Parse::CLPScope::Denied.new(
-            collection_name, :find,
-            "CLP requires user identity (pointerFields=#{pointer_fields.inspect}) " \
-            "but the current Atlas Search scope has no user_id.",
-          )
-        end
-        pointer_fields
+        # nil when a public, user, or role grant already permits every row
+        # (Parse Server ignores pointer permissions then); otherwise the
+        # pointerFields plus readUserFields the rows must match. The older
+        # permits? / pointer_fields_for pair missed readUserFields entirely
+        # and over-restricted a public grant that also listed pointerFields.
+        Parse::CLPScope.row_constraint_for!(collection_name, :find, resolution,
+                                            label: "Atlas Search")
       end
 
       # ATLAS-4: refuse `highlight_field:` when the field is in the
@@ -1016,13 +1046,42 @@ module Parse
         return if highlight_field.nil?
         return if resolution.nil? || resolution.master?
         return if protected_fields.nil? || protected_fields.empty?
-        path = highlight_field.to_s
-        return unless protected_fields.include?(path)
+        return unless ProtectedPaths.touches?(highlight_field, protected_fields)
+        path = highlight_field.is_a?(String) || highlight_field.is_a?(Symbol) ? highlight_field.to_s : highlight_field.inspect
         raise Parse::CLPScope::Denied.new(
           nil, :find,
           "Parse::AtlasSearch.search refused: highlight_field '#{path}' is in " \
           "protectedFields for the current scope; returning highlights would " \
           "leak the protected field's value.",
+        )
+      end
+
+      # Refuse a scoped text search whose paths include a protected field,
+      # or that searches every field (no `fields:`) while the scope has
+      # protected fields. Stripping a protected field from the RESULT does
+      # not stop it from deciding which documents MATCH and how they RANK,
+      # so a caller could test guesses against its value. Master scopes and
+      # scopes with nothing protected are unaffected.
+      #
+      # @raise [Parse::CLPScope::Denied]
+      def assert_search_fields_allowed!(fields, protected_fields, resolution)
+        return if resolution.nil? || resolution.master?
+        return if protected_fields.nil? || protected_fields.empty?
+        if fields.nil? || fields.empty?
+          raise Parse::CLPScope::Denied.new(
+            nil, :find,
+            "Parse::AtlasSearch.search refused: a search over every field would " \
+            "match on protectedFields for the current scope; pass fields: with " \
+            "the fields to search.",
+          )
+        end
+        list = fields.is_a?(Array) ? fields : [fields]
+        hit = list.find { |f| ProtectedPaths.touches?(f, protected_fields) }
+        return unless hit
+        raise Parse::CLPScope::Denied.new(
+          nil, :find,
+          "Parse::AtlasSearch.search refused: field '#{hit}' is in protectedFields " \
+          "for the current scope; matching on it would reveal its value.",
         )
       end
 
@@ -1035,13 +1094,14 @@ module Parse
       def strip_protected_highlights!(documents, protected_fields)
         return if documents.nil? || documents.empty?
         return if protected_fields.nil? || protected_fields.empty?
-        protected_set = protected_fields.to_set
         documents.each do |doc|
           next unless doc.is_a?(Hash)
           highlights = doc["_highlights"]
           next unless highlights.is_a?(Array)
           doc["_highlights"] = highlights.reject do |h|
-            h.is_a?(Hash) && protected_set.include?((h["path"] || h[:path]).to_s)
+            # A highlight entry with no usable path is dropped too: it
+            # cannot be shown to address an unprotected field.
+            h.is_a?(Hash) && ProtectedPaths.touches?(h["path"] || h[:path], protected_fields)
           end
         end
       end
@@ -1172,6 +1232,18 @@ module Parse
           Parse::PipelineSecurity.refuse_protected_field_references!(
             [{ "$match" => filter }], collection_name, resolution,
           )
+          # Predicate KEYS decide matches too: `{ "ssn" => /^1/ }` is the
+          # same oracle as the `$expr` form above. Refuse any key (top
+          # level or nested under $and/$or/$nor/$not, dotted or `_p_`
+          # storage form) that touches a protected field.
+          unless resolution.master?
+            protected_fields = Parse::CLPScope.protected_fields_for(
+              collection_name, resolution.permission_strings,
+            )
+            ProtectedPaths.assert_filter_allowed!(
+              filter, protected_fields, resolution, collection_name: collection_name,
+            )
+          end
         end
 
         filter

@@ -27,7 +27,13 @@ class CacheKeyspaceMiddlewareTest < Minitest::Test
     Parse::Middleware::Caching.enabled = @prior_enabled
   end
 
+  # Cached response entries. Version keys (`rv:` per resource, `cv:` per
+  # class) are bookkeeping, not entries, and outlive the entries they retire.
   def keys
+    all_keys.reject { |k| k.match?(/:(?:rv|cv):[0-9a-f]+\z/) }
+  end
+
+  def all_keys
     ks = []
     @store.each_key { |k| ks << k }
     ks
@@ -38,7 +44,7 @@ class CacheKeyspaceMiddlewareTest < Minitest::Test
   def test_keys_are_written_under_the_keyspace
     request(PATH)
     refute_empty keys
-    keys.each { |k| assert k.start_with?(@keyspace.root_prefix), "stray key #{k}" }
+    all_keys.each { |k| assert k.start_with?(@keyspace.root_prefix), "stray key #{k}" }
   end
 
   def test_without_a_keyspace_legacy_shape_is_preserved

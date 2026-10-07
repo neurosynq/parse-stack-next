@@ -621,6 +621,13 @@ module Parse
           ambient = Parse.current_session_token
           client_opts[:session_token] = ambient if ambient.is_a?(String) && !ambient.empty?
         end
+        # Inside `Parse.with_session(nil)` the caller is anonymous. A worker
+        # thread may not see that fiber state, so carry it explicitly rather
+        # than letting the worker fall back to the master key.
+        if !client_opts.key?(:session_token) && !client_opts.key?(:use_master_key) &&
+           Parse.respond_to?(:anonymous_session?) && Parse.anonymous_session?
+          client_opts[:use_master_key] = false
+        end
 
         if type == :batch
           # use a .in query with the given id as a list

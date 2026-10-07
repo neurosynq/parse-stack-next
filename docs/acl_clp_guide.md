@@ -491,6 +491,13 @@ described in §7. From a security standpoint, an Atlas Search call
 with a session token is treated like a `Parse::Query` with a session
 token — same scoping, same field stripping.
 
+Stripping a protected field from results does not stop it from
+deciding which documents match. A scoped `Parse::AtlasSearch.search`
+is therefore refused (`Parse::CLPScope::Denied`) when `fields:` names a
+field protected for the caller, or when it names no fields (a search
+over every column) while the caller has any protected fields. Pass
+`fields:` with the fields to search.
+
 The `$search` stage itself runs on the Atlas Search index and is not
 filtered by ACL. The ACL filter is applied as a `$match` stage by
 `Parse::ACLScope` after `$search`, before results are returned. If

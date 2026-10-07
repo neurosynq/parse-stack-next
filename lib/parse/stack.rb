@@ -115,9 +115,12 @@ module Parse
   #
   # The `token` argument may be a String, a {Parse::User} (its
   # `session_token` is read), a {Parse::Session} (its `session_token` is
-  # read), or `nil`. Passing `nil` clears the ambient inside the block —
-  # useful for performing one anonymous call inside an otherwise
-  # session-scoped region.
+  # read), or `nil`. Passing `nil`, or a user or session that carries no
+  # token, runs the block ANONYMOUSLY: requests inside it send neither a
+  # session token nor the master key, and a client's bound token is not
+  # used either. This is useful for performing one anonymous call inside an
+  # otherwise session-scoped region. A call inside the block can still opt
+  # out with an explicit `session_token:` or `use_master_key: true`.
   #
   # Fiber-local, not thread-local: concurrent fibers (and threads, since
   # each thread starts with its own root fiber) do not share state.
@@ -156,17 +159,37 @@ module Parse
         "token is refused so the block cannot silently execute with master-key " \
         "authority — pass a valid session token, or `nil` for no ambient session."
     end
-    Fiber[SESSION_TOKEN_STATE_KEY] = resolved
+    # `nil` (no token, or a user/session without one) installs the
+    # anonymous sentinel rather than clearing the slot. A cleared slot meant
+    # "no ambient", which the request layer resolves to the master key on a
+    # master-keyed client: the opposite of the documented anonymous block.
+    Fiber[SESSION_TOKEN_STATE_KEY] = resolved.nil? ? ANONYMOUS_SESSION : resolved
     yield
   ensure
     Fiber[SESSION_TOKEN_STATE_KEY] = previous
   end
 
+  # Fiber-state sentinel installed by `Parse.with_session(nil)`. The request
+  # layer treats it as "anonymous": no session token and no master key.
+  # @!visibility private
+  ANONYMOUS_SESSION = :__parse_anonymous_session__
+
   # The ambient session token set by {.with_session} for the current
-  # fiber, or `nil` when not inside such a block.
+  # fiber, or `nil` when not inside such a block or inside an anonymous
+  # `with_session(nil)` block (see {.anonymous_session?}).
   # @return [String, nil]
   def self.current_session_token
-    Fiber[SESSION_TOKEN_STATE_KEY]
+    value = Fiber[SESSION_TOKEN_STATE_KEY]
+    value == ANONYMOUS_SESSION ? nil : value
+  end
+
+  # Whether the current fiber is inside an anonymous `Parse.with_session(nil)`
+  # block (directly, or nested without a token-bearing block inside it).
+  # Requests there carry no session token and no master key unless the call
+  # passes `session_token:` or `use_master_key: true` explicitly.
+  # @return [Boolean]
+  def self.anonymous_session?
+    Fiber[SESSION_TOKEN_STATE_KEY] == ANONYMOUS_SESSION
   end
 
   # @!visibility private
@@ -776,10 +799,17 @@ module Parse
     #   - the name singularizes to a *different* string (i.e. looks plural),
     #   - the singular form does NOT already end in `s` (per design: classes
     #     whose name ends in `s` are not auto-aliased),
-    #   - the singular constant is defined (searching ancestors so a
-    #     top-level model is visible from a nested reference) and is a
-    #     `Parse::Object` subclass,
-    #   - the plural is not already defined on the referencing module.
+    #   - the singular constant resolves from the referencing module and
+    #     is a `Parse::Object` subclass,
+    #   - the plural is not already defined in the singular class's own
+    #     namespace.
+    #
+    # The alias is installed in the namespace that defines the singular
+    # class (`Object` for a top-level `Post`, `Blog` for `Blog::Post`), never
+    # on the module where the lookup happened. A reference to `Posts` from
+    # inside an unrelated class or module therefore resolves, but does not
+    # add a `Posts` constant to that module. A frozen namespace is left
+    # alone (no `FrozenError`).
     #
     # @param mod [Module] the module/class on which `const_missing` fired.
     # @param name [Symbol] the missing constant name.
@@ -795,12 +825,37 @@ module Parse
       return nil unless mod.const_defined?(sym, true)
       klass = mod.const_get(sym)
       return nil unless klass.is_a?(Class) && klass < Parse::Object
-      return nil if mod.const_defined?(name, false)
-      mod.const_set(name, klass)
+      home = __pluralized_alias_home(klass, sym)
+      return nil if home.nil?
+      if home.const_defined?(name, false)
+        existing = home.const_get(name, false)
+        return existing.equal?(klass) ? klass : nil
+      end
+      return nil if home.frozen?
+      home.const_set(name, klass)
       klass
-    rescue NameError, LoadError
+    rescue NameError, LoadError, FrozenError
       # const_get/const_defined? can raise on malformed names or autoload
       # failures; never let alias resolution mask the original lookup.
+      nil
+    end
+
+    # @!visibility private
+    # The namespace that directly defines `klass` under the name `singular`,
+    # which is where its pluralized alias belongs. nil when it cannot be
+    # determined (anonymous class, or a constant that only resolves through
+    # an ancestor).
+    # @param klass [Class]
+    # @param singular [Symbol]
+    # @return [Module, nil]
+    def __pluralized_alias_home(klass, singular)
+      name = klass.name
+      return nil if name.nil?
+      parent_name = name.rpartition("::").first
+      home = parent_name.empty? ? ::Object : ::Object.const_get(parent_name, false)
+      return nil unless home.is_a?(Module) && home.const_defined?(singular, false)
+      home.const_get(singular, false).equal?(klass) ? home : nil
+    rescue NameError
       nil
     end
 
@@ -1048,4 +1103,7 @@ Parse._attach_slow_query_subscriber! if Parse.slow_query_threshold_ms
 # already defined. Gated at runtime on Parse.pluralized_aliases?.
 require_relative "model/core/pluralized_aliases"
 
-require_relative "stack/railtie" if defined?(::Rails)
+# Only hook into Rails when railties is loaded. A bare `Rails` module (for
+# example the one rails-html-sanitizer defines) has no `Rails::Railtie`, and
+# subclassing it would abort loading the gem.
+require_relative "stack/railtie" if defined?(::Rails::Railtie)

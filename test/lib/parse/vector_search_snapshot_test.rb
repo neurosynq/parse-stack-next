@@ -65,7 +65,7 @@ class VectorSearchSnapshotTest < Minitest::Test
           Parse::ACLScope.stub(:resolve!, ->(*, **) { res }) do
             Parse::CLPScope.stub(:permits?, ->(*, **) { true }) do
               Parse::CLPScope.stub(:protected_fields_for, ->(*, **) { Set.new }) do
-                Parse::CLPScope.stub(:pointer_fields_for, ->(*, **) { nil }) do
+                Parse::CLPScope.stub(:row_constraint_for!, ->(*, **) { nil }) do
                   Parse::VectorSearch.search("Song", field: "embedding", query_vector: [0.1, 0.2, 0.3],
                                                      k: 5, index: "song_vec", **search_opts)
                 end

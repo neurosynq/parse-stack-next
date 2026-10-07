@@ -4,12 +4,16 @@
 module Parse
   # Global `const_missing` hook that lazily resolves the plural form of a
   # {Parse::Object} subclass constant to that class. Referencing `Posts`
-  # when a class `Post` exists installs `Posts` as an alias for `Post` on
-  # the referencing module and returns it, so query entry points like
+  # when a class `Post` exists installs `Posts` as an alias for `Post` and
+  # returns it, so query entry points like
   # `Posts.where(...).count` work without any per-model boilerplate.
   #
-  # The hook is prepended onto `Module` so it applies to constant lookups
-  # in any namespace (top-level and nested). It is tightly guarded: every
+  # The hook is prepended onto `Module` so a plural reference resolves from
+  # any namespace, but the alias constant is only ever installed in the
+  # namespace that defines the singular class (`::Posts` for a top-level
+  # `Post`, `Blog::Posts` for `Blog::Post`). A lookup from an unrelated
+  # module never adds a constant to that module, and a frozen namespace is
+  # skipped rather than raising `FrozenError`. It is tightly guarded: every
   # path that is not a plural-of-a-Parse-class falls through to `super`,
   # preserving normal `NameError` and autoloader (Zeitwerk/classic)
   # behavior. The whole feature is gated on {Parse.pluralized_aliases?} so

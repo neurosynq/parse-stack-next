@@ -34,10 +34,12 @@ module Parse
       ATTRIBUTES
     end
 
-    # Base64 encode and set the instance contents
+    # Base64 encode and set the instance contents. Uses strict (RFC 4648)
+    # encoding: `Base64.encode64` inserts a newline every 60 characters,
+    # which Parse Server stores verbatim in the Bytes column.
     # @param str the string to encode
     def encode(str)
-      @base64 = Base64.encode64(str)
+      @base64 = Base64.strict_encode64(str.to_s)
     end
 
     # Get the content as decoded base64 bytes
@@ -45,11 +47,17 @@ module Parse
       Base64.decode64(@base64 || "")
     end
 
+    # Mass-assign the base64 content from a base64 String, a Parse Bytes
+    # hash (`{"__type" => "Bytes", "base64" => "..."}`), or another
+    # {Parse::Bytes}.
+    # @param a [String, Hash, Parse::Bytes]
     def attributes=(a)
-      if a.is_a?(String)
-        @bytes = a
+      if a.is_a?(Bytes)
+        @base64 = a.base64.dup
+      elsif a.is_a?(String)
+        @base64 = a.dup
       elsif a.is_a?(Hash)
-        @bytes = a["base64"] || @bytes
+        @base64 = a["base64"] || a[:base64] || @base64
       end
     end
 

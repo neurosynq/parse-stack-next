@@ -109,8 +109,12 @@ module Parse
       self.method = method
       self.path = uri
       self.body = body
-      self.headers = headers || {}
-      self.opts = opts || {}
+      # Copy the caller's hashes: the request id header is written into
+      # `headers` below, and writing it into a hash the caller reuses would
+      # send the same id on the caller's next request, which Parse Server's
+      # idempotency layer rejects as a duplicate.
+      self.headers = headers ? headers.dup : {}
+      self.opts = opts ? opts.dup : {}
 
       # Handle request ID for idempotency
       setup_request_id
@@ -199,24 +203,32 @@ module Parse
       true
     end
 
+    # Endpoints that never get an automatic request id. Matched against the
+    # path with any leading slash and mount prefix allowed, since requests
+    # carry both relative (`functions/foo`) and absolute
+    # (`/parse/functions/foo`) paths.
+    NON_IDEMPOTENT_PATH_PATTERNS = [
+      %r{(?:\A|/)sessions(?:/|\z)},            # Session creation/management
+      %r{(?:\A|/)logout(?:/|\z)},              # Logout operations
+      %r{(?:\A|/)requestPasswordReset(?:/|\z)}, # Password reset requests
+      %r{(?:\A|/)functions/},                  # Cloud functions (may have their own logic)
+      %r{(?:\A|/)jobs/},                       # Background jobs
+      %r{(?:\A|/)events/},                     # Analytics events
+      %r{(?:\A|/)push(?:/|\z)},                # Push notifications
+    ].freeze
+
     # Checks if the request path should not use request IDs
     # @return [Boolean]
     def non_idempotent_path?
       # GET requests are naturally idempotent
       return true if @method == :get
 
-      # Some Parse endpoints handle their own idempotency or shouldn't be retried
-      non_idempotent_patterns = [
-        %r{/sessions},           # Session creation/management
-        %r{/logout},             # Logout operations
-        %r{/requestPasswordReset}, # Password reset requests
-        %r{/functions/},         # Cloud functions (may have their own logic)
-        %r{/jobs/},              # Background jobs
-        %r{/events/},            # Analytics events
-        %r{/push},                # Push notifications
-      ]
+      path = @path.to_s.split("?", 2).first
+      # Object paths are never one of the special endpoints, even when the
+      # class is named like one (`classes/push`).
+      return false if path.match?(%r{(?:\A|/)classes/})
 
-      non_idempotent_patterns.any? { |pattern| @path =~ pattern }
+      NON_IDEMPOTENT_PATH_PATTERNS.any? { |pattern| path.match?(pattern) }
     end
 
     # Generates a unique request ID

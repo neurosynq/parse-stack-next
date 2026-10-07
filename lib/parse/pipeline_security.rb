@@ -439,55 +439,347 @@ module Parse
       # caller hasn't otherwise needed it.
       require_relative "clp_scope" unless defined?(Parse::CLPScope)
 
+      require_relative "atlas_search/protected_paths" unless defined?(Parse::AtlasSearch::ProtectedPaths)
+
       protected_set = Parse::CLPScope.protected_fields_for(collection_name, perms)
-      return if protected_set.nil? || protected_set.empty?
+      sets = Hash.new do |memo, klass|
+        memo[klass] = Parse::CLPScope.protected_fields_for(klass, perms)
+      end
+      sets[collection_name.to_s] = protected_set || Set.new
 
       pipeline.each_with_index do |stage, idx|
-        walk_for_protected_ref!(stage, protected_set, collection_name, "pipeline[#{idx}]")
+        walk_stage_refs!(stage, collection_name.to_s, sets, "pipeline[#{idx}]")
+        refuse_protected_stage_keys!(stage, collection_name.to_s, sets, "pipeline[#{idx}]")
       end
       nil
     end
 
+    # Whether no stage of `pipeline` can change a row's identity
+    # (`_id` / `objectId`).
+    #
+    # The `_User` self exemption (a user sees their own `email`) is decided
+    # from the identity of the row that comes OUT of the pipeline. A stage
+    # such as `{ "$set" => { "_id" => "<caller id>" } }` would otherwise let
+    # another user's row claim the exemption. Only stages that cannot write
+    # an identity key count as preserving: filters, sorts, paging,
+    # `$unset`, `$project` that only includes or excludes `_id`, and
+    # `$addFields` / `$set` / `$lookup` / `$graphLookup` / `$unwind` /
+    # `$geoNear` that write no identity key. Every other stage (`$group`,
+    # `$replaceRoot`, `$facet`, `$unionWith`, ...) and any unknown shape
+    # returns false, so the exemption is withheld and the field stripped.
+    #
+    # @param pipeline [Array<Hash>, nil]
+    # @return [Boolean]
+    def identity_preserving?(pipeline)
+      return true if pipeline.nil?
+      return false unless pipeline.is_a?(Array)
+      pipeline.all? { |stage| identity_preserving_stage?(stage) }
+    end
+
+    # @!visibility private
+    IDENTITY_KEYS = %w[_id objectId].freeze
+
+    # @!visibility private
+    def identity_preserving_stage?(stage)
+      return false unless stage.is_a?(Hash) && stage.size == 1
+      op, body = stage.first
+      case op.to_s
+      when "$match", "$sort", "$limit", "$skip", "$sample", "$unset"
+        true
+      when "$count"
+        !identity_key?(body)
+      when "$project"
+        body.is_a?(Hash) &&
+          body.all? { |k, v| !identity_key?(k) || [0, 1, true, false].include?(v) }
+      when "$addFields", "$set"
+        body.is_a?(Hash) && body.keys.none? { |k| identity_key?(k) }
+      when "$lookup", "$graphLookup"
+        body.is_a?(Hash) && !identity_key?(body["as"] || body[:as])
+      when "$unwind"
+        body.is_a?(String) ||
+          (body.is_a?(Hash) && !identity_key?(body["includeArrayIndex"] || body[:includeArrayIndex]))
+      when "$geoNear"
+        body.is_a?(Hash) &&
+          %w[distanceField includeLocs].none? { |k| identity_key?(body[k] || body[k.to_sym]) }
+      else
+        false
+      end
+    end
+
+    private_class_method :identity_preserving_stage?
+
+    # @!visibility private
+    def identity_key?(key)
+      return false if key.nil?
+      IDENTITY_KEYS.include?(key.to_s.split(".").first.to_s)
+    end
+
+    private_class_method :identity_key?
+
+    # Walk one stage for `$<field>` value references, judging each against
+    # the protected set of the class whose documents the expression sees.
+    #
+    # Most stages see the documents of `class_name`. A join is different:
+    # its `let` / `startWith` expressions read the OUTER document, while its
+    # sub-pipeline (and a `$graphLookup` search) reads the JOINED class, so
+    # those are checked against the joined class's set. The outer set is
+    # kept as well (the union of both): a joined class whose CLP cannot be
+    # resolved reports nothing protected, and the conservative reading of a
+    # name both classes share is to refuse it. A `$facet` branch sees the
+    # same documents as the stage it sits in.
+    #
+    # A `$graphLookup` into a class with protected fields for the scope is
+    # refused outright: it returns whole joined documents and offers no
+    # sub-pipeline in which the SDK could strip them.
+    #
+    # @!visibility private
+    def walk_stage_refs!(stage, class_name, sets, path, extra = nil)
+      return unless stage.is_a?(Hash)
+      own = sets[class_name]
+      own = own | extra if extra && !extra.empty?
+      stage.each do |op, body|
+        op_s = op.to_s
+        case op_s
+        when "$lookup", "$unionWith", "$graphLookup"
+          walk_join_refs!(op_s, body, class_name, own, sets, "#{path}.#{op_s}")
+        when "$facet"
+          next unless body.is_a?(Hash)
+          body.each do |name, branch|
+            Array(branch).each_with_index do |sub, i|
+              walk_stage_refs!(sub, class_name, sets, "#{path}.$facet.#{name}[#{i}]", extra)
+            end
+          end
+        when "$replaceRoot", "$replaceWith"
+          next if own.nil? || own.empty?
+          new_root = op_s == "$replaceRoot" && body.is_a?(Hash) ? (body["newRoot"] || body[:newRoot]) : body
+          if rehome_root?(new_root)
+            # `$replaceRoot: { newRoot: "$$ROOT" }`, `$replaceWith: "$$ROOT"`,
+            # or a `$mergeObjects` of `$$ROOT` in that position keeps every
+            # field at the TOP level of the output, where the strip removes
+            # protected ones. Only the other operands need checking.
+            walk_rehome_operands!(new_root, own, class_name, "#{path}.#{op_s}")
+          else
+            walk_for_protected_ref!(body, own, class_name, "#{path}.#{op_s}")
+          end
+        else
+          next if own.nil? || own.empty?
+          walk_for_protected_ref!(body, own, class_name, "#{path}.#{op_s}")
+        end
+      end
+      nil
+    end
+
+    private_class_method :walk_stage_refs!
+
+    # @!visibility private
+    def walk_join_refs!(op, body, class_name, own, sets, path)
+      spec = body
+      spec = { "coll" => body } if op == "$unionWith" && body.is_a?(String)
+      return unless spec.is_a?(Hash)
+      foreign = (spec["from"] || spec[:from] || spec["coll"] || spec[:coll]).to_s
+      foreign_set = foreign.empty? ? Set.new : sets[foreign]
+
+      outer_keys = op == "$graphLookup" ? %w[startWith] : %w[let]
+      outer_keys.each do |key|
+        value = spec[key] || spec[key.to_sym]
+        next if value.nil? || own.nil? || own.empty?
+        walk_for_protected_ref!(value, own, class_name, "#{path}.#{key}")
+      end
+
+      return if foreign.empty?
+
+      if op == "$graphLookup"
+        unless foreign_set.empty?
+          raise Parse::CLPScope::Denied.new(
+            foreign, :find,
+            "#{path} reads class #{foreign}, which has protected fields for the " \
+            "current scope. $graphLookup returns whole joined documents with no " \
+            "sub-pipeline to strip them in; use $lookup instead.",
+          )
+        end
+        restrict = spec["restrictSearchWithMatch"] || spec[:restrictSearchWithMatch]
+        walk_for_protected_ref!(restrict, foreign_set | own, foreign, "#{path}.restrictSearchWithMatch") if restrict
+        return
+      end
+
+      sub = spec["pipeline"] || spec[:pipeline]
+      return unless sub.is_a?(Array)
+      sub.each_with_index do |sub_stage, i|
+        walk_stage_refs!(sub_stage, foreign, sets, "#{path}.pipeline[#{i}]", own)
+      end
+    end
+
+    private_class_method :walk_join_refs!
+
+    # Refuse a stage that filters, sorts, or joins on a protected field by
+    # naming it as a KEY rather than through a `$<field>` value reference.
+    #
+    # Parse Server refuses a REST find whose `where` names a protected field
+    # (at any depth of `$and` / `$or` / `$nor`, dotted or not) with error 119,
+    # because which rows match, and in what order, reveals the field's
+    # value even though the output strips it. The mongo-direct path must do
+    # the same. Checked here:
+    #
+    # * `$match` predicate keys, including under `$and` / `$or` / `$nor` /
+    #   `$not`, dotted paths (`secret.sub`), and the `_p_<field>` storage
+    #   form of a pointer;
+    # * `$sort` keys (a `$meta` sort is not a field);
+    # * `$geoNear.query` keys and `$geoNear.key`;
+    # * `$facet` branches, against the same class;
+    # * `$lookup` `localField` (this class) and `foreignField` plus the
+    #   sub-pipeline (the joined class, with ITS protected set), and the
+    #   same for `$unionWith` and `$graphLookup`, so an `$inQuery` style
+    #   join cannot probe the joined class's protected fields either.
+    #
+    # @!visibility private
+    def refuse_protected_stage_keys!(stage, class_name, sets, path)
+      return unless stage.is_a?(Hash)
+      paths = Parse::AtlasSearch::ProtectedPaths
+      own = sets[class_name]
+      stage.each do |op, body|
+        case op.to_s
+        when "$match"
+          paths.each_filter_reference(body) do |ref|
+            raise_protected_key!(class_name, ref, "#{path}.$match") if paths.touches?(ref, own)
+          end
+        when "$sort"
+          next unless body.is_a?(Hash)
+          body.each do |key, dir|
+            next if dir.is_a?(Hash) && (dir.key?("$meta") || dir.key?(:$meta))
+            raise_protected_key!(class_name, key, "#{path}.$sort") if paths.touches?(key.to_s, own)
+          end
+        when "$geoNear"
+          next unless body.is_a?(Hash)
+          query = body["query"] || body[:query]
+          paths.each_filter_reference(query) do |ref|
+            raise_protected_key!(class_name, ref, "#{path}.$geoNear.query") if paths.touches?(ref, own)
+          end
+          key = body["key"] || body[:key]
+          raise_protected_key!(class_name, key, "#{path}.$geoNear.key") if key && paths.touches?(key.to_s, own)
+        when "$facet"
+          next unless body.is_a?(Hash)
+          body.each do |name, branch|
+            Array(branch).each_with_index do |sub, i|
+              refuse_protected_stage_keys!(sub, class_name, sets, "#{path}.$facet.#{name}[#{i}]")
+            end
+          end
+        when "$lookup", "$graphLookup", "$unionWith"
+          refuse_protected_join_keys!(op.to_s, body, class_name, sets, path)
+        end
+      end
+      nil
+    end
+
+    private_class_method :refuse_protected_stage_keys!
+
+    # @!visibility private
+    def refuse_protected_join_keys!(op, body, class_name, sets, path)
+      paths = Parse::AtlasSearch::ProtectedPaths
+      spec = body
+      spec = { "coll" => body } if op == "$unionWith" && body.is_a?(String)
+      return unless spec.is_a?(Hash)
+      foreign = (spec["from"] || spec[:from] || spec["coll"] || spec[:coll]).to_s
+      foreign_set = foreign.empty? ? Set.new : sets[foreign]
+      own = sets[class_name]
+
+      local_keys = case op
+        when "$lookup" then [spec["localField"] || spec[:localField]]
+        else []
+        end
+      local_keys.compact.each do |k|
+        raise_protected_key!(class_name, k, "#{path}.#{op}.localField") if paths.touches?(k.to_s, own)
+      end
+
+      foreign_keys = case op
+        when "$lookup" then [spec["foreignField"] || spec[:foreignField]]
+        when "$graphLookup"
+          [spec["connectToField"] || spec[:connectToField],
+           spec["connectFromField"] || spec[:connectFromField]]
+        else []
+        end
+      foreign_keys.compact.each do |k|
+        raise_protected_key!(foreign, k, "#{path}.#{op}") if paths.touches?(k.to_s, foreign_set)
+      end
+
+      restrict = spec["restrictSearchWithMatch"] || spec[:restrictSearchWithMatch]
+      paths.each_filter_reference(restrict) do |ref|
+        raise_protected_key!(foreign, ref, "#{path}.#{op}.restrictSearchWithMatch") if paths.touches?(ref, foreign_set)
+      end
+
+      sub = spec["pipeline"] || spec[:pipeline]
+      return if foreign.empty? || !sub.is_a?(Array)
+      sub.each_with_index do |sub_stage, i|
+        refuse_protected_stage_keys!(sub_stage, foreign, sets, "#{path}.#{op}.pipeline[#{i}]")
+      end
+    end
+
+    private_class_method :refuse_protected_join_keys!
+
+    # @!visibility private
+    def raise_protected_key!(class_name, ref, path)
+      field = Parse::AtlasSearch::ProtectedPaths.root_field(ref)
+      raise Parse::CLPScope::Denied.new(
+        class_name, :find,
+        "This user is not allowed to query #{field} on class #{class_name}: " \
+        "#{path} filters, sorts, or joins on protected field '#{ref}', which " \
+        "would reveal its value through which rows match or how they order.",
+      )
+    end
+
+    private_class_method :raise_protected_key!
+
     # @!visibility private
     def walk_for_protected_ref!(node, protected_set, class_name, path)
+      return if protected_set.nil? || protected_set.empty?
+      paths = Parse::AtlasSearch::ProtectedPaths
       case node
       when String
-        # Field-reference syntax is `$<path>` — variable refs start
-        # with `$$` (e.g. `$$ROOT`, `$$<userVarFromLet>`) and aren't
-        # field references; skip them.
         return if node.empty?
         return unless node.start_with?("$")
-        return if node.start_with?("$$")
-        # Path may be dotted (`$ssn.area`). The protectedFields list
-        # is a set of top-level column names per Parse Server's CLP
-        # schema, so we compare against the first segment.
-        head = node.sub(/\A\$/, "").split(".").first
-        return if head.nil? || head.empty?
+        if node.start_with?("$$")
+          # `$$ROOT` / `$$CURRENT` name the whole document. Copying it into
+          # a value (`{ snapshot: "$$ROOT" }`, `$mergeObjects`, `$push`, a
+          # `let` binding) nests every protected field one level down,
+          # where the top-level strip does not reach. A dotted form is a
+          # field path like `$<field>`. Other `$$` names are variables.
+          var, rest = node[2..].split(".", 2)
+          return unless %w[ROOT CURRENT].include?(var)
+          if rest.nil? || rest.empty?
+            raise Parse::CLPScope::Denied.new(
+              class_name, :read,
+              "Pipeline at #{path} copies the whole document with '#{node}'. " \
+              "Class #{class_name} has protected fields for the current scope, " \
+              "and a nested copy would carry them past the top-level strip.",
+            )
+          end
+          raise_protected_ref!(class_name, path, node, paths.root_field(rest)) if paths.touches?(rest, protected_set)
+          return
+        end
+        ref = node[1..]
         # `$_id` is the canonical primary-key reference; never on the
         # protected list and would otherwise short-circuit common
         # aggregations like `{$group: {_id: "$_id"}}`.
-        return if head == "_id"
-        if protected_set.include?(head)
-          raise Parse::CLPScope::Denied.new(
-            class_name, :read,
-            "Pipeline at #{path} references protectedField '#{head}' " \
-            "via field-reference '#{node}'. ProtectedFields cannot be " \
-            "laundered through a $project/$addFields/$group rename — " \
-            "the post-fetch strip walks by name and would miss the " \
-            "renamed value, leaking the protected column.",
-          )
-        end
+        return if ref.split(".").first == "_id"
+        # Dotted (`$ssn.area`) and storage (`$_p_owner`) forms are compared
+        # by their top-level Parse field, as Parse Server protects columns.
+        raise_protected_ref!(class_name, path, node, paths.root_field(ref)) if paths.touches?(ref, protected_set)
       when Array
         node.each_with_index do |child, i|
           walk_for_protected_ref!(child, protected_set, class_name, "#{path}[#{i}]")
         end
       when Hash
         node.each do |key, value|
+          # `$getField` reads a field by NAME, so `{ $getField: "ssn" }`
+          # reaches a protected column without a `$ssn` reference. It reads
+          # the current document unless `input` names something else.
+          # `$setField` / `$unsetField` take a name the same way and are held
+          # to the same literal-name rule.
+          check_field_name_operator!(key.to_s, value, protected_set, class_name, "#{path}.#{key}") if
+            FIELD_NAME_OPERATORS.include?(key.to_s)
           # Recurse into every value. Hash keys are field NAMES in
-          # most contexts, not references — we don't need to gate them
-          # because the post-fetch redact would still strip a key
-          # literally named "ssn". The bypass is the VALUE-side
-          # field-reference string.
+          # most contexts, not references; the post-fetch redact
+          # would still strip a key literally named "ssn". The bypass
+          # is the VALUE-side field-reference string.
           walk_for_protected_ref!(value, protected_set, class_name, "#{path}.#{key}")
         end
       end
@@ -495,6 +787,103 @@ module Parse
     end
 
     private_class_method :walk_for_protected_ref!
+
+    # @!visibility private
+    WHOLE_DOCUMENT_VARS = %w[$$ROOT $$CURRENT].freeze
+
+    # Whether `value` is the whole current document, or a `$mergeObjects`
+    # whose operands include it, in a re-home position.
+    # @!visibility private
+    def rehome_root?(value)
+      return true if WHOLE_DOCUMENT_VARS.include?(value)
+      return false unless value.is_a?(Hash) && value.size == 1
+      operands = value["$mergeObjects"] || value[:$mergeObjects]
+      operands.is_a?(Array) && operands.any? { |o| WHOLE_DOCUMENT_VARS.include?(o) }
+    end
+
+    private_class_method :rehome_root?
+
+    # @!visibility private
+    def walk_rehome_operands!(value, protected_set, class_name, path)
+      return unless value.is_a?(Hash)
+      operands = value["$mergeObjects"] || value[:$mergeObjects]
+      Array(operands).each_with_index do |operand, i|
+        next if WHOLE_DOCUMENT_VARS.include?(operand)
+        walk_for_protected_ref!(operand, protected_set, class_name, "#{path}.$mergeObjects[#{i}]")
+      end
+    end
+
+    private_class_method :walk_rehome_operands!
+
+    # Expression operators that take a field NAME rather than a `$field`
+    # reference.
+    # @!visibility private
+    FIELD_NAME_OPERATORS = %w[$getField $setField $unsetField].freeze
+
+    # Check the field-name argument of `$getField`, `$setField`, or
+    # `$unsetField`. The name must be fixed when the pipeline is written: a
+    # plain string that does not start with `$`, or `{ $literal: "<name>" }`.
+    # Anything else is computed at run time. `{ $getField: "$selector" }`
+    # takes the name from the document's own `selector` field, so a caller
+    # who first sets `selector` to a protected field's name reads that field
+    # under another name. A fixed `$getField` name that reads a protected
+    # field of the current document is refused as well.
+    # @!visibility private
+    def check_field_name_operator!(op, spec, protected_set, class_name, path)
+      field, input = if spec.is_a?(Hash)
+          [spec.key?("field") ? spec["field"] : spec[:field], spec.key?("input") ? spec["input"] : spec[:input]]
+        else
+          [spec, nil]
+        end
+      name = literal_field_name(field)
+      if name.nil?
+        raise Parse::CLPScope::Denied.new(
+          class_name, :read,
+          "Pipeline at #{path} uses #{op} with a field name computed at run time " \
+          "(#{field.inspect}). Class #{class_name} has protected fields for the current " \
+          "scope, so the field name must be a plain string that does not start with " \
+          "'$', or a $literal string.",
+        )
+      end
+      return unless op == "$getField"
+      return unless input.nil? || WHOLE_DOCUMENT_VARS.include?(input)
+      return unless protected_set.include?(name) || protected_set.include?(name.delete_prefix("_p_"))
+      raise_protected_ref!(class_name, path, "$getField(#{name})", name.delete_prefix("_p_"))
+    end
+
+    private_class_method :check_field_name_operator!
+
+    # The fixed field name a `$getField` / `$setField` / `$unsetField`
+    # argument names, or nil when the name is computed at run time. A bare
+    # string starting with `$` is an expression (a field path or variable),
+    # not a name.
+    # @!visibility private
+    def literal_field_name(field)
+      if field.is_a?(String) || field.is_a?(Symbol)
+        name = field.to_s
+        return name.start_with?("$") ? nil : name
+      end
+      return nil unless field.is_a?(Hash) && field.size == 1
+      literal = field.key?("$literal") ? field["$literal"] : field[:$literal]
+      literal.is_a?(String) || literal.is_a?(Symbol) ? literal.to_s : nil
+    end
+
+    private_class_method :literal_field_name
+
+    # @!visibility private
+    def raise_protected_ref!(class_name, path, node, field)
+      raise Parse::CLPScope::Denied.new(
+        class_name, :read,
+        "Pipeline at #{path} references protectedField '#{field}' " \
+        "via field-reference '#{node}'. ProtectedFields cannot be " \
+        "laundered through a $project/$addFields/$group rename: " \
+        "the post-fetch strip walks by name and would miss the " \
+        "renamed value, leaking the protected column.",
+      )
+    end
+
+    private_class_method :raise_protected_ref!
+
 
     # @!visibility private
     def validate_stage!(stage, idx)

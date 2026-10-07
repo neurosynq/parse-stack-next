@@ -378,10 +378,22 @@ module Parse
           }
 
           define_method(key) do |*args, &block|
-            return [] if @id.nil?
             query = Parse::Query.new(klassName, limit: :max)
 
-            query.where(foreign_field => self) unless opts[:scope_only] == true
+            unless opts[:scope_only] == true
+              if @id.blank?
+                # An unsaved owner has no related records. Return a query
+                # that matches nothing, so chaining still works, without
+                # sending a constraint on a pointer with a null objectId.
+                query.where(:objectId.in => [])
+                query.define_singleton_method(:results) do |*_a, **_o, &blk|
+                  blk ? [].each(&blk) : []
+                end
+                query.define_singleton_method(:count) { |*_a, **_o| 0 }
+              else
+                query.where(foreign_field => self)
+              end
+            end
 
             if scope.is_a?(Proc)
               # magic, override the singleton method_missing with accessing object level methods
@@ -483,6 +495,7 @@ module Parse
           }
 
           self.field_map.merge!(key => parse_field)
+          Parse::Model.model_registry_changed!
           # dirty tracking
           define_attribute_methods key
 
@@ -510,7 +523,7 @@ module Parse
             unless val.is_a?(Parse::PointerCollectionProxy)
               results = []
               #results = val.parse_objects if val.respond_to?(:parse_objects)
-              val = proxyKlass.new results, delegate: self, key: key
+              val = proxyKlass.new results, delegate: self, key: key, parse_class: klassName
               instance_variable_set(ivar, val)
             end
             val
@@ -554,10 +567,21 @@ module Parse
               _collection.loaded = true
               _collection.remove val["objects"].parse_objects(klassName)
               val = _collection
-            elsif val.is_a?(Array)
-              # Otherwise create a new collection based on what the user
-              # defined; always coerce array elements to the declared class.
-              val = proxyKlass.new val.parse_objects(klassName), delegate: self, key: key, parse_class: klassName
+            elsif val.is_a?(Array) || (track == true && val.is_a?(Parse::CollectionProxy) && !val.is_a?(proxyKlass))
+              _collection = proxyKlass.new [], delegate: self, key: key, parse_class: klassName
+              items = if track == true
+                  # Assignment from application code: validate every item.
+                  # An item of another class, nil, or a value that is not an
+                  # object, pointer or objectId raises ArgumentError rather
+                  # than being stored under the declared class.
+                  _collection.send(:typecast_items, val.to_a)
+                else
+                  # Server data: coerce elements to the declared class.
+                  val.parse_objects(klassName)
+                end
+              _collection.set_collection!(items)
+              _collection.loaded = true
+              val = _collection
             end
 
             # send dirty tracking if set
@@ -579,11 +603,16 @@ module Parse
           #   for more information.
           if data_type == :relation
             # return a query given the foreign table class name.
+            # The $relatedTo key is the remote column, which differs from the
+            # local name when `field:` is given.
             define_method("#{key}_relation_query") do
-              Parse::Query.new(klassName, key.to_sym.related_to => self.pointer, limit: :max)
+              Parse::Query.new(klassName, parse_field.related_to => self.pointer, limit: :max)
             end
-            # fetch the contents of the relation
+            # fetch the contents of the relation. An owner without an
+            # objectId has nothing on the server; a query for it would send
+            # a null objectId, which Parse Server rejects.
             define_method("#{key}_fetch!") do
+              next [] if @id.blank?
               q = self.send :"#{key}_relation_query"
               q.results || []
             end

@@ -145,6 +145,8 @@ module Parse
         unless defined?(Parse::MongoDB) && Parse::MongoDB.respond_to?(:enabled?) && Parse::MongoDB.enabled?
           return { available: false, reason: :mongodb_not_enabled }
         end
+        # Parse::AtlasSearch is loaded on first use, not with the SDK.
+        require_relative "../../atlas_search"
         indexes = Parse::AtlasSearch::IndexManager.list_indexes(parse_class)
         {
           available: true,

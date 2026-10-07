@@ -129,8 +129,9 @@ class MCPLoggingTest < Minitest::Test
     app = build_app(streaming: true)
     post(app, "initialize", session_id: "s1", principal: "alice")
     post(app, "logging/setLevel", params: { "level" => "error" }, session_id: "s1", principal: "alice")
-    _, res = post(app, "logging/setLevel", params: { "level" => "debug" }, session_id: "s1", principal: "mallory")
-    assert_equal({}, res["result"], "no oracle: the refused call looks like success")
+    status, res = post(app, "logging/setLevel", params: { "level" => "debug" }, session_id: "s1", principal: "mallory")
+    assert_equal 403, status, "a session bound to another principal is refused"
+    assert res["error"]
     assert_equal "error", level(app, "s1")
   end
 
@@ -154,7 +155,12 @@ class MCPLoggingTest < Minitest::Test
     app = build_app(streaming: true)
     post(app, "initialize", session_id: "s1", principal: "alice")
     post(app, "logging/setLevel", params: { "level" => "info" }, session_id: "s1", principal: "alice")
-    app.call("REQUEST_METHOD" => "DELETE", "HTTP_MCP_SESSION_ID" => "s1", "rack.input" => StringIO.new(""))
+    status, = app.call("REQUEST_METHOD" => "DELETE", "HTTP_MCP_SESSION_ID" => "s1",
+                       "HTTP_X_PRINCIPAL" => "mallory", "rack.input" => StringIO.new(""))
+    assert_equal 403, status, "another principal cannot terminate the session"
+    assert_equal "info", level(app, "s1")
+    app.call("REQUEST_METHOD" => "DELETE", "HTTP_MCP_SESSION_ID" => "s1",
+             "HTTP_X_PRINCIPAL" => "alice", "rack.input" => StringIO.new(""))
     assert_nil level(app, "s1")
   end
 

@@ -134,22 +134,22 @@ class TestRangeOperatorCombination < Minitest::Test
     assert_equal 500, compiled["likes"][:$lte]
   end
 
-  def test_overwriting_same_operator
+  def test_same_operator_twice_keeps_both
     time1 = Time.new(2023, 1, 1, 0, 0, 0, 0)
     time2 = Time.new(2023, 6, 1, 0, 0, 0, 0)
 
-    # Add gte twice - second should overwrite first
+    # Add gte twice: both bounds must hold, so the second one is kept in a
+    # top-level $and instead of overwriting the first.
     @query.where(:created_at.gte => time1)
     @query.where(:created_at.gte => time2)
 
     compiled = @query.compile_where
 
     assert compiled.key?("createdAt"), "Should have createdAt field"
-    assert compiled["createdAt"].key?(:$gte), "Should have $gte operator"
-
-    # Should have the second time value
-    expected = { :__type => "Date", :iso => time2.utc.iso8601(3) }
-    assert_equal expected, compiled["createdAt"][:$gte]
+    first = { :__type => "Date", :iso => time1.utc.iso8601(3) }
+    second = { :__type => "Date", :iso => time2.utc.iso8601(3) }
+    assert_equal first, compiled["createdAt"][:$gte]
+    assert_equal [{ "createdAt" => { :$gte => second } }], compiled["$and"]
   end
 
   def test_between_dates_helper_method

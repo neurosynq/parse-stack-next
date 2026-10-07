@@ -1137,6 +1137,8 @@ class CLPIntegrationTest < Minitest::Test
 
     with_parse_server do
       with_timeout(20, "set_default_clp integration test") do
+        # Roles take users, so create them first (add_users refuses nil).
+        setup_test_users
         setup_test_roles
 
         # Configure CLP with dynamic admin role name

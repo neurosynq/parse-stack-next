@@ -173,7 +173,7 @@ class WebhookTriggersTest < Minitest::Test
 
     # Mock object with callback methods
     test_object = Object.new
-    test_object.define_singleton_method(:run_callbacks) { |type, &block| callback_executed = true; block.call if block }
+    test_object.define_singleton_method(:run_before_phase_callbacks) { |_kind| callback_executed = true }
     test_object.define_singleton_method(:is_a?) { |klass| klass == Parse::Object }
     test_object.define_singleton_method(:name=) { |value| @name = value }
     test_object.define_singleton_method(:name) { @name }
@@ -401,7 +401,7 @@ class WebhookTriggersTest < Minitest::Test
     assert hook_payload.ruby_initiated?, "Should detect Ruby-initiated request"
     assert_equal 2, hook_payload.objects.length, "Should have correct number of objects"
     assert_equal "found1", hook_payload.objects.first["objectId"], "Should preserve object data"
-    assert_equal true, result, "after_find should return true"
+    assert_nil result, "after_find replies nil (Parse Server keeps the matched rows)"
     puts "✅ after_find hook executed correctly for Ruby request"
 
     # Reset for client test

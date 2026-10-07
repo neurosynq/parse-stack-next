@@ -6,8 +6,58 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Fail closed unless the exact commit being released has been validated.
+  # Publication (`push` below) depends on this job, so a release cut from an
+  # untested commit, or from a commit whose CI failed, never reaches RubyGems.
+  validate:
+    name: Validate release commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tag matches lib/parse/stack/version.rb
+        if: github.event_name == 'release'
+        run: |
+          version=$(ruby -e 'require "./lib/parse/stack/version"; print Parse::Stack::VERSION')
+          tag="${GITHUB_REF_NAME}"
+          if [ "${tag}" != "v${version}" ]; then
+            echo "::error::Release tag ${tag} does not match version.rb (v${version})."
+            exit 1
+          fi
+
+      - name: Gem Tests passed on this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          # The LATEST completed Gem Tests (ruby.yml) run for this SHA must have
+          # succeeded. No run, a run still in progress, or a latest run (or
+          # rerun) that failed all fail the release; an older success does not
+          # outweigh a newer failure.
+          latest=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ruby.yml/runs?head_sha=${SHA}&per_page=50" \
+            --jq '[.workflow_runs[] | select(.status == "completed")] | sort_by(.updated_at) | last | .conclusion // "none"')
+          echo "Latest completed Gem Tests conclusion for ${SHA}: ${latest}"
+          if [ "${latest}" != "success" ]; then
+            echo "::error::The latest Gem Tests run for ${SHA} did not succeed (${latest}). Wait for CI on this commit, or fix it, before releasing."
+            exit 1
+          fi
+
+      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      # Re-run the unit suite on the exact commit being packaged, so the gem
+      # built below is the code that was just tested here.
+      - name: Unit tests on the release commit
+        run: bundle exec rake test:unit
+
   push:
     name: Push to RubyGems
+    needs: validate
     runs-on: ubuntu-latest
     environment: rubygems
     permissions:

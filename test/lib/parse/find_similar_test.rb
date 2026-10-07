@@ -79,7 +79,8 @@ class FindSimilarTest < Minitest::Test
                                  field: :other_vec, raw: true)
       end
     end
-    assert_equal :other_vec, captured[:field]
+    # The stored column (field_map), which $vectorSearch must query.
+    assert_equal "otherVec", captured[:field]
   end
 
   def test_unknown_field_raises
@@ -135,7 +136,7 @@ class FindSimilarTest < Minitest::Test
     captured = {}
     catalog = lambda do |coll, field:|
       assert_equal "SingleVecDoc", coll
-      assert_equal :embedding, field
+      assert_equal "embedding", field
       { "name" => "discovered_idx" }
     end
     stub_index_catalog(catalog) do

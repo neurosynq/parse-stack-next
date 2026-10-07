@@ -57,6 +57,12 @@ module Parse
       # truncation is never silent. Pass `max_total_tokens: 0` to disable.
       DEFAULT_MAX_TOTAL_TOKENS = 20_000
 
+      # Longest `query` accepted. A search query is a short natural-language
+      # request; the bound keeps one call from sending a body-sized string to
+      # the embedding provider and, under a reranking profile, pairing it
+      # with every candidate document.
+      MAX_QUERY_CHARS = 4_000
+
       # @param agent [Parse::Agent]
       # @param text_field [String, Symbol, nil] which embedded text source to
       #   chunk and return as `content`. Must name one of the class's declared
@@ -75,10 +81,36 @@ module Parse
       #   by objectId) instead of being duplicated on every chunk. When the
       #   token budget trims the result, `budget_truncated: true` and
       #   `budget_dropped: <n>` are added.
-      def semantic_search(agent, class_name: nil, query: nil, k: DEFAULT_K,
+      def semantic_search(agent, **args)
+        started = monotonic_now
+        semantic_search_unobserved(agent, **args)
+      rescue StandardError => e
+        # Failures are observable too: one sanitized event naming the error
+        # class (never its message, which can echo input).
+        emit_failure_event(args, e, started)
+        raise
+      end
+
+      # @!visibility private
+      def emit_failure_event(args, error, started)
+        return unless defined?(ActiveSupport::Notifications)
+        payload = {
+          class_name: (args[:class_name] || args[:klass]).to_s,
+          profile: args[:profile]&.to_s,
+          error: error.class.name,
+          duration_ms: ((monotonic_now - started) * 1000).round(1),
+        }
+        ActiveSupport::Notifications.instrument("parse.retrieval.search", payload)
+      rescue StandardError
+        nil
+      end
+
+      # @!visibility private
+      def semantic_search_unobserved(agent, class_name: nil, query: nil, k: nil,
                                  filter: nil, vector_filter: nil, text_field: nil,
                                  chunk_size: nil, chunk_overlap: nil, chunk_by: nil,
                                  max_chunks_per_document: nil, max_total_tokens: nil,
+                                 profile: nil,
                                  # Back-compat / ergonomic aliases for direct callers:
                                  # `klass:`/`class:` for class_name, and the chunker's
                                  # own `size:`/`overlap:`/`by:` names.
@@ -95,14 +127,32 @@ module Parse
         unless query.is_a?(String) && !query.strip.empty?
           raise Parse::Agent::ValidationError, "semantic_search: `query` must be a non-empty String."
         end
+        if query.length > MAX_QUERY_CHARS
+          raise Parse::Agent::ValidationError,
+                "semantic_search: `query` is #{query.length} characters; the limit is #{MAX_QUERY_CHARS}."
+        end
 
         resolved_text_field = normalize_text_field!(text_field, klass)
+        # A named, server-configured retrieval profile (Parse::Retrieval::Profiles).
+        # Unknown names fail here, before any provider call.
+        prof = profile.nil? || profile.to_s.strip.empty? ? nil : Parse::Retrieval::Profiles.fetch!(profile)
 
         # Reject reserved underscore keys at any depth, then enforce the
         # per-class filter-field allowlist on top-level keys.
         Parse::Retrieval.assert_no_underscore_keys!(filter) unless filter.nil?
         Parse::Retrieval.assert_no_underscore_keys!(vector_filter) unless vector_filter.nil?
         allowed = Parse::Agent::MetadataRegistry.searchable_filter_fields(cname).map(&:to_s)
+        # Filterable fields are also bounded by what the agent may read (the
+        # class `agent_fields` ceiling, narrowed by any per-agent `fields:`
+        # policy): filtering on a field the agent cannot read would reveal
+        # its value through which rows match. A `filter_fields` entry outside
+        # `agent_fields` is therefore never usable.
+        readable = Parse::Agent::MetadataRegistry.field_allowlist(cname)&.map(&:to_s)
+        if readable && !readable.empty?
+          allowed = allowed.select do |f|
+            readable.include?(Parse::Agent::MetadataRegistry.wire_field_names(cname, [f]).first)
+          end
+        end
         assert_filter_fields_allowed!(filter, allowed)
         assert_filter_fields_allowed!(vector_filter, allowed)
 
@@ -124,6 +174,39 @@ module Parse
         score_quantize = (agent.permissions != :admin)
         vector_field = Parse::Agent::MetadataRegistry.searchable_field(cname)
 
+        # Profile resolution: k is bounded by the profile's max_k; a reranking
+        # profile retrieves `rerank_candidates` and keeps `rerank_top_n` (or
+        # the effective k); hybrid settings come only from the profile.
+        effective_k = if prof
+            requested = k.to_i.positive? ? k.to_i : prof.k
+            clamp_k([requested, prof.max_k].min)
+          else
+            clamp_k(k)
+          end
+        reranker = nil
+        retrieve_k = effective_k
+        rerank_top_n = nil
+        if prof&.rerank?
+          reranker = Parse::Retrieval::BudgetedReranker.new(
+            Parse::Retrieval.reranker(prof.reranker), prof,
+            charge: ->(tokens) { charge_rerank_tokens!(agent, scope, tokens) },
+          )
+          # rerank_candidates is a hard budget: the caller's k can never
+          # raise how many documents are retrieved and sent to the
+          # reranker, so k is capped at it.
+          retrieve_k = prof.rerank_candidates
+          effective_k = [effective_k, retrieve_k].min
+          rerank_top_n = [prof.rerank_top_n || effective_k, effective_k].min
+        end
+        if prof
+          # Under a profile the response budget is mandatory: the caller can
+          # lower it but never raise or disable it (0 does not switch it off).
+          ceiling = prof.max_total_tokens || DEFAULT_MAX_TOTAL_TOKENS
+          requested = max_total_tokens.to_i
+          max_total_tokens = requested.positive? ? [requested, ceiling].min : ceiling
+        end
+        started = monotonic_now
+
         # with_precharged: the cap was charged above with per-tenant
         # identity (or deliberately skipped for trusted admin agents) —
         # suppress the generic query-embed charge inside
@@ -135,7 +218,10 @@ module Parse
             klass: klass,
             field: vector_field,
             text_field: resolved_text_field,
-            k: clamp_k(k),
+            k: retrieve_k,
+            hybrid: prof&.hybrid ? hybrid_config_for(prof, klass) : nil,
+            rerank: reranker,
+            rerank_top_n: rerank_top_n,
             filter: filter,
             vector_filter: vector_filter,
             chunker: build_chunker(chunk_size, chunk_overlap, chunk_by, max_chunks_per_document),
@@ -149,7 +235,7 @@ module Parse
         # Token budget (B4): trim the score-ordered chunk list before
         # building the envelope so `documents` only carries parents whose
         # chunks survived.
-        kept, dropped = apply_token_budget(chunks, resolve_token_budget(max_total_tokens))
+        kept, dropped = apply_token_budget(chunks, resolve_token_budget(max_total_tokens), strict: !prof.nil?)
 
         # Source dedup (A3): a document's (projected) source record is
         # identical across all its chunks. Hoist it into a `documents` map
@@ -172,7 +258,111 @@ module Parse
           envelope[:budget_truncated] = true
           envelope[:budget_dropped] = dropped
         end
+        if prof
+          envelope[:profile] = prof.name
+          if reranker&.stats&.dig(:fallback)
+            # Observable fallback: the result is in retrieval order, not
+            # reranked, and the caller is told why.
+            envelope[:rerank_fallback] = true
+            envelope[:rerank_fallback_reason] = reranker.stats[:fallback_reason]
+          end
+        end
+        emit_search_event(cname, prof, effective_k, retrieve_k, reranker, envelope, dropped, started)
         envelope
+      end
+
+      # @!visibility private
+      # A profile's hybrid settings with the lexical branch restricted to the
+      # text sources the agent may read. Without this the lexical search runs
+      # over every field (`wildcard: "*"`), so which documents match, and
+      # their rank, could depend on a hidden field. Refused when the class
+      # has an allowlist and no readable text source.
+      def hybrid_config_for(prof, klass)
+        cfg = Marshal.load(Marshal.dump(prof.hybrid.to_h))
+        allowlist = Parse::Agent::MetadataRegistry.field_allowlist(klass.parse_class)
+        if allowlist.nil? || allowlist.empty?
+          # No allowlist: never fall back to `wildcard: "*"`, which would
+          # let every column (including CLP protectedFields) decide matches.
+          # Search the embedded text sources unless the profile names fields;
+          # Atlas search then refuses any named field protected for the caller.
+          lexical = (cfg[:lexical] || {}).dup
+          if Array(lexical[:fields]).empty?
+            lexical[:fields] = searchable_text_fields(klass).map { |f| Parse::Retrieval.send(:wire_name, klass, f) }
+            cfg[:lexical] = lexical
+          end
+          return cfg
+        end
+        lexical = (cfg[:lexical] || {}).dup
+        if lexical[:fields]
+          # Server-configured lexical fields are kept when the agent may read
+          # them (any readable field, not only embedding sources), and
+          # translated to their stored names.
+          readable_wire = allowlist.map(&:to_s) - Parse::Agent::MetadataRegistry::ALWAYS_KEEP_FIELDS
+          configured = Array(lexical[:fields]).map { |f| Parse::Retrieval.send(:wire_name, klass, f) }
+          lexical[:fields] = configured & readable_wire
+        else
+          # Unconfigured: search the readable embedded text sources.
+          readable = readable_text_fields(klass) || []
+          lexical[:fields] = readable.map { |f| Parse::Retrieval.send(:wire_name, klass, f) }
+        end
+        if lexical[:fields].empty?
+          # An empty list would mean `wildcard: "*"`, letting hidden fields
+          # decide matches; refuse instead.
+          raise text_field_denied(klass, Array(cfg.dig(:lexical, :fields)).first || searchable_text_fields(klass).first)
+        end
+        cfg[:lexical] = lexical
+        cfg
+      end
+
+      # @!visibility private
+      def monotonic_now
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      # @!visibility private
+      # One sanitized `parse.retrieval.search` event per semantic_search
+      # call: profile, budgets, stage counts and timings, and estimated
+      # rerank usage. Never document text, field values, URLs, or
+      # credentials. Rerank tokens are the SDK's estimate
+      # (`tokens_estimated`), not provider-reported usage.
+      def emit_search_event(cname, prof, k, retrieve_k, reranker, envelope, dropped, started)
+        return unless defined?(ActiveSupport::Notifications)
+        total_ms = ((monotonic_now - started) * 1000).round(1)
+        rerank = reranker ? reranker.stats.dup : { used: false }
+        payload = {
+          class_name: cname,
+          profile: prof&.name,
+          hybrid: !prof&.hybrid.nil?,
+          k: k,
+          candidates: retrieve_k,
+          rerank: rerank,
+          chunks_returned: envelope[:count],
+          documents_returned: envelope[:documents].size,
+          budget_dropped: dropped,
+          duration_ms: total_ms,
+          retrieve_ms: (total_ms - (rerank[:duration_ms] || 0)).round(1),
+        }
+        ActiveSupport::Notifications.instrument("parse.retrieval.search", payload)
+      rescue StandardError
+        nil
+      end
+
+      # @!visibility private
+      # Charge estimated reranker tokens to the same per-tenant spend cap
+      # the query embedding uses (admin agents are exempt, as there). A
+      # transient cap hit surfaces as RateLimitExceeded; an impossible one
+      # as ValidationError, mirroring {#charge_spend_cap!}.
+      def charge_rerank_tokens!(agent, scope, tokens)
+        return if agent.permissions == :admin
+        tenant_id = scope && (scope[:value] || scope["value"])
+        Parse::Embeddings::SpendCap.charge!(tenant_id: tenant_id, tokens: tokens)
+      rescue Parse::Embeddings::SpendCap::Exceeded => e
+        if e.retry_after.nil?
+          raise Parse::Agent::ValidationError,
+                "semantic_search: reranking exceeds the spend cap " \
+                "(#{e.requested} tokens requested, limit #{e.limit}/#{e.window}s)."
+        end
+        raise Parse::Agent::RateLimitExceeded.new(retry_after: e.retry_after, limit: e.limit, window: e.window)
       end
 
       # @!visibility private
@@ -230,14 +420,40 @@ module Parse
       # least the first chunk so a single oversize chunk still returns
       # something (flagged truncated).
       # @return [Array(Array<Chunk>, Integer)] [kept, dropped_count]
-      def apply_token_budget(chunks, budget)
+      #
+      # The estimate covers the whole response, not only chunk text: each
+      # chunk's content plus, the first time a parent document appears, that
+      # document's serialized source record (it is hoisted into `documents`).
+      #
+      # `strict:` (a profile's mandatory budget) drops even the first chunk
+      # when it alone exceeds the budget; otherwise the first chunk is always
+      # kept so an oversized single result still returns something.
+      # Characters each returned chunk adds beyond its content and metadata:
+      # its key names, score, and `_source` provenance stamp.
+      CHUNK_OVERHEAD_CHARS = 160
+      # Characters the response envelope adds once (counts, profile,
+      # truncation flags, the `documents` map wrapper).
+      ENVELOPE_OVERHEAD_CHARS = 400
+
+      def apply_token_budget(chunks, budget, strict: false)
         return [chunks, 0] if budget.nil? || chunks.empty?
-        total = 0
+        # Every chunk carries metadata and per-chunk keys alongside its text,
+        # so a response of many tiny chunks is mostly overhead; count it.
+        total = (ENVELOPE_OVERHEAD_CHARS / 4.0).ceil
         kept = []
+        seen_docs = {}
         chunks.each do |chunk|
-          est = (chunk.content.to_s.length / 4.0).ceil
-          break unless kept.empty? || total + est <= budget
+          meta = chunk.respond_to?(:metadata) ? chunk.metadata : nil
+          meta_chars = meta.is_a?(Hash) ? (JSON.generate(meta).length rescue 0) : 0
+          est = ((chunk.content.to_s.length + meta_chars + CHUNK_OVERHEAD_CHARS) / 4.0).ceil
+          oid = chunk.respond_to?(:metadata) && chunk.metadata.is_a?(Hash) ? chunk.metadata[:object_id] : nil
+          if oid && !seen_docs.key?(oid) && chunk.respond_to?(:source) && chunk.source
+            doc_est = (JSON.generate(chunk.source).length / 4.0).ceil rescue 0
+            est += doc_est
+          end
+          break unless (kept.empty? && !strict) || total + est <= budget
           kept << chunk
+          seen_docs[oid] = true if oid
           total += est
         end
         [kept, chunks.length - kept.length]
@@ -423,11 +639,12 @@ module Parse
         "type" => "object",
         "properties" => {
           "class_name" => { "type" => "string", "description" => "Parse class name (must be agent_searchable)." },
-          "query" => { "type" => "string", "description" => "Natural-language query." },
+          "query" => { "type" => "string", "description" => "Natural-language query.", "maxLength" => MAX_QUERY_CHARS },
           "k" => { "type" => "integer", "default" => DEFAULT_K, "minimum" => 1, "maximum" => MAX_K },
           "filter" => { "type" => "object", "description" => "Post-search field filter (allowlisted fields only)." },
           "vector_filter" => { "type" => "object", "description" => "Atlas pre-search filter (allowlisted fields only)." },
           "text_field" => { "type" => "string", "description" => "Which embedded text source to chunk and return as content. Required only when the class embeds more than one text field; must name one of those sources." },
+          "profile" => { "type" => "string", "description" => "Optional server-configured retrieval profile name (for example fast, balanced, precise). Profiles set result counts, hybrid search, and reranking; omit for the default search. An unknown name is refused with the list of available profiles." },
           "chunk_size" => { "type" => "integer", "description" => "Override chunk window size." },
           "chunk_overlap" => { "type" => "integer", "description" => "Override chunk overlap." },
           "chunk_by" => { "type" => "string", "enum" => %w[chars tokens], "description" => "Chunk unit." },

@@ -147,6 +147,25 @@ module Parse
       @delegate = owner
     end
 
+    # Deep-copies the permissions table so a `dup`/`clone` of an ACL never
+    # shares mutable state with the original. ActiveModel dirty tracking
+    # stores a clone of the ACL as the "before" value on the first change;
+    # with a shallow copy, later in-place edits (`apply`, `delete`,
+    # `Permission#no_read!`) also rewrote that saved value. `rollback!`
+    # then restored the edited ACL and the change history reported the old
+    # and new values as identical.
+    # @!visibility private
+    def initialize_copy(other)
+      super
+      src = other.instance_variable_get(:@permissions)
+      @permissions = nil
+      return if src.nil?
+      @permissions = {}
+      src.each do |key, perm|
+        @permissions[key] = perm.is_a?(Permission) ? adopt_permission(perm.dup) : perm
+      end
+    end
+
     # Create a new ACL with default Public read/write permissions and any
     # overrides from the input hash format.
     # @param read [Boolean] the read permissions for PUBLIC (default: true)
@@ -268,6 +287,21 @@ module Parse
       as_json == other_acl.as_json
     end
 
+    # Strict equality used by Hash keys and `Array#uniq`. Unlike {#==}, a
+    # plain Hash is never `eql?` to an ACL, since the two cannot share a
+    # {#hash} value. Two ACLs granting the same privileges are `eql?` and
+    # hash alike. The hash follows the current permissions, so an ACL
+    # mutated after use as a Hash key must be rehashed like any Hash key.
+    # @return [Boolean]
+    def eql?(other_acl)
+      other_acl.is_a?(Parse::ACL) && as_json == other_acl.as_json
+    end
+
+    # @return [Integer] a hash value consistent with {#eql?}.
+    def hash
+      [Parse::ACL, as_json].hash
+    end
+
     # Set the public read and write permissions.
     # @param read [Boolean] the read permission state.
     # @param write [Boolean] the write permission state.
@@ -285,17 +319,23 @@ module Parse
       @delegate.acl_will_change! if @delegate.respond_to?(:acl_will_change!)
     end
 
-    # Removes a permission for an objectId or user.
+    # Removes every permission for a user, role or the public entry.
     # @overload delete(object)
-    #  @param object [Parse::User] the user to revoke permissions.
+    #  @param object [Parse::User, Parse::Pointer] the user to revoke permissions.
+    # @overload delete(role)
+    #  @param role [Parse::Role] the role to revoke permissions.
     # @overload delete(id)
-    #  @param id [String] the objectId to revoke permissions.
+    #  @param id [String, Symbol] a user objectId, a role key (`"role:Admin"`),
+    #   a role name whose `role:` entry exists, or `:public` / `"*"`.
+    # @return [Parse::ACL::Permission, nil] the removed permission, or nil
+    #  when there was no matching entry.
     def delete(id)
-      id = id.id if id.is_a?(Parse::Pointer)
-      if id.present? && permissions.has_key?(id)
-        will_change!
-        permissions.delete(id)
-      end
+      key = normalize_permission_key(id)
+      return nil unless key.present? && permissions.has_key?(key)
+      will_change!
+      perm = permissions.delete(key)
+      perm.acl = nil if perm.is_a?(Permission) && perm.acl.equal?(self)
+      perm
     end
 
     # Apply a new permission with a given objectId, tag or :public.
@@ -331,7 +371,7 @@ module Parse
       if permission.is_a?(ACL::Permission)
         if permissions[id.to_s] != permission
           will_change! # dirty track
-          permissions[id.to_s] = permission
+          permissions[id.to_s] = adopt_permission(permission)
         end
       end
 
@@ -351,6 +391,10 @@ module Parse
     #  @param write [Boolean] the write permission.
     def apply_role(name, read = nil, write = nil)
       name = name.name if name.is_a?(Parse::Role)
+      name = name.to_s
+      # Accept an already-prefixed key so "role:Admin" does not become
+      # "role:role:Admin".
+      name = name.delete_prefix("role:") if name.start_with?("role:")
       apply("role:#{name}", read, write)
     end
 
@@ -822,6 +866,17 @@ module Parse
 
     private
 
+    # Points a Permission at this ACL so its own mutators can mark the ACL
+    # (and the owning object) dirty. A Permission already owned by a
+    # different ACL is copied first, so one ACL's edit never reaches another.
+    # @return [Permission]
+    def adopt_permission(perm)
+      owner = perm.acl
+      perm = perm.dup if owner && !owner.equal?(self)
+      perm.acl = self
+      perm
+    end
+
     # Normalizes a user or role input to the appropriate permission key format.
     # @param user_or_role [String, Parse::User, Parse::Role] the input to normalize
     # @return [String, nil] the normalized key or nil if invalid
@@ -885,6 +940,27 @@ module Parse
       # @return [Boolean] whether this permission is allowed.
       attr_reader :write
 
+      # @!visibility private
+      # The ACL this permission belongs to. Its mutators notify this ACL so
+      # the change is dirty tracked on the owning object.
+      attr_accessor :acl
+
+      # Converts a permission flag to a strict boolean. Only `true`, the
+      # strings "true" and "1" (any case, surrounding whitespace ignored) and
+      # non-zero numbers grant. Everything else, including the string
+      # "false", denies.
+      # @!visibility private
+      # @return [Boolean]
+      def self.grant?(value)
+        case value
+        when true then true
+        when false, nil then false
+        when String then %w[true 1].include?(value.strip.downcase)
+        when Numeric then !value.zero?
+        else value.present?
+        end
+      end
+
       # Create a new permission with the given read and write privileges.
       # @overload new(read = nil, write = nil)
       #  @param read [Boolean] whether reading is allowed.
@@ -899,18 +975,32 @@ module Parse
       def initialize(r_perm = nil, w_perm = nil)
         if r_perm.is_a?(Hash)
           r_perm = r_perm.symbolize_keys
-          @read = r_perm[:read].present?
-          @write = r_perm[:write].present?
+          @read = self.class.grant?(r_perm[:read])
+          @write = self.class.grant?(r_perm[:write])
         else
-          @read = r_perm.present?
-          @write = w_perm.present?
+          @read = self.class.grant?(r_perm)
+          @write = self.class.grant?(w_perm)
         end
+      end
+
+      # A copy is detached from the original's ACL; the copying ACL adopts it.
+      # @!visibility private
+      def initialize_copy(other)
+        super
+        @acl = nil
       end
 
       # @return [Boolean] whether two permission instances have the same permissions.
       def ==(per)
         return false unless per.is_a?(self.class)
         @read == per.read && @write == per.write
+      end
+
+      alias_method :eql?, :==
+
+      # @return [Integer] a hash value consistent with {#eql?}.
+      def hash
+        [self.class, @read, @write].hash
       end
 
       # @return [Hash] A Parse-compatible ACL-hash. Omission or false on a
@@ -940,19 +1030,27 @@ module Parse
         @read.present? || @write.present?
       end
 
-      # Sets the *read* value of the permission. Defaults to true.
-      # @note Setting the value in this manner is not dirty tracked.
+      # Sets the *read* value of the permission. Defaults to true. When the
+      # permission belongs to an ACL, a real change marks that ACL (and its
+      # owning object) dirty so the change is sent on the next save.
       # @version 1.7.2
-      # @return [void]
+      # @return [Boolean] the new read value.
       def read!(value = true)
+        value = self.class.grant?(value)
+        return value if value == @read
+        @acl&.will_change!
         @read = value
       end
 
-      # Sets the *write* value of the permission. Defaults to true.
-      # @note Setting the value in this manner is not dirty tracked.
+      # Sets the *write* value of the permission. Defaults to true. When the
+      # permission belongs to an ACL, a real change marks that ACL (and its
+      # owning object) dirty so the change is sent on the next save.
       # @version 1.7.2
-      # @return [void]
+      # @return [Boolean] the new write value.
       def write!(value = true)
+        value = self.class.grant?(value)
+        return value if value == @write
+        @acl&.will_change!
         @write = value
       end
 
@@ -960,14 +1058,14 @@ module Parse
       # @version 1.7.2
       # @return [void]
       def no_read!
-        @read = false
+        read!(false)
       end
 
       # Sets the *write* value of the permission to false.
       # @version 1.7.2
       # @return [void]
       def no_write!
-        @write = false
+        write!(false)
       end
     end
   end

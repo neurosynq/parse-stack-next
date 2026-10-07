@@ -856,4 +856,42 @@ class MCPListeningStreamRackTest < Minitest::Test
     # => locks out all streams; stuck low => stops protecting).
     assert_equal before, Parse::Agent::MCPRackApp.active_listening_stream_count
   end
+
+  # A reconnect overlaps the old stream: the new GET stream attaches before
+  # the old one closes. The old body must detach only its own listener, so
+  # the newer stream keeps its delivery and the session keeps its
+  # subscriptions.
+  def test_closing_a_superseded_body_keeps_the_newer_streams_listener_and_subscriptions
+    old_body = Body.new(@manager, "sess-re", 0, nil)
+    old_chunks = Queue.new
+    old_worker = Thread.new { old_body.each { |c| old_chunks << c } }
+    assert_equal ": connected\n\n", pop_with_timeout(old_chunks)
+
+    @manager.subscribe(session_id: "sess-re", uri: "parse://Post/count", agent: SubAgentStub.new)
+    sub = @lq.last.subscription
+
+    new_body = Body.new(@manager, "sess-re", 0, nil)
+    new_chunks = Queue.new
+    new_worker = Thread.new { new_body.each { |c| new_chunks << c } }
+    assert_equal ": connected\n\n", pop_with_timeout(new_chunks)
+
+    old_body.close
+    old_worker.join(2)
+
+    assert @manager.listener?("sess-re"), "the newer stream must keep its listener"
+    refute sub.unsubscribed?, "the superseded stream must not tear down the session's subscription"
+    assert_equal 1, @manager.subscription_count
+
+    sub.fire(:create)
+    event = pop_with_timeout(new_chunks)
+    assert_includes event, "notifications/resources/updated"
+
+    new_body.close
+    new_worker.join(2)
+    assert sub.unsubscribed?, "the active stream closing tears the session down"
+    assert_equal 0, @manager.subscription_count
+  ensure
+    old_body&.close
+    new_body&.close
+  end
 end

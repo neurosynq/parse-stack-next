@@ -566,6 +566,152 @@ class EmbeddingsVoyageTest < Minitest::Test
     assert_operator seen, :>, Parse::Embeddings::Voyage::MAX_RESPONSE_BYTES
   end
 
+  # ---- adaptive contextualized batching --------------------------------
+
+  def test_contextualized_requests_are_packed_by_estimated_tokens
+    requests = []
+    stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+      stub.post("/v1/contextualizedembeddings") do |env|
+        inputs = JSON.parse(env.request_body)["inputs"]
+        requests << inputs.length
+        [200, { "Content-Type" => "application/json" }, tagged_contextualized_response(inputs, 256)]
+      end
+    end
+    provider = build(model: "voyage-context-4", dimensions: 256, connection: stubbed_conn(stubs))
+    # 150,000 bytes estimates to 50,000 tokens: two fit under the 120k
+    # budget, a third does not, so three documents take two requests.
+    docs = (0..2).map { |i| ["doc-#{i} " + ("x" * 149_990)] }
+
+    result = provider.embed_chunks(docs)
+
+    assert_equal [2, 1], requests
+    assert_equal [0.0, 1.0, 2.0], result.map { |d| d.first.first }
+  end
+
+  def test_size_rejection_splits_by_document_and_preserves_alignment
+    requests = []
+    stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+      stub.post("/v1/contextualizedembeddings") do |env|
+        inputs = JSON.parse(env.request_body)["inputs"]
+        requests << inputs.length
+        if inputs.length > 2
+          too_large_response
+        else
+          [200, { "Content-Type" => "application/json" }, tagged_contextualized_response(inputs, 256)]
+        end
+      end
+    end
+    provider = build(model: "voyage-context-4", dimensions: 256, connection: stubbed_conn(stubs))
+    docs = (0..4).map { |i| ["doc-#{i} a", "doc-#{i} b"] }
+
+    result = provider.embed_chunks(docs)
+
+    # 5 rejected -> [2, 3]; 2 succeeds; 3 rejected -> [1, 2]; both succeed.
+    assert_equal [5, 2, 3, 1, 2], requests
+    assert_equal docs.map(&:length), result.map(&:length)
+    assert_equal [0.0, 1.0, 2.0, 3.0, 4.0], result.map { |d| d.first.first },
+                 "vectors must stay aligned with their documents across splits"
+  end
+
+  def test_unrelated_bad_request_is_not_split
+    requests = 0
+    stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+      stub.post("/v1/contextualizedembeddings") do |_env|
+        requests += 1
+        [400, { "Content-Type" => "application/json" }, { "detail" => "Invalid input_type: 'banana'." }.to_json]
+      end
+    end
+    provider = build(model: "voyage-context-4", connection: stubbed_conn(stubs))
+    err = assert_raises(Parse::Embeddings::Voyage::BadRequestError) do
+      provider.embed_chunks([%w[a b], %w[c d]])
+    end
+    assert_equal 1, requests, "an unrelated 400 must not trigger splitting"
+    refute err.request_too_large?
+    assert_equal 400, err.status
+    assert_equal "Invalid input_type: 'banana'.", err.detail
+  end
+
+  def test_input_too_long_is_not_split
+    requests = 0
+    stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+      stub.post("/v1/contextualizedembeddings") do |_env|
+        requests += 1
+        detail = "Number of tokens in an example exceeds the context length (32000)."
+        [400, { "Content-Type" => "application/json" }, { "detail" => detail }.to_json]
+      end
+    end
+    provider = build(model: "voyage-context-4", connection: stubbed_conn(stubs))
+    err = assert_raises(Parse::Embeddings::Voyage::BadRequestError) do
+      provider.embed_chunks([%w[a], %w[b]])
+    end
+    assert_equal 1, requests, "splitting the batch cannot fix one over-long input"
+    assert err.input_too_long?
+    refute err.request_too_large?
+  end
+
+  def test_persistent_size_rejection_is_bounded_and_names_the_document
+    requests = 0
+    stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+      stub.post("/v1/contextualizedembeddings") do |_env|
+        requests += 1
+        too_large_response
+      end
+    end
+    provider = build(model: "voyage-context-4", connection: stubbed_conn(stubs))
+    docs = (0..7).map { |i| ["doc-#{i}"] }
+    err = assert_raises(Parse::Embeddings::Voyage::BadRequestError) { provider.embed_chunks(docs) }
+    # Halving 8 documents down to the first single document: 8, 4, 2, 1.
+    assert_equal 4, requests
+    assert_match(/document 0 \(1 chunk/, err.message)
+    assert_match(/even on its own/, err.message)
+    assert err.request_too_large?
+  end
+
+  def test_single_oversized_document_error_names_its_original_index
+    stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+      stub.post("/v1/contextualizedembeddings") do |env|
+        inputs = JSON.parse(env.request_body)["inputs"]
+        if inputs.flatten.any? { |c| c.start_with?("HUGE") }
+          too_large_response
+        else
+          [200, { "Content-Type" => "application/json" }, tagged_contextualized_response(inputs, 1024)]
+        end
+      end
+    end
+    provider = build(model: "voyage-context-4", connection: stubbed_conn(stubs))
+    docs = [["doc-0"], ["doc-1"], ["doc-2"], ["HUGE doc-3"]]
+    err = assert_raises(Parse::Embeddings::Voyage::BadRequestError) { provider.embed_chunks(docs) }
+    assert_match(/document 3 /, err.message)
+  end
+
+  def test_payload_too_large_status_counts_as_a_size_error
+    err = Parse::Embeddings::Voyage::BadRequestError.new("413", status: 413)
+    assert err.request_too_large?
+  end
+
+  def test_provider_error_detail_is_bounded_and_sanitized
+    long = "batch size limit is 128 \e[31m" + ("z" * 2_000)
+    stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+      stub.post("/v1/embeddings") { |_env| [422, { "Content-Type" => "application/json" }, { "detail" => long }.to_json] }
+    end
+    provider = build(connection: stubbed_conn(stubs))
+    err = assert_raises(Parse::Embeddings::Voyage::BadRequestError) { provider.embed_text(["x"]) }
+    refute_includes err.detail, "\e", "control bytes must be escaped"
+    assert_operator err.detail.length, :<=, Parse::Embeddings::Voyage::MAX_ERROR_DETAIL_CHARS + 50
+    assert_equal 422, err.status
+  end
+
+  def test_unparseable_error_body_keeps_status_only
+    stubs = Faraday::Adapter::Test::Stubs.new do |stub|
+      stub.post("/v1/embeddings") { |_env| [400, {}, "<html>bad gateway</html>"] }
+    end
+    provider = build(connection: stubbed_conn(stubs))
+    err = assert_raises(Parse::Embeddings::Voyage::BadRequestError) { provider.embed_text(["x"]) }
+    assert_nil err.detail
+    refute err.request_too_large?
+    assert_match(/400 from POST \/embeddings/, err.message)
+  end
+
   def test_embed_chunks_rejects_non_contextualized_model
     err = assert_raises(Parse::Embeddings::Voyage::BadRequestError) do
       build(model: "voyage-4", connection: stubbed_conn(empty_stubs)).embed_chunks([["x"]])
@@ -756,6 +902,35 @@ class EmbeddingsVoyageTest < Minitest::Test
       "model" => "voyage-context-4",
       "usage" => { "total_tokens" => chunk_counts.sum },
     }.to_json
+  end
+
+  # A contextualized response for the request's own inputs, where each
+  # vector's first element is the N in the document's "doc-N" chunk text,
+  # so alignment can be checked across split requests.
+  def tagged_contextualized_response(inputs, dim)
+    {
+      "object" => "list",
+      "data" => inputs.each_with_index.map do |chunks, d|
+        tag = chunks.first[/doc-(\d+)/, 1].to_f
+        {
+          "object" => "list",
+          "index" => d,
+          "data" => chunks.each_index.map do |c|
+            vec = Array.new(dim, 0.0)
+            vec[0] = tag
+            { "object" => "embedding", "index" => c, "embedding" => vec }
+          end,
+        }
+      end,
+      "model" => "voyage-context-4",
+      "usage" => { "total_tokens" => inputs.flatten.length },
+    }.to_json
+  end
+
+  def too_large_response
+    detail = "Request to model 'voyage-context-4' failed. The max allowed tokens per submitted " \
+             "batch is 120000. Your batch has 131072 tokens."
+    [400, { "Content-Type" => "application/json" }, { "detail" => detail }.to_json]
   end
 
   def silence_sleep(provider)

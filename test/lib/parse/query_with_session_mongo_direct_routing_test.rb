@@ -20,12 +20,22 @@ require_relative "../../test_helper"
 class QueryWithSessionMongoDirectRoutingTest < Minitest::Test
   AMBIENT = "r:ambient-user-token"
 
+  # The master fallback applies only when REST would send the master key,
+  # so the query is bound to a client that holds one. A client without a
+  # master key runs direct reads in the public scope instead.
   def build_query
-    Parse::Query.new("GeoThing")
+    q = Parse::Query.new("GeoThing")
+    q.client = Parse::Client.new(server_url: "http://localhost:1337/parse", app_id: "test",
+                                 api_key: "test", master_key: "mk")
+    q
+  end
+
+  def auth_kwargs_without_client(query)
+    query.send(:mongo_direct_auth_kwargs).reject { |k, _| k == :client }
   end
 
   def auth_kwargs(query)
-    query.send(:mongo_direct_auth_kwargs)
+    auth_kwargs_without_client(query)
   end
 
   # ---- the bug being fixed ----------------------------------------------

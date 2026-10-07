@@ -111,7 +111,10 @@ class MCPListenerOwnerBindingTest < Minitest::Test
     s1, _h, b1 = app.call(get_env(session_id: "sess-1", principal: "r:alice"))
     assert_equal 200, s1
     b1.close
-    dstatus, = app.call(delete_env(session_id: "sess-1"))
+    # Another principal cannot terminate the session (5.8).
+    refused, = app.call(delete_env(session_id: "sess-1").merge("HTTP_X_PRINCIPAL" => "r:mallory"))
+    assert_equal 403, refused
+    dstatus, = app.call(delete_env(session_id: "sess-1").merge("HTTP_X_PRINCIPAL" => "r:alice"))
     assert_equal 204, dstatus
     # After explicit termination a new principal may claim the id.
     s2, _h, b2 = app.call(get_env(session_id: "sess-1", principal: "r:mallory"))
@@ -162,6 +165,26 @@ class MCPListenerOwnerBindingTest < Minitest::Test
     b1.close
     s2, = app.call(post_initialize_env(session_id: "sess-tofu", principal: "r:mallory"))
     assert_equal 403, s2
+  end
+
+  def test_live_session_binding_survives_lru_pressure
+    live = %w[s-live]
+    reg = Parse::Agent::MCPRackApp::SessionOwnerRegistry.new(max_entries: 2, pinned: ->(sid) { live.include?(sid) })
+    reg.bind("s-live", "op:alice")
+    reg.bind("s-a", "op:x")
+    reg.bind("s-b", "op:y")
+    reg.bind("s-c", "op:z")
+    assert reg.owned_by?("s-live", "op:alice"), "a live session keeps its owner under eviction pressure"
+    refute reg.owned_by?("s-a", "op:x"), "idle sessions are still evicted"
+  end
+
+  def test_full_pinned_registry_refuses_admission_instead_of_dropping_ownership
+    reg = Parse::Agent::MCPRackApp::SessionOwnerRegistry.new(max_entries: 1, pinned: ->(_sid) { true })
+    assert_equal true, reg.bind("s-live", "op:alice")
+    assert_equal :full, reg.bind("s-new", "op:bob"), "cannot keep a new owner when every slot is live"
+    assert_equal :full, reg.authorize_attach("s-other", "op:eve")
+    refute reg.controllable_by?("s-live", "op:bob")
+    assert reg.owned_by?("s-live", "op:alice")
   end
 
   def test_master_key_agents_share_one_principal_without_resolver

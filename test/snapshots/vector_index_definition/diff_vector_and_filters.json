@@ -1,0 +1,21 @@
+{
+  "filters_extra": [
+    "legacyFlag"
+  ],
+  "filters_missing": [
+    "_p_author",
+    "published",
+    "tenantKey"
+  ],
+  "in_sync": false,
+  "vector": {
+    "numDimensions": {
+      "declared": 768,
+      "live": 1536
+    },
+    "quantization": {
+      "declared": "none",
+      "live": "binary"
+    }
+  }
+}

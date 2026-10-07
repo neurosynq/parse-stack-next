@@ -43,7 +43,7 @@ class VectorSearchableHybridTest < Minitest::Test
     assert_equal "HybDoc", captured[:collection]
     assert_equal "love and rain", captured[:lexical][:query] # defaults to text
     assert_equal "hyb_lex", captured[:lexical][:index]
-    assert_equal :embedding, captured[:vector][:field]       # sole vector field
+    assert_equal "embedding", captured[:vector][:field]      # sole vector field, as its stored column
     assert_equal 150, captured[:vector][:num_candidates]
     assert_kind_of Array, captured[:vector][:query_vector]   # text embedded
     assert_equal 12, captured[:k]

@@ -51,9 +51,29 @@ module Parse
       @removals = []
     end
 
+    # The items of the relation. The first access queries the server for the
+    # related objects, then applies the additions and removals that have not
+    # been saved yet. An owner without an objectId has nothing on the server,
+    # so no query is sent for it.
+    # @return [Array<Parse::Object>]
+    def collection
+      unless @loaded
+        fetched = owner_saved? ? forward(:"#{@key}_fetch!") : nil
+        list = fetched.to_a.reject { |item| @removals.include?(item) }
+        @additions.each { |item| list.push(item) unless list.include?(item) }
+        @collection = list
+        @loaded = true
+      end
+      @collection
+    end
+
     # You can get items within the collection relation filtered by a specific set
     # of query constraints.
     def all(constraints = {}, &block)
+      # An unsaved owner has no relation on the server yet.
+      unless owner_saved?
+        return block_given? ? collection.each(&block) : collection
+      end
       q = query({ limit: :max }.merge(constraints))
       if block_given?
         # if we have a query, then use the Proc with it (more efficient)
@@ -86,32 +106,44 @@ module Parse
       query(limit: count)
     end
 
-    # Add Parse::Objects to the relation.
+    # Add Parse::Objects to the relation. The change is staged and sent with
+    # the next save of the owner. Staging does not query the relation.
+    # Adding an item that is already staged has no further effect.
     # @overload add(parse_object)
     #  Add a Parse::Object or Parse::Pointer to this relation.
     #  @param parse_object [Parse::Object,Parse::Pointer] the object to add
     # @overload add(parse_objects)
     #  Add an array of Parse::Objects or Parse::Pointers to this relation.
     #  @param parse_objects [Array<Parse::Object,Parse::Pointer>] the array to append.
+    # @raise [ArgumentError] if an item is nil, of another Parse class, or
+    #  cannot be turned into a pointer.
     # @return [Array<Parse::Object>] the collection
     def add(*items)
-      items = items.flatten.parse_objects
+      items = typecast_items(items)
       return @collection if items.empty?
 
       notify_will_change!
       additions_will_change!
       removals_will_change!
-      # take all the items
       items.each do |item|
-        @additions.push item
-        @collection.push item
-        #cleanup
-        @removals.delete item
+        @additions.push(item) unless @additions.include?(item)
+        @removals.delete(item)
+        @collection.push(item) if @loaded && !@collection.include?(item)
       end
       @collection
     end
 
-    # Removes Parse::Objects from the relation.
+    alias_method :push, :add
+
+    # Same as {#add}: a relation never holds an object twice.
+    def add_unique(*items)
+      add(*items)
+    end
+
+    alias_method :push_unique, :add_unique
+
+    # Removes Parse::Objects from the relation. The change is staged and sent
+    # with the next save of the owner. Staging does not query the relation.
     # @overload remove(parse_object)
     #  Remove a Parse::Object or Parse::Pointer to this relation.
     #  @param parse_object [Parse::Object,Parse::Pointer] the object to remove
@@ -120,45 +152,103 @@ module Parse
     #  @param parse_objects [Array<Parse::Object,Parse::Pointer>] the array of objects to remove.
     # @return [Array<Parse::Object>] the collection
     def remove(*items)
-      items = items.flatten.parse_objects
+      items = typecast_items(items, strict: false)
       return @collection if items.empty?
       notify_will_change!
       additions_will_change!
       removals_will_change!
+      # An unsaved owner has nothing on the server to remove.
+      saved = owner_saved?
       items.each do |item|
-        @removals.push item
-        @collection.delete item
-        # remove it from any add operations
-        @additions.delete item
+        @removals.push(item) if saved && !@removals.include?(item)
+        @additions.delete(item)
+        @collection.delete(item)
       end
       @collection
     end
 
+    alias_method :delete, :remove
+
+    # Stage the removal of every object in the relation. This loads the
+    # relation to know what to remove.
+    # @return [Array<Parse::Object>] the (now empty) collection.
+    def clear
+      remove(*collection.to_a)
+      @collection
+    end
+
+    # Stage the changes that make the relation hold exactly `items`.
+    # @return [self]
+    def replace(items)
+      items = typecast_items(Array(items.is_a?(Parse::CollectionProxy) ? items.to_a : items))
+      current = collection.to_a
+      stale = current.reject { |item| items.include?(item) }
+      remove(*stale) if stale.any?
+      fresh = items.reject { |item| current.include?(item) }
+      add(*fresh) if fresh.any?
+      self
+    end
+
     # Atomically add a set of Parse::Objects to this relation.
-    # This is done by making the API request directly with Parse server; the
-    # local object is not updated with changes.
+    # This is done by making the API request directly with Parse server. On
+    # success the loaded collection includes the items, and a staged
+    # removal of the same items is dropped so a later save does not undo it.
+    # On an owner that has not been saved yet the items are staged as in
+    # {#add} and sent with the next save.
+    # @return [Boolean] whether the operation succeeded.
     def add!(*items)
       return false unless @delegate.respond_to?(:op_add_relation!)
-      items = items.flatten.parse_pointers
-      @delegate.send :op_add_relation!, @key, items
+      items = typecast_items(items)
+      return true if items.empty?
+      return add(*items) && true unless owner_saved?
+      return false unless @delegate.send(:op_add_relation!, @key, items.parse_pointers)
+      items.each do |item|
+        @removals.delete(item)
+        @collection.push(item) if @loaded && !@collection.include?(item)
+      end
+      true
     end
 
-    # Atomically add a set of Parse::Objects to this relation.
-    # This is done by making the API request directly with Parse server; the
-    # local object is not updated with changes.
+    # @see #add!
     def add_unique!(*items)
-      return false unless @delegate.respond_to?(:op_add_relation!)
-      items = items.flatten.parse_pointers
-      @delegate.send :op_add_relation!, @key, items
+      add!(*items)
     end
 
-    # Atomically remove a set of Parse::Objects to this relation.
-    # This is done by making the API request directly with Parse server; the
-    # local object is not updated with changes.
+    # Atomically remove a set of Parse::Objects from this relation.
+    # This is done by making the API request directly with Parse server. On
+    # success the items leave the loaded collection, and a staged addition
+    # of the same items is dropped.
+    # @return [Boolean] whether the operation succeeded.
     def remove!(*items)
       return false unless @delegate.respond_to?(:op_remove_relation!)
-      items = items.flatten.parse_pointers
-      @delegate.send :op_remove_relation!, @key, items
+      items = typecast_items(items, strict: false)
+      return true if items.empty?
+      return remove(*items) && true unless owner_saved?
+      return false unless @delegate.send(:op_remove_relation!, @key, items.parse_pointers)
+      items.each do |item|
+        @additions.delete(item)
+        @collection.delete(item)
+      end
+      true
+    end
+
+    # Marks the staged additions and removals as saved. Called after the
+    # owner is saved successfully, so the operations are not sent again by a
+    # later save.
+    def changes_applied!
+      @additions = []
+      @removals = []
+      super
+    end
+
+    # Drops the staged additions and removals. The items are reloaded from
+    # the server on the next access.
+    def rollback!
+      super
+      @additions = []
+      @removals = []
+      reset!
+      @collection
     end
 
     # Save the changes to the relation
@@ -172,6 +262,22 @@ module Parse
     def <<(*list)
       list.each { |d| add(d) }
       @collection
+    end
+
+    private
+
+    attr_writer :additions, :removals
+
+    # @return [Boolean] whether the owner has an objectId to query by.
+    def owner_saved?
+      !(@delegate.respond_to?(:id) && @delegate.id.blank?)
+    end
+
+    # ActiveModel reads the current value when a change starts. Read the
+    # items directly: going through {#collection} would query the whole
+    # relation just to stage an add or remove.
+    def _read_attribute(attr)
+      attr.to_s == "collection" ? @collection : super
     end
   end
 end

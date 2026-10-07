@@ -23,6 +23,8 @@ require_relative "agent/rate_limiter"
 require_relative "agent/cancellation_token"
 require_relative "agent/log_levels"
 require_relative "agent/approval_gate"
+require_relative "agent/field_policy"
+require_relative "agent/field_names"
 require_relative "agent/prompt_hardening"
 require_relative "agent/describe"
 
@@ -592,8 +594,10 @@ module Parse
         # Use provided port, or configured port, or default
         port ||= Parse.mcp_server_port || 3001
 
-        @mcp_enabled = true
+        # Load the server before flagging MCP as enabled, so a failed load
+        # does not leave mcp_enabled? reporting true.
         require_relative "agent/mcp_server"
+        @mcp_enabled = true
         MCPServer.default_port = port
 
         # Pass remote API config if available
@@ -1559,6 +1563,7 @@ module Parse
                    max_log_size: DEFAULT_MAX_LOG_SIZE,
                    system_prompt: nil, system_prompt_suffix: nil, pricing: nil,
                    tools: nil, methods: nil, classes: nil, filters: nil,
+                   fields: nil, field_names: nil,
                    parent: nil, recursion_depth: nil,
                    strict_tool_filter: nil, strict_class_filter: nil,
                    master_atlas: nil,
@@ -2033,6 +2038,21 @@ module Parse
       @method_filter_only, @method_filter_except = normalize_method_filter(methods)
       @class_filter_only, @class_filter_except = normalize_class_filter(classes)
       @filters = normalize_query_filters(filters)
+      # Per-agent field narrowing (see Parse::Agent::FieldPolicy). Stored as
+      # layers so a sub-agent's policy INTERSECTS its parent's: every layer
+      # that names a class must permit a field for the agent to see it.
+      own_field_policy = normalize_field_policy(fields)
+      @field_policy_layers = (parent ? parent.field_policy_layers : []) +
+                             (own_field_policy ? [own_field_policy] : [])
+      @field_policy_layers.freeze
+      # Data-field naming mode (see Parse::Agent::FieldNames). A sub-agent
+      # inherits its parent's mode unless it sets one; naming never affects
+      # the access restrictions inherited above.
+      @field_names_mode = if field_names.nil?
+          parent ? parent.field_names_mode : :default
+        else
+          Parse::AggregationResult.normalize_field_names!(field_names)
+        end
 
       # Sub-agent class-filter inheritance. Unlike `tools:` (which overrides
       # outright), `classes:` clamps to the parent's effective set so a
@@ -3428,6 +3448,49 @@ module Parse
     # lookup re-expands the variants and accepts both forms symmetrically.
     #
     # @return [Hash, nil] frozen Hash or nil when no filters declared
+    # Normalize the constructor's `fields:` kwarg: a Hash mapping class
+    # identifiers (Class, String, Symbol, or :default) to an Array of field
+    # names. Keys canonicalize like `filters:` so `Parse::User` matches both
+    # "_User" and "User". Field names may be Ruby property names or wire
+    # names; they are translated to wire form at lookup time.
+    def normalize_field_policy(fields)
+      return nil if fields.nil?
+      unless fields.is_a?(Hash)
+        raise ArgumentError,
+              "fields: must be a Hash mapping class identifiers (or :default) " \
+              "to Arrays of field names, got #{fields.class}"
+      end
+      result = {}
+      fields.each do |key, names|
+        unless names.is_a?(Array) && names.all? { |n| n.is_a?(String) || n.is_a?(Symbol) }
+          raise ArgumentError,
+                "fields[#{key.inspect}]: value must be an Array of field names, got #{names.inspect}"
+        end
+        field_policy_keys(key).each { |canon| result[canon] = names.map(&:to_s).freeze }
+      end
+      result.freeze
+    end
+
+    # Canonical lookup names for a `fields:` key. Tools look policies up by
+    # the class's Parse name (`_User`, or a custom `parse_class`), so a
+    # String or Symbol key is resolved through Parse::Model.find_class to
+    # that name as well as kept verbatim; otherwise `fields: { "User" => ... }`
+    # would silently fail to narrow `_User`.
+    def field_policy_keys(key)
+      keys = canonical_filter_key(key)
+      if key.is_a?(String) || key.is_a?(Symbol)
+        klass = (Parse::Model.find_class(key.to_s) rescue nil)
+        if klass.respond_to?(:parse_class)
+          keys |= [klass.parse_class.to_s]
+          if defined?(Parse::Agent::MetadataRegistry) &&
+             Parse::Agent::MetadataRegistry.respond_to?(:hidden_name_variants_for)
+            keys |= Parse::Agent::MetadataRegistry.hidden_name_variants_for(klass)
+          end
+        end
+      end
+      keys
+    end
+
     def normalize_query_filters(filters)
       return nil if filters.nil?
       unless filters.is_a?(Hash)
@@ -3567,6 +3630,35 @@ module Parse
     #
     # @param class_name [String, Symbol, Class]
     # @return [Boolean]
+    # @return [Array<Hash>] the per-agent `fields:` policies in effect, own
+    #   policy last; a sub-agent carries its parent's layers first. Each
+    #   layer maps a canonical class name (or :default) to raw field names.
+    attr_reader :field_policy_layers
+
+    # @return [Symbol] `:default` or `:server`; see {Parse::Agent::FieldNames}.
+    attr_reader :field_names_mode
+
+    # Wire-format field names this agent narrows `class_name` to, or nil when
+    # no `fields:` layer names the class (or a :default). Every layer that
+    # applies must permit a field, so a sub-agent can never widen its
+    # parent. The result is intersected with the class's `agent_fields`
+    # ceiling by {Parse::Agent::MetadataRegistry.field_allowlist}.
+    #
+    # @param class_name [String, Class]
+    # @return [Array<String>, nil]
+    def field_narrowing_for(class_name)
+      return nil if @field_policy_layers.nil? || @field_policy_layers.empty?
+      cn = class_name.respond_to?(:parse_class) ? class_name.parse_class.to_s : class_name.to_s
+      result = nil
+      @field_policy_layers.each do |layer|
+        names = layer[cn] || layer[:default]
+        next if names.nil?
+        wire = Parse::Agent::MetadataRegistry.wire_field_names(cn, names)
+        result = result ? (result & wire) : wire
+      end
+      result
+    end
+
     def class_filter_permits?(class_name)
       return true if @class_filter_only.nil? && @class_filter_except.nil?
       candidates = class_name_variants_for(class_name)

@@ -225,7 +225,7 @@ module Parse
 
         raw_hits = Parse::VectorSearch.search(
           parse_class,
-          field: resolved_field,
+          field: vector_storage_path(resolved_field),
           query_vector: query_vector,
           k: k,
           num_candidates: num_candidates,
@@ -318,7 +318,7 @@ module Parse
             filter: lex[:filter], fuzzy: lex[:fuzzy],
           },
           vector: {
-            query_vector: qv, field: field_sym, index: vector_index,
+            query_vector: qv, field: vector_storage_path(field_sym), index: vector_index,
             num_candidates: vec[:num_candidates], filter: vec[:filter],
             vector_filter: vec[:vector_filter],
             candidate_limit: vec[:candidate_limit],
@@ -330,6 +330,22 @@ module Parse
 
         return fused if raw
         build_hybrid_hits(fused)
+      end
+
+      # The column a `:vector` property is stored under, which is what an
+      # Atlas index path and a `$vectorSearch` path must name: the property's
+      # `field_map` entry (an explicit `field:` alias, or the lowerCamelCase
+      # form of the Ruby name). `property :body_embedding, :vector` is saved
+      # as `bodyEmbedding`. Before 5.8 the SDK searched, discovered, and
+      # drift-checked indexes by the Ruby name, so a multi-word vector
+      # property matched no vectors.
+      #
+      # @param field [Symbol, String] the `:vector` property's Ruby name.
+      # @return [String]
+      def vector_storage_path(field)
+        sym = field.to_sym
+        fmap = respond_to?(:field_map) ? field_map : {}
+        (fmap[sym] || sym.to_s.columnize).to_s
       end
 
       private
@@ -450,7 +466,7 @@ module Parse
                 "#{self}.find_similar: no index: given and Parse::AtlasSearch " \
                 "could not be loaded; pass an explicit index: kwarg."
         end
-        idx = Parse::AtlasSearch::IndexCatalog.find_vector_index(parse_class, field: field)
+        idx = Parse::AtlasSearch::IndexCatalog.find_vector_index(parse_class, field: vector_storage_path(field))
         if idx.nil?
           raise IndexNotResolved,
                 "#{self}.find_similar: no vectorSearch index found covering " \
@@ -473,7 +489,7 @@ module Parse
         return if Parse::VectorSearch.index_drift_policy == :ignore
         begin
           require_relative "../../atlas_search"
-          idx = Parse::AtlasSearch::IndexCatalog.find_vector_index(parse_class, field: field)
+          idx = Parse::AtlasSearch::IndexCatalog.find_vector_index(parse_class, field: vector_storage_path(field))
         rescue StandardError, LoadError
           return
         end
@@ -497,7 +513,9 @@ module Parse
       #    property's declared `dimensions:`.
       # 2. `similarity` vs the property's declared `similarity:` (only
       #    when both sides declare one).
-      # 3. When the class registers an `agent_tenant_scope`, the scope
+      # 3. `quantization` vs the property's declared `quantization:`
+      #    (absent on either side means none).
+      # 4. When the class registers an `agent_tenant_scope`, the scope
       #    field must appear among the index's `type: "filter"` paths —
       #    otherwise the tenant pre-filter that
       #    {Parse::Retrieval.retrieve} folds into `$vectorSearch.filter`
@@ -530,7 +548,7 @@ module Parse
       def vector_index_drift_findings(field, idx)
         defn = idx["latestDefinition"] || idx[:latestDefinition] || {}
         entries = defn["fields"] || defn[:fields] || []
-        field_str = field.to_s
+        field_str = vector_storage_path(field)
         vector_entry = entries.find do |f|
           (f["type"] || f[:type]).to_s == "vector" && (f["path"] || f[:path]).to_s == field_str
         end
@@ -550,6 +568,17 @@ module Parse
         if declared_sim && index_sim && index_sim.to_s != declared_sim.to_s
           findings << "index similarity=#{index_sim.inspect} but property declares " \
                       "similarity: #{declared_sim.inspect}"
+        end
+
+        # Quantization is compared both ways: an index quantized without a
+        # declaration, or a declaration the index does not carry, is drift.
+        # An absent value means none on either side.
+        declared_q = vector_properties.dig(field.to_sym, :quantization)&.to_s || "none"
+        index_q = (vector_entry["quantization"] || vector_entry[:quantization]).to_s
+        index_q = "none" if index_q.empty?
+        if declared_q != index_q
+          findings << "index quantization=#{index_q.inspect} but property declares " \
+                      "quantization: #{declared_q == "none" ? "none" : declared_q.inspect}"
         end
 
         scope_field = registered_tenant_scope_field

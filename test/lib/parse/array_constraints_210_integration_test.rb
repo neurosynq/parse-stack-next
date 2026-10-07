@@ -729,10 +729,10 @@ class ArrayConstraints210IntegrationTest < Minitest::Test
           puts "\n--- Test: size + pointer constraint ---"
           results1 = ReportTest210.query(
             project: project,
-            :topics.size => 2,
+            :topics.array_size => 2,
           ).all
           names1 = results1.map(&:name).sort
-          puts "Query: project=#{project.id}, :topics.size => 2"
+          puts "Query: project=#{project.id}, :topics.array_size => 2"
           puts "Results: #{names1.inspect}"
 
           assert_includes names1, "report_2_topics", "Should match report with 2 topics"
@@ -740,7 +740,7 @@ class ArrayConstraints210IntegrationTest < Minitest::Test
           refute_includes names1, "report_3_topics", "Should NOT match report with 3 topics"
           refute_includes names1, "report_2_topics_other", "Should NOT match report from other project"
 
-          count1 = ReportTest210.query(project: project, :topics.size => 2).count
+          count1 = ReportTest210.query(project: project, :topics.array_size => 2).count
           puts "Count: #{count1}, all.count: #{results1.count}"
           assert_equal results1.count, count1, "count should match all.count"
 
@@ -750,11 +750,11 @@ class ArrayConstraints210IntegrationTest < Minitest::Test
           puts "\n--- Test: size + pointer + date constraint ---"
           results2 = ReportTest210.query(
             project: project,
-            :topics.size => 2,
+            :topics.array_size => 2,
             :created_at.lt => reference_time,
           ).all
           names2 = results2.map(&:name).sort
-          puts "Query: project=#{project.id}, :topics.size => 2, :created_at.lt => #{reference_time}"
+          puts "Query: project=#{project.id}, :topics.array_size => 2, :created_at.lt => #{reference_time}"
           puts "Results: #{names2.inspect}"
 
           assert_includes names2, "report_2_topics", "Should match report with 2 topics before ref time"
@@ -762,7 +762,7 @@ class ArrayConstraints210IntegrationTest < Minitest::Test
 
           count2 = ReportTest210.query(
             project: project,
-            :topics.size => 2,
+            :topics.array_size => 2,
             :created_at.lt => reference_time,
           ).count
           puts "Count: #{count2}, all.count: #{results2.count}"
@@ -1415,10 +1415,10 @@ class ArrayConstraints210IntegrationTest < Minitest::Test
           puts "\n--- Test: size(2) + project constraint ---"
           results = TeamWithMembers210.query(
             project: project,
-            :members.size => 2,
+            :members.array_size => 2,
           ).all
           names = results.map(&:name).sort
-          puts "Query: project=#{project.id}, :members.size => 2"
+          puts "Query: project=#{project.id}, :members.array_size => 2"
           puts "Results: #{names.inspect}"
 
           assert_includes names, "team_2_members", "Should match team with 2 members"
@@ -1426,7 +1426,7 @@ class ArrayConstraints210IntegrationTest < Minitest::Test
           refute_includes names, "team_1_member", "Should NOT match team with 1 member"
           refute_includes names, "team_other_project", "Should NOT match other project"
 
-          count = TeamWithMembers210.query(project: project, :members.size => 2).count
+          count = TeamWithMembers210.query(project: project, :members.array_size => 2).count
           puts "Count: #{count}"
           assert_equal results.count, count, "count should match all.count"
 
@@ -1436,10 +1436,10 @@ class ArrayConstraints210IntegrationTest < Minitest::Test
           puts "\n--- Test: size(0) + project constraint ---"
           results_empty = TeamWithMembers210.query(
             project: project,
-            :members.size => 0,
+            :members.array_size => 0,
           ).all
           names_empty = results_empty.map(&:name).sort
-          puts "Query: project=#{project.id}, :members.size => 0"
+          puts "Query: project=#{project.id}, :members.array_size => 0"
           puts "Results: #{names_empty.inspect}"
 
           assert_includes names_empty, "team_no_members", "Should match team with 0 members"
@@ -2168,7 +2168,7 @@ class ArrayConstraints210IntegrationTest < Minitest::Test
           begin
             require "mongo"
             require_relative "../../../lib/parse/mongodb"
-            Parse::MongoDB.configure(uri: (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"), enabled: true)
+            Parse::MongoDB.configure(uri: (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin&directConnection=true"), enabled: true)
 
             # Test $split via MongoDB direct using $literal to escape the dollar sign
             mongo_split_pipeline = [

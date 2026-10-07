@@ -83,7 +83,38 @@ module Parse
   class Webhooks
     # The error to be raised in registered trigger or function webhook blocks that
     # will trigger the Parse::Webhooks application to return the proper error response.
-    class ResponseError < StandardError; end
+    #
+    # An optional numeric `code` is carried on the exception and written into
+    # the error body as `"code"`. Note that Parse Server's HTTP webhook adapter
+    # (as of 9.10) reports every webhook error to the client as code 141
+    # (`SCRIPT_FAILED`) and does not forward a custom code; the code remains
+    # visible to in-process callers such as {Parse::Webhooks.run_function}.
+    class ResponseError < StandardError
+      # @return [Integer, nil] the Parse error code requested by the handler.
+      attr_reader :code
+
+      # @param message [String] the error message.
+      # @param code [Integer, nil] an optional Parse error code.
+      def initialize(message = nil, code: nil)
+        super(message)
+        @code = code
+      end
+    end
+
+    # The reply that tells Parse Server to keep a beforeSave write, or the
+    # afterFind rows, exactly as they were: a JSON object with no `success`
+    # key, so the adapter's `body.success` is `undefined`. A `null` success
+    # is not safe for beforeSave (see {Parse::Webhooks.before_save_reply}).
+    PASS_THROUGH_BODY = "{}"
+
+    # Keys never echoed back to Parse Server in a beforeSave reply. These are
+    # server-managed (`className`, timestamps) or credential material that a
+    # client write cannot legitimately carry.
+    # @!visibility private
+    BEFORE_SAVE_REPLY_SKIP_KEYS = %w[
+      className createdAt updatedAt
+      sessionToken session_token _hashed_password _password_history
+    ].freeze
 
     # The authentication-side triggers (local underscore form). These carry a
     # `_User` / `_Session` as the payload object but are NOT object save/delete
@@ -483,6 +514,12 @@ module Parse
           result = invoke_handler(payload, registry)
         end
 
+        if type == :after_find
+          # Parse Server can only keep or deny afterFind rows from an HTTP
+          # webhook (see after_find_reply!); the reply always passes them through.
+          return after_find_reply!(payload, result)
+        end
+
         if result.is_a?(Parse::Object)
           # if it is a Parse::Object, we will call the registered ActiveModel callbacks
           if type == :before_save
@@ -510,18 +547,37 @@ module Parse
                 end
               end
             end
-            # For before_save, return the changes payload (what Parse Server expects)
-            result = result.changes_payload
+            # Parse Server REPLACES the write with the object a beforeSave
+            # webhook returns, so reply with the client's full write plus the
+            # handler's changes (or `nil`, "unchanged", when there are none).
+            result = before_save_reply(payload, result, include_create_defaults: true)
           elsif type == :before_delete
-            result.run_callbacks(:destroy) { false }
+            # Run only the BEFORE phase of the destroy chain: the object is not
+            # deleted yet, so after_destroy belongs to the afterDelete trigger.
+            # A halted chain must deny the delete, and Parse Server only treats
+            # an `{error}` body as a denial.
+            unless trusted_ruby_initiated
+              if result.send(:run_before_phase_callbacks, :destroy) == false
+                raise Parse::Webhooks::ResponseError, "Delete halted by before_destroy callback"
+              end
+            end
             result = true
           end
         elsif type == :before_save && result == false
           # If webhook block returns false, halt the save by throwing an error
           raise Parse::Webhooks::ResponseError, "Save halted by before_save webhook"
-        elsif type == :before_save && (result == true || result.nil?)
-          # Open Source Parse server does not accept true results on before_save hooks.
-          result = {}
+        elsif type == :before_save
+          # `true` / `nil` (or any non-Hash value) means "allow the write as
+          # sent". A Hash is a set of field overrides. Either way the reply is
+          # built from the client's write so nothing the client sent is lost;
+          # in-place edits to `parse_object` and field-guard reverts are
+          # carried along. `nil` tells Parse Server to keep the write as is.
+          overrides = result.is_a?(Hash) ? result : nil
+          result = before_save_reply(payload, payload&.memoized_parse_object, overrides: overrides)
+        elsif type == :before_delete && result == false
+          # Parse Server ignores a `{success:false}` body and deletes anyway;
+          # only an `{error}` body denies the delete.
+          raise Parse::Webhooks::ResponseError, "Delete halted by before_delete webhook"
         end
 
         # Auth- and LiveQuery-trigger dispatch (beforeLogin/afterLogin/
@@ -548,29 +604,10 @@ module Parse
           result = true
         end
 
-        # Guard-injection: when a handler returns a Hash (or true/nil normalized
-        # to {}) for a class with field_guards, Parse Server would otherwise
-        # merge the response with the client's original payload and persist
-        # the client-supplied values for guarded fields. Inject the pre-built
-        # parse_object's changes_payload entries for any guarded field so the
-        # response carries the appropriate revert (Delete op on create, prior
-        # value on update). The Parse::Object return path already runs through
-        # changes_payload on the same memoized instance and therefore needs no
-        # extra injection.
-        if type == :before_save && result.is_a?(Hash) && payload && payload.object?
-          guard_klass = (className.present? && className != "*") ? Parse::Object.find_class(className) : nil
-          if guard_klass && guard_klass.respond_to?(:field_guards) && guard_klass.field_guards.any?
-            pre_obj = payload.parse_object # same memoized instance the pre-block step mutated
-            if pre_obj.respond_to?(:changes_payload)
-              guard_payload = pre_obj.changes_payload
-              field_map = guard_klass.respond_to?(:field_map) ? guard_klass.field_map : {}
-              guard_klass.field_guards.each_key do |field|
-                remote = (field_map[field.to_sym] || field).to_s
-                result[remote] = guard_payload[remote] if guard_payload.key?(remote)
-              end
-            end
-          end
-        end
+        # Field guards need no separate injection step: the pre-block step
+        # reverted the guarded fields on the memoized parse_object, and
+        # before_save_reply diffs that same instance against the client's
+        # write, so every revert is already in the reply.
 
         if type == :after_save && payload&.parse_object.present? && payload.parse_object.is_a?(Parse::Object)
           # The chained ActiveModel after_save/after_create callbacks are NOT
@@ -681,6 +718,294 @@ module Parse
         nil
       end
 
+      # Fires the chained ActiveModel after_destroy callbacks for an afterDelete
+      # delivery, exactly once per request (after both the class route and the
+      # `"*"` route ran), mirroring {run_after_save_chain}. Skipped for
+      # trusted-Ruby-initiated deletes, whose callbacks already ran locally
+      # around `destroy`, and when no afterDelete route is registered. The
+      # object is already gone, so a raising callback is logged and swallowed.
+      #
+      # @param payload [Parse::Webhooks::Payload] the afterDelete payload.
+      # @return [void]
+      def run_after_delete_chain(payload)
+        obj = nil
+        return unless payload&.after_delete?
+        obj = payload.parse_object
+        return unless obj.is_a?(Parse::Object)
+        return unless route_registered?(:after_delete, payload.parse_class)
+        return if payload.ruby_initiated? && payload.master? == true
+        obj.run_after_delete_callbacks
+        nil
+      rescue => e
+        warn "[Parse::Webhooks] afterDelete after_destroy callback raised for " \
+             "#{obj ? obj.class : "UnknownObject"}##{Parse::TerminalSafe.sanitize_line(obj&.id)} -- the object is " \
+             "already deleted; logging and continuing: #{e.class}: " \
+             "#{Parse::TerminalSafe.sanitize_line(Parse::Middleware::BodyBuilder.redact(e.message))}"
+        nil
+      end
+
+      # Whether a handler is registered for a trigger on a class, either on the
+      # class itself or on the generic `"*"` route.
+      #
+      # @param type [Symbol, String] the trigger (or `:function`).
+      # @param class_name [String, nil] the class (or function) name.
+      # @return [Boolean]
+      def route_registered?(type, class_name)
+        type = type.to_s.underscore.to_sym
+        table = routes[type]
+        return false if table.blank?
+        return table[class_name.to_s].present? if type == :function
+        table[class_name.to_s].present? || table["*"].present?
+      end
+
+      # Build the object a beforeSave webhook replies with.
+      #
+      # Parse Server's HTTP webhook adapter REPLACES the pending write with
+      # whatever object a beforeSave webhook returns (`this.data =
+      # response.object`). Replying with only the handler's changes therefore
+      # erases every other field the client sent. This method returns:
+      #
+      # - `nil` when nothing differs from the client's write. The router
+      #   replies with an empty object (`{}`, no `success` key), which Parse
+      #   Server treats as "keep the write exactly as sent", preserving every
+      #   atomic operator. (`{"success": null}` is NOT equivalent: Parse
+      #   Server's beforeSave adapter checks `typeof result === "object"`,
+      #   which is true for null, and then throws deleting a key from it.)
+      # - otherwise a Hash: the client's write (rebuilt from the payload, with
+      #   `Increment` / `Add` / `Remove` / `Delete` / relation operators passed
+      #   through untouched) with the handler's changes layered on top. A field
+      #   the handler (or a field guard) returned to its stored value is
+      #   dropped from the write rather than rewritten.
+      #
+      # Fields are compared against a fresh build of the payload, so only the
+      # fields the handler actually changed are encoded from the Ruby object.
+      # Two limits come from what Parse Server sends: an operator on a dotted
+      # sub-key (`"meta.count"`) reaches the webhook only as its resulting
+      # sub-document, and is written back that way when the reply is not
+      # `nil`; and a field the handler rewrites is written as an absolute
+      # value.
+      #
+      # @param payload [Parse::Webhooks::Payload] the beforeSave payload.
+      # @param obj [Parse::Object, nil] the handler's object (nil when none).
+      # @param overrides [Hash, nil] field values a handler returned as a Hash.
+      # @param include_create_defaults [Boolean] on a create, also write the
+      #   object's dirty fields the client did not send (declared defaults,
+      #   default ACL), matching what an SDK-side create sends.
+      # @return [Hash, nil] the reply object, or nil for "unchanged".
+      def before_save_reply(payload, obj, overrides: nil, include_create_defaults: false)
+        return nil unless payload && payload.object?
+        raw_object = payload.raw_object
+        return nil unless raw_object.is_a?(Hash)
+        raw_original = payload.raw_original
+        raw_original = nil unless raw_original.is_a?(Hash) && raw_original.present?
+
+        changes = {}
+        drops = []
+        if obj.is_a?(Parse::Object)
+          changes, drops = handler_field_changes(payload, obj, raw_original)
+          if include_create_defaults && raw_original.nil?
+            client_keys = raw_object.keys.map(&:to_s)
+            dirty = obj.changed.map(&:to_sym) & snapshot_fields(obj)
+            wire_values(obj, dirty).each do |remote, value|
+              next if client_keys.include?(remote) || changes.key?(remote)
+              changes[remote] = value
+            end
+          end
+        end
+        overrides = overrides.as_json if overrides.is_a?(Hash)
+        return nil if changes.empty? && drops.empty? && overrides.blank?
+
+        reply = client_write_data(raw_object, raw_original)
+        drops.each { |remote| reply.delete(remote) }
+        reply.merge!(changes)
+        reply.merge!(overrides.transform_keys(&:to_s)) if overrides.present?
+        reply
+      end
+
+      # The client's write, rebuilt from a beforeSave payload. Parse Server
+      # serializes the pending object with `toJSON()`, which reports every
+      # pending top-level operator as its operator hash, so the operators
+      # survive here as sent. On an update, a field whose value equals the
+      # stored one was not written by the client and is left out.
+      #
+      # @param raw_object [Hash] the unscrubbed `object` hash.
+      # @param raw_original [Hash, nil] the unscrubbed `original` hash.
+      # @return [Hash]
+      # @!visibility private
+      def client_write_data(raw_object, raw_original)
+        data = {}
+        raw_object.each do |key, value|
+          key = key.to_s
+          next if BEFORE_SAVE_REPLY_SKIP_KEYS.include?(key)
+          if raw_original
+            # Parse Server drops objectId from an update write itself.
+            next if key == Parse::Model::OBJECT_ID
+            next if raw_original.key?(key) && raw_original[key] == value
+          end
+          data[key] = value
+        end
+        data
+      end
+
+      # Diff the handler's object against a fresh build of the same payload.
+      #
+      # Only fields that are dirty on either object can differ: a field the
+      # client did not write and the handler did not touch is clean on both.
+      # Comparing just those keeps the getters off fields the payload never
+      # carried (which would otherwise autofetch).
+      #
+      # @return [Array(Hash, Array<String>)] the changed wire fields with their
+      #   encoded values, and the wire fields to drop from the write because
+      #   the handler returned them to their stored value.
+      # @!visibility private
+      def handler_field_changes(payload, obj, raw_original)
+        fresh = payload.unmemoized_parse_object
+        fresh = nil unless fresh.instance_of?(obj.class)
+        candidates = obj.changed.map(&:to_sym)
+        candidates |= fresh.changed.map(&:to_sym) if fresh
+        candidates &= snapshot_fields(obj)
+        after = wire_values(obj, candidates)
+        before = fresh ? wire_values(fresh, candidates) : {}
+
+        changes = {}
+        drops = []
+        after.each do |remote, value|
+          next if before.key?(remote) && before[remote] == value
+          if raw_original
+            stored = raw_original.key?(remote) ? raw_original[remote].as_json : nil
+            unchanged = raw_original.key?(remote) ? stored == value : (value.is_a?(Hash) && value["__op"] == "Delete")
+            if unchanged
+              drops << remote
+              next
+            end
+          end
+          changes[remote] = value
+        end
+
+        # Relation edits are tracked on the proxies, not as field values. A
+        # relation field whose pending operation differs from the client's
+        # was changed by the handler or reverted by a field guard: write the
+        # handler's operation, or drop the client's when none is left.
+        ops_after = relation_ops(obj)
+        ops_before = fresh ? relation_ops(fresh) : {}
+        (ops_after.keys | ops_before.keys).each do |remote|
+          next if ops_after[remote] == ops_before[remote]
+          if ops_after.key?(remote)
+            changes[remote] = ops_after[remote]
+          else
+            drops << remote
+          end
+        end
+        [changes, drops]
+      end
+
+      # Pending relation operations of an object, keyed by remote field.
+      # Additions win over removals for the same field, matching
+      # `changes_payload`.
+      # @!visibility private
+      def relation_ops(obj)
+        return {} unless obj.respond_to?(:relation_changes?) && obj.relation_changes?
+        additions, removals = obj.relation_change_operations.as_json
+        (removals || {}).merge(additions || {})
+      end
+
+      # Declared, non-base, non-relation fields of an object.
+      # @!visibility private
+      def snapshot_fields(obj)
+        klass = obj.class
+        return [] unless klass.respond_to?(:fields)
+        klass.fields.reject do |name, type|
+          Parse::Properties::BASE_KEYS.include?(name.to_sym) || type == :relation
+        end.keys.map(&:to_sym)
+      end
+
+      # Encode the given fields of an object in Parse wire form, keyed by
+      # remote field name, using the same encoder the SDK uses for a save
+      # (`attribute_updates`). A nil value encodes as a Delete operator.
+      # Autofetch is suspended so reading a field never reaches the network.
+      # @!visibility private
+      def wire_values(obj, fields)
+        return {} if fields.empty?
+        names = fields.map(&:to_s).freeze
+        prior_autofetch = obj.instance_variable_get(:@_autofetch_disabled)
+        obj.instance_variable_set(:@_autofetch_disabled, true)
+        obj.define_singleton_method(:changed) { names }
+        begin
+          obj.attribute_updates.as_json
+        ensure
+          singleton = obj.singleton_class
+          singleton.send(:remove_method, :changed) if singleton.method_defined?(:changed, false)
+          obj.instance_variable_set(:@_autofetch_disabled, prior_autofetch)
+        end
+      end
+
+      # Resolve an afterFind handler result.
+      #
+      # Parse Server's afterFind handling maps each returned row through
+      # `toJSONwithObjects`, which turns any plain JSON object (everything an
+      # HTTP webhook can send) into `{}`, and crashes on a non-array body. A
+      # missing result keeps the matched rows. So an HTTP afterFind can observe
+      # the rows or deny the query, but it cannot rewrite them. The reply is
+      # always `nil` (sent as `{}`, with no `success` key), and a handler that tries
+      # to drop or add rows is refused with an error rather than having the
+      # rows it meant to hide returned anyway.
+      #
+      # @param payload [Parse::Webhooks::Payload] the afterFind payload.
+      # @param result [Object] the handler's return value.
+      # @return [nil]
+      # @raise [Parse::Webhooks::ResponseError] when the handler returned
+      #   `false` or a different set of rows.
+      # @!visibility private
+      def after_find_reply!(payload, result)
+        if result == false
+          raise Parse::Webhooks::ResponseError, "afterFind rejected by webhook handler"
+        end
+        if result.is_a?(Array) && payload
+          returned = result.map { |row| after_find_row_id(row) }
+          matched = Array(payload.objects).map { |row| after_find_row_id(row) }
+          unless returned.size == matched.size && returned.sort_by(&:to_s) == matched.sort_by(&:to_s)
+            warn "[Parse::Webhooks] an afterFind handler for " \
+                 "#{Parse::TerminalSafe.sanitize_line(payload.parse_class)} returned a different " \
+                 "set of rows. Parse Server cannot apply row changes from an HTTP afterFind " \
+                 "webhook, so the find is denied instead. Filter in beforeFind, or deny with error!."
+            raise Parse::Webhooks::ResponseError,
+                  "afterFind webhooks cannot filter or replace results"
+          end
+        end
+        nil
+      end
+
+      # @!visibility private
+      def after_find_row_id(row)
+        case row
+        when Hash then row["objectId"] || row[:objectId] || row["id"] || row[:id]
+        else row.respond_to?(:id) ? row.id : row
+        end
+      end
+
+      # The value sent as `success` for a routed (or unrouted) trigger result.
+      # `nil` for beforeSave / afterFind means "pass through": the Rack app
+      # then replies `{}` (see {PASS_THROUGH_BODY}).
+      #
+      # @param payload [Parse::Webhooks::Payload] the request payload.
+      # @param result [Object] the dispatch result.
+      # @return [Object] the success value.
+      # @!visibility private
+      def trigger_success_value(payload, result)
+        # beforeSave: nil means "keep the write as sent", a Hash replaces it.
+        return (result.is_a?(Hash) ? result : nil) if payload.before_save?
+        # afterFind: only "no result" is safe (keeps the rows); see after_find_reply!.
+        return nil if payload.after_find?
+        result.nil? ? true : result
+      end
+
+      # Whether a dispatch result should be sent as {PASS_THROUGH_BODY}.
+      # @!visibility private
+      def pass_through_reply?(payload, result)
+        result.nil? && payload.respond_to?(:trigger?) && payload.trigger? &&
+          (payload.before_save? || payload.after_find?)
+      end
+
       # Generates a success response for Parse Server.
       # @param data [Object] the data to send back with the success.
       # @return [Hash] a success data payload
@@ -690,9 +1015,12 @@ module Parse
 
       # Generates an error response for Parse Server.
       # @param data [Object] the data to send back with the error.
+      # @param code [Integer, nil] an optional Parse error code to include.
       # @return [Hash] a error data payload
-      def error(data = false)
-        { error: data }.to_json
+      def error(data = false, code = nil)
+        body = { error: data }
+        body[:code] = code unless code.nil?
+        body.to_json
       end
 
       # @!attribute key
@@ -862,6 +1190,14 @@ module Parse
           return response.finish
         end
 
+        # A trigger whose body names a different class than the one the
+        # request was routed to (the URL path) is forged or misrouted. Refuse
+        # it before any handler runs or any typed object is built from it.
+        if payload.trigger? && payload.payload_class_mismatch?
+          response.write error("Webhook payload class does not match the trigger class.")
+          return response.finish
+        end
+
         if self.logging.present?
           # Everything interpolated below arrives in the webhook request body:
           # the trigger/function names, the object id, and the whole payload are
@@ -887,7 +1223,14 @@ module Parse
         begin
           result = true
           if payload.function? && payload.function_name.present?
+            # An unknown function must fail. Answering success would tell the
+            # caller that a function ran when nothing did.
+            unless Parse::Webhooks.route_registered?(:function, payload.function_name)
+              raise Parse::Webhooks::ResponseError,
+                    "Webhook function #{payload.function_name} is not registered."
+            end
             result = Parse::Webhooks.call_route(:function, payload.function_name, payload)
+            result = true if result.nil?
           elsif payload.trigger? && payload.parse_class.present? && payload.trigger_name.present?
             # call hooks subscribed to the specific class
             result = Parse::Webhooks.call_route(payload.trigger_name, payload.parse_class, payload)
@@ -896,25 +1239,42 @@ module Parse
             generic_result = Parse::Webhooks.call_route(payload.trigger_name, "*", payload)
             result = generic_result if generic_result.present? && result.nil?
 
-            # Fire the chained ActiveModel after_save/after_create callbacks
-            # exactly once per delivery -- after BOTH route calls above -- so an
-            # app that registers both a class route and a `"*"` route doesn't
-            # double-fire them. No-op for every non-afterSave trigger.
+            # Fire the chained ActiveModel after_save/after_create (or
+            # after_destroy) callbacks exactly once per delivery -- after BOTH
+            # route calls above -- so an app that registers both a class route
+            # and a `"*"` route doesn't double-fire them. Each is a no-op for
+            # every other trigger.
             Parse::Webhooks.run_after_save_chain(payload)
+            Parse::Webhooks.run_after_delete_chain(payload)
+
+            # An unrouted trigger (or a handler that returned nil) passes the
+            # operation through unchanged, in the shape each trigger needs.
+            result = Parse::Webhooks.trigger_success_value(payload, result)
+          elsif payload.trigger?
+            # A trigger the router cannot attribute to a class: pass it through
+            # unchanged rather than failing the client's operation.
+            if self.logging.present?
+              puts "[Webhooks] --> Could not find mapping route for " \
+                "#{Parse::TerminalSafe.sanitize_line(Parse::Middleware::BodyBuilder.redact(payload.to_json))}"
+            end
+            result = Parse::Webhooks.trigger_success_value(payload, nil)
           else
             if self.logging.present?
               puts "[Webhooks] --> Could not find mapping route for " \
                 "#{Parse::TerminalSafe.sanitize_line(Parse::Middleware::BodyBuilder.redact(payload.to_json))}"
             end
+            raise Parse::Webhooks::ResponseError, "Unrecognized webhook request."
           end
 
-          result = true if result.nil?
+          body = pass_through_reply?(payload, result) ? PASS_THROUGH_BODY : success(result)
           if self.logging.present?
+            # The reply can echo the client's write (passwords, auth data,
+            # tokens a handler returned), so it is redacted like the request.
             puts "[Webhooks::Response] ----------------------------"
-            puts Parse::TerminalSafe.sanitize(success(result))
+            puts Parse::TerminalSafe.sanitize(Parse::Middleware::BodyBuilder.redact(body))
             puts "----------------------------------------------------\n"
           end
-          response.write success(result)
+          response.write body
           # Schedule any after_response work to run once this reply is flushed,
           # off the client's critical path. Registered on the success path so the
           # deferred work overlaps a response Parse Server will act on.
@@ -930,7 +1290,19 @@ module Parse
             puts "[Webhooks::ResponseError] >> #{Parse::TerminalSafe.sanitize_line(payload.function_name)}: " \
                  "#{Parse::TerminalSafe.sanitize_line(e.to_s)}"
           end
-          response.write error(e.to_s)
+          code = e.respond_to?(:code) ? e.code : nil
+          response.write error(e.to_s, code)
+          return response.finish
+        rescue StandardError => e
+          # Anything else a handler (or the router) raised. Answer with a JSON
+          # error so Parse Server denies the operation cleanly, and keep the
+          # exception message out of the reply: it can quote record data or
+          # internals. The log line carries the class and a redacted message.
+          where = payload.trigger? ? "#{payload.trigger_name} #{payload.parse_class}" : payload.function_name
+          warn "[Webhooks::Error] >> #{Parse::TerminalSafe.sanitize_line(where.to_s)}: #{e.class}: " \
+               "#{Parse::TerminalSafe.sanitize_line(Parse::Middleware::BodyBuilder.redact(e.message.to_s))}"
+          response = Rack::Response.new
+          response.write error("Webhook handler failed.")
           return response.finish
         end
 

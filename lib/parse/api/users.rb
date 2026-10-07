@@ -47,7 +47,14 @@ module Parse
       # @param headers [Hash] additional HTTP headers to send with the request.
       # @return [Parse::Response]
       def current_user(session_token, headers: {}, **opts)
-        headers.merge!({ Parse::Protocol::SESSION_TOKEN => session_token })
+        # The token argument is the whole point of this call, so it is passed
+        # as the explicit per-call token: an ambient `Parse.with_session`
+        # token or a client-bound token must never replace it (that resolved
+        # the wrong user and poisoned the identity cache). A caller-supplied
+        # `session_token:` in opts is ignored for the same reason.
+        session_token = session_token.session_token if session_token.respond_to?(:session_token)
+        opts = opts.merge(session_token: session_token.to_s, use_master_key: false)
+        headers = headers.merge({ Parse::Protocol::SESSION_TOKEN => session_token.to_s })
         response = request :get, "#{USER_PATH_PREFIX}/me", headers: headers, opts: opts
         response.parse_class = Parse::Model::CLASS_USER
         response
@@ -58,10 +65,23 @@ module Parse
       # @param opts [Hash] additional options to pass to the {Parse::Client} request.
       # @param headers [Hash] additional HTTP headers to send with the request.
       # @return [Parse::Response]
+      #
+      # Sent WITHOUT the master key unless the caller passes
+      # `use_master_key: true`. Parse Server does not mint a session token for
+      # a master-key signup, so a master-keyed client used to get back a user
+      # with no `sessionToken` (and {Parse::User#upgrade_anonymous!} then
+      # failed). A master-key create also lets the request through `_User`
+      # create CLPs and authData checks that a real signup must pass.
       def create_user(body, headers: {}, **opts)
-        headers.merge!({ Parse::Protocol::REVOCABLE_SESSION => "1" })
+        opts = opts.merge(use_master_key: false) unless opts[:use_master_key] == true
+        headers = headers.merge({ Parse::Protocol::REVOCABLE_SESSION => "1" })
         if opts[:session_token].present?
-          headers.merge!({ Parse::Protocol::SESSION_TOKEN => opts[:session_token] })
+          headers = headers.merge({ Parse::Protocol::SESSION_TOKEN => opts[:session_token] })
+        elsif opts[:use_master_key] != true
+          # No token given: send none, rather than letting an ambient
+          # `with_session` token or a client-bound token make the caller the
+          # `request.user` of someone else's signup.
+          opts = opts.merge(session_token: "")
         end
         response = request :post, USER_PATH_PREFIX, body: body, headers: headers, opts: opts
         response.parse_class = Parse::Model::CLASS_USER
@@ -78,6 +98,10 @@ module Parse
         id = Parse::API::PathSegment.object_id!(id)
         response = request :put, "#{USER_PATH_PREFIX}/#{id}", body: body, headers: headers, opts: opts
         response.parse_class = Parse::Model::CLASS_USER
+        # A password change revokes the user's other sessions server-side.
+        if response.success? && body.is_a?(Hash) && (body.key?(:password) || body.key?("password"))
+          invalidate_user_identity(id)
+        end
         response
       end
 
@@ -101,7 +125,9 @@ module Parse
       # @return [Parse::Response]
       def delete_user(id, headers: {}, **opts)
         id = Parse::API::PathSegment.object_id!(id)
-        request :delete, "#{USER_PATH_PREFIX}/#{id}", headers: headers, opts: opts
+        response = request :delete, "#{USER_PATH_PREFIX}/#{id}", headers: headers, opts: opts
+        invalidate_user_identity(id) if response.success?
+        response
       end
 
       # Request a password reset for a registered email.
@@ -127,7 +153,7 @@ module Parse
         rate_key = "pwreset:#{email}"
         check_login_rate_limit!(rate_key)
         body = { email: email }
-        response = request :post, REQUEST_PASSWORD_RESET, body: body, opts: opts, headers: headers
+        response = request :post, REQUEST_PASSWORD_RESET, body: body, opts: unauthenticated_opts(opts), headers: headers
         # Always count the attempt as a "failure" for backoff purposes:
         # the response body is intentionally indistinguishable across
         # found/not-found emails, so we cannot reset the counter on
@@ -150,7 +176,7 @@ module Parse
         rate_key = "emailverify:#{email}"
         check_login_rate_limit!(rate_key)
         body = { email: email }
-        response = request :post, VERIFICATION_EMAIL_REQUEST, body: body, opts: opts, headers: headers
+        response = request :post, VERIFICATION_EMAIL_REQUEST, body: body, opts: unauthenticated_opts(opts), headers: headers
         # Indistinguishable found/not-found response, like password reset — count
         # every attempt toward backoff so probing can't reset the counter.
         track_login_attempt(rate_key, false)
@@ -164,11 +190,16 @@ module Parse
       # @param headers [Hash] additional HTTP headers to send with the request.
       # @param opts [Hash] additional options to pass to the {Parse::Client} request.
       # @return [Parse::Response]
+      #
+      # Always sent without the master key and without any ambient or bound
+      # session token (see {#unauthenticated_opts}). A master-key login makes
+      # Parse Server skip the additional MFA check and SAVE the submitted
+      # authData, so it must never be sent from a master-keyed client.
       def login(username, password, headers: {}, **opts)
         check_login_rate_limit!(username)
         body = { username: username, password: password }
-        headers.merge!({ Parse::Protocol::REVOCABLE_SESSION => "1" })
-        response = request :post, LOGIN_PATH, body: body, headers: headers, opts: opts
+        headers = headers.merge({ Parse::Protocol::REVOCABLE_SESSION => "1" })
+        response = request :post, LOGIN_PATH, body: body, headers: headers, opts: unauthenticated_opts(opts)
         response.parse_class = Parse::Model::CLASS_USER
         track_login_attempt(username, response.success?)
         response
@@ -200,8 +231,12 @@ module Parse
             },
           },
         }
-        headers.merge!({ Parse::Protocol::REVOCABLE_SESSION => "1" })
-        response = request :post, LOGIN_PATH, body: body, headers: headers, opts: opts
+        # Never with the master key: with it, Parse Server skips the MFA
+        # validation and stores the submitted `authData.mfa` over the
+        # account's enrolled TOTP secret, so any code "verifies" and MFA is
+        # silently broken for the account from then on.
+        headers = headers.merge({ Parse::Protocol::REVOCABLE_SESSION => "1" })
+        response = request :post, LOGIN_PATH, body: body, headers: headers, opts: unauthenticated_opts(opts)
         response.parse_class = Parse::Model::CLASS_USER
         track_login_attempt(username, response.success?)
         response
@@ -242,7 +277,7 @@ module Parse
       def verify_password(username, password, headers: {}, **opts)
         check_login_rate_limit!(username)
         body = { username: username, password: password }
-        response = request :post, VERIFY_PASSWORD_PATH, body: body, headers: headers, opts: opts
+        response = request :post, VERIFY_PASSWORD_PATH, body: body, headers: headers, opts: unauthenticated_opts(opts)
         response.parse_class = Parse::Model::CLASS_USER
         track_login_attempt(username, response.success?)
         response
@@ -254,9 +289,14 @@ module Parse
       # @param opts [Hash] additional options to pass to the {Parse::Client} request.
       # @return [Parse::Response]
       def logout(session_token, headers: {}, **opts)
-        headers.merge!({ Parse::Protocol::SESSION_TOKEN => session_token })
-        opts.merge!({ use_master_key: false, session_token: session_token })
-        request :post, LOGOUT_PATH, headers: headers, opts: opts
+        session_token = session_token.session_token if session_token.respond_to?(:session_token)
+        headers = headers.merge({ Parse::Protocol::SESSION_TOKEN => session_token })
+        opts = opts.merge({ use_master_key: false, session_token: session_token })
+        response = request :post, LOGOUT_PATH, headers: headers, opts: opts
+        # Forget the token in this client's identity plane so mongo-direct
+        # reads see the revocation now rather than when the entry expires.
+        invalidate_session_identity(session_token) if response.success?
+        response
       end
 
       # Signup a user given a username, password and, optionally, their email.
@@ -272,7 +312,41 @@ module Parse
         create_user(body, **opts)
       end
 
+      # Drop one session token from this client's identity plane.
+      # @!visibility private
+      # @param session_token [String]
+      def invalidate_session_identity(session_token)
+        return if session_token.nil? || session_token.to_s.empty?
+        authorization.invalidate(session_token) if respond_to?(:authorization)
+      rescue StandardError
+        nil
+      end
+
+      # Drop every identity entry that resolves to `user_id` from this
+      # client's identity plane, after an event that revokes the user's
+      # sessions (password change, account deletion, logout everywhere).
+      # @!visibility private
+      # @param user_id [String]
+      def invalidate_user_identity(user_id)
+        return if user_id.nil? || user_id.to_s.empty?
+        authorization.invalidate_user(user_id) if respond_to?(:authorization)
+      rescue StandardError
+        nil
+      end
+
       private
+
+      # Request options for an endpoint that authenticates by the request
+      # body itself (login, MFA login, verifyPassword, password reset,
+      # verification email). Forces the master key off, and passes an
+      # explicitly blank session token so neither the ambient
+      # `Parse.with_session` token nor a client-bound token is attached:
+      # {Parse::Client#request} treats an explicit blank token as "send no
+      # credential". A caller cannot opt back into the master key here.
+      # @!visibility private
+      def unauthenticated_opts(opts)
+        opts.merge(use_master_key: false, session_token: "")
+      end
 
       # @!visibility private
       # Thread-safe tracker for login rate limiting. Keys are usernames, values are

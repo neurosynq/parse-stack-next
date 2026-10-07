@@ -402,7 +402,7 @@ class VectorSearchHybridTest < Minitest::Test
             Parse::ACLScope.stub(:match_stage_for, ->(_r) { nil }) do
               Parse::CLPScope.stub(:permits?, ->(*) { true }) do
                 Parse::CLPScope.stub(:protected_fields_for, ->(*) { [] }) do
-                  Parse::CLPScope.stub(:pointer_fields_for, ->(*) { nil }) do
+                  Parse::CLPScope.stub(:row_constraint_for!, ->(*, **) { nil }) do
                     Parse::AtlasSearch.stub(:search, ->(*_a, **_k) { [] }) do
                       H.search("Song",
                                lexical: { query: "rain", index: "lex" },

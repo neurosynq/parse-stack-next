@@ -1,6 +1,17 @@
 require "minitest/pride"
 require "minitest/reporters"
-Minitest::Reporters.use!(Minitest::Reporters::SpecReporter.new)
+# PSNEXT_SKIP_LOG (set by the Rake integration runner) additionally records
+# every skip and its reason, so the runner can fail a run whose coverage was
+# silently skipped because a service went down.
+if (skip_log = ENV["PSNEXT_SKIP_LOG"].to_s).length.positive?
+  require_relative "support/skip_log_reporter"
+  Minitest::Reporters.use!([
+    Minitest::Reporters::SpecReporter.new,
+    Parse::Test::SkipLogReporter.new(skip_log, $PROGRAM_NAME),
+  ])
+else
+  Minitest::Reporters.use!(Minitest::Reporters::SpecReporter.new)
+end
 require_relative "../lib/parse/stack.rb"
 require "minitest/autorun"
 require "minitest/mock"

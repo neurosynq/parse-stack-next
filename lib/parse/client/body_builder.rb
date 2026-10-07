@@ -346,15 +346,36 @@ module Parse
             puts "[[Response]] --------------------------------------\n"
           end
 
+          parsed = true
           begin
             r = Parse::Response.new(response_env.body)
           rescue => e
+            parsed = false
             r = Parse::Response.new
             r.code = response_env.status
             r.error = "Invalid response for #{env[:method]} #{env[:url]}: #{e}"
           end
+          status = response_env[:status].to_i
           r.http_status = response_env[:status]
           r.headers = response_env[:response_headers]
+          if parsed && status.between?(200, 299)
+            # Parse Server never reports an error with a 2xx status, so a
+            # `code` or `error` key in a 2xx body is object data (for example
+            # a column set by a beforeSave trigger), not an error envelope.
+            r.code = nil
+            r.error = nil
+          elsif status > 0 && !status.between?(200, 299) && r.error.blank?
+            # A non-2xx response is a failure even without a Parse `error`
+            # field. It may come from something in front of Parse Server (an
+            # API gateway or load balancer returning 502/504 with
+            # `{"message": ...}`), or from Parse Server itself (a failed
+            # transaction returns `{"code": 1, "message": ...}`). Record the
+            # HTTP status as the code when there is none, so the request is
+            # never mistaken for a success.
+            detail = r.result.is_a?(Hash) ? r.result["message"] : nil
+            r.code ||= status
+            r.error = detail.present? ? detail.to_s : "HTTP #{status} response without a Parse error body"
+          end
           r.code ||= response_env[:status] if r.error.present?
           response_env[:body] = r
         end

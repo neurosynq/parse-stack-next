@@ -209,7 +209,7 @@ Parse::AtlasSearch::IndexCatalog.create_index(
     fields: [
       {
         type: "vector",
-        path: "body_embedding",
+        path: "bodyEmbedding",          # the STORED column, not the Ruby name
         numDimensions: 1536,
         similarity: "cosine",
       },
@@ -220,6 +220,12 @@ Parse::AtlasSearch::IndexCatalog.create_index(
   },
 )
 ```
+
+The vector `path` is the column the property is stored under:
+`property :body_embedding, :vector` is saved as `bodyEmbedding` (or under an
+explicit `field:` alias). `find_similar`, hybrid search, index discovery, and
+drift checks all use that stored name; `Parse::VectorSearch::IndexDefinition`
+generates it for you.
 
 Including `_rperm` as a filter field lets the per-row ACL match
 short-circuit at the index level — strongly recommended for any
@@ -240,6 +246,91 @@ Auto-discovery: when `find_similar` is called without an explicit
 indexes for one whose definition covers the requested `path`. The
 first match wins; pass `index:` explicitly when you have more than
 one covering index and want a specific one.
+
+### Generating the definition from the model
+
+Writing the definition by hand lets it drift from the model: a changed
+`dimensions:`, a new `agent_searchable` filter field, or a tenant scope
+the index does not cover. `Parse::VectorSearch::IndexDefinition` derives
+the definition from the model's own declarations instead:
+
+* the `:vector` property's path, `dimensions:`, `similarity:` (`cosine`
+  when undeclared), and optional `quantization:`;
+* every `agent_searchable filter_fields:` entry as a `type: "filter"` path
+  (pointer fields use their `_p_<column>` storage path);
+* the `agent_tenant_scope` field, which retrieval folds into
+  `$vectorSearch.filter` on every scoped query.
+
+Output is deterministic (vector entry first, filters sorted by path), so
+it diffs cleanly in review.
+
+```ruby
+class Document < Parse::Object
+  property :category, :string
+  property :embedding, :vector, dimensions: 1024, similarity: :dotProduct
+  agent_searchable field: :embedding, filter_fields: %i[category]
+
+  # Declare the index; its definition is generated, not written by hand.
+  vector_search_index "document_vec"
+end
+
+# Preview without touching Atlas.
+Parse::VectorSearch::IndexDefinition.build(Document)
+Parse::Schema.vector_index_definition(Document)          # same thing
+Parse::VectorSearch::IndexDefinition.preview(Document, name: "document_vec")
+
+# Compare against what is deployed (a definition or a $listSearchIndexes entry).
+live = Parse::AtlasSearch::IndexCatalog.find_vector_index("Document", field: :embedding)
+Parse::VectorSearch::IndexDefinition.diff(Parse::Schema.vector_index_definition(Document), live)
+# => { in_sync: false,
+#      vector: { "numDimensions" => { declared: 1024, live: 1536 } },
+#      filters_missing: ["category"], filters_extra: [] }
+```
+
+Applying stays explicit. `vector_search_index` declarations join the
+model's `mongo_search_index` declarations in
+`Parse::Schema::SearchIndexMigrator`, which plans first and only mutates
+Atlas when asked; a drifted index is reported, not rebuilt, unless you
+pass `update: true`. The definition is generated when the migrator plans,
+so `agent_searchable` and `agent_tenant_scope` can be declared in any
+order.
+
+```ruby
+Document.search_indexes_plan          # :to_create / :in_sync / :drifted / :orphans
+Document.apply_search_indexes!        # creates missing indexes only
+Document.apply_search_indexes!(update: true)   # also rebuilds drifted ones
+```
+
+### Index-side quantization
+
+Atlas can quantize a float vector field when it builds the index, which
+shrinks the index Atlas keeps in memory. Declare it per property; it is
+off by default:
+
+```ruby
+property :embedding, :vector, dimensions: 1024, quantization: :scalar   # or :binary
+```
+
+The generated definition then carries `"quantization": "scalar"` (or
+`"binary"`) on the vector field. Only the index changes: stored vectors and
+the SDK write path stay full precision, so turning it on or off is an index
+rebuild, not a re-embed.
+
+| Setting | Index memory | Recall |
+|---------|--------------|--------|
+| none (default) | full float vectors | baseline |
+| `:scalar` | roughly 4x smaller | small loss for most embedding models |
+| `:binary` | roughly 32x smaller | larger loss; Atlas rescoring recovers part of it |
+
+Measure recall on your own queries before adopting `:binary`; the right
+choice depends on the embedding model and the collection. For small
+collections the memory saving rarely matters.
+
+First-query drift verification also checks quantization: an index whose
+`quantization` differs from the property's declaration (an absent value
+counts as none on either side) is reported under
+`Parse::VectorSearch.index_drift_policy` like a dimension or similarity
+mismatch.
 
 ---
 
@@ -302,6 +393,9 @@ index's `latestDefinition` against the model declaration:
   (usually an index that predates a model change).
 * `similarity` vs the property's declared `similarity:` (checked only
   when both sides declare one).
+* `quantization` vs the property's declared `quantization:` (absent on
+  either side means none, so an index quantized without a declaration
+  is drift too).
 * When the class registers an `agent_tenant_scope`, the scope field
   must appear among the index's `type: "filter"` paths — without it,
   every tenant-scoped `$vectorSearch.filter` fails Atlas-side at
@@ -505,18 +599,27 @@ Two things to know:
   one-chunk document. Registering a context model as an `embed` provider
   works, but the stored vectors carry no surrounding-document context.
   Use `embed_chunks` when chunk-level context is the point.
-* **Request sizing is partly handled for you.** Voyage caps one request
-  at 1,000 documents, 16,000 chunks, and 120k tokens. `embed_chunks`
-  checks the document and chunk caps before sending, and splits large
-  inputs across several requests by whole document (a document's chunks
-  always travel together) so that each **response** stays under the
-  SDK's response-size cap. That split is sized by the vectors coming
-  back, not by tokens going out, so it does **not** guarantee a request
-  stays under the 120k input-token cap. The SDK has no tokenizer to
-  check that; keep long documents to a few per call, and expect a
-  `BadRequestError` from Voyage if a request exceeds it. Context models
-  default to `embed_batch_size: 32` to keep `embed_text` batches clear of
-  the token cap for typical inputs, which is a heuristic, not a check.
+* **Request sizing adapts; it is not exact token counting.** Voyage caps
+  one request at 1,000 documents, 16,000 chunks, and 120k input tokens.
+  `embed_chunks` (and `embed_text` on a context model) packs whole
+  documents into requests that stay within the document cap, a chunk
+  count whose **response** fits the SDK's response-size cap, and an
+  **estimated** 120k-token budget. The SDK has no tokenizer, so the
+  estimate assumes three bytes per token, which over-counts typical
+  English text and packs conservatively. A document's chunks always
+  travel together.
+  When Voyage still rejects a request as too large (its "batch size" or
+  "max allowed tokens per submitted batch" errors, or an HTTP 413), the
+  SDK halves that request by document and resends each half, keeping
+  the returned vectors aligned with your input. Only those positively
+  identified size errors trigger a split; any other 400 is raised as is,
+  with the provider's message on `BadRequestError#detail`. A document
+  that is rejected as too large even on its own raises a
+  `BadRequestError` naming its index, since no split can fix it: break
+  it into fewer or shorter chunks. A single chunk longer than the
+  model's context window ("tokens in an example exceeds the context
+  length") is also raised directly. Context models default to
+  `embed_batch_size: 32` for `embed_text` batches.
 
 ---
 
@@ -677,6 +780,71 @@ adapters implement only the network call (`#rerank_scores`).
 > window:)`). A breach hard-refuses (surfaced to the agent as a
 > rate-limited tool error). Admin agents are exempt; direct
 > `find_similar` / `retrieve` callers are not metered.
+
+### Retrieval profiles for `semantic_search` (5.8)
+
+An agent can choose among a few server-configured retrieval strategies by
+name, without ever choosing a provider, endpoint, or credential. Register
+rerankers by name, then profiles that reference them:
+
+```ruby
+Parse::Retrieval.register_reranker(:voyage,
+  Parse::Retrieval::Reranker::Voyage.new(api_key: ENV.fetch("VOYAGE_API_KEY"), model: "rerank-3-lite"))
+
+Parse::Retrieval::Profiles.register(:fast, k: 5, max_k: 10)
+Parse::Retrieval::Profiles.register(:balanced, k: 8, hybrid: true)
+Parse::Retrieval::Profiles.register(:precise,
+  k: 8, reranker: :voyage,
+  rerank_candidates: 30,            # documents retrieved and sent to the reranker (max 100)
+  rerank_top_n: 8,                  # documents kept after reranking
+  rerank_max_document_chars: 4_000, # each document's text is cut before it leaves the process
+  rerank_timeout: 5,                # seconds
+  on_rerank_failure: :fallback,     # or :raise
+  max_total_tokens: 8_000)          # default response budget
+
+agent.execute(:semantic_search, class_name: "Article", query: "refund policy", profile: "precise")
+```
+
+* **Validated at registration.** An unknown option, an unregistered reranker,
+  `k` above `max_k`, or a non-positive budget raises `ArgumentError` at boot.
+  An unknown profile name at call time is refused with the list of available
+  profiles.
+* **Field-safe reranking.** The reranker receives the same text source as
+  chunk content, which `semantic_search` restricts to fields the agent may
+  read (its effective `agent_fields`, including any per-agent `fields:`
+  narrowing), cut to `rerank_max_document_chars`.
+* **Spend.** Estimated rerank tokens are charged to the same per-tenant
+  `SpendCap` budget as the query embedding (admin agents are exempt).
+* **Fallback is observable.** On a reranker timeout or provider error,
+  `:fallback` keeps the retrieval order and adds `rerank_fallback: true` and
+  `rerank_fallback_reason` to the result; `:raise` fails the call.
+* **Defaults are unchanged.** Without `profile:` the tool behaves as before.
+
+Each call emits one `parse.retrieval.search` notification with the profile,
+`k`, candidate count, rerank stats (`used`, `documents`, `chars`,
+`tokens_estimated`, `duration_ms`, `fallback`, `fallback_reason`), chunk and
+document counts, budget drops, and timings. It never carries the query,
+document text, field values, URLs, or credentials, and `tokens_estimated` is
+the SDK's estimate, not provider-reported usage.
+
+**Measuring profiles.** `Parse::Retrieval::Benchmark` scores profiles on a
+labeled case set (recall@k, MRR, hit rate, mean and p95 latency, estimated
+rerank tokens), overall and per tag. Cases may list `forbidden` ids that must
+never be returned (restrictive ACLs, other tenants); any such hit is reported
+as a violation.
+
+```ruby
+cases = Parse::Retrieval::Benchmark.load_cases("eval/cases.json")
+runner = Parse::Retrieval::Benchmark.semantic_search_runner(agent, class_name: "Article")
+# nil is the baseline (no profile); its results are reported under "default".
+report = Parse::Retrieval::Benchmark.run(cases: cases, profiles: [nil, "fast", "precise"], runner: runner)
+report["default"]                          # => the baseline, for comparison
+report["precise"]                          # => { recall_at_k:, mrr:, hit_rate:, violations:, mean_ms:, p95_ms:, ... }
+report["precise"][:by_tag]["long_document"]
+```
+
+Run it against your own data and Atlas index before recommending a profile;
+the SDK does not ship measured defaults.
 
 ### Chunkers
 

@@ -87,7 +87,11 @@ module Parse
         includes_array = includes.present? ? Array(includes) : nil
 
         # Build formatted keys once (reused for query and tracking)
-        formatted_keys = keys_array&.map { |k| Parse::Query.format_field(k) }
+        formatted_keys = if keys_array
+            Parse::Query.with_field_aliases(parse_class) do
+              keys_array.map { |k| Parse::Query.format_field(k) }
+            end
+          end
 
         # Validate keys against model fields if validation is enabled
         # Skip validation if warnings are disabled (nothing to report)
@@ -203,6 +207,15 @@ module Parse
 
         # Apply attributes from server (only keys in result get updated)
         apply_attributes!(result, dirty_track: false)
+        # The server row is now the source of truth for the ACL. A full
+        # fetch whose response has no ACL key is a public (ACL-less) row, so
+        # drop any locally stamped default rather than misreport it. Either
+        # way the record exists, so the save-time default-ACL resolver must
+        # not replace its ACL.
+        if !is_partial_fetch && !result.key?("ACL") && !result.key?(:ACL)
+          @acl = nil
+        end
+        @_acl_pristine = false
         record_authorization_hydration!(result, partial: is_partial_fetch) if
           respond_to?(:record_authorization_hydration!)
 
@@ -318,7 +331,9 @@ module Parse
       def fetch_json(keys: nil, includes: nil)
         query = {}
         if keys.present?
-          keys_array = Array(keys).map { |k| Parse::Query.format_field(k) }
+          keys_array = Parse::Query.with_field_aliases(parse_class) do
+            Array(keys).map { |k| Parse::Query.format_field(k) }
+          end
           query[:keys] = keys_array.join(",")
         end
         if includes.present?
@@ -432,9 +447,12 @@ module Parse
         # Autofetch if object is a pointer OR was selectively fetched
         # Skip if autofetch is disabled for this instance
         needs_fetch = pointer? || has_selective_keys?
+        # A pointer never autofetches for its ACL. A partially fetched object
+        # does when the ACL was left out, so code that edits it starts from
+        # the record's real ACL instead of nil.
         return unless needs_fetch &&
                       !autofetch_disabled? &&
-                      key != :acl &&
+                      !(key == :acl && pointer?) &&
                       !Parse::Properties::BASE_KEYS.include?(key) &&
                       respond_to?(:fetch)
 

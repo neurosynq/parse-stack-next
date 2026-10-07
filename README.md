@@ -4,6 +4,16 @@
 
 A full-featured Ruby client SDK for [Parse Server](http://parseplatform.org/). [parse-stack-next](https://github.com/neurosynq/parse-stack-next) is a Ruby client SDK, REST client, and Active Model ORM for [Parse Server](http://parseplatform.org/), combining a low-level API client, a query engine, an object-relational mapper (ORM), and a Cloud Code Webhooks rack application in a single gem.
 
+## What's new in 5.8
+
+- **5.8.0: MCP deployments can expose less than their users can read.** `Parse::Agent.new(fields: { Customer => %i[display_name timezone] })` narrows a class's `agent_fields` for one agent, so a user-facing assistant and an analytics endpoint in one process expose different subsets of the same model. It applies to queries, includes, aggregation, search, schema output, exports, and `semantic_search` text, and `query_class`/`count_objects`/`export_data` now refuse filtering or sorting on a hidden field. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.8.0: Supported deployment patterns.** `MCPRackApp.user_scoped` serves signed-in application users (no master-key fallback, server-pinned identity and tenant), and `MCPRackApp.master_analytics` serves a shared read-only analytics endpoint that requires an operator `principal_resolver`. Cancellations and approval replies are now bound to the session's owner, revocation intervals are documented, and orphaned subscriptions are reaped. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.8.0: Retrieval profiles for `semantic_search`.** Profiles you register on the server (for example `fast`, `balanced`, `precise`; none ship by default) compose hybrid search and reranking with budgets, spend accounting, and observable fallback; each call emits a sanitized `parse.retrieval.search` event, and `Parse::Retrieval::Benchmark` measures profiles on labeled cases. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.8.0: Vector index definitions from the model, with optional quantization.** `Parse::VectorSearch::IndexDefinition` generates the Atlas definition from your declarations (filters and tenant field included) with preview and diff, and `quantization: :scalar`/`:binary` on a `:vector` property shrinks index memory without changing stored data. Contextualized embedding batches now adapt to provider size limits. See [CHANGELOG.md](./CHANGELOG.md)
+- **5.8.0: Two silent mismatches fixed; check whether you need to act.** Queries now send a property's declared `field:` name exactly as declared (`property :account_id, :string, field: :account_id` queries `account_id`, no longer `accountId`), so queries that matched nothing against underscore or mixed-case columns now return rows. Vector search, index auto-discovery, and drift checks now use the stored column of a multi-word `:vector` property: an Atlas vector index whose path is the Ruby name (`body_embedding`) must be recreated on the stored column (`bodyEmbedding`). Drift detection reports the mismatch. See [CHANGELOG.md](./CHANGELOG.md)
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full 5.8 entry.
+
 ## What's new in 5.7
 
 - **5.7.6: `semantic_search` respects `agent_fields` for chunk content.** A class that embedded a field hidden by its `agent_fields` allowlist returned that field's text as chunk content. Chunk text now comes only from embedded fields the agent may read; a hidden text source is refused with `:field_denied` before the search runs. See [CHANGELOG.md](./CHANGELOG.md)
@@ -92,7 +102,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full 5.1 entry, including breaking ch
 - **MCP transport hardening** — Streamable HTTP `Mcp-Session-Id` header (renamed from `X-MCP-Session-Id`, **breaking**), `MCP-Protocol-Version` validation, `DELETE /` session termination, structured-content (`outputSchema`) on built-in tools, optional `health_path:` liveness probe
 - **`Parse::GraphQL::TypeGenerator`** — generate `graphql-ruby` types directly from your `Parse::Object` subclasses (no Parse Server round-trip), with `:vector` columns surfaced as `[Float]` and association registries (`has_one_associations`, `has_many_associations`) populated at DSL time
 - **LiveQuery promoted to stable** — the experimental warning is removed; `Parse.live_query_enabled = true` is retained as a network-egress safety toggle, not a stability gate
-- **Server-version deprecation warning** — one-shot warning when connecting to a Parse Server older than the configured threshold (default `7.0.0`, override with `PARSE_DEPRECATED_SERVER_VERSION_BELOW`); silence with `Parse.suppress_server_version_warning = true`. The **supported baseline is Parse Server 9.x** (the SDK is developed and tested against a pinned `parse-server:9.10.0`); the default warning threshold is intentionally conservative so older deployments only get an advisory, not a hard break.
+- **Server-version deprecation warning**: a one-shot warning when connecting to a Parse Server older than the configured threshold (default `7.0.0`, override with `PARSE_DEPRECATED_SERVER_VERSION_BELOW`); silence with `Parse.suppress_server_version_warning = true`. The **supported baseline is Parse Server 9.x** (the SDK is developed and tested against a pinned `parse-server:9.10.3`); the default warning threshold is intentionally conservative so older deployments only get an advisory, not a hard break.
 - **`mongo_relation_index :field, dedup: true`** — register a compound `{owningId, relatedId}` UNIQUE on relation join collections to prevent duplicate-pair subscriptions without breaking `has_many` semantics
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full 5.0 entry, including security-hardening notes and Ruby 3.x cleanup.
@@ -916,8 +926,8 @@ view = Parse.client.sdk_cache
 store.verify_upstream_isolation!
 ```
 
-**The two URLs must address different Redis databases.** On Parse Server 9.10.0
-and earlier, a `_Role` write clears the cache with `FLUSHDB`, which on a shared
+**The two URLs must address different Redis databases.** Through at least Parse
+Server 9.10.3, a `_Role` write clears the cache with `FLUSHDB`, which on a shared
 database deletes the SDK's cached responses and its create-locks along with it
 ([parse-server#10617](https://github.com/parse-community/parse-server/issues/10617)).
 `verify_upstream_isolation!` detects this by scanning the SDK's own database
@@ -6473,7 +6483,7 @@ export PARSE_TEST_SERVER_URL=http://localhost:29337/parse
 export PARSE_TEST_APP_ID=psnextItAppId
 export PARSE_TEST_API_KEY=psnext-it-rest-key
 export PARSE_TEST_MASTER_KEY=psnextItMasterKey
-export PARSE_TEST_MONGO_URI="mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin"
+export PARSE_TEST_MONGO_URI="mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin&directConnection=true"
 export PARSE_TEST_REDIS_URL=redis://localhost:29379/0
 export PARSE_TEST_LIVE_QUERY_URL=ws://localhost:29337
 export ATLAS_URI="mongodb://localhost:29020/parse_atlas_test?directConnection=true"

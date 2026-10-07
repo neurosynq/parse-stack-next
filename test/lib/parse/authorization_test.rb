@@ -62,6 +62,21 @@ class AuthorizationContextTest < Minitest::Test
     captures
   end
 
+  def test_session_lookup_bypasses_the_response_cache
+    # A revoked token must not re-resolve from a cached /users/me response
+    # once its identity entry is gone.
+    seen_opts = nil
+    ok = Object.new
+    ok.define_singleton_method(:error?) { false }
+    ok.define_singleton_method(:result) { { "objectId" => "u_cache" } }
+    Parse.client.define_singleton_method(:current_user) do |_token, **opts|
+      seen_opts = opts
+      ok
+    end
+    context.send(:lookup_user_id, "r:cache-test")
+    assert_equal false, seen_opts[:cache]
+  end
+
   def stub_current_user_error
     stub_response = Object.new
     stub_response.define_singleton_method(:error?) { true }

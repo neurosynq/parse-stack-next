@@ -163,7 +163,9 @@ class TestACL < Minitest::Test
     assert_equal note_master_key_only.acl, {}
     assert_equal note_write_only.acl, { "*" => { "write" => true } }
     assert_equal note_read_and_write.acl, { "*" => { "read" => true, "write" => true } }
-    assert_equal note_edge_case.acl, Note.default_acls # should be affected because ACL is nil
+    # A server row without an ACL key is public on the server, so the local
+    # class default is not stamped onto it.
+    assert_nil note_edge_case.acl
     refute_equal note_master_key_only, Note.default_acls
     refute_equal note_write_only, Note.default_acls
     refute_equal note_read_and_write, Note.default_acls

@@ -396,6 +396,177 @@ Common uses for the direct dispatcher:
 
 ---
 
+## Deployment Patterns
+
+`MCPRackApp.new(agent_factory: ...)` accepts any factory. For the two common
+production shapes, two factories package the identity rules so a deployment
+cannot drift from one access mode into the other by accident:
+
+| Factory | Use it for | Identity | Data access |
+|---|---|---|---|
+| `MCPRackApp.user_scoped` | Personal assistants, application users | A Parse session token on every request; missing or invalid is 401 | The user's own ACL/CLP, enforced by Parse Server on REST and by the SDK on mongo-direct paths. No master-key fallback |
+| `MCPRackApp.master_analytics` | Analytics, reporting, trusted operational tools | A verified operator from a required `principal_resolver`; unresolved is 401 | Master authority, narrowed by the agent's `tools:`, `classes:`, `filters:`, and field policy. Read-only by default |
+
+Both factories take `agent_options:` (extra `Parse::Agent.new` options such
+as `tools:`, `methods:`, `classes:`, `filters:`) and pass the remaining
+keywords to `MCPRackApp.new` (`transport:`, `logger:`, `allowed_origins:`,
+...). Options that set identity or authority are refused in
+`agent_options:` with `ArgumentError` at construction: `session_token`,
+`acl_user`, `acl_role`, `impersonate_user`, `impersonation_user`,
+`impersonate_mint`, `impersonation_mint`, `impersonate_label`,
+`impersonation_label`, `tenant_id`, `client`, `permissions`, `permission`, and
+`parent`. `user_scoped` also refuses `master_atlas` and `allow_mutations`,
+since a signed-in user's agent never receives authority beyond its session.
+The factory owns the Rack options `agent_factory:`, `principal_resolver:`,
+`listening_stream_revalidator:`, and `listening_stream_revalidate_interval:`,
+so passing any of them is refused as well. A deliberate single-operator
+master-key endpoint is still built with `MCPRackApp.new` directly.
+
+### Personal assistant (user-scoped)
+
+```ruby
+# config/routes.rb (Rails), or `run` it from config.ru
+MCP_APP = Parse::Agent::MCPRackApp.user_scoped(
+  transport: :streamable_http,
+  permissions: :write,                       # writes still go only through agent_methods
+  tenant_from: ->(env, user_id) { Workspace.id_for_user(user_id) },  # pinned server-side
+  agent_options: { classes: %w[Post Comment], methods: %w[archive] },
+)
+mount MCP_APP, at: "/mcp"
+```
+
+```ruby
+# The only write this assistant can make, declared by the application.
+class Post < Parse::Object
+  property :archived, :boolean
+  property :archive_reason, :string
+
+  agent_method :archive, permission: :write, supports_dry_run: true, permitted_keys: [:reason]
+  def archive(reason:, agent: nil, dry_run: false, **)
+    return { would: "archive #{id}", reason: reason } if dry_run
+    self.archived = true
+    self.archive_reason = reason
+    save
+  end
+end
+
+# Require a human approval (MCP elicitation) before any :write call runs.
+Parse::Agent.require_approval_for = [:write]
+```
+
+The client sends the user's session token as `Authorization: Bearer
+<token>` (or `X-Parse-Session-Token`; pass `session_token_from: ->(env) {
+... }` for anything else). Every request builds a fresh
+`Parse::Agent.new(session_token: token, ...)`, so the agent acts as that user
+and tool arguments cannot change who it is or which tenant it is bound to.
+`tenant_from` returning nil refuses the request rather than running unscoped.
+
+On logout the token stops validating, so the next request gets 401 and any
+open listening stream closes within the revalidation interval. To reconnect,
+the client logs in again and starts a new MCP session (`initialize`) with the
+new token. A session id is bound to the principal that initialized it, so
+the new token cannot take over the old session, and the old session's
+subscriptions are torn down when its stream closes (or reaped as orphans,
+below).
+
+### Read-only analytics endpoint (master key)
+
+```ruby
+ANALYTICS = Parse::Agent::MCPRackApp.master_analytics(
+  # Required. Resolve the VERIFIED operator behind the request. Returning
+  # nil or "" refuses the request with 401.
+  principal_resolver: ->(_agent, env) { env["warden"]&.user&.email },
+  transport: :streamable_http,
+  agent_options: {
+    classes: %w[Post Subscription PostMetric],
+    tools: %w[query_class count_objects group_by group_by_date distinct aggregate get_schema],
+  },
+)
+
+# Audit: every tool call emits parse.agent.tool_call.
+ActiveSupport::Notifications.subscribe("parse.agent.tool_call") do |*, payload|
+  AuditLog.record(tool: payload[:tool], correlation_id: payload[:correlation_id])
+end
+```
+
+`principal_resolver:` is a required keyword: `master_analytics` raises
+`ArgumentError` at construction when it is missing or does not respond to
+`#call`. Without one every master-key agent has the same
+fingerprint, so two operators sharing the endpoint could attach to, approve,
+or cancel each other's sessions. The operator identity governs session
+ownership and audit; master authority governs what data the agent can reach,
+and the configured tools and classes govern what it may actually do. It
+defaults to `permissions: :readonly`.
+
+The master-key check runs per request, not at construction. The factory
+resolves its client on each request (the `client:` you passed, else
+`Parse.client` at that moment), and any request whose client has no master key
+is answered with 401. Construction succeeds even when the master key is not
+configured yet.
+
+### Session ownership
+
+Under both factories, an `Mcp-Session-Id` is bound to the principal that
+initialized it (the session token for `user_scoped`, the resolved operator for
+`master_analytics`). Another caller who knows or chooses the same id cannot:
+
+- re-initialize it (403),
+- attach its listening stream (403),
+- cancel its in-flight requests (`notifications/cancelled` is a silent 202 no-op),
+- answer its approval prompts (the elicitation reply is a silent 202 no-op),
+- change its log level.
+
+A session with an attached listening stream or a pending approval keeps its
+owner binding for as long as it is live. When the owner registry is full of
+live sessions, a new `initialize` or listening stream is refused with `503`
+rather than displacing one (see Capacity and eviction under the listening
+stream's owner binding, below).
+
+### Revocation intervals
+
+How quickly a logged-out, expired, or revoked session (or a role change)
+stops having effect, for a `user_scoped` deployment:
+
+| Path | `session_validation: :per_request` (default) | `session_validation: :cached` |
+|---|---|---|
+| New MCP request (any tool) | Next request: the token is re-checked against Parse Server (`GET /users/me`, response cache bypassed) | Identity-cache TTL (`identity_cache_ttl`, default 3600s), or immediately when the `Parse::Cache::Invalidation` `after_logout` / `_User` hooks evict the token |
+| REST tools within an accepted request | Immediate: Parse Server validates the token on every call | Immediate |
+| Mongo-direct reads (identity) | Next request: a failed check also evicts the token from `client.authorization` | Same as the row above |
+| Mongo-direct reads (role change) | Role-cache TTL (`role_cache_ttl`, default 30s), or immediately when the `_Role` invalidation hook fires | Same |
+| Open listening stream / subscriptions | Within `session_revalidate_interval` (default 60s): the stream is re-checked and closed, tearing down its LiveQuery subscriptions | Same (stream re-checks always ask Parse Server) |
+
+`:per_request` costs one `/users/me` call per MCP request; `:cached` saves it
+at the price of the identity-TTL window when invalidation hooks are not
+installed. The TTLs are configured with
+`Parse::Authorization.configure(identity_cache_ttl:, role_cache_ttl:)`.
+
+### Orphaned subscriptions
+
+A session that subscribes to resources but never opens its listening stream
+(or subscribes again after the stream closed) holds LiveQuery subscriptions
+with nowhere to deliver them. Normal teardown (unsubscribe, stream close,
+`DELETE`) does not cover that case, so the subscription manager reaps such
+sessions after a grace period: `orphan_ttl:` on
+`Parse::Agent::MCPSubscriptions::Manager` (default 300 seconds, `nil` to
+disable). Reaping runs whenever a session subscribes or attaches a stream,
+and can be triggered with `manager.reap_orphans!`. A session that attaches
+its stream within the grace period keeps its subscriptions.
+
+### Operational notes for deployment factories
+
+* **Validation load.** `user_scoped` with the default
+  `session_validation: :per_request` asks Parse Server (`GET /users/me`) on
+  every request, including requests carrying a random bearer string. Put a
+  `pre_auth_rate_limiter:` in front of a public endpoint, or use
+  `session_validation: :cached` and rely on the identity cache's TTL and
+  invalidation hooks.
+* **Outages fail closed.** A Parse Server error while validating a session is
+  treated as an invalid session: the request gets 401 and a listening stream
+  is closed at its next revalidation. Clients reconnect once Parse Server is
+  back.
+
+---
+
 ## Connecting Claude Desktop (stdio bridge)
 
 Parse Stack speaks MCP over **HTTP** (the standalone server and the
@@ -659,10 +830,36 @@ The principal fingerprint is derived, in order, from: an operator-supplied
 per-`MCPRackApp` instance and **single-process** — it does not span Puma workers
 or survive a restart. In a clustered deployment the `initialize` POST and the
 `GET` stream may land on different workers, so the initialize-binding degrades
-to TOFU there. The registry is LRU-bounded (default 10,000 sessions) so a stream
-of `initialize`-without-`DELETE` sessions cannot grow it without limit; evicting
-an active owner just downgrades that id to TOFU on its next attach. Blank
-session ids or blank fingerprints fail closed.
+to TOFU there. Blank session ids or blank fingerprints fail closed.
+
+**Capacity and eviction.** The registry is LRU-bounded (default 10,000
+sessions) so a stream of `initialize`-without-`DELETE` sessions cannot grow it
+without limit. Only idle bindings are evicted. A live session (one with an
+attached listening stream or a pending approval prompt) is pinned and keeps its
+owner binding under any amount of LRU pressure, so a flood of new sessions
+cannot strip a victim's owner and then answer its approvals or cancel its
+requests. An evicted idle id is unbound, and the next principal to attach a
+stream to it claims it TOFU. When every binding is live and the registry is
+full, new bindings are refused rather than displacing a live one: `initialize`
+and the listening-stream `GET` answer `503` (`-32000`, "Session capacity
+exhausted"). Clients retry once sessions close or are terminated with
+`DELETE`.
+
+**Per-principal bound.** Each principal may hold at most 100 session
+bindings. Past that, its own least recently used idle binding is evicted (or
+the new one refused with `503` when all of its bindings are live), so one
+caller flooding `initialize` cannot push other principals' sessions out of
+the registry. `initialize` and `resources/subscribe` are charged against the
+principal's rate limiter and answer `429` when it is exhausted; with
+`user_scoped` and `master_analytics` that limiter is shared across the
+principal's requests.
+
+**Requests on another principal's session.** Any POST whose `Mcp-Session-Id`
+is bound to a different principal is refused with `403`.
+`resources/subscribe` additionally requires a session the caller established,
+through `initialize` or by attaching its listening stream, because each
+subscription holds a LiveQuery socket and a slot in the global session limit.
+A stateless client that never initializes can still call tools.
 
 ---
 
@@ -844,6 +1041,51 @@ session's logs. `DELETE` on the session forgets it.
 > per-request log level in `_meta` and deprecates the logging feature. This
 > server targets `2025-11-25` and earlier, where `logging/setLevel` is the
 > mechanism. `agent.log` is the stable API either way.
+
+---
+
+## Server Field Names (`field_names: :server`)
+
+`Parse::Agent.new(field_names: :server)` asks for data fields in the exact
+names Parse returns or the model declares through its `field_map`
+(`createdAt`, `totalPlays`, an alias such as `ExternalID`), with no
+snake_case conversion anywhere a tool would otherwise apply one. Omit it (or
+pass `:default`) to keep each tool's existing output; any other value raises
+`ArgumentError`. Sub-agents inherit the mode unless they set their own.
+
+```ruby
+analytics = Parse::Agent.new(field_names: :server, permissions: :readonly)
+```
+
+| Output | Default | `field_names: :server` |
+|---|---|---|
+| `query_class` / `get_object` rows, Atlas and `semantic_search` source records, exports (CSV headers) | Parse field names | Parse field names (unchanged) |
+| A Parse object returned by an `agent_method` (`call_method`) | Parse field names and values | Parse field names and values |
+| An `AggregationResult` returned by an `agent_method` | snake_case keys | keys exactly as the aggregation returned them |
+
+Most tool output already carried server names, so the visible difference is
+in values an `agent_method` returns. Two `call_method` serialization fixes
+ship alongside: a returned Parse object is now emitted with its values (it
+previously emitted the model's field-type map, e.g. `"title" => "string"`),
+and a returned `AggregationResult` is emitted as a Hash (it was previously its
+`inspect` String).
+
+The option changes **data-field keys only**:
+
+* MCP protocol keys and SDK envelope keys (`chunks`, `documents`,
+  `object_id`, `next_call`, ...) keep their contracts.
+* Date, Pointer, and File formatting, vector visibility, and metadata
+  redaction are unchanged.
+* "Server names" means the application-facing Parse names, never raw MongoDB
+  storage columns such as `_p_author`, `_rperm`, or `_session_token`.
+* Explicit export column aliases still win over automatic naming.
+
+Naming is presentation only. ACL/CLP, `protectedFields`, the class
+`agent_fields` ceiling, and per-agent `fields:` policies resolve against the
+canonical field names before anything is formatted, so a user-scoped agent
+and a master-key agent with the same policy return the same fields in either
+mode. Like `fields:`, the mode is scoped to each tool call, so agents with
+different modes can run concurrently in one process.
 
 ---
 
@@ -1094,6 +1336,12 @@ MCPRackApp (per-request factory)
 ```
 
 The same problem exists in miniature whenever a tool handler constructs a sub-agent inside its block — a fresh `Parse::Agent.new` produces a fresh limiter, so an attacker who can induce delegation amplifies the per-process budget linearly with delegation depth × branching. The v4.2 `parent:` kwarg closes that case automatically (see [Per-Agent Tool Filtering & Sub-Agent Delegation](#per-agent-tool-filtering--sub-agent-delegation-v42)); the shared external limiter pattern below covers the cross-request case at the MCPRackApp boundary.
+
+### Deployment factories already share a limiter per principal
+
+`MCPRackApp.user_scoped` and `MCPRackApp.master_analytics` do not have this problem. Each keeps one in-process `RateLimiter` per principal (the validated user id for `user_scoped`, the resolved operator for `master_analytics`) and hands it to every agent it builds for that principal, so `rate_limit:` and `rate_window:` in `agent_options:` accumulate across requests. The registry is LRU-bounded (default 10,000 principals); an evicted principal starts a fresh window. Passing your own `rate_limiter:` in `agent_options:` bypasses the registry and uses that limiter as-is, which is the way to share one budget across processes.
+
+The workarounds below apply to a custom `agent_factory:` lambda (including `Parse::Agent.rack_app do |env| ... end`), which builds a fresh agent per request and gets no shared limiter unless you inject one.
 
 ### The solution
 
@@ -1416,7 +1664,9 @@ class Project < Parse::Object
     # _wperm so the update only sees rows the agent's scope is allowed
     # to modify, defense-in-depth alongside Parse Server's own ACL.
     Audit.all(**agent.acl_scope_kwargs).each { |a| a.cancel! } if agent&.acl_scope
-    update!(archived_at: Time.now, archive_reason: reason)
+    self.archived = true              # property :archived, :boolean
+    self.archive_reason = reason      # property :archive_reason, :string
+    save
     { archived: true, objectId: id }
   end
 end
@@ -1557,6 +1807,67 @@ Parse::Agent::Tools.register(
 **The clamp invariant:** `sub.permissions ≤ parent.permissions` always holds. The default `:readonly` is always safe regardless of parent tier; only explicit overrides hit the clamp check, and overrides that exceed the parent's tier raise at construction. This is the structural guarantee that a `delegate_to_subagent` chain cannot escape the parent's tier through sub-agent construction — the only path to a more-privileged agent is at the MCP factory, where the explicit elevation is auditable.
 
 **ACL-scope subset invariant (v4.4.0):** when the parent carries a resolved ACL scope (session_token / acl_user / acl_role), an explicit child override must resolve to a `permission_strings` set that is a SUBSET of the parent's. A tool handler that tries `Parse::Agent.new(parent: user_scoped, acl_role: "admin")` raises `ArgumentError` at construction because the child's claim set would include `"role:admin"`, which the parent's claim set does not. The same applies to a different `acl_user:` (different user_id), or to a child that resolves to master-key while the parent was scoped. This closes the analogous footgun for the acl_user / acl_role identity axis — the precedent of session_token swap is misleading because session tokens are externally verified by Parse Server, while `acl_user:` and `acl_role:` are unverified constructor assertions. A master-key parent (`@acl_scope.nil?`) allows any child scope because the parent already has unrestricted reach.
+
+### `fields:` per-agent field narrowing (5.8)
+
+A class's `agent_fields` is the most any agent may read. `fields:` narrows
+that ceiling for one agent, so two MCP deployments in the same process can
+expose different subsets of the same model: a user-facing assistant sees
+less than an analytics endpoint. Effective access is the intersection of the
+caller's Parse ACL/CLP, the class `agent_fields`, the agent's `fields:`
+policy, its tenant scope, and its tool and method filters.
+
+```ruby
+class Customer < Parse::Object
+  property :display_name, :string
+  property :timezone, :string
+  property :plan, :string
+  property :billing_email, :string
+  agent_fields :display_name, :timezone, :plan, :billing_email  # ceiling for every agent
+end
+
+assistant = Parse::Agent.new(session_token: token,
+                             fields: { Customer => %i[display_name timezone] })
+analytics = Parse::Agent.new(permissions: :readonly,
+                             fields: { Customer => %i[display_name plan] })
+```
+
+* **Narrow only.** A field outside `agent_fields` stays hidden even if a
+  policy lists it. A class without `agent_fields` is narrowed to exactly the
+  listed fields (plus `objectId`, `createdAt`, `updatedAt`).
+* **`default:`** narrows every class the policy does not name.
+* **Sub-agents intersect.** `Parse::Agent.new(parent: assistant, fields: ...)`
+  sees only fields both policies permit; omitting `fields:` inherits the
+  parent's policy.
+* **Everywhere the class allowlist applied.** Query projection, `keys:`,
+  include projections, aggregation pipelines, Atlas Search fields,
+  `get_schema` and `completion/complete` field names, exports,
+  `agent.describe`, and `semantic_search` chunk text, reranker input, and
+  filter fields all use the effective set.
+* **No inference through filters.** `query_class`, `count_objects`, and
+  `export_data` refuse a `where:` or `order:` on a field outside the
+  effective set with `:field_denied` (filtering or sorting on a hidden field
+  reveals it through which rows match). `group_by`, `distinct`, and
+  aggregation already refused. This also applies to the class ceiling with
+  no `fields:` policy.
+* **Writes stay on declared methods.** `fields:` governs what the agent
+  reads; writes still go through `agent_method`s and the per-agent
+  `methods:` filter.
+
+The policy is applied for the duration of each tool call (fiber-local), so
+agents serving concurrent requests never see each other's policy.
+
+**Known limits.**
+
+* `call_method` projects returned objects (anything carrying `className` and
+  `objectId`) through their class policy, but rows a method returns from its
+  own aggregation (`$group` output, `$lookup` documents) are the method
+  author's responsibility: the SDK cannot tell which class such a row came
+  from.
+* `get_schema` lists index keys and class-level permission entries that may
+  name fields outside the agent's policy (names only, never values).
+
+---
 
 ### Developer introspection — `agent.describe` / `describe_for` / `would_permit?` (v4.4.0)
 
@@ -2483,7 +2794,7 @@ Every tool call dispatched through `Agent#execute` fires the `"parse.agent.tool_
 
   **Server-assigned on `initialize`:** when the client omits the header on the `initialize` request, `MCPRackApp` generates a UUID, binds it to `agent.correlation_id`, and returns it in the `Mcp-Session-Id` response header. Clients echo that id on subsequent requests. A client-supplied `Mcp-Session-Id` on `initialize` is echoed back unchanged; a factory-bound `correlation_id` always wins over both. Only the `initialize` response carries the header — non-init responses don't, so the id is never leaked on every reply. The SDK does not maintain a server-side session store: the id is best-effort correlation only (audit threading + cancellation routing), and a subsequent request carrying an "unknown" id is NOT refused.
 
-  **Session termination via `DELETE /`:** a `DELETE` carrying `Mcp-Session-Id` cancels every in-flight request registered under that correlation id and returns `204 No Content`. The header value is sanitized with the same regex as the request setter; missing or invalid values return `400`. The DELETE handler runs before the agent factory, so teardown traffic cannot force per-request agent construction.
+  **Session termination via `DELETE /`:** a `DELETE` carrying `Mcp-Session-Id` cancels every in-flight request registered under that correlation id and returns `204 No Content`. The header value is sanitized with the same regex as the request setter; missing or invalid values return `400`. Since 5.8, termination is gated like every other session operation: it passes the Origin policy, authenticates through the agent factory (`401` when the factory refuses), and is refused with `403` when the session is bound to a different principal. An unclaimed session can be terminated by any authenticated caller.
 
 - **Factory path (for application-bound sessions):** application code that already has an internal session identifier can override the client-supplied header by setting it inside the agent factory:
 

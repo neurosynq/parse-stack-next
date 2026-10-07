@@ -389,4 +389,43 @@ class PipelineForwardPassTest < Minitest::Test
     end
     assert_match(/sessionToken|internal Parse Server column/, err.message)
   end
+
+  # ─── whole-document variables and join keys ─────────────────────────
+
+  def test_root_variable_reference_to_a_hidden_field_is_refused
+    assert_raises(Parse::Agent::AccessDenied) do
+      aggregate([{ "$project" => { "leaked" => "$$ROOT.secret_note" } }])
+    end
+    assert_raises(Parse::Agent::AccessDenied) do
+      aggregate([{ "$addFields" => { "copy" => "$$CURRENT" } }])
+    end
+    aggregate([{ "$project" => { "s" => "$$ROOT.status", "now" => "$$NOW" } }])
+  end
+
+  def test_lookup_join_keys_are_checked_on_both_sides
+    assert_raises(Parse::Agent::AccessDenied) do
+      aggregate([{ "$lookup" => { "from" => "PFPProject", "localField" => "secret_note",
+                                  "foreignField" => "name", "as" => "p" } }])
+    end
+    assert_raises(Parse::Agent::AccessDenied) do
+      aggregate([{ "$lookup" => { "from" => "PFPProject", "localField" => "status",
+                                  "foreignField" => "budget", "as" => "p" } }])
+    end
+    assert_raises(Parse::Agent::AccessDenied) do
+      aggregate([{ "$lookup" => { "from" => "PFPProject", "let" => { "x" => "$secret_note" },
+                                  "pipeline" => [], "as" => "p" } }])
+    end
+    aggregate([{ "$lookup" => { "from" => "PFPProject", "localField" => "_p_project",
+                                "foreignField" => "_id", "as" => "p" } }])
+  end
+
+  def test_pass_through_pipeline_rows_are_projected_to_the_allowlist
+    out = aggregate([{ "$limit" => 1 }])
+    rows = [{ "objectId" => "a", "status" => "x", "secret_note" => "s", "_p_author" => "_User$u" }]
+    projected = Parse::Agent::Tools.project_aggregate_rows(rows, out)
+    assert_equal [{ "objectId" => "a", "status" => "x", "_p_author" => "_User$u" }], projected
+    assert_nil aggregate([{ "$group" => { "_id" => "$status", "n" => { "$sum" => 1 } } }]),
+               "a schema-replacing pipeline needs no projection"
+  end
+
 end

@@ -14,7 +14,7 @@ class TestObjectIdConstraint < Minitest::Test
     @klass = Parse::Constraint::ObjectIdConstraint
     @key = nil
     @operand = :id
-    @keys = [:id]
+    @keys = [:pointer_id] # :id is not installed on Symbol (it broke ActiveRecord)
   end
 
   def test_scalar_values

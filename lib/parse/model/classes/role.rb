@@ -62,6 +62,78 @@ module Parse
     # @return [RelationCollectionProxy<User>] a Parse relation of users belonging to this role.
     has_many :users, through: :relation
 
+    # Grants and revocations reach mongo-direct ACL resolution immediately
+    # rather than after the role-cache TTL: the users whose membership a save
+    # changes have their cached role closures dropped, and a change to the
+    # role hierarchy drops them all.
+    before_save :_capture_role_membership_changes
+    after_save :_invalidate_role_caches
+
+    # Atomic relation operations (`role.users.add!`, `role.roles.remove!`)
+    # write immediately without a save, so they invalidate the same caches.
+    # @!visibility private
+    def op_add_relation!(field, objects = [])
+      result = super
+      _invalidate_after_relation_op(field, objects) if result
+      result
+    end
+
+    # @!visibility private
+    def op_remove_relation!(field, objects = [])
+      result = super
+      _invalidate_after_relation_op(field, objects) if result
+      result
+    end
+
+    # @!visibility private
+    def _invalidate_after_relation_op(field, objects)
+      key = field.to_s
+      if %w[roles].include?(key)
+        @_role_hierarchy_changed = true
+      elsif %w[users].include?(key)
+        @_role_membership_changed_ids = Array(objects).filter_map do |u|
+          id = u.respond_to?(:id) ? u.id : (u.is_a?(Hash) ? (u["objectId"] || u[:objectId]) : u)
+          id.to_s if id.present?
+        end
+      else
+        return
+      end
+      _invalidate_role_caches
+    end
+
+    # @!visibility private
+    def _capture_role_membership_changes
+      users_proxy = instance_variable_get(:@users)
+      ids = []
+      if users_proxy.respond_to?(:additions)
+        (Array(users_proxy.additions) + Array(users_proxy.removals)).each do |u|
+          id = u.respond_to?(:id) ? u.id : u
+          ids << id.to_s if id.present?
+        end
+      end
+      roles_proxy = instance_variable_get(:@roles)
+      @_role_hierarchy_changed = roles_proxy.respond_to?(:additions) &&
+                                 (Array(roles_proxy.additions).any? || Array(roles_proxy.removals).any?)
+      @_role_membership_changed_ids = ids.uniq
+      nil
+    end
+
+    # @!visibility private
+    def _invalidate_role_caches
+      auth = client.respond_to?(:authorization) ? client.authorization : nil
+      return unless auth
+      if @_role_hierarchy_changed && auth.respond_to?(:invalidate_all_roles)
+        auth.invalidate_all_roles
+      elsif auth.respond_to?(:invalidate_user_roles)
+        Array(@_role_membership_changed_ids).each { |id| auth.invalidate_user_roles(id) }
+      end
+    rescue StandardError => e
+      warn "[Parse::Role] role cache invalidation failed: #{e.class}"
+    ensure
+      @_role_membership_changed_ids = nil
+      @_role_hierarchy_changed = nil
+    end
+
     # Names of Mongo driver errors that mean "the server is momentarily
     # unreachable", for which falling back to the Parse Server walk is right.
     #

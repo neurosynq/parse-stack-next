@@ -138,6 +138,10 @@ module Parse
       # `^foo.*` is not).
       REDOS_NESTED_QUANTIFIER_RE = /\([^)]*[+*][^)]*\)[+*?]/.freeze
 
+      # Fiber-storage key holding the class whose field names are being
+      # resolved; see {#translate}.
+      CLASS_SCOPE_KEY = :parse_agent_constraint_class
+
       # Translate JSON constraints to Parse query format.
       # Validates all operators against the security whitelist.
       #
@@ -153,9 +157,38 @@ module Parse
       #   — continues to parse as a single positional Hash under Ruby 3+
       #   kwargs separation. Adding a kwarg would have turned the same call
       #   into "empty kwargs + missing positional arg."
-      def translate(constraints, agent = nil)
+      #
+      # @param class_name [String, nil] the class the constraints apply to.
+      #   When given, field keys are resolved the way the field-policy check
+      #   resolves them ({Parse::Agent::MetadataRegistry.wire_field_names}):
+      #   a declared `field:` name such as `PublicText` is kept exactly, so the
+      #   column that was checked is the column that is queried. Embedded
+      #   `$inQuery`/`$select` clauses resolve against their own className.
+      def translate(constraints, agent = nil, class_name = nil)
         return {} if constraints.nil? || constraints.empty?
+        previous = Fiber[CLASS_SCOPE_KEY]
+        Fiber[CLASS_SCOPE_KEY] = class_name&.to_s
+        begin
+          translate_in_scope(constraints, agent)
+        ensure
+          Fiber[CLASS_SCOPE_KEY] = previous
+        end
+      end
 
+      # Check if constraints are valid without raising.
+      #
+      # @param constraints [Hash] the query constraints
+      # @return [Boolean] true if valid, false otherwise
+      def valid?(constraints)
+        translate(constraints)
+        true
+      rescue ConstraintSecurityError, InvalidOperatorError
+        false
+      end
+
+      private
+
+      def translate_in_scope(constraints, agent)
         raise InvalidOperatorError.new(
           "Constraints must be a Hash, got #{constraints.class}",
           operator: nil,
@@ -177,19 +210,6 @@ module Parse
             end
         end
       end
-
-      # Check if constraints are valid without raising.
-      #
-      # @param constraints [Hash] the query constraints
-      # @return [Boolean] true if valid, false otherwise
-      def valid?(constraints)
-        translate(constraints)
-        true
-      rescue ConstraintSecurityError, InvalidOperatorError
-        false
-      end
-
-      private
 
       # Translate a single value, handling nested operators
       #
@@ -305,7 +325,7 @@ module Parse
         # disabling the per-agent class filter on every nested
         # cross-class hop. Keep this call POSITIONAL.
         if embedded_where.is_a?(Hash)
-          translated_where = translate(embedded_where, agent)
+          translated_where = translate(embedded_where, agent, embedded_class_name)
           new_val = val.dup
           if op == "$select" || op == "$dontSelect"
             query_part = new_val["query"].transform_keys(&:to_s)
@@ -541,6 +561,13 @@ module Parse
       # Matches Parse::Query.field_formatter behavior
       def columnize(field)
         return field if field.start_with?("_") # Preserve special fields like _User
+
+        class_name = Fiber[CLASS_SCOPE_KEY]
+        if class_name && !class_name.empty? && defined?(Parse::Agent::MetadataRegistry)
+          root, rest = field.to_s.split(".", 2)
+          wire = Parse::Agent::MetadataRegistry.wire_field_names(class_name, [root]).first || root
+          return rest ? "#{wire}.#{rest}" : wire
+        end
 
         # Convert snake_case to camelCase
         field.to_s.gsub(/_([a-z])/) { ::Regexp.last_match(1).upcase }

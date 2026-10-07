@@ -463,10 +463,33 @@ module Parse
           protected_fields = Parse::CLPScope.protected_fields_for(
             collection_name, resolution.permission_strings,
           )
+          # Unconditional: `Parse::AtlasSearch` may already be partially
+          # defined by a submodule (session, protected_paths) without the
+          # main file loaded. `require_relative` is idempotent.
+          require_relative "../atlas_search"
+          Parse::AtlasSearch.send(:assert_search_fields_allowed!,
+                                  Array(lex[:fields]).map(&:to_s), protected_fields, resolution)
           Parse::VectorSearch.validate_query_vector!(vec[:query_vector])
           Parse::PipelineSecurity.validate_filter!(vec[:vector_filter]) if vec[:vector_filter]
           Parse::PipelineSecurity.validate_filter!(vec[:filter]) if vec[:filter]
           Parse::PipelineSecurity.validate_filter!(lex[:filter]) if lex[:filter]
+          # The client path gets these refusals from AtlasSearch.search and
+          # VectorSearch.search. The native path builds its own pipeline,
+          # so apply the same protected-field refusals here: the vector
+          # field, every filter's predicate keys, and `$expr` references.
+          Parse::VectorSearch.send(:assert_protected_fields_untouched!,
+                                   collection_name, vec[:field].to_s, vec[:filter],
+                                   vec[:vector_filter], protected_fields, resolution)
+          if lex[:filter] && !lex[:filter].empty? && !resolution.master?
+            Parse::PipelineSecurity.refuse_protected_field_references!(
+              [{ "$match" => lex[:filter] }], collection_name, resolution,
+            )
+            Parse::AtlasSearch::ProtectedPaths.assert_filter_allowed!(
+              lex[:filter], protected_fields, resolution,
+              collection_name: collection_name,
+              method_name: "Parse::VectorSearch::Hybrid.search",
+            )
+          end
 
           pipeline = native_pipeline_for(lex, vec, oversample, resolution,
                                          k_constant: k_constant, weights: weights, limit: oversample)
@@ -672,27 +695,22 @@ module Parse
         end
 
         def assert_clp_find!(collection_name, resolution)
-          return if resolution.nil? || resolution.master?
-          unless Parse::CLPScope.permits?(collection_name, :find, resolution.permission_strings)
-            raise Parse::CLPScope::Denied.new(
-              collection_name, :find,
-              "CLP refuses find on '#{collection_name}' for the current hybrid-search scope.",
-            )
-          end
+          # Same CLP branch evaluation as Parse::MongoDB.aggregate (public,
+          # user, and role grants first; then pointerFields / readUserFields).
+          # Raises Parse::CLPScope::Denied when the scope cannot find at all.
+          Parse::CLPScope.row_constraint_for!(collection_name, :find, resolution,
+                                              label: "hybrid-search")
+          nil
         end
 
         def resolve_pointer_fields!(collection_name, resolution)
-          return nil if resolution.nil? || resolution.master?
-          pointer_fields = Parse::CLPScope.pointer_fields_for(collection_name, :find)
-          return nil if pointer_fields.nil?
-          if resolution.user_id.nil?
-            raise Parse::CLPScope::Denied.new(
-              collection_name, :find,
-              "CLP requires user identity (pointerFields=#{pointer_fields.inspect}) " \
-              "but the current hybrid-search scope has no user_id.",
-            )
-          end
-          pointer_fields
+          # nil when a public, user, or role grant already permits every row
+          # (Parse Server ignores pointer permissions then); otherwise the
+          # pointerFields plus readUserFields the rows must match. The older
+          # permits? / pointer_fields_for pair missed readUserFields entirely
+          # and over-restricted a public grant that also listed pointerFields.
+          Parse::CLPScope.row_constraint_for!(collection_name, :find, resolution,
+                                              label: "hybrid-search")
         end
 
         def validate_weights!(weights)

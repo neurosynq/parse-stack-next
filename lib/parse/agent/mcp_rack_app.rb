@@ -313,6 +313,17 @@ module Parse
       #   explicit `streaming:` or `notifications:` also raises, since the
       #   switch already owns those toggles. Requires a streaming-capable Rack
       #   server (Puma, Falcon, Unicorn); has no effect under WEBrick.
+      # @param listening_stream_revalidator [#call, nil] re-checks the caller's
+      #   identity on long-lived GET listening streams. Called with the agent
+      #   that opened the stream every `listening_stream_revalidate_interval`
+      #   seconds; a falsy return (or a raise) closes the stream, which tears
+      #   down that session's subscriptions. POST requests re-authenticate
+      #   through the agent factory on every call, but a listening stream is
+      #   authenticated once at attach, so this is what bounds how long a
+      #   revoked session keeps receiving notifications. `nil` (default) skips
+      #   revalidation. {MCPRackApp.user_scoped} installs one.
+      # @param listening_stream_revalidate_interval [Numeric, nil] seconds
+      #   between revalidations. Required (positive) when a revalidator is set.
       # @raise [ArgumentError] if both or neither of agent_factory/block are given.
       def initialize(agent_factory: nil, max_body_size: DEFAULT_MAX_BODY_SIZE,
                      logger: nil, streaming: nil,
@@ -328,6 +339,8 @@ module Parse
                      transport: nil,
                      approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
                      principal_resolver: nil,
+                     listening_stream_revalidator: nil,
+                     listening_stream_revalidate_interval: nil,
                      health_path: nil, &block)
         if agent_factory && block
           raise ArgumentError, "Provide agent_factory: OR a block, not both"
@@ -415,11 +428,35 @@ module Parse
         # Binds each MCP session id to the principal that established it so a
         # listening stream can't be hijacked by another authenticated caller.
         # Same per-instance / single-process scope as @cancellation_registry.
-        @session_owners = SessionOwnerRegistry.new
+        # Live sessions (an attached listening stream or a pending approval)
+        # keep their owner binding under LRU pressure.
+        @session_owners = SessionOwnerRegistry.new(
+          # A session holding subscriptions is pinned too: evicting its
+          # binding would leave LiveQuery subscriptions (and a global session
+          # slot) owned by no one, outside every per-principal bound.
+          pinned: lambda do |sid|
+            @pending_elicitations.pending_for?(sid) ||
+              (@subscription_manager.respond_to?(:listener?) && @subscription_manager.listener?(sid)) ||
+              (@subscription_manager.respond_to?(:subscriptions?) && @subscription_manager.subscriptions?(sid))
+          end,
+        )
         if principal_resolver && !principal_resolver.respond_to?(:call)
           raise ArgumentError, "principal_resolver must respond to #call"
         end
         @principal_resolver = principal_resolver
+
+        if listening_stream_revalidator
+          unless listening_stream_revalidator.respond_to?(:call)
+            raise ArgumentError, "listening_stream_revalidator must respond to #call"
+          end
+          unless listening_stream_revalidate_interval.is_a?(Numeric) && listening_stream_revalidate_interval.positive?
+            raise ArgumentError,
+                  "listening_stream_revalidate_interval must be a positive Numeric when a " \
+                  "listening_stream_revalidator is set (got #{listening_stream_revalidate_interval.inspect})"
+          end
+        end
+        @listening_stream_revalidator = listening_stream_revalidator
+        @listening_stream_revalidate_interval = listening_stream_revalidate_interval
 
         # Listening-stream coordinator (the server→client broadcast bus
         # backing resource subscriptions, MCP elicitation, and
@@ -625,6 +662,27 @@ module Parse
           if clean_sid.nil?
             return [400, json_headers, [json_rpc_error(-32_600, "Invalid Mcp-Session-Id")]]
           end
+          # Termination is gated like every other session operation: the
+          # Origin policy, authentication through the agent factory, and the
+          # session's owner binding. Before 5.8 any caller who knew a session
+          # id could terminate it (cancel its requests, drop its approvals,
+          # subscriptions, and log level) without authenticating.
+          if origin_refused?(env)
+            return [403, json_headers, [json_rpc_error(-32_700, "Origin not allowed")]]
+          end
+          begin
+            terminating_agent = @agent_factory.call(env)
+          rescue Parse::Agent::Unauthorized
+            @logger&.warn("[Parse::Agent::MCPRackApp] Unauthorized session termination")
+            return [401, json_headers, [unauthorized_body]]
+          rescue StandardError => e
+            @logger&.warn("[Parse::Agent::MCPRackApp] Factory error on DELETE: #{e.class.name}")
+            return [500, json_headers, [json_rpc_error(-32_603, "Internal error")]]
+          end
+          if @session_owners.claimed_by_other?(clean_sid, principal_fingerprint(terminating_agent, env))
+            @logger&.warn("[Parse::Agent::MCPRackApp] session termination refused: owned by another principal")
+            return [403, json_headers, [json_rpc_error(-32_600, "Mcp-Session-Id is owned by another principal")]]
+          end
           @cancellation_registry.cancel_all_for(clean_sid, reason: :session_terminated)
           # Wake any tool thread blocked on an elicitation reply for this
           # session (it returns `unavailable` → fail closed) and drop the
@@ -824,7 +882,15 @@ module Parse
           # level, or have its elicitation capability recorded (owner-binding;
           # see SessionOwnerRegistry). A session id already owned by another
           # principal is refused outright rather than rebound.
-          unless @session_owners.bind(agent.correlation_id, principal_fingerprint(agent, env))
+          if (limited = charge_session_op(agent, body))
+            return limited
+          end
+          bound = @session_owners.bind(agent.correlation_id, principal_fingerprint(agent, env))
+          if bound == :full
+            @logger&.warn("[Parse::Agent::MCPRackApp] initialize refused: session registry full")
+            return [503, json_headers, [json_rpc_error(-32_000, "Session capacity exhausted", id: body["id"])]]
+          end
+          unless bound
             @logger&.warn("[Parse::Agent::MCPRackApp] initialize refused: session owned by another principal")
             return [403, json_headers,
                     [json_rpc_error(-32_600, "Mcp-Session-Id is owned by another principal", id: body["id"])]]
@@ -841,7 +907,9 @@ module Parse
         #     Failures (no correlation_id, no match) are silent 202 no-ops
         #     to avoid a probe oracle — exactly like notifications/cancelled.
         if elicitation_reply?(body)
-          route_elicitation_reply(agent, body)
+          # Only the session's owner may answer its approval prompts. A
+          # mismatch is the same silent 202 as any other miss (no oracle).
+          route_elicitation_reply(agent, body) if session_controllable?(agent, env)
           return [202, json_headers, [""]]
         end
 
@@ -859,7 +927,11 @@ module Parse
         #     always 202 Accepted with an empty body.
         if body.is_a?(Hash) && body["method"] == "notifications/cancelled"
           request_id = body.dig("params", "requestId")
-          if agent.respond_to?(:correlation_id) && agent.correlation_id && request_id
+          # Only the session's owner may cancel its in-flight requests; a
+          # caller who merely knows (or chose) the same Mcp-Session-Id gets the
+          # same silent 202 as any other miss.
+          if agent.respond_to?(:correlation_id) && agent.correlation_id && request_id &&
+             session_controllable?(agent, env)
             @cancellation_registry.cancel(
               agent.correlation_id,
               request_id,
@@ -867,6 +939,41 @@ module Parse
             )
           end
           return [202, json_headers, [""]]
+        end
+
+        # 5d. Session ownership for every other request. A request carrying a
+        #     session id bound to another principal is refused, so knowing a
+        #     session id is not enough to unsubscribe its resources, fill its
+        #     subscription cap, or route an approval prompt to its stream.
+        #     An unbound id (stateless clients, or a cluster where initialize
+        #     landed on another worker) still works for ordinary calls.
+        if (cid = agent.respond_to?(:correlation_id) ? agent.correlation_id : nil) &&
+           body.is_a?(Hash) && body["method"] != "initialize"
+          fingerprint = principal_fingerprint(agent, env)
+          if @session_owners.claimed_by_other?(cid, fingerprint)
+            @logger&.warn("[Parse::Agent::MCPRackApp] request refused: session owned by another principal")
+            return [403, json_headers,
+                    [json_rpc_error(-32_600, "Mcp-Session-Id is owned by another principal", id: body["id"])]]
+          end
+          # Subscriptions hold server resources (LiveQuery sockets, global
+          # session slots), so they need a session this principal established
+          # (initialize, or a listening stream it attached). Without that, a
+          # caller could invent session ids to fill the global session limit.
+          if SESSION_BOUND_METHODS.include?(body["method"]) && @subscription_manager
+            unless @session_owners.owned_by?(cid, fingerprint)
+              # Not owned by anyone else (that was refused above), so the id
+              # is unknown here: never initialized, or bound on another
+              # process before a restart. 404 is the MCP signal for an
+              # unknown session; a compliant client re-initializes.
+              return [404, json_headers,
+                      [json_rpc_error(-32_001,
+                                      "Unknown session; send initialize to start a new one",
+                                      id: body["id"])]]
+            end
+            if (limited = charge_session_op(agent, body))
+              return limited
+            end
+          end
         end
 
         # 6. Branch on streaming preference. Transport-level errors (steps 1-5)
@@ -957,6 +1064,37 @@ module Parse
           listener_check: ->(cid) { mgr ? mgr.listener?(cid) : false },
           timeout: @approval_timeout,
         )
+      end
+
+      # Methods that act on server-held session state and so require a session
+      # bound to the caller (see step 5d in #call).
+      SESSION_BOUND_METHODS = %w[resources/subscribe].freeze
+
+      # Charge a session-creating operation (initialize, subscribe) against
+      # the agent's rate limiter, which these never reach through
+      # `agent.execute`. With a per-principal limiter (`user_scoped`,
+      # `master_analytics`) this bounds how fast one caller can create
+      # sessions or subscriptions.
+      #
+      # @return [Array, nil] a 429 Rack response when limited, else nil.
+      def charge_session_op(agent, body)
+        limiter = agent.respond_to?(:rate_limiter) ? agent.rate_limiter : nil
+        return nil unless limiter.respond_to?(:check!)
+        limiter.check!
+        nil
+      rescue StandardError => e
+        retry_after = e.respond_to?(:retry_after) ? e.retry_after.to_f.ceil : 1
+        headers = json_headers.merge("retry-after" => [retry_after, 1].max.to_s)
+        [429, headers, [json_rpc_error(-32_000, "Rate limit exceeded", id: body["id"])]]
+      end
+
+      # Whether this request's principal may send control messages
+      # (cancellation, elicitation replies) for its Mcp-Session-Id: true for an
+      # unbound session or one bound to this principal.
+      def session_controllable?(agent, env)
+        cid = agent.respond_to?(:correlation_id) ? agent.correlation_id : nil
+        return false if cid.nil? || cid.to_s.empty?
+        @session_owners.controllable_by?(cid, principal_fingerprint(agent, env))
       end
 
       # The log-level registry this request may read and write, or nil.
@@ -1125,25 +1263,40 @@ module Parse
         # infeasible to enumerate. (Contrast the cancellation/elicitation
         # paths, which return a uniform 202 because their ids are
         # client-chosen and guessable.)
-        unless @session_owners.authorize_attach(session_id, principal_fingerprint(agent, env))
-          @logger&.warn("[Parse::Agent::MCPRackApp] Listening stream denied: session owned by another principal")
-          return [403, json_headers, [json_rpc_error(-32_600, "Mcp-Session-Id is owned by another principal")]]
-        end
-
-        # Soft cap on concurrent listening streams, mirroring serve_sse's
-        # dispatcher cap. Listening streams are bounded SEPARATELY from
-        # request-scoped SSE dispatchers and reuse the same configured ceiling,
-        # so total streaming thread exposure can reach 2x max_concurrent_dispatchers
-        # (up to N request SSE + N listening streams), not N. Like serve_sse the
-        # check is best-effort (not lock-protected against the per-stream
-        # increment in #each), so a burst can briefly overshoot — acceptable for
-        # a soft cap.
+        # Check capacity and charge the principal BEFORE claiming the id, so a
+        # refused stream leaves no binding behind and a caller cannot claim
+        # ids by opening and dropping streams faster than its rate limit.
         if @max_concurrent_dispatchers &&
            MCPRackApp.active_listening_stream_count >= @max_concurrent_dispatchers
           return [503, json_headers, [json_rpc_error(-32_000, "server busy")]]
         end
+        if (limited = charge_session_op(agent, {}))
+          return limited
+        end
 
-        body = ListeningStreamBody.new(@subscription_manager, session_id, @heartbeat_interval, @logger)
+        attach = @session_owners.authorize_attach(session_id, principal_fingerprint(agent, env))
+        if attach == :full
+          @logger&.warn("[Parse::Agent::MCPRackApp] Listening stream denied: session registry full")
+          return [503, json_headers, [json_rpc_error(-32_000, "Session capacity exhausted")]]
+        end
+        unless attach
+          @logger&.warn("[Parse::Agent::MCPRackApp] Listening stream denied: session owned by another principal")
+          return [403, json_headers, [json_rpc_error(-32_600, "Mcp-Session-Id is owned by another principal")]]
+        end
+
+        # (The soft cap on concurrent listening streams is checked above,
+        # before the claim. Listening streams are bounded separately from
+        # request-scoped SSE dispatchers and reuse the same ceiling, so total
+        # streaming thread exposure can reach 2x max_concurrent_dispatchers.
+        # The check is best-effort, so a burst can briefly overshoot.)
+
+        revalidate = if @listening_stream_revalidator
+            revalidator = @listening_stream_revalidator
+            -> { revalidator.call(agent) }
+          end
+        body = ListeningStreamBody.new(@subscription_manager, session_id, @heartbeat_interval, @logger,
+                                       revalidate: revalidate,
+                                       revalidate_interval: @listening_stream_revalidate_interval)
         [200, sse_headers, body]
       end
 
@@ -1785,16 +1938,25 @@ module Parse
         # @param heartbeat_interval [Numeric] SSE comment heartbeat period in
         #   seconds; `<= 0` disables heartbeats.
         # @param logger [#warn, nil]
-        def initialize(manager, session_id, heartbeat_interval, logger)
+        # @param revalidate [#call, nil] identity re-check run every
+        #   `revalidate_interval` seconds; a falsy return or a raise closes the
+        #   stream. See MCPRackApp's `listening_stream_revalidator:`.
+        # @param revalidate_interval [Numeric, nil]
+        def initialize(manager, session_id, heartbeat_interval, logger,
+                       revalidate: nil, revalidate_interval: nil)
           @manager = manager
           @session_id = session_id
           @heartbeat_interval = heartbeat_interval
           @logger = logger
+          @revalidate = revalidate
+          @revalidate_interval = revalidate_interval
+          @revalidator_thread = nil
           @queue = Queue.new
           @heartbeat = nil
           @closed = false
           @counted = false
           @close_mutex = Mutex.new
+          @close_signal = ConditionVariable.new
         end
 
         # Rack body interface — called once by the Rack server.
@@ -1806,14 +1968,29 @@ module Parse
           # Rack server never iterates — or a client that disconnects before
           # iteration — never inflates the counter; the matching decrement is in
           # #close, which #each's `ensure` always runs.
-          MCPRackApp.adjust_listening_stream_count(1)
-          @counted = true
-          @manager.attach_listener(@session_id) do |notification|
+          # Increment and record it under the close lock, so a close racing
+          # this cannot skip the matching decrement and leak a stream slot.
+          @close_mutex.synchronize do
+            return if @closed
+            MCPRackApp.adjust_listening_stream_count(1)
+            @counted = true
+          end
+          listener = lambda do |notification|
             queue << format_event(notification)
+          end
+          # Attach under the close lock so a close that races this attach
+          # either runs first (nothing is attached) or sees @listener set
+          # and detaches it. Without the lock a close landing just before
+          # the attach would leave the listener registered with no stream.
+          @close_mutex.synchronize do
+            return if @closed
+            @manager.attach_listener(@session_id, &listener)
+            @listener = listener
           end
           # Initial comment flushes response headers and confirms the stream.
           yield ": connected\n\n"
           start_heartbeat
+          start_revalidation
           loop do
             msg = @queue.pop
             break if msg == DONE
@@ -1826,17 +2003,38 @@ module Parse
         # Terminate the stream: stop heartbeats, detach the listener, and tear
         # down the session's LiveQuery subscriptions. Idempotent.
         def close
-          @close_mutex.synchronize do
+          counted = @close_mutex.synchronize do
             return if @closed
             @closed = true
+            # Wake the revalidator so it exits at once instead of after its
+            # next interval.
+            @close_signal.broadcast
+            @counted
           end
           # Balance the #each increment exactly once (close is idempotent via
-          # @closed, and only #each sets @counted).
-          MCPRackApp.adjust_listening_stream_count(-1) if @counted
+          # @closed, and #each counts only under the same lock).
+          MCPRackApp.adjust_listening_stream_count(-1) if counted
           @heartbeat&.kill
           @heartbeat = nil
+          # The revalidator is not killed: it may be inside a REST call, and
+          # killing it there can return a pooled connection mid-response. It
+          # was woken above and exits after any check in progress.
+          @revalidator_thread = nil
           begin
-            @manager.detach_listener(@session_id)
+            # Only a stream that attached detaches: a body closed before
+            # Rack iterated it (or before its attach) never registered a
+            # listener, and detaching would tear down the session's active
+            # stream. Pass this stream's own callback so a reconnect that
+            # already attached a newer stream is not torn down either.
+            # Custom managers with a one-argument detach_listener still work.
+            listener = @close_mutex.synchronize { @listener }
+            if listener.nil?
+              nil
+            elsif @manager.method(:detach_listener).arity != 1
+              @manager.detach_listener(@session_id, listener)
+            else
+              @manager.detach_listener(@session_id)
+            end
           rescue StandardError => e
             line = "[Parse::Agent::MCPRackApp::ListeningStreamBody] detach error: #{e.class}: #{e.message}"
             @logger ? @logger.warn(line) : warn(line)
@@ -1846,15 +2044,77 @@ module Parse
 
         private
 
+        # @return [Boolean] true once {#close} has run.
+        def closed?
+          @close_mutex.synchronize { @closed }
+        end
+
+        # Background threads start under the same mutex {#close} takes, and
+        # never once the stream is closed. A stream can close while #each is
+        # still yielding its first frame (client disconnect, DELETE); without
+        # this, the threads would start after close had already run and keep
+        # running (the revalidator re-authenticating indefinitely).
         def start_heartbeat
           return unless @heartbeat_interval && @heartbeat_interval > 0
           queue = @queue
           interval = @heartbeat_interval
-          @heartbeat = Thread.new do
-            loop do
-              sleep interval
-              queue << ": keep-alive\n\n"
+          @close_mutex.synchronize do
+            return if @closed
+            @heartbeat = Thread.new do
+              loop do
+                sleep interval
+                break if closed?
+                queue << ": keep-alive\n\n"
+              end
             end
+          end
+        end
+
+        # Re-check the caller's identity on a timer; close the stream the first
+        # time the check fails. close runs the normal teardown (detach the
+        # listener, unsubscribe the session's LiveQuery subscriptions) and
+        # wakes #each, which then ends the response.
+        def start_revalidation
+          return unless @revalidate && @revalidate_interval && @revalidate_interval > 0
+          check = @revalidate
+          interval = @revalidate_interval
+          @close_mutex.synchronize do
+            return if @closed
+            @revalidator_thread = Thread.new { revalidation_loop(check, interval) }
+          end
+        end
+
+        # Consecutive revalidation errors (as opposed to a check that reports
+        # the identity invalid) tolerated before the stream is closed. One
+        # Parse Server blip should not drop every open stream at once; an
+        # outage that persists still closes them, since the identity can no
+        # longer be confirmed.
+        MAX_REVALIDATION_ERRORS = 3
+
+        def revalidation_loop(check, interval)
+          errors = 0
+          loop do
+            @close_mutex.synchronize do
+              @close_signal.wait(@close_mutex, interval) unless @closed
+            end
+            break if closed?
+            ok = begin
+                result = check.call
+                errors = 0
+                result
+              rescue StandardError => e
+                errors += 1
+                line = "[Parse::Agent::MCPRackApp::ListeningStreamBody] revalidation error: #{e.class}"
+                @logger ? @logger.warn(line) : warn(line)
+                errors < MAX_REVALIDATION_ERRORS ? :retry : false
+              end
+            next if ok
+            break if closed?
+            line = "[Parse::Agent::MCPRackApp::ListeningStreamBody] closing listening stream: " \
+                   "caller identity no longer valid"
+            @logger ? @logger.warn(line) : warn(line)
+            close
+            break
           end
         end
 
@@ -1926,14 +2186,31 @@ module Parse
       #   per-user impersonation) supplies a real identity.
       #
       # LRU-bounded so an initialize-without-DELETE stream of sessions can't
-      # grow it without limit; evicting an active owner just downgrades it to
-      # TOFU on the next attach.
+      # grow it without limit. Live sessions (an attached listening stream or a
+      # pending approval) are pinned and never evicted; an evicted idle id
+      # downgrades to TOFU on its next attach. Each principal may hold at most
+      # `max_per_principal` bindings: past that, its own least recently used
+      # idle binding is evicted, so one caller flooding `initialize` cannot
+      # push other principals' idle sessions out of the registry.
       class SessionOwnerRegistry
         DEFAULT_MAX_ENTRIES = 10_000
+        DEFAULT_MAX_PER_PRINCIPAL = 100
+        # Fingerprints shared by every caller of an endpoint (a master-key
+        # factory with no `principal_resolver`). A per-principal bound on them
+        # would be a bound on the whole endpoint, so only the global one applies.
+        SHARED_PRINCIPALS = %w[mk].freeze
 
-        def initialize(max_entries: DEFAULT_MAX_ENTRIES)
+        # @param pinned [#call, nil] `->(session_id) { Boolean }`; a pinned
+        #   session's binding is never evicted (see #evict_lru!).
+        # @param max_per_principal [Integer, nil] bindings one principal may
+        #   hold; nil disables the per-principal bound.
+        def initialize(max_entries: DEFAULT_MAX_ENTRIES, pinned: nil,
+                       max_per_principal: DEFAULT_MAX_PER_PRINCIPAL)
           @owners = {} # session_id => principal fingerprint (insertion-ordered for LRU)
+          @counts = Hash.new(0) # principal fingerprint => bindings held
           @max = max_entries
+          @max_per_principal = max_per_principal
+          @pinned = pinned
           @mutex = Mutex.new
         end
 
@@ -1951,10 +2228,14 @@ module Parse
           @mutex.synchronize do
             owner = @owners[session_id]
             return false if owner && owner != fingerprint
-            @owners.delete(session_id)
-            @owners[session_id] = fingerprint
-            evict_lru!
-            true
+            if owner
+              @owners.delete(session_id)
+              @owners[session_id] = fingerprint
+              true
+            else
+              store(session_id, fingerprint)
+              retain_or_reject!(session_id, fingerprint)
+            end
           end
         end
 
@@ -1967,9 +2248,8 @@ module Parse
           @mutex.synchronize do
             owner = @owners[session_id]
             if owner.nil?
-              @owners[session_id] = fingerprint
-              evict_lru!
-              true
+              store(session_id, fingerprint)
+              retain_or_reject!(session_id, fingerprint)
             elsif owner == fingerprint
               @owners.delete(session_id)
               @owners[session_id] = owner
@@ -1980,11 +2260,38 @@ module Parse
           end
         end
 
+        # True when the session is bound to a principal other than this one.
+        # An unclaimed session is not claimed by anyone else.
+        def claimed_by_other?(session_id, fingerprint)
+          return false if blank?(session_id)
+          @mutex.synchronize do
+            owner = @owners[session_id]
+            touch(session_id, owner) if owner && owner == fingerprint
+            !owner.nil? && owner != fingerprint
+          end
+        end
+
+        # True when the session is unbound (never initialized or attached) or
+        # bound to this principal. Used to gate per-session control messages
+        # (cancellation, elicitation replies): an unbound session has no owner
+        # to protect, while a bound one only accepts its owner.
+        def controllable_by?(session_id, fingerprint)
+          return false if blank?(session_id) || blank?(fingerprint)
+          @mutex.synchronize do
+            owner = @owners[session_id]
+            owner.nil? || owner == fingerprint
+          end
+        end
+
         # True when `session_id` is bound to exactly this principal. Never
         # claims an unbound session (unlike {#authorize_attach}).
         def owned_by?(session_id, fingerprint)
           return false if blank?(session_id) || blank?(fingerprint)
-          @mutex.synchronize { @owners[session_id] == fingerprint }
+          @mutex.synchronize do
+            owned = @owners[session_id] == fingerprint
+            touch(session_id, fingerprint) if owned
+            owned
+          end
         end
 
         # Drop a session's owner binding (explicit DELETE termination). Not
@@ -1992,7 +2299,7 @@ module Parse
         # and an attacker can't grab the id during a brief disconnect.
         def forget(session_id)
           return if blank?(session_id)
-          @mutex.synchronize { @owners.delete(session_id) }
+          @mutex.synchronize { remove(session_id) }
         end
 
         # @return [Integer] current number of bound sessions (tests/metrics).
@@ -2003,8 +2310,77 @@ module Parse
         private
 
         # Hash preserves insertion order; #shift drops the oldest (LRU) entry.
-        def evict_lru!
-          @owners.shift while @owners.size > @max
+        # Evict least recently used bindings past the cap, skipping sessions
+        # the `pinned` predicate reports as live (an attached listening stream
+        # or a pending approval prompt). Evicting a live session's binding
+        # would make it unbound, and an unbound session accepts control
+        # messages from anyone, so a flood of new sessions could otherwise
+        # strip a victim's owner and let the flooder answer its approvals.
+        #
+        # A pinned entry the scan passes over is moved to the tail, so the
+        # next eviction does not re-check the same live sessions from the head
+        # (which would make every bind at capacity O(live sessions) under the
+        # lock). With `principal:`, only that principal's bindings are
+        # candidates and the scan stops at its per-principal bound.
+        def evict_lru!(protect: nil, principal: nil)
+          over = lambda do
+            principal ? @counts[principal] > @max_per_principal : @owners.size > @max
+          end
+          return unless over.call
+          @owners.keys.each do |sid|
+            break unless over.call
+            next if sid == protect
+            owner = @owners[sid]
+            next if principal && owner != principal
+            if @pinned && (@pinned.call(sid) rescue false)
+              @owners.delete(sid)
+              @owners[sid] = owner
+              next
+            end
+            remove(sid)
+          end
+        end
+
+        # Make room for a binding just written for `session_id`, never by
+        # evicting that binding itself. The principal's own idle bindings go
+        # first (per-principal bound), then the global LRU. When the room
+        # cannot be made because every candidate is pinned, the new binding is
+        # removed and :full returned so the caller refuses admission, rather
+        # than reporting success for a session that has no owner (which would
+        # let any caller attach to or control it).
+        #
+        # @return [true, :full]
+        def retain_or_reject!(session_id, fingerprint)
+          if @max_per_principal && !SHARED_PRINCIPALS.include?(fingerprint)
+            evict_lru!(protect: session_id, principal: fingerprint)
+            if @counts[fingerprint] > @max_per_principal
+              remove(session_id)
+              return :full
+            end
+          end
+          evict_lru!(protect: session_id)
+          return true if @owners.size <= @max
+          remove(session_id)
+          :full
+        end
+
+        # Refresh a binding's LRU position: an owner's ordinary requests keep
+        # its session from being evicted as idle.
+        def touch(session_id, owner)
+          @owners.delete(session_id)
+          @owners[session_id] = owner
+        end
+
+        def store(session_id, fingerprint)
+          @owners[session_id] = fingerprint
+          @counts[fingerprint] += 1
+        end
+
+        def remove(session_id)
+          owner = @owners.delete(session_id)
+          return unless owner
+          @counts[owner] -= 1
+          @counts.delete(owner) if @counts[owner] <= 0
         end
 
         def blank?(value)
@@ -2295,3 +2671,6 @@ module Parse
     end
   end
 end
+
+# Supported deployment patterns (MCPRackApp.user_scoped / .master_analytics).
+require_relative "mcp_deployments"

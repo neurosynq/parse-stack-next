@@ -47,6 +47,18 @@ class SemanticSearchFieldAllowlistTest < Minitest::Test
     agent_fields :summary, :body
   end
 
+  # Filterable fields, for per-agent narrowing of filter_fields.
+  class FilterDoc < Parse::Object
+    parse_class "SemanticAllowlistFilter"
+    property :summary, :string
+    property :category, :string
+    property :region, :string
+    property :embedding, :vector, dimensions: 8, provider: :fixture
+    embed :summary, into: :embedding
+    agent_searchable field: :embedding, filter_fields: %i[category region]
+    agent_fields :summary, :category, :region
+  end
+
   SECRET = "PRIVATE-BODY-TEXT do not disclose"
 
   def fake_agent
@@ -107,6 +119,42 @@ class SemanticSearchFieldAllowlistTest < Minitest::Test
     result = run_search(MixedDoc, text_field: "summary")
     assert_equal ["Public summary"], result[:chunks].map { |c| c[:content] }
     refute_includes JSON.generate(result), SECRET
+  end
+
+  # ---- per-agent narrowing (5.8) ----------------------------------------
+
+  def narrowed_agent(narrowing)
+    a = fake_agent
+    a.define_singleton_method(:field_narrowing_for) do |cn|
+      names = narrowing[cn.to_s]
+      names && Parse::Agent::MetadataRegistry.wire_field_names(cn, names)
+    end
+    a
+  end
+
+  def test_per_agent_narrowing_hides_a_text_source_the_class_allows
+    # The class ceiling allows summary, but this agent narrows it away.
+    a = narrowed_agent("SemanticAllowlistMixed" => %i[title])
+    err = assert_raises(Parse::Agent::AccessDenied) do
+      Parse::Agent::FieldPolicy.with(a) do
+        MixedDoc.stub(:find_similar, ->(**_kw) { @search_calls += 1; [] }) do
+          Parse::Retrieval::AgentTool.semantic_search(a, class_name: "SemanticAllowlistMixed", query: "q")
+        end
+      end
+    end
+    assert_equal :field_denied, err.kind
+    assert_equal 0, @search_calls
+  end
+
+  def test_per_agent_narrowing_narrows_filter_fields
+    a = narrowed_agent("SemanticAllowlistFilter" => %i[summary region])
+    err = assert_raises(Parse::Agent::ValidationError) do
+      Parse::Agent::FieldPolicy.with(a) do
+        Parse::Retrieval::AgentTool.semantic_search(a, class_name: "SemanticAllowlistFilter", query: "q",
+                                                       filter: { "category" => "x" })
+      end
+    end
+    assert_match(/category/, err.message)
   end
 
   def test_multiple_readable_sources_still_require_text_field

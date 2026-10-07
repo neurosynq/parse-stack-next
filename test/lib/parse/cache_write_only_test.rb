@@ -551,9 +551,12 @@ class CacheMiddlewareWriteOnlyTest < Minitest::Test
     # Call middleware
     middleware.call(env)
 
-    # Cache should now have the fresh data
-    assert @store.key?(@cache_key), "Cache should be updated after write_only request"
-    cached = @store[@cache_key]
+    # Cache should now have the fresh data. Default-layout keys are bound to
+    # the app id, the credential and the resource version, so locate the
+    # entry by its URL rather than by a hand-built key.
+    entry_key = @store.each_key.find { |k| k.include?(@cache_key) }
+    assert entry_key, "Cache should be updated after write_only request"
+    cached = @store[entry_key]
     # The caching middleware now stores values with string keys so they
     # survive the Redis wrapper's JSON serialization (no Marshal). Read the
     # string key, with a symbol fallback for legacy entries.
@@ -563,8 +566,22 @@ class CacheMiddlewareWriteOnlyTest < Minitest::Test
   end
 
   def test_normal_mode_reads_from_cache
-    # Pre-populate cache
-    @store.store(@cache_key, @cached_data, expires: 60)
+    # Pre-populate cache through the middleware, so the entry lands under
+    # the real (credential- and version-bound) key.
+    populate = lambda do |_env|
+      response = Faraday::Response.new
+      response.finish({
+        status: 200,
+        response_headers: { "Content-Type" => "application/json", "content-length" => "50" },
+        body: @cached_data[:body],
+      })
+      response
+    end
+    seed_env = Faraday::Env.new
+    seed_env.method = :get
+    seed_env.url = URI.parse(@cache_key)
+    seed_env[:request_headers] = {}
+    Parse::Middleware::Caching.new(populate, @store, expires: 60).call(seed_env)
 
     # Create a mock app that should NOT be called
     app_called = false

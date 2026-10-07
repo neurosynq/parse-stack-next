@@ -1,0 +1,44 @@
+# Live provider contract tests (`rake test:contract`).
+#
+# These issue real, billable requests to embedding and reranking providers to
+# catch provider drift that mocked tests cannot see (dimension tables, accepted
+# media, endpoint/key routing). They run on a schedule or on demand only, never
+# on pull_request, so PR runs stay credential-free and fork PRs never see the
+# secrets. Without a configured key every probe skips.
+
+name: Provider Contracts
+
+on:
+  schedule:
+    # Weekly, Monday 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-contracts
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    name: Live provider contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: Install ffmpeg (video contract probes)
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+      - name: Run contract tests
+        env:
+          VOYAGE_CONTRACT_KEY: ${{ secrets.VOYAGE_CONTRACT_KEY }}
+          # Per-model requests per minute for the key; set for trial keys
+          # (3 is common) so the suite paces itself instead of skipping.
+          VOYAGE_CONTRACT_RPM: ${{ vars.VOYAGE_CONTRACT_RPM }}
+        run: bundle exec rake test:contract

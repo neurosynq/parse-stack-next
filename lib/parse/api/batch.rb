@@ -26,7 +26,16 @@ module Parse
           batch_operations = Parse::BatchOperation.new batch_operations
         end
         response = request(:post, "batch", body: batch_operations.as_json)
-        response.success? && response.batch? ? response.batch_responses : response
+        return response.batch_responses if response.success? && response.batch?
+        return response if response.error?
+        # A successful HTTP response whose body is not an array of results
+        # cannot be matched to the submitted requests. Report it as a failure
+        # rather than as a batch where every write landed.
+        Parse::Response.error_response(
+          Parse::Response::ERROR_INTERNAL,
+          "Malformed batch response: expected an array of results",
+          http_status: response.http_status,
+        ).tap { |r| r.request = response.request }
       end
     end
   end

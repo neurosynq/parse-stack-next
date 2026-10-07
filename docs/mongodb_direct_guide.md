@@ -469,6 +469,33 @@ The `Parse::MongoDB.to_mongodb_date(value)` helper coerces `Date`,
 `DateTime`, `Time`, ISO 8601 strings, and Unix timestamps to a UTC `Time`
 suitable for matching.
 
+### MongoDB 9.0 null semantics
+
+MongoDB 9.0 changed how `null` comparisons treat a dotted path that runs
+through an array. When the path resolves to no non-null value (the field is
+an empty array, an array of scalars, or contains a nested array), it now
+compares equal to `null`. For `{ meta: [] }` or `{ meta: [1] }`,
+`{ "meta.owner": null }` now matches and `{ "meta.owner": { $ne: null } }` no
+longer does. `$exists` is unchanged, and `$lookup` equality follows the new
+rule. This applies to REST queries (Parse Server passes them to MongoDB) and
+mongo-direct queries alike.
+
+The SDK never adds a `null` comparison on a dotted path by itself; ACL
+scoping only checks the top-level `_rperm`. It compiles one only when you
+name a dotted field. Which constraints are affected:
+
+| Constraint on a dotted field | Compiles to | Changed in 9.0 |
+|---|---|---|
+| `:"meta.owner" => nil` | `{ "meta.owner": null }` | Yes |
+| `:"meta.owner".not => nil`, `.null => false` | `{ $ne: null }` | Yes |
+| `:"meta.owner".in => [nil, ...]` | `{ $in: [null, ...] }` | Yes |
+| `:"meta.items".empty_or_nil`, `.not_empty` | pipeline with `$eq` / `$ne: null` | Yes |
+| `:"meta.owner".null => true`, `.exists => false` | `{ $exists: false }` | No |
+
+If a dotted path in your queries can traverse an array, review those
+queries before upgrading, or use `.exists` when you mean "the field is
+present".
+
 ---
 
 ## Pointer joins and `parse_reference`

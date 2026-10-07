@@ -48,7 +48,7 @@ end
 class LookupRewriterIntegrationTest < Minitest::Test
   include ParseStackIntegrationTest
 
-  MONGODB_URI = (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin")
+  MONGODB_URI = (ENV["PARSE_TEST_MONGO_URI"] || "mongodb://admin:password@localhost:29017/parse_stack_next_it?authSource=admin&directConnection=true")
 
   def setup_mongodb_direct
     require "mongo"

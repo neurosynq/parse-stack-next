@@ -88,6 +88,10 @@ class MCPNotificationsTest < Minitest::Test
   end
 
   def test_resource_subscribe_fails_closed_in_notifications_mode
+    post({
+      "jsonrpc" => "2.0", "id" => 1, "method" => "initialize",
+      "params" => { "protocolVersion" => "2025-06-18", "capabilities" => {} },
+    }, session_id: "sub-sess")
     status, _h, body = post({
       "jsonrpc" => "2.0", "id" => 2, "method" => "resources/subscribe",
       "params" => { "uri" => "parse://Post/count" },

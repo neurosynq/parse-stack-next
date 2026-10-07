@@ -253,7 +253,9 @@ class QueryCloneTest < Minitest::Test
 
     assert original_author_constraint, "Original should have author constraint"
     assert cloned_author_constraint, "Clone should have author constraint"
-    assert_equal original_author_constraint.value, cloned_author_constraint.value, "Pointer constraint values should be preserved"
+    # The user is unsaved, and unsaved objects compare by identity, so a
+    # deep-copied clone is a different object. Compare their content.
+    assert_equal original_author_constraint.value.as_json, cloned_author_constraint.value.as_json, "Pointer constraint values should be preserved"
 
     puts "✓ Clone handles pointer constraints correctly"
   end

@@ -21,6 +21,10 @@ module Parse
     EMPTY_SET = Set.new.freeze
     private_constant :EMPTY_SET
 
+    # Parse Server's default server-config `protectedFields` option. See
+    # {.default_protected_fields}.
+    DEFAULT_PROTECTED_FIELDS = { "_User" => { "*" => ["email"].freeze }.freeze }.freeze
+
     # Cache-entry shape. `kind:` is the disposition of the most recent
     # schema-fetch attempt:
     #
@@ -288,29 +292,183 @@ module Parse
         # `permits?` already refused the query, so this branch is only
         # reached when callers ask for the protected-fields set directly
         # (e.g. for documentation or audit tooling).
-        return EMPTY_SET if entry.kind == :no_clp || entry.kind == :unresolvable
-        protected_map = entry.clp["protectedFields"] || entry.clp[:protectedFields]
+        return EMPTY_SET if entry.kind == :unresolvable
+        stored_map = if entry.kind == :no_clp
+            nil
+          else
+            entry.clp["protectedFields"] || entry.clp[:protectedFields]
+          end
+        protected_map = merge_default_protected_fields(class_name, stored_map)
         return EMPTY_SET if protected_map.nil? || protected_map.empty?
 
-        strip = Set.new(Array(protected_map["*"] || protected_map[:"*"]).map(&:to_s))
-
         claim_set = permission_strings.is_a?(Set) ? permission_strings : permission_strings.to_set
-        claim_set.each do |claim|
-          next if claim == "*"
-          override = protected_map[claim.to_s] || protected_map[claim.to_sym]
-          next if override.nil?
-          override_set = Set.new(Array(override).map(&:to_s))
-          strip &= override_set
-        end
-
-        strip.freeze
+        protected_sets_for(protected_map, claim_set).reduce { |acc, set| acc & set }&.freeze || EMPTY_SET
       end
 
-      def redact_protected_fields!(documents, strip_set)
+      # Parse Server's server-config `protectedFields` default, merged into
+      # every class's CLP `protectedFields` the way Parse Server's
+      # `SchemaData` merges them (union per group key).
+      #
+      # Parse Server ships `{ _User: { "*": ["email"] } }` as the default
+      # and does NOT expose the server-config value through
+      # `GET /schemas/<Class>`, so the SDK cannot discover it. Without this
+      # default a scoped mongo-direct read returned every user's email,
+      # and an `email` filter matched, where REST hides the field and
+      # refuses the filter. Set this to the same value as the server's
+      # `protectedFields` option when it is customized; `{}` disables the
+      # merge.
+      #
+      # @return [Hash{String => Hash{String => Array<String>}}]
+      def default_protected_fields
+        @default_protected_fields ||= DEFAULT_PROTECTED_FIELDS
+      end
+
+      # @param value [Hash, nil] class name => protectedFields map; nil
+      #   restores Parse Server's default.
+      def default_protected_fields=(value)
+        @default_protected_fields = value.nil? ? DEFAULT_PROTECTED_FIELDS : value
+      end
+
+      # Strip protected fields from result rows, top-level keys only.
+      #
+      # Parse Server deletes `object[key]` for each protected key on the
+      # returned object and does not descend into nested values, so an
+      # `:object` column holding `{ "secret" => ... }` keeps that key even
+      # when a top-level `secret` column is protected. Included objects are
+      # separate rows of another class; strip them with that class's own set
+      # (see {Parse::MongoDB.aggregate}).
+      #
+      # Parse Server also skips the strip for a `_User` row that IS the
+      # requesting user, so a user always sees their own `email`. Pass
+      # `class_name:` and `user_id:` to apply that exemption.
+      #
+      # The exemption reads the row's `_id` (or `objectId`) as it comes out
+      # of the pipeline. A caller stage can rewrite that value, so pass
+      # `user_id:` only when ownership was settled before any caller stage
+      # ran: either no caller stage can change the identity (see
+      # {Parse::PipelineSecurity.identity_preserving?}), or the rows went
+      # through {.protected_strip_stage} at the head of their pipeline.
+      #
+      # @param documents [Array<Hash>] rows (Mongo storage or Parse form).
+      # @param strip_set [Set<String>] protected field names.
+      # @param class_name [String, nil] the rows' class.
+      # @param user_id [String, nil] the requesting user's objectId.
+      # @return [Array<Hash>] the same array, modified in place.
+      def redact_protected_fields!(documents, strip_set, class_name: nil, user_id: nil)
         return documents if documents.nil? || documents.empty?
         return documents if strip_set.nil? || strip_set.empty?
-        documents.each { |doc| walk_and_delete!(doc, strip_set) }
+        self_exempt = class_name.to_s == Parse::Model::CLASS_USER && !user_id.to_s.empty?
+        documents.each do |doc|
+          next unless doc.is_a?(Hash)
+          if self_exempt
+            row_id = doc["_id"] || doc[:_id] || doc["objectId"] || doc[:objectId]
+            next if row_id.to_s == user_id.to_s
+          end
+          strip_top_level!(doc, strip_set)
+        end
         documents
+      end
+
+      # A pipeline stage that removes protected fields at the database,
+      # placed at the head of a (sub-)pipeline before any caller stage runs.
+      #
+      # Ownership of a `_User` row is decided here, on the stored `_id`, so
+      # the self exemption cannot be claimed by a later stage that rewrites
+      # `_id`. For a `_User` read by a known user the fields are kept only on
+      # that user's own row; everywhere else they are unset. The `_p_<field>`
+      # storage column of a protected pointer is removed with the field.
+      #
+      # @param strip_set [Set<String>] protected field names for the scope.
+      # @param class_name [String, nil] the class the stage reads.
+      # @param user_id [String, nil] the requesting user's objectId.
+      # @return [Hash, nil] a `$unset` or `$set` stage, or nil when nothing
+      #   is protected.
+      def protected_strip_stage(strip_set, class_name: nil, user_id: nil)
+        return nil if strip_set.nil? || strip_set.empty?
+        columns = strip_set.flat_map { |f| [f.to_s, "_p_#{f}"] }.uniq
+        if class_name.to_s == Parse::Model::CLASS_USER && !user_id.to_s.empty?
+          own_row = { "$eq" => ["$_id", { "$literal" => user_id.to_s }] }
+          { "$set" => columns.to_h { |c| [c, { "$cond" => [own_row, "$#{c}", "$$REMOVE"] }] } }
+        else
+          { "$unset" => columns }
+        end
+      end
+
+      # Evaluate the `op` CLP for a resolved mongo-direct scope with the same
+      # mutually exclusive branches Parse Server uses, and return the row
+      # constraint the caller must apply.
+      #
+      # A public, user, or role grant permits every row, even when the CLP
+      # also lists `pointerFields` / `readUserFields` (Parse Server only
+      # consults those when no other branch grants). When the only grant is
+      # a pointer branch, the caller must keep just the rows whose named
+      # pointer fields reference the requesting user. `readUserFields`
+      # counts as a pointer branch here; the older {permits?} plus
+      # {pointer_fields_for} pair ignored it, so a `readUserFields` class
+      # let every authenticated user read every row on the direct path.
+      #
+      # @param class_name [String]
+      # @param op [Symbol] one of {OPERATIONS}.
+      # @param resolution [Parse::ACLScope::Resolution, nil]
+      # @param client [Parse::Client, nil] application whose schema owns the CLP.
+      # @param label [String, nil] scope label used in the error message.
+      # @return [Array<String>, nil] pointer field names that must reference
+      #   the requesting user, or nil when every row is permitted. Always nil
+      #   for master and nil resolutions.
+      # @raise [Denied] when the scope cannot perform `op` at all, including
+      #   when the CLP is unresolvable (fail closed).
+      def row_constraint_for!(class_name, op, resolution, client: nil, label: nil)
+        return nil if resolution.nil?
+        return nil if resolution.respond_to?(:master?) && resolution.master?
+        perms = resolution.respond_to?(:permission_strings) ? resolution.permission_strings : nil
+        return nil if perms.nil?
+
+        user_id = resolution.respond_to?(:user_id) ? resolution.user_id.to_s : ""
+        evaluation = evaluate_access(
+          class_name, op,
+          claims: perms,
+          authenticated: !user_id.empty?,
+          user_id: user_id.empty? ? nil : user_id,
+          client: client,
+        )
+        if evaluation.allowed?
+          fields = Array(evaluation.pointer_fields)
+          return fields.empty? ? nil : fields
+        end
+
+        warn_unresolvable_once!(class_name) if evaluation.reason == :clp_unresolvable
+        scope = label ? "the current #{label} scope" : "the current scope"
+        message = if %i[concrete_user_required authentication_required].include?(evaluation.reason) &&
+                     !pointer_fields_from_entry(class_name, op, client).empty?
+            "CLP requires user identity (pointerFields=#{pointer_fields_from_entry(class_name, op, client).inspect}) " \
+            "but #{scope} has no user_id."
+          else
+            "CLP refuses #{op} on '#{class_name}' for #{scope}."
+          end
+        raise Denied.new(class_name, op, message)
+      end
+
+      # A `$match` predicate keeping only rows whose pointer fields reference
+      # `user_id`, in Mongo storage form. A single pointer is stored as
+      # `_p_<field>: "_User$<id>"`; an array of pointers is stored under the
+      # bare field name as `{ __type, className, objectId }` elements. Both
+      # forms are matched, ORed across fields, as Parse Server's
+      # `addPointerPermissions` does.
+      #
+      # @param pointer_fields [Array<String>]
+      # @param user_id [String]
+      # @return [Hash] a `$match` predicate.
+      def pointer_fields_predicate(pointer_fields, user_id)
+        uid = user_id.to_s
+        storage = "#{Parse::Model::CLASS_USER}$#{uid}"
+        clauses = Array(pointer_fields).flat_map do |field|
+          f = field.to_s
+          [
+            { "_p_#{f}" => storage },
+            { f => { "$elemMatch" => { "className" => Parse::Model::CLASS_USER, "objectId" => uid } } },
+          ]
+        end
+        { "$or" => clauses }
       end
 
       def filter_by_pointer_fields(documents, pointer_fields, user_id)
@@ -373,6 +531,54 @@ module Parse
 
       private
 
+      # Collect one field set per protectedFields group that applies to the
+      # caller, mirroring Parse Server's `DatabaseController.addProtectedFields`.
+      # Only groups PRESENT in the map participate. A missing `"*"` key does
+      # not mean "nothing protected": a map of `{ "role:Restricted" => ["secret"] }`
+      # still strips `secret` for a member of `Restricted`. The final strip set
+      # is the intersection of the applicable sets, so membership in a group
+      # with a narrower (or empty) list relaxes protection.
+      #
+      # Groups:
+      # - `"*"` applies to everyone.
+      # - `"authenticated"` applies when the claim set carries a concrete user id.
+      # - `"role:<name>"` applies for each role claim.
+      # - `"<userId>"` applies for the caller's own user id.
+      # - `"userField:<field>"` entries are per-object pointer rules that
+      #   Parse Server evaluates against each row. They are skipped here,
+      #   which can only over-protect, never under-protect.
+      #
+      # Role entries apply even when the claim set has no user id (an
+      # `acl_role:` scope). Parse Server has no REST equivalent of a
+      # role-only caller, and the SDK treats a granted role claim as held.
+      #
+      # @return [Array<Set<String>>]
+      def protected_sets_for(protected_map, claim_set)
+        lookup = lambda do |key|
+          value = protected_map[key]
+          value = protected_map[key.to_sym] if value.nil?
+          value.nil? ? nil : Set.new(Array(value).map(&:to_s))
+        end
+
+        sets = []
+        public_set = lookup.call("*")
+        sets << public_set if public_set
+
+        user_claims = claim_set.map(&:to_s).reject { |c| c == "*" || c.start_with?("role:") }
+        if user_claims.any?
+          auth_set = lookup.call("authenticated")
+          sets << auth_set if auth_set
+        end
+
+        claim_set.each do |claim|
+          key = claim.to_s
+          next if key == "*" || key == "authenticated" || key.start_with?("userField:")
+          set = lookup.call(key)
+          sets << set if set
+        end
+        sets
+      end
+
       # Always returns a {CacheEntry}. On schema-fetch failure (network
       # error, unsuccessful response, raised exception, missing client)
       # the entry has `kind: :unresolvable` and is held for
@@ -400,7 +606,7 @@ module Parse
             unresolvable_entry
           else
             begin
-              response = resolved_client.schema(class_key)
+              response = fetch_schema_response(resolved_client, class_key)
               if response&.success?
                 schema = response.result || {}
                 clp = schema["classLevelPermissions"] || {}
@@ -416,6 +622,37 @@ module Parse
 
         @cache_mutex.synchronize { @cache[key] = entry }
         entry
+      end
+
+      # Fetch a class schema with the master key, explicitly.
+      #
+      # `GET /schemas/<Class>` is master-key-only on Parse Server. A plain
+      # `client.schema(name)` call inherits the request layer's auth
+      # resolution, so inside `Parse.with_session(token)` (or on a client in
+      # `client_mode`) it sends the user's session token instead of the master
+      # key. Parse Server refuses that, the entry is recorded as
+      # `:unresolvable`, and every scoped mongo-direct read in the block is
+      # denied by CLP (and the denial is negatively cached). Passing
+      # `use_master_key: true` makes the request layer skip both the ambient
+      # and the client-bound session token. A client that holds no master key
+      # still cannot read schemas, which stays fail-closed.
+      #
+      # Objects that only implement `#schema` (test doubles, custom schema
+      # sources installed via {.schema_client}), and clients whose `#schema`
+      # was overridden on the instance, keep the old call.
+      def fetch_schema_response(resolved_client, class_key)
+        stock_schema = begin
+            resolved_client.method(:schema).owner == Parse::API::Schema
+          rescue NameError
+            false
+          end
+        if resolved_client.is_a?(Parse::Client) && stock_schema
+          safe = Parse::API::PathSegment.identifier!(class_key, kind: "class name")
+          resolved_client.request(:get, "schemas/#{safe}",
+                                  opts: { cache: false, use_master_key: true })
+        else
+          resolved_client.schema(class_key)
+        end
       end
 
       def unresolvable_entry
@@ -514,15 +751,36 @@ module Parse
         s != "*" && !s.start_with?("role:")
       end
 
-      def walk_and_delete!(node, strip_set)
-        case node
-        when Hash
-          strip_set.each { |k| node.delete(k) }
-          node.each_value { |v| walk_and_delete!(v, strip_set) }
-        when Array
-          node.each { |v| walk_and_delete!(v, strip_set) }
+      # Delete protected keys from one row. Mongo stores a pointer column as
+      # `_p_<field>`, so the storage form of a protected pointer is removed
+      # along with the Parse-form key.
+      def strip_top_level!(doc, strip_set)
+        strip_set.each do |k|
+          key = k.to_s
+          doc.delete(key)
+          doc.delete(key.to_sym)
+          doc.delete("_p_#{key}")
         end
-        node
+        doc
+      end
+
+      def merge_default_protected_fields(class_name, stored_map)
+        defaults = default_protected_fields
+        extra = defaults.is_a?(Hash) ? (defaults[class_name.to_s] || defaults[class_name.to_s.to_sym]) : nil
+        return stored_map if extra.nil? || extra.empty?
+        merged = {}
+        (stored_map || {}).each { |k, v| merged[k.to_s] = Array(v).map(&:to_s) }
+        extra.each do |k, v|
+          key = k.to_s
+          merged[key] = (Array(merged[key]) + Array(v).map(&:to_s)).uniq
+        end
+        merged
+      end
+
+      def pointer_fields_from_entry(class_name, op, client)
+        entry = fetch(class_name, client: client)
+        return [] unless entry.kind == :cached_clp
+        pointer_fields_from(entry.clp, op)
       end
 
       def any_pointer_matches?(doc, pointer_fields, user_id)
