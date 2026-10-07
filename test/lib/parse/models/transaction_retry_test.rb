@@ -86,4 +86,48 @@ class TestTransactionRetry < Minitest::Test
       Parse::BatchOperation.define_singleton_method(:new, &original_new)
     end
   end
+
+  # Parse Server answers an aborted transaction with a bare 500: it is
+  # retried, and once retries run out the error names the likely causes.
+  def with_submit(behavior)
+    original_new = Parse::BatchOperation.method(:new)
+    Parse::BatchOperation.define_singleton_method(:new) do |*args, **kwargs|
+      batch = original_new.call(*args, **kwargs)
+      batch.define_singleton_method(:submit, &behavior)
+      batch
+    end
+    yield
+  ensure
+    Parse::BatchOperation.define_singleton_method(:new, &original_new)
+  end
+
+  def test_transaction_retries_a_transient_500_then_succeeds
+    attempts = 0
+    submit = lambda do
+      attempts += 1
+      raise Parse::Error::ServiceUnavailableError, "[E-1] POST batch : Internal server error. (500)" if attempts < 3
+      [OpenStruct.new(success?: true)]
+    end
+    with_submit(submit) do
+      responses = Parse::Object.transaction(retries: 5) {}
+      assert responses.first.success?
+    end
+    assert_equal 3, attempts
+  end
+
+  def test_exhausted_transient_500_names_the_replica_set_requirement
+    attempts = 0
+    submit = lambda do
+      attempts += 1
+      raise Parse::Error::ServiceUnavailableError, "[E-1] POST batch : Internal server error. (500)"
+    end
+    with_submit(submit) do
+      error = assert_raises(Parse::Error) { Parse::Object.transaction(retries: 3) {} }
+      assert_match(/replica set/, error.message)
+      assert_match(/Array#save/, error.message)
+      assert_kind_of Parse::Error::ServiceUnavailableError, error.cause
+    end
+    assert_equal 3, attempts
+  end
+
 end

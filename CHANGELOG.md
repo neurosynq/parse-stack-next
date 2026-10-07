@@ -818,7 +818,9 @@
   intermittently rejects; Parse Server aborts and answers a bare 500, so the
   SDK retries the transaction (up to `retries:`, default 5) as it does a 251
   conflict. A transaction that fails for another reason is also answered with
-  a 500, so it is retried before the error is raised.
+  a 500, so it is retried before the error is raised. Once retries run out,
+  the raised `Parse::Error` names the replica-set requirement and points to
+  `Array#save` for a non-atomic batch, with the original 500 as its `cause`.
 - Mongo-direct, Atlas Search, and vector results for callers in a `role:` or
   `authenticated` protectedFields group now omit those fields, matching
   Parse Server.

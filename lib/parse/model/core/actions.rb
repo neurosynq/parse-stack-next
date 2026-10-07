@@ -501,6 +501,17 @@ module Parse
                   sleep(0.1 * attempts)
                   next
                 end
+                # Parse Server answers every aborted transaction with a bare
+                # 500, so name the likely causes rather than surfacing only
+                # "Internal server error". The original error is the cause.
+                if transient
+                  raise Parse::Error,
+                        "Transaction failed after #{attempts} attempts: Parse Server aborted it and " \
+                        "answered 500 (#{e.message}). Parse Server transactions need MongoDB running " \
+                        "as a replica set or mongos; on a standalone server every transaction fails " \
+                        "this way. Otherwise one of its requests failed (check the Parse Server log). " \
+                        "For a non-atomic batch, save the objects with Array#save instead."
+                end
                 raise
               end
 
