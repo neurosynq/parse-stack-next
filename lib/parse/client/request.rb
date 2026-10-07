@@ -49,6 +49,50 @@ module Parse
     # means the batch's own client.
     attr_accessor :client
 
+    # @!visibility private
+    # The credentials this request names explicitly, resolved the way
+    # {Parse::Client#request} resolves them for a single request: the
+    # `session_token:` option, else an `X-Parse-Session-Token` header; and
+    # the `use_master_key:` option; and `suppress_master_key: true` when the
+    # master-key suppression header is set. A key is absent when the request
+    # does not name it, so ambient context (`Parse.with_session`,
+    # `client_mode`, a bound client token) still applies.
+    # @return [Hash] with optional `:session_token` (String),
+    #   `:use_master_key` (Boolean), and `:suppress_master_key` (true) keys.
+    def explicit_authority
+      o = opts.is_a?(Hash) ? opts : {}
+      result = {}
+      token = o[:session_token]
+      token = token.session_token if !token.nil? && token.respond_to?(:session_token)
+      if token.nil?
+        header_token = self.class.header_value(headers, Parse::Protocol::SESSION_TOKEN)
+        token = header_token if header_token.is_a?(String)
+      end
+      result[:session_token] = token.to_s unless token.nil?
+      if o.key?(:use_master_key) && !o[:use_master_key].nil?
+        result[:use_master_key] = o[:use_master_key] ? true : false
+      end
+      # The suppression header wins over `use_master_key: true` in the
+      # authentication middleware, so a batch must carry it as a header
+      # rather than fold it into `use_master_key:` (which would also change
+      # how the ambient and bound session tokens apply).
+      if self.class.header_value(headers, Parse::Middleware::Authentication::DISABLE_MASTER_KEY).present?
+        result[:suppress_master_key] = true
+      end
+      result
+    end
+
+    # @!visibility private
+    # Case-insensitive header lookup.
+    # @return [Object, nil]
+    def self.header_value(headers, name)
+      return nil unless headers.is_a?(Hash)
+      return headers[name] if headers.key?(name)
+      wanted = name.to_s.downcase
+      headers.each { |k, v| return v if k.to_s.downcase == wanted }
+      nil
+    end
+
     # @!attribute [rw] request_id
     #   @return [String] unique identifier for this request to enable idempotency
     attr_accessor :request_id

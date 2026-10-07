@@ -40,8 +40,8 @@ class BatchAuthorityTest < Minitest::Test
     @calls = []
     calls = @calls
     [DEFAULT_CLIENT, BOUND_CLIENT].each do |client|
-      client.define_singleton_method(:request) do |method, path = nil, body: nil, opts: {}, **_rest|
-        calls << { client: self, method: method, path: path, body: body, opts: opts }
+      client.define_singleton_method(:request) do |method, path = nil, body: nil, opts: {}, headers: nil, **_rest|
+        calls << { client: self, method: method, path: path, body: body, opts: opts, headers: headers }
         reqs = body["requests"] || body[:requests] || []
         Parse::Response.new(reqs.map do |r|
           name = (r["body"] || r[:body] || {})["name"]
@@ -105,6 +105,183 @@ class BatchAuthorityTest < Minitest::Test
     by_token = @calls.to_h { |call| [call[:opts][:session_token], sent_requests(call).map { |r| r["body"]["name"] }] }
     assert_equal({ "r:one" => %w[a c], "r:two" => %w[b] }, by_token)
     assert_equal %w[ID_a ID_b ID_c], responses.map { |r| r.result["objectId"] }
+  end
+
+  # Credentials in request headers resolve as they do for a single request
+
+  def test_header_session_token_is_sent_with_the_batch
+    req = Parse::Request.new(:put, "/parse/classes/X/abc", body: { v: 2 },
+                                                          headers: { Parse::Protocol::SESSION_TOKEN => "r:hdr" })
+    Parse.batch([req]).submit
+    assert_equal 1, @calls.size
+    assert_equal({ session_token: "r:hdr" }, @calls.first[:opts])
+  end
+
+  def test_lowercase_header_session_token_is_sent_with_the_batch
+    req = Parse::Request.new(:put, "/parse/classes/X/abc", body: { v: 2 },
+                                                          headers: { "x-parse-session-token" => "r:low" })
+    Parse.batch([req]).submit
+    assert_equal({ session_token: "r:low" }, @calls.first[:opts])
+  end
+
+  def test_header_master_key_suppression_is_sent_with_the_batch
+    req = Parse::Request.new(:put, "/parse/classes/X/abc", body: { v: 2 },
+                                                          headers: { Parse::Middleware::Authentication::DISABLE_MASTER_KEY => "true" })
+    Parse.batch([req]).submit
+    assert_equal({}, @calls.first[:opts])
+    assert_equal "true", @calls.first[:headers][Parse::Middleware::Authentication::DISABLE_MASTER_KEY]
+  end
+
+  def test_header_suppression_wins_over_use_master_key_true
+    req = Parse::Request.new(:put, "/parse/classes/X/abc", body: { v: 2 },
+                                                          headers: { Parse::Middleware::Authentication::DISABLE_MASTER_KEY => "true" },
+                                                          opts: { use_master_key: true })
+    Parse.batch([req]).submit
+    assert_equal({ use_master_key: true }, @calls.first[:opts])
+    assert_equal "true", @calls.first[:headers][Parse::Middleware::Authentication::DISABLE_MASTER_KEY]
+  end
+
+  def test_option_session_wins_over_header_session
+    req = Parse::Request.new(:put, "/parse/classes/X/abc", body: { v: 2 },
+                                                          headers: { Parse::Protocol::SESSION_TOKEN => "r:hdr" },
+                                                          opts: { session_token: "r:opt" })
+    Parse.batch([req]).submit
+    assert_equal({ session_token: "r:opt" }, @calls.first[:opts])
+  end
+
+  def test_mixed_header_sessions_in_a_transaction_raise
+    a = Parse::Request.new(:put, "/parse/classes/X/a", body: { v: 1 }, headers: { Parse::Protocol::SESSION_TOKEN => "r:one" })
+    b = Parse::Request.new(:put, "/parse/classes/X/b", body: { v: 2 }, headers: { Parse::Protocol::SESSION_TOKEN => "r:two" })
+    assert_raises(Parse::BatchOperation::MixedAuthorityError) do
+      Parse::BatchOperation.new([a, b], transaction: true).submit
+    end
+    assert_empty @calls
+  end
+
+  # Direct calls to Parse::Client#batch_request apply the same rules
+
+  def test_direct_transaction_with_mixed_sessions_raises_and_sends_nothing
+    a = Parse::Request.new(:put, "/parse/classes/X/a", body: { v: 1 }, opts: { session_token: "r:one" })
+    b = Parse::Request.new(:put, "/parse/classes/X/b", body: { v: 2 }, opts: { session_token: "r:two" })
+    assert_raises(Parse::BatchOperation::MixedAuthorityError) do
+      DEFAULT_CLIENT.batch_request(Parse::BatchOperation.new([a, b], transaction: true))
+    end
+    assert_empty @calls
+  end
+
+  def test_direct_batch_sends_the_requests_own_session
+    a = Parse::Request.new(:put, "/parse/classes/X/a", body: { v: 1 }, opts: { session_token: "r:one" })
+    DEFAULT_CLIENT.batch_request(Parse::BatchOperation.new([a], transaction: true))
+    assert_equal 1, @calls.size
+    assert_equal({ session_token: "r:one" }, @calls.first[:opts])
+  end
+
+  def test_direct_batch_with_header_session_sends_it
+    a = Parse::Request.new(:put, "/parse/classes/X/a", body: { v: 1 }, headers: { Parse::Protocol::SESSION_TOKEN => "r:hdr" })
+    DEFAULT_CLIENT.batch_request([a])
+    assert_equal({ session_token: "r:hdr" }, @calls.first[:opts])
+  end
+
+  def test_direct_batch_call_options_apply_to_requests_naming_none
+    a = Parse::Request.new(:put, "/parse/classes/X/a", body: { v: 1 })
+    DEFAULT_CLIENT.batch_request([a], session_token: "r:call")
+    assert_equal({ session_token: "r:call" }, @calls.first[:opts])
+  end
+
+  def test_direct_non_transactional_mixed_batch_is_split_in_order
+    a = Parse::Request.new(:put, "/parse/classes/X/a", body: { "name" => "a" }, opts: { session_token: "r:one" })
+    b = Parse::Request.new(:put, "/parse/classes/X/b", body: { "name" => "b" }, opts: { session_token: "r:two" })
+    responses = DEFAULT_CLIENT.batch_request([a, b])
+    assert_equal 2, @calls.size
+    assert_equal %w[ID_a ID_b], responses.map { |r| r.result["objectId"] }
+  end
+
+  def test_direct_transaction_with_a_request_for_another_client_raises
+    obj = saved(BatchAuthorityBoundWidget, "B1", "b1")
+    batch = Parse::BatchOperation.new(nil, transaction: true)
+    batch.add(obj)
+    assert_raises(Parse::BatchOperation::MixedAuthorityError) { DEFAULT_CLIENT.batch_request(batch) }
+    assert_empty @calls
+  end
+
+  # Clients with the same configuration are one set of credentials
+
+  def self.configured_client(master_key: "mk", session_token: nil)
+    Parse::Client.allocate.tap do |c|
+      c.instance_variable_set(:@conn, Faraday.new(url: "http://localhost:1/parse"))
+      c.instance_variable_set(:@retry_limit, 0)
+      c.instance_variable_set(:@application_id, "same-app")
+      c.instance_variable_set(:@server_url, "http://localhost:1/parse")
+      c.instance_variable_set(:@api_key, "rest")
+      c.instance_variable_set(:@master_key, master_key)
+      c.instance_variable_set(:@session_token, session_token)
+    end
+  end
+
+  def with_recording(*clients)
+    calls = @calls
+    clients.each do |client|
+      client.define_singleton_method(:request) do |method, path = nil, body: nil, opts: {}, **_rest|
+        calls << { client: self, method: method, path: path, body: body, opts: opts }
+        reqs = body["requests"] || body[:requests] || []
+        Parse::Response.new(reqs.map { { "success" => { "updatedAt" => CREATED } } })
+      end
+    end
+    yield
+  end
+
+  def test_equivalent_client_objects_share_one_transaction
+    one = self.class.configured_client
+    two = self.class.configured_client
+    a = Parse::Request.new(:put, "/parse/classes/X/a", body: { v: 1 }).tap { |r| r.client = one }
+    b = Parse::Request.new(:put, "/parse/classes/X/b", body: { v: 2 }).tap { |r| r.client = two }
+    with_recording(one, two) do
+      batch = Parse::BatchOperation.new([a, b], transaction: true)
+      batch.client = one
+      batch.submit
+    end
+    assert_equal 1, @calls.size
+    assert_same one, @calls.first[:client]
+  end
+
+  def test_clients_with_different_master_keys_still_raise_in_a_transaction
+    one = self.class.configured_client(master_key: "mk1")
+    two = self.class.configured_client(master_key: "mk2")
+    a = Parse::Request.new(:put, "/parse/classes/X/a", body: { v: 1 }).tap { |r| r.client = one }
+    b = Parse::Request.new(:put, "/parse/classes/X/b", body: { v: 2 }).tap { |r| r.client = two }
+    with_recording(one, two) do
+      assert_raises(Parse::BatchOperation::MixedAuthorityError) do
+        Parse::BatchOperation.new([a, b], transaction: true).submit
+      end
+    end
+    assert_empty @calls
+  end
+
+  def test_clients_bound_to_different_sessions_still_raise_in_a_transaction
+    one = self.class.configured_client(session_token: "r:one")
+    two = self.class.configured_client(session_token: "r:two")
+    a = Parse::Request.new(:put, "/parse/classes/X/a", body: { v: 1 }).tap { |r| r.client = one }
+    b = Parse::Request.new(:put, "/parse/classes/X/b", body: { v: 2 }).tap { |r| r.client = two }
+    with_recording(one, two) do
+      assert_raises(Parse::BatchOperation::MixedAuthorityError) do
+        Parse::BatchOperation.new([a, b], transaction: true).submit
+      end
+    end
+    assert_empty @calls
+  end
+
+  def test_equivalent_clients_in_array_save_are_not_split
+    one = self.class.configured_client
+    two = self.class.configured_client
+    a = Parse::Request.new(:put, "/parse/classes/X/a", body: { v: 1 }).tap { |r| r.client = one }
+    b = Parse::Request.new(:put, "/parse/classes/X/b", body: { v: 2 }).tap { |r| r.client = two }
+    with_recording(one, two) { Parse.batch([a, b]).submit }
+    assert_equal 1, @calls.size
+  end
+
+  def test_fingerprint_never_holds_a_secret
+    fp = Parse::BatchOperation.credential_fingerprint(self.class.configured_client(master_key: "super-secret"))
+    refute_includes fp.compact.join(" "), "super-secret"
   end
 
   # Objects bound to a class client

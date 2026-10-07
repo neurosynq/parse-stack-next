@@ -1,6 +1,7 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
+require "digest"
 require_relative "request"
 require_relative "response"
 
@@ -48,6 +49,27 @@ module Parse
     # sent when this is raised.
     class MixedAuthorityError < Parse::Error; end
 
+    # @!visibility private
+    # A comparable identity for the credentials a client sends: server URL,
+    # application id, digests of the REST and master keys, and its bound
+    # session token. Two client objects with the same configuration (for
+    # example a class client memoized before a second `Parse.setup`) have the
+    # same fingerprint and are batched together. The keys are digested so the
+    # fingerprint never holds a secret.
+    # @param c [Parse::Client]
+    # @return [Array]
+    def self.credential_fingerprint(c)
+      return [:client, c.object_id] unless c.respond_to?(:application_id) && c.respond_to?(:server_url)
+      digest = lambda do |v|
+        v.nil? || v.to_s.empty? ? nil : ::Digest::SHA256.hexdigest(v.to_s)
+      end
+      bound = c.respond_to?(:session_token) ? c.session_token : nil
+      [c.server_url.to_s.sub(%r{/+\z}, ""), c.application_id.to_s,
+       digest.call(c.respond_to?(:api_key) ? c.api_key : nil),
+       digest.call(c.respond_to?(:master_key) ? c.master_key : nil),
+       digest.call(bound)]
+    end
+
     # Default number of threads used to dispatch batch segments concurrently.
     # Raise via `Parse::BatchOperation.parallelism = N` (or pass `parallelism:`
     # to `#submit`) for higher throughput on bulk writes; 2 is intentionally
@@ -88,6 +110,18 @@ module Parse
       @client = c
       @explicit_client = !c.nil?
     end
+
+    # @!visibility private
+    # Credentials (`session_token:`, `use_master_key:`) applied to requests
+    # that name none of their own. Set by {Parse::API::Batch#batch_request}
+    # when it routes a mixed batch through {#submit}.
+    # @return [Hash]
+    def batch_defaults
+      @batch_defaults || {}
+    end
+
+    # @!visibility private
+    attr_writer :batch_defaults
 
     # @param reqs [Array<Parse::Request>] an array of requests.
     # @param transaction [Boolean] whether to execute as a transaction.
@@ -224,7 +258,7 @@ module Parse
                 "Save these objects in separate transactions."
         end
         group = groups.first
-        if @explicit_client && !group[:client].equal?(client)
+        if @explicit_client && self.class.credential_fingerprint(group[:client]) != self.class.credential_fingerprint(client)
           raise MixedAuthorityError,
                 "This transaction's requests were built for a different client than the " \
                 "one set on the batch. Use the objects' own client."
@@ -273,28 +307,47 @@ module Parse
     # with no extra options, so an ambient `Parse.with_session`,
     # `Parse.client_mode`, or `Parse.without_master_key` applies exactly as
     # it does to a single request.
+    # Credentials come from {Parse::Request#explicit_authority} (options,
+    # then headers), falling back to `default_opts` for a request that names
+    # none.
+    # @param default_client [Parse::Client] client for requests built for none.
+    # @param default_opts [Hash] `session_token:` / `use_master_key:` applied to
+    #   requests that name no credentials of their own.
     # @return [Array<Hash>] groups in first-appearance order, each with
     #   `:client`, `:opts`, and `:entries` (`[index, request]` pairs).
-    def authority_groups
+    # @!visibility private
+    def authority_groups(default_client = client, default_opts = batch_defaults)
+      defaults = default_opts.is_a?(Hash) ? default_opts : {}
       groups = {}
       @requests.each_with_index do |req, index|
-        target = req.respond_to?(:client) && req.client ? req.client : client
-        opts = req.respond_to?(:opts) && req.opts.is_a?(Hash) ? req.opts : {}
-        token = opts[:session_token]
-        token = token.session_token if token.respond_to?(:session_token)
+        target = req.respond_to?(:client) && req.client ? req.client : default_client
+        # Credentials resolve as they do for a single request: options, then
+        # the session-token and master-key-suppression headers.
+        named = req.respond_to?(:explicit_authority) ? req.explicit_authority : {}
+        token = named.key?(:session_token) ? named[:session_token] : defaults[:session_token]
+        token = token.session_token if !token.nil? && token.respond_to?(:session_token)
         token = token.to_s unless token.nil?
-        master = opts.key?(:use_master_key) ? opts[:use_master_key] : nil
-        key = [target.object_id, token, master]
+        master = named.key?(:use_master_key) ? named[:use_master_key] : defaults[:use_master_key]
+        suppress = named[:suppress_master_key] == true || defaults[:suppress_master_key] == true
+        key = [self.class.credential_fingerprint(target), token, master, suppress]
+        existing = groups[key]
+        if existing && !existing[:client].equal?(default_client) && target.equal?(default_client)
+          # Same credentials as an earlier client object: send through the
+          # batch's own client.
+          existing[:client] = default_client
+        end
         group = groups[key] ||= begin
             call_opts = {}
             call_opts[:session_token] = token unless token.nil?
             call_opts[:use_master_key] = master unless master.nil?
+            call_opts[:suppress_master_key] = true if suppress
             { client: target, opts: call_opts, entries: [] }
           end
         group[:entries] << [index, req]
       end
       groups.values
     end
+    public :authority_groups
 
     # Whether `req` repeats a request already in the batch for the same
     # tagged object.
