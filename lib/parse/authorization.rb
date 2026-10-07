@@ -189,6 +189,12 @@ module Parse
         @role_cache_ttl = DEFAULT_ROLE_TTL
         @upstream_role_reader = nil
         @compare_upstream_roles = false
+        # Bumped by every invalidation. A token resolution captures it before
+        # calling `/users/me` and does not cache its answer when it moved, so
+        # a resolve already in flight when a session is revoked cannot put
+        # the revoked token back into the plane.
+        @invalidation_epoch = 0
+        @epoch_mutex = Mutex.new
       end
 
       # Apply settings, leaving anything not passed unchanged.
@@ -246,6 +252,7 @@ module Parse
       # @param session_token [String]
       def invalidate(session_token)
         return if session_token.nil?
+        bump_invalidation_epoch!
         @identity_cache.invalidate(session_token.to_s)
       end
 
@@ -268,6 +275,7 @@ module Parse
       def invalidate_user(user_id)
         return if user_id.nil? || user_id.to_s.empty?
         uid = user_id.to_s
+        bump_invalidation_epoch!
         cache = @identity_cache
         if generation_capable?(cache) && cache.respond_to?(:bump_generation)
           cache.bump_generation(uid)
@@ -294,6 +302,7 @@ module Parse
 
       # Drop every entry in both planes.
       def reset_caches!
+        bump_invalidation_epoch!
         @identity_cache.clear if @identity_cache.respond_to?(:clear)
         @role_cache.clear if @role_cache.respond_to?(:clear)
       end
@@ -314,6 +323,11 @@ module Parse
         cached = cached_user_id(session_token)
         return cached unless cached.nil?
 
+        # Captured before `/users/me`: an invalidation that lands while the
+        # lookup is in flight must win over the answer it returns.
+        epoch = current_invalidation_epoch
+        prior_uid, prior_gen = prior_generation(session_token)
+
         response = begin
             # cache: false: a revoked or expired token must not re-resolve
             # from a cached /users/me response after its identity entry is
@@ -331,8 +345,35 @@ module Parse
         raise InvalidSession, "session token resolved no user objectId" if user_id.nil? || user_id.to_s.empty?
 
         user_id = user_id.to_s
-        store_user_id(session_token, user_id)
+        if epoch == current_invalidation_epoch
+          # A stale entry for the same user tells us its generation from
+          # before the lookup; storing under it lets a bump made across
+          # processes during the lookup still reject the entry.
+          store_user_id(session_token, user_id, gen: prior_uid == user_id ? prior_gen : nil)
+        end
         user_id
+      end
+
+      def bump_invalidation_epoch!
+        @epoch_mutex.synchronize { @invalidation_epoch += 1 }
+      end
+
+      def current_invalidation_epoch
+        @epoch_mutex.synchronize { @invalidation_epoch }
+      end
+
+      # The user id and that user's current generation from a stale entry
+      # already stored for the token, read before `/users/me`.
+      # @return [Array(String, Object), Array(nil, nil)]
+      def prior_generation(session_token)
+        cache = @identity_cache
+        return [nil, nil] unless generation_capable?(cache)
+        raw = cache.get(session_token)
+        uid = raw.is_a?(Hash) ? (raw["user_id"] || raw[:user_id]) : nil
+        return [nil, nil] if uid.nil?
+        [uid.to_s, cache.generation(uid.to_s)]
+      rescue StandardError
+        [nil, nil]
       end
 
       # Read the identity plane and, where the plane supports it, check that
@@ -369,10 +410,11 @@ module Parse
 
       # Write the identity entry, tagging it with the subject's current
       # generation when the plane can track one.
-      def store_user_id(session_token, user_id)
+      def store_user_id(session_token, user_id, gen: nil)
         cache = @identity_cache
         if generation_capable?(cache)
-          cache.set(session_token, { "user_id" => user_id, "gen" => cache.generation(user_id) },
+          gen = cache.generation(user_id) if gen.nil?
+          cache.set(session_token, { "user_id" => user_id, "gen" => gen },
                     ttl: @identity_cache_ttl)
         else
           cache.set(session_token, user_id, ttl: @identity_cache_ttl)

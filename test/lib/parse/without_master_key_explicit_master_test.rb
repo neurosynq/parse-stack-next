@@ -273,8 +273,140 @@ class WithoutMasterKeyExplicitMasterTest < Minitest::Test
     client.define_singleton_method(:send_message) { |m| frames << m }
     capture_io { Parse.without_master_key { client.send(:send_connect_message) } }
     refute frames.last.key?(:masterKey)
+    assert client.master_key_withheld?
+    # A reconnect (or an explicit connect) made outside the block keeps
+    # withholding it: subscriptions created on the socket are not elevated.
+    capture_io { client.send(:send_connect_message) }
+    refute frames.last.key?(:masterKey)
+    client.allow_master_key_connection!
+    refute client.master_key_withheld?
     capture_io { client.send(:send_connect_message) }
     assert_equal "mk", frames.last[:masterKey]
+  end
+
+  def test_live_query_admin_connect_outside_block_sends_master_key
+    require "parse/live_query"
+    client = Parse::LiveQuery::Client.new(url: "wss://example.test", application_id: "a",
+                                          client_key: "k", master_key: "mk",
+                                          use_master_key: true, auto_connect: false)
+    frames = []
+    client.define_singleton_method(:send_message) { |m| frames << m }
+    capture_io { client.send(:send_connect_message) }
+    assert_equal "mk", frames.last[:masterKey]
+    refute client.master_key_withheld?
+  end
+
+  # --- metadata marker stays off stored requests ----------------------------
+
+  def metadata_client(responses)
+    client = Parse::Client.new(server_url: "http://localhost:1/parse", app_id: "a", api_key: "k",
+                               master_key: "mk", retry_limit: 2)
+    seen = []
+    conn = Object.new
+    conn.define_singleton_method(:send) do |_method, _uri, _params, headers|
+      seen << headers.dup
+      body = responses.shift
+      Struct.new(:body).new(body)
+    end
+    client.instance_variable_set(:@conn, conn)
+    [client, seen]
+  end
+
+  def server_error
+    r = Parse::Response.new({ "code" => 1, "error" => "unavailable" })
+    r.http_status = 503
+    r
+  end
+
+  def test_marker_is_not_kept_on_the_request_after_a_retry
+    marker = Parse::Middleware::Authentication::METADATA_MASTER
+    client, seen = metadata_client([server_error, Parse::Response.new({})])
+    response = client.stub(:sleep, nil) do
+      client.request(:get, "schemas/Thing", opts: { use_master_key: true,
+                                                    metadata_master: Parse::Client::METADATA_MASTER_REQUEST })
+    end
+    assert_equal 2, seen.size
+    assert(seen.all? { |h| h[marker] == Parse::Middleware::Authentication::METADATA_MASTER_TOKEN },
+           "every attempt still carries the marker on the wire copy")
+    refute response.request.headers.key?(marker)
+    refute response.request.opts.key?(:metadata_master)
+  end
+
+  def test_marker_is_not_kept_on_the_request_of_a_raised_error
+    marker = Parse::Middleware::Authentication::METADATA_MASTER
+    client, = metadata_client([server_error, server_error, server_error, server_error])
+    err = client.stub(:sleep, nil) do
+      assert_raises(Parse::Error::ServiceUnavailableError) do
+        client.request(:get, "schemas/Thing", opts: { use_master_key: true,
+                                                      metadata_master: Parse::Client::METADATA_MASTER_REQUEST })
+      end
+    end
+    req = err.response.request
+    refute req.headers.key?(marker)
+    refute req.opts.key?(:metadata_master)
+  end
+
+  # --- suppressed schema failures -------------------------------------------
+
+  def test_schema_failure_inside_block_is_remembered_briefly_inside_the_block_only
+    calls = 0
+    failing = Object.new
+    failing.define_singleton_method(:schema) do |_name|
+      calls += 1
+      Parse::Response.new({ "code" => 119, "error" => "unauthorized" })
+    end
+    prior = Parse::CLPScope.schema_client
+    Parse::CLPScope.schema_client = failing
+    Parse::CLPScope.reset_cache!
+    Parse.without_master_key do
+      Parse::CLPScope.send(:fetch, "WmkDown")
+      Parse::CLPScope.send(:fetch, "WmkDown")
+    end
+    assert_equal 1, calls, "a failure inside the block is not refetched on every read"
+    Parse::CLPScope.send(:fetch, "WmkDown")
+    assert_equal 2, calls, "outside the block the block-only memo is not consulted"
+  ensure
+    Parse::CLPScope.schema_client = prior
+    Parse::CLPScope.reset_cache!
+  end
+
+  def test_role_walk_inside_block_bypasses_the_response_cache
+    prior_cache = Parse.default_query_cache
+    Parse.default_query_cache = true
+    seen = []
+    finder = lambda do |_table, _query, headers: {}, **opts|
+      seen << opts
+      Parse::Response.new({ "results" => [] })
+    end
+    Parse.client.stub(:find_objects, finder) do
+      Parse.without_master_key do
+        Parse::Role.send(:role_query_all, { users: Parse::User.pointer("U1") })
+      end
+    end
+    assert_equal false, seen.first[:cache]
+  ensure
+    Parse.default_query_cache = prior_cache
+  end
+
+  # --- identity resolution race ---------------------------------------------
+
+  def test_resolve_in_flight_during_an_invalidation_does_not_cache_the_token
+    client = Parse::Client.new(server_url: "http://localhost:1/parse", app_id: "race", api_key: "k")
+    auth = client.authorization
+    me = lambda do |_token, **_opts|
+      # The session is revoked while `/users/me` is in flight.
+      auth.invalidate_user("U1")
+      Parse::Response.new({ "objectId" => "U1" })
+    end
+    client.stub(:current_user, me) do
+      assert_equal "U1", auth.send(:lookup_user_id, "r:revoked")
+    end
+    assert_nil auth.instance_variable_get(:@identity_cache).get("r:revoked"),
+               "an answer that raced an invalidation is not cached"
+    client.stub(:current_user, ->(_t, **_o) { Parse::Response.new({ "objectId" => "U1" }) }) do
+      auth.send(:lookup_user_id, "r:fresh")
+    end
+    refute_nil auth.instance_variable_get(:@identity_cache).get("r:fresh")
   end
 
 

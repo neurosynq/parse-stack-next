@@ -279,6 +279,12 @@ module Parse
       #   query/constraints) — none of those have a caller scope to
       #   forward. The fast path is opt-in for performance-conscious
       #   callers that can supply explicit authorization.
+      # @note Inside {Parse.without_master_key}, the Parse Server walk (no
+      #   `master:` or `as:`) still reads `_Role` with the master key as SDK
+      #   metadata, so it returns the full role-name closure of `user`, not
+      #   only the publicly readable roles. The block guards against
+      #   accidental master-key use; it does not scope this lookup. Pass
+      #   `as:` for a scope-checked answer.
       # @example
       #   names = Parse::Role.all_for_user(user, master: true)  # admin/analytics
       #   names = Parse::Role.all_for_user(user, as: current_user)  # scope-checked
@@ -431,6 +437,8 @@ module Parse
         if Parse.respond_to?(:master_key_disabled?) && Parse.master_key_disabled?
           query = Parse::Role.query(constraints.reverse_merge(limit: :max))
           query.client = client if client
+          # A master-key read: keep it out of the shared response cache.
+          query.cache = false
           query.instance_variable_set(:@_metadata_master, true)
           return query.results
         end
@@ -969,6 +977,9 @@ module Parse
     #   another's role names.
     # @param strict [Boolean] re-raise role-query failures rather than returning
     #   a partial parent closure.
+    # @note Inside {Parse.without_master_key} the walk still reads `_Role`
+    #   with the master key as SDK metadata, so it returns the full parent
+    #   closure, not only publicly readable roles.
     def all_parent_role_names(max_depth: 10, client: nil, strict: false)
       Parse::Role.expand_inheritance_upward(
         [self], max_depth: max_depth, client: client, strict: strict,

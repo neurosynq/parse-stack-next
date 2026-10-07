@@ -1327,7 +1327,10 @@ module Parse
           body ||= _request.body
           headers.merge! _request.headers
         else
-          _request = Parse::Request.new(method, uri, body: body, headers: headers, opts: opts)
+          # The metadata-master sentinel stays off the stored request: a
+          # caller replaying `response.request` later must not inherit it.
+          _request = Parse::Request.new(method, uri, body: body, headers: headers,
+                                                     opts: opts.except(:metadata_master))
           # Request copies the headers it is given, so carry its request id
           # back onto the outgoing headers.
           headers.merge!(_request.headers)
@@ -1359,10 +1362,10 @@ module Parse
         # SDK metadata reads (class schemas, the role graph) keep the master
         # key inside `Parse.without_master_key`. Only the internal sentinel
         # turns this on; a `true` or any other value from a caller does not.
-        if opts[:metadata_master].equal?(METADATA_MASTER_REQUEST) && opts[:use_master_key] == true
-          headers[Parse::Middleware::Authentication::METADATA_MASTER] =
-            Parse::Middleware::Authentication::METADATA_MASTER_TOKEN
-        end
+        # The marker goes on a per-attempt copy of the headers handed to the
+        # connection (below), never on `headers` or the stored request, so a
+        # retry, `response.request`, or an error reporter never carries it.
+        metadata_master = opts[:metadata_master].equal?(METADATA_MASTER_REQUEST) && opts[:use_master_key] == true
 
         if opts[:use_master_key] == false
           headers[Parse::Middleware::Authentication::DISABLE_MASTER_KEY] = "true"
@@ -1433,7 +1436,12 @@ module Parse
         params = (method == :get ? query : body) || {}
         # if the path does not start with the '/1/' prefix, then add it to be nice.
         # actually send the request and return the body
-        response_env = @conn.send(method, uri, params, headers)
+        send_headers = headers
+        if metadata_master
+          send_headers = headers.merge(Parse::Middleware::Authentication::METADATA_MASTER =>
+                                         Parse::Middleware::Authentication::METADATA_MASTER_TOKEN)
+        end
+        response_env = @conn.send(method, uri, params, send_headers)
         response = response_env.body
         response.request = _request
 

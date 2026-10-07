@@ -369,6 +369,19 @@ Two behaviors to know before you rely on these:
   those tokens until their cached entries expire, so revocation there is
   bounded by `identity_cache_ttl`, not immediate. Lower the TTL if that window
   is too long.
+* A session or user delete drops its cached identity when the delete succeeds
+  or reports the row already gone ("object not found"); a denied delete leaves
+  the cache alone. A session fetched without its token is looked up first
+  (with the master key when the client has one, otherwise with the delete's
+  `session:`). Only a lookup that fails outright clears the client's whole
+  identity and role cache, at most once every 5 seconds per client, so an
+  endpoint that deletes caller-supplied session ids cannot be used to flush a
+  shared plane on every request.
+* A token resolution that is in flight when an invalidation lands in the same
+  process does not cache its answer, so it cannot put a just-revoked token
+  back. Across processes the window is bounded by the generation check when a
+  stale entry for the token named its user, and by `identity_cache_ttl`
+  otherwise.
 
 On a Redis outage these planes behave differently from the response cache.
 The response cache degrades to a passthrough request; the identity and role

@@ -29,6 +29,21 @@ class IdentityRevocation581Test < Minitest::Test
     unless Parse::Client.client?
       Parse.setup(server_url: "http://localhost:1/parse", application_id: "a", api_key: "k")
     end
+    # The token lookup reads `_Session` with the master key when the client
+    # has one; most tests here exercise that path.
+    @client = Parse::Client.client
+    @prior_master_key = @client.instance_variable_get(:@master_key)
+    @client.instance_variable_set(:@master_key, "mk")
+    clear_reset_limiter
+  end
+
+  def teardown
+    @client.instance_variable_set(:@master_key, @prior_master_key)
+    clear_reset_limiter
+  end
+
+  def clear_reset_limiter
+    Parse::Session.instance_variable_get(:@identity_reset_at)&.clear
   end
 
   def session(id, token, user_id)
@@ -67,10 +82,10 @@ class IdentityRevocation581Test < Minitest::Test
     assert s1.destroyed?
   end
 
-  # A failed delete still drops the cached identity: "object not found"
-  # means the session was already revoked elsewhere while its token may
-  # still be cached here, and dropping an entry is idempotent.
-  def test_failed_batch_destroy_still_invalidates
+  # "Object not found" still drops the cached identity: the session was
+  # already revoked elsewhere while its token may still be cached here, and
+  # dropping an entry is idempotent.
+  def test_object_not_found_batch_destroy_still_invalidates
     s1 = session("S1", "r:tok1", "U1")
     s2 = session("S2", "r:tok2", "U2")
     auth = destroy_in_batch([s1, s2], fail_ids: ["S2"])
@@ -212,7 +227,9 @@ class IdentityRevocation581Test < Minitest::Test
     assert_equal 1, auth.resets
   end
 
-  def test_session_missing_from_lookup_falls_back_to_dropping_the_identity_plane
+  # A lookup that answers without the row (a bogus id, a session already
+  # gone) leaves nothing to forget: it never resets the identity plane.
+  def test_session_missing_from_lookup_resets_nothing
     s = session_ref("SM1")
     auth = FakeAuth.new
     s.client.stub(:authorization, auth) do
@@ -222,7 +239,120 @@ class IdentityRevocation581Test < Minitest::Test
         end
       end
     end
-    assert_equal 1, auth.resets
+    assert_equal 0, auth.resets
+    assert_empty auth.tokens
+    assert_empty auth.users
+  end
+
+  def bogus_sessions(count)
+    Array.new(count) { |i| Parse::Session.build({ "objectId" => "bogus#{i}" }, "_Session") }
+  end
+
+  def test_many_bogus_ids_never_reset_when_the_lookup_answers
+    auth = FakeAuth.new
+    client = Parse::Client.client
+    client.stub(:authorization, auth) do
+      client.stub(:find_objects, session_lookup([], [])) do
+        client.stub(:batch_request, batch_responder((0...50).map { |i| "bogus#{i}" })) do
+          bogus_sessions(50).destroy
+        end
+      end
+    end
+    assert_equal 0, auth.resets
+    assert_empty auth.users
+  end
+
+  def test_many_bogus_ids_reset_at_most_once_when_the_lookup_raises
+    auth = FakeAuth.new
+    client = Parse::Client.client
+    client.stub(:authorization, auth) do
+      client.stub(:find_objects, ->(*_a, **_k) { raise Parse::Error::ConnectionError, "down" }) do
+        client.stub(:batch_request, batch_responder((0...50).map { |i| "bogus#{i}" })) do
+          capture_io do
+            bogus_sessions(50).destroy
+            bogus_sessions(50).destroy
+          end
+        end
+      end
+    end
+    assert_equal 1, auth.resets, "lookup-triggered resets are rate limited per client"
+  end
+
+  def test_denied_batch_destroy_leaves_the_cache_alone
+    s = session("SX1", "r:tokx", "UX")
+    u = Parse::User.build({ "objectId" => "UY", "username" => "y",
+                            "createdAt" => CREATED, "updatedAt" => CREATED }, "_User")
+    auth = FakeAuth.new
+    client = s.client
+    denied = lambda do |batch, **_opts|
+      batch.requests.map { Parse::Response.new({ "code" => 119, "error" => "Permission denied." }) }
+    end
+    client.stub(:authorization, auth) do
+      client.stub(:batch_request, denied) { [s, u].destroy }
+    end
+    assert_empty auth.tokens
+    assert_empty auth.users
+    assert_equal 0, auth.resets
+  end
+
+  def test_client_without_master_key_looks_up_with_the_delete_session
+    @client.instance_variable_set(:@master_key, nil)
+    s = session_ref("SC1")
+    auth = FakeAuth.new
+    seen = []
+    s.client.stub(:authorization, auth) do
+      s.client.stub(:find_objects, session_lookup([session_row("SC1", "r:mine", "UC")], seen)) do
+        s.client.stub(:delete_object, ->(*_a, **_k) { Parse::Response.new({}) }) do
+          assert s.destroy(session: "r:mine")
+        end
+      end
+    end
+    assert_equal 1, seen.size
+    assert_equal "r:mine", seen.first[:opts][:session_token]
+    refute_equal true, seen.first[:opts][:use_master_key]
+    assert_nil seen.first[:opts][:metadata_master]
+    assert_equal ["r:mine"], auth.tokens
+    assert_equal ["UC"], auth.users
+  end
+
+  def test_client_without_master_key_or_session_skips_the_lookup
+    @client.instance_variable_set(:@master_key, nil)
+    s = session_ref("SC2")
+    auth = FakeAuth.new
+    s.client.stub(:authorization, auth) do
+      s.client.stub(:find_objects, ->(*_a, **_k) { flunk "no anonymous lookup expected" }) do
+        s.client.stub(:delete_object, ->(*_a, **_k) { Parse::Response.new({ "code" => 101, "error" => "Object not found." }) }) do
+          refute s.destroy
+        end
+      end
+    end
+    assert_equal 0, auth.resets
+  end
+
+  def test_session_lookup_bypasses_the_response_cache
+    prior_cache = Parse.default_query_cache
+    Parse.default_query_cache = true
+    s = session_ref("SC3")
+    seen = []
+    s.client.stub(:authorization, FakeAuth.new) do
+      s.client.stub(:find_objects, session_lookup([session_row("SC3", "r:t", "U")], seen)) do
+        s.client.stub(:delete_object, ->(*_a, **_k) { Parse::Response.new({}) }) do
+          assert s.destroy
+        end
+      end
+    end
+    assert_equal false, seen.first[:opts][:cache]
+  ensure
+    Parse.default_query_cache = prior_cache
+  end
+
+  def test_identity_helpers_are_not_public
+    refute Parse::Session.respond_to?(:_preload_identity_for_destroy!)
+    s = session_ref("SC4")
+    refute s.respond_to?(:_after_batch_destroy)
+    refute s.respond_to?(:_clear_identity_for_destroy!)
+    refute s.respond_to?(:_identity_lookup_needed?)
+    refute Parse::User.new.respond_to?(:_after_batch_destroy)
   end
 
   def test_fully_loaded_session_needs_no_lookup
