@@ -997,24 +997,24 @@ module Parse
     # Run an OR or subquery merge so that a raise leaves this query exactly
     # as it was: constraints, authority, client, and the pinned authority.
     def with_or_rollback
-      saved = {}
-      saved_where = nil
-      captured_where = false
+      # Captured before the guarded block: a failure here changes nothing,
+      # so there is nothing to restore.
       ivars = OR_SCOPE_STATE_IVARS + %i[@_or_branch_scope @_or_branch_app @read_preference]
       saved = ivars.to_h { |iv| [iv, [instance_variable_defined?(iv), instance_variable_get(iv)]] }
       saved_where = @where.dup
-      captured_where = true
-      yield
-    rescue StandardError
-      saved.each do |iv, (defined, value)|
-        if defined
-          instance_variable_set(iv, value)
-        elsif instance_variable_defined?(iv)
-          remove_instance_variable(iv)
+      begin
+        yield
+      rescue StandardError
+        saved.each do |iv, (defined, value)|
+          if defined
+            instance_variable_set(iv, value)
+          elsif instance_variable_defined?(iv)
+            remove_instance_variable(iv)
+          end
         end
+        @where = saved_where
+        raise
       end
-      @where = saved_where if captured_where
-      raise
     end
     private :with_or_rollback
 

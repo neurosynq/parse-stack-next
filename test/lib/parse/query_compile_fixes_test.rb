@@ -24,6 +24,13 @@ class QueryCompileFixesTest < Minitest::Test
     belongs_to :author_workspace, as: :fix_artist
   end
 
+  # Parse::Client.new registers itself as the default client when none
+  # exists, so an app B client built before the default would become the
+  # default and break the cross-application tests under some orders.
+  def setup
+    default_client
+  end
+
   # The compiled where with operator keys normalized to strings.
   def where_of(query)
     where = query.compile(encode: false)[:where]
