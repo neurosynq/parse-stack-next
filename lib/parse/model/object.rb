@@ -1614,8 +1614,25 @@ module Parse
       clear_changes!
     end
 
-    # clears all dirty tracking information
+    # clears all dirty tracking information. Array and relation proxies are
+    # cleared too, so a relation's staged additions and removals are dropped
+    # rather than sent by a later save.
     def clear_changes!
+      (fields(:array).keys + relations.keys).uniq.each do |key|
+        ivar = :"@#{key}"
+        next unless instance_variable_defined?(ivar)
+        proxy = instance_variable_get(ivar)
+        proxy.clear_changes! if proxy.respond_to?(:clear_changes!)
+      end
+      clear_dirty_tracking!
+    end
+
+    # @!visibility private
+    # Clears the record's own dirty tracking but leaves array and relation
+    # proxies alone. A fetch uses this: it replaces field values from the
+    # server, but a relation's staged additions and removals are not field
+    # values and must survive it (the fetch re-marks the field dirty).
+    def clear_dirty_tracking!
       clear_changes_information
       # Clear the ACL snapshot used for proper acl_was tracking
       @_acl_snapshot_before_change = nil

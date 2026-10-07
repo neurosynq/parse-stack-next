@@ -220,11 +220,13 @@ module Parse
           respond_to?(:record_authorization_hydration!)
 
         begin
-          clear_changes!
+          # Not clear_changes!: that also drops a relation's staged
+          # additions and removals, which a fetch must keep.
+          clear_dirty_tracking!
         rescue => e
           # Log the error for debugging purposes
           warn "[Parse::Fetch] Warning: clear_changes! failed: #{e.class}: #{e.message}"
-          # If clear_changes! fails, manually reset change tracking
+          # If clearing fails, manually reset change tracking
           @changed_attributes = {} if instance_variable_defined?(:@changed_attributes)
           @mutations_from_database = nil if instance_variable_defined?(:@mutations_from_database)
           @mutations_before_last_save = nil if instance_variable_defined?(:@mutations_before_last_save)
@@ -266,7 +268,29 @@ module Parse
           end
         end
 
+        # A relation whose proxy still holds staged additions or removals
+        # must stay dirty, or the next save sends nothing. The loop above
+        # cannot guarantee it: when the response carries the relation's
+        # descriptor, re-applying the same proxy is not a change.
+        remark_staged_relations_dirty!
+
         self
+      end
+
+      # @!visibility private
+      # Marks dirty every relation whose proxy holds staged additions or
+      # removals. Used after a fetch has cleared the record's dirty tracking.
+      def remark_staged_relations_dirty!
+        return unless respond_to?(:relations)
+        relations.each_key do |key|
+          ivar = :"@#{key}"
+          next unless instance_variable_defined?(ivar)
+          proxy = instance_variable_get(ivar)
+          next unless proxy.respond_to?(:staged_changes?) && proxy.staged_changes?
+          next if changed.include?(key.to_s)
+          will_change_method = "#{key}_will_change!"
+          send(will_change_method) if respond_to?(will_change_method)
+        end
       end
 
       # Fetches the object with explicit caching enabled.

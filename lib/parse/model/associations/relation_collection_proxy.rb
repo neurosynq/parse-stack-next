@@ -24,16 +24,13 @@ module Parse
   # get matching items within the relation collection.
   #
   # When creating a Relation proxy, all the delegate methods defined in the superclasses
-  # need to be implemented, in addition to a few others with the key parameter:
-  # _relation_query and _commit_relation_updates . :'key'_relation_query should return a
+  # need to be implemented, in addition to :'key'_relation_query, which should return a
   # Parse::Query object that is properly tied to the foreign table class related to this object column.
   # Example, if an Artist has many Song objects, then the query to be returned by this method
   # should be a Parse::Query for the class 'Song'.
   # Because relation changes are separate from object changes, you can call save on a
-  # relation collection to save the current add and remove operations. Because the delegate needs
-  # to be informed of the changes being committed, it will be notified
-  # through :'key'_commit_relation_updates message. The delegate is also in charge of
-  # clearing out the change information for the collection if saved successfully.
+  # relation collection to send only its staged add and remove operations, through the
+  # owner's atomic relation operations.
   # @see PointerCollectionProxy
   class RelationCollectionProxy < PointerCollectionProxy
     define_attribute_methods :additions, :removals
@@ -251,11 +248,55 @@ module Parse
       @collection
     end
 
-    # Save the changes to the relation
+    # Drops the staged additions and removals and clears the dirty tracking,
+    # without sending anything. When operations were staged, the items are
+    # reloaded from the server on the next access, since the loaded list
+    # included them.
+    # @return [Boolean] true when additions or removals are staged and not
+    #   yet sent.
+    def staged_changes?
+      @additions.any? || @removals.any?
+    end
+
+    def clear_changes!
+      staged = staged_changes?
+      @additions = []
+      @removals = []
+      super
+      reset! if staged
+      @collection
+    end
+
+    # Sends the staged additions and removals of this relation without saving
+    # the rest of the owner. The owner must already be saved: an unsaved owner
+    # sends its relation additions when it is created.
+    #
+    # Removals and additions go out as two requests, removals first (each
+    # through the owner's atomic relation operation, so {Parse::Role} cache
+    # invalidation still runs). The two are not atomic: if the removals
+    # succeed and the additions fail, the removals stay applied, they are no
+    # longer staged, and the additions stay staged for a retry. An owner
+    # save sends relation changes the same way.
+    # @return [Boolean] whether the staged operations were applied. False
+    #  when the owner is not saved yet or a request failed; operations that
+    #  did not succeed stay staged.
     def save
-      unless @removals.empty? && @additions.empty?
-        forward :"#{@key}_commit_relation_updates"
+      return true if @additions.empty? && @removals.empty?
+      return false unless owner_saved?
+      return false unless @delegate.respond_to?(:op_add_relation!) && @delegate.respond_to?(:op_remove_relation!)
+      if @removals.any?
+        return false unless @delegate.send(:op_remove_relation!, @key, @removals.parse_pointers)
+        @removals = []
       end
+      if @additions.any?
+        return false unless @delegate.send(:op_add_relation!, @key, @additions.parse_pointers)
+        @additions = []
+      end
+      clear_changes_information
+      if @delegate.respond_to?(:clear_attribute_changes, true)
+        @delegate.send(:clear_attribute_changes, [@key.to_s])
+      end
+      true
     end
 
     # @see #add

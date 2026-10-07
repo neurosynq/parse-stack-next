@@ -197,13 +197,10 @@ module Parse
 
         if respond_to?(:relations) && relations[field_sym]
           proxy = public_send(field_sym)
-          # Reset the pending add/remove ledger that backs
-          # relation_change_operations. The proxy itself has no public reset
-          # API for these (its rollback!/restore_attributes path expects
-          # setters that don't exist for additions/removals), so we clear
-          # them directly and then drop the proxy's dirty markers.
-          proxy.instance_variable_set(:@additions, []) if proxy.instance_variable_defined?(:@additions)
-          proxy.instance_variable_set(:@removals, []) if proxy.instance_variable_defined?(:@removals)
+          # Drop the pending add/remove ledger that backs
+          # relation_change_operations, and the proxy's dirty markers. The
+          # relation proxy's clear_changes! also reloads its list on next
+          # access, since the loaded list included the discarded items.
           proxy.clear_changes! if proxy.respond_to?(:clear_changes!)
           clear_attribute_changes([field_str])
           return

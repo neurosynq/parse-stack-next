@@ -271,9 +271,10 @@ module Parse
     alias_method :delete, :remove
 
     # Atomically adds all items to the array field. The request is sent
-    # directly to the Parse backend. On success the local collection is
-    # updated to match (the items are appended) without marking the field
-    # as changed, so a later save does not overwrite the server array. On
+    # directly to the Parse backend. On success the local collection takes
+    # the array the server returned (or appends the items when the reply
+    # does not include the field) without marking the field as changed, so
+    # a later save does not overwrite the server array. On
     # an owner that has not been saved yet there is nothing to update on
     # the server, so the items are added locally as a normal change and
     # sent with the next save.
@@ -509,11 +510,11 @@ module Parse
       # Read the owner's dirty state before touching the items, so a change
       # that was already pending is still sent by the next save.
       was_dirty = delegate_field_dirty?
-      # A clean plain array adopts the array the server returned, so a local
-      # copy that was already out of date is corrected. With unsaved local
-      # edits pending, adopting it would discard them, so the operation is
-      # applied locally instead (as it is for pointer collections, or a reply
-      # without the field) and the pending edits are still sent on save.
+      # A clean array adopts the array the server returned, so a local copy
+      # that was already out of date is corrected. With unsaved local edits
+      # pending, adopting it would discard them, so the operation is applied
+      # locally instead (as it is for a reply without the field) and the
+      # pending edits are still sent on save.
       server = was_dirty ? nil : server_array_after_op
       @collection = server || yield(collection.to_a.dup, items)
       @loaded = true
@@ -528,13 +529,20 @@ module Parse
     end
 
     # The field's new array from the delegate's last atomic operation, when
-    # this is a plain array proxy and the server returned it.
+    # the server returned it.
     # @return [Array, nil]
     def server_array_after_op
-      return nil unless instance_of?(Parse::CollectionProxy)
       return nil unless @delegate.respond_to?(:_last_operation_value, true)
       value = @delegate.send(:_last_operation_value, @key)
-      value.is_a?(Array) ? Parse::Properties.deep_copy_value(value) : nil
+      value.is_a?(Array) ? adopt_server_items(value) : nil
+    end
+
+    # The local items for an array the server returned, or nil to apply the
+    # operation locally instead.
+    # @param value [Array] the field's array from the server's reply.
+    # @return [Array, nil]
+    def adopt_server_items(value)
+      Parse::Properties.deep_copy_value(value)
     end
 
     # Convert items to pointer format for atomic operations.
