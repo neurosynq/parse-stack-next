@@ -18,19 +18,13 @@ module Parse
     # Maximum allowed length for regex patterns
     MAX_PATTERN_LENGTH = 500
 
-    # Patterns that can cause exponential backtracking in PCRE
-    DANGEROUS_PATTERNS = [
-      /\(\?\=|\(\?\!|\(\?\<[!=]/,                    # Lookahead/lookbehind assertions
-      /\{(\d{3,}|\d+,\d{3,})\}/,                     # Large repetition counts {1000} or {1,1000}
-      /(\.\*|\.\+)\s*(\.\*|\.\+)/,                   # Consecutive .* or .+ patterns
-      /\([^)]*(\+|\*)[^)]*\)\s*(\+|\*)/,             # Nested quantifiers like (a+)+
-      /\(\?[^)]*\([^)]*(\+|\*)[^)]*\)[^)]*(\+|\*)\)/, # More complex nested quantifiers
-    ].freeze
-
-    # `$options` flags MongoDB accepts on `$regex`: case-insensitive,
-    # multiline, extended, dot-all, and Unicode (`u`, emitted by the
-    # unicode form of the regex constraints).
-    ALLOWED_OPTIONS = "imxsu"
+    # `$options` flags accepted on a caller-supplied `$regex`:
+    # case-insensitive, multiline, dot-all, and Unicode (`u`, emitted by the
+    # unicode form of the regex constraints). The extended flag `x` is
+    # refused: it turns whitespace and `#` into comments, which can hide a
+    # quantifier from any check that reads the pattern text. Parse Server
+    # accepts `x`; this SDK refuses it on input it did not build.
+    ALLOWED_OPTIONS = "imsu"
 
     # A literal text optionally anchored or wrapped in `.*`: what
     # `starts_with`, `ends_with`, and `contains` build from escaped input.
@@ -38,48 +32,341 @@ module Parse
     # pattern cannot backtrack catastrophically.
     LITERAL_BODY = /\A(?:\\.|[^\\.^$|?*+()\[\]{}])*\z/m
 
+    # Largest repeat count PCRE accepts in `{n}` / `{n,m}`.
+    MAX_REPEAT_COUNT = 65_535
+
+    # Raised by {Parser} for a pattern the checker refuses or cannot read.
+    # @!visibility private
+    class Refused < StandardError; end
+
+    # @!visibility private
+    # A small reader for the PCRE pattern language, enough to find the
+    # shapes that backtrack catastrophically. It builds a tree of
+    # alternations, sequences, and quantified items, and refuses anything
+    # it does not understand (fail closed).
+    #
+    # Node shapes:
+    #   [:alt, [seq, ...]]           alternation (one seq per branch)
+    #   [:seq, [item, ...]]          concatenation
+    #   item = { atom:, quant: }     quant is nil or { min:, max: } (max nil = unbounded)
+    #   atom = [:char] | [:dot] | [:anchor] | [:backref] | [:group, alt]
+    class Parser
+      def initialize(source)
+        @src = source
+        @pos = 0
+      end
+
+      # @return [Array] the parsed tree.
+      def parse
+        tree = parse_alt
+        refuse("unbalanced ')'") if @pos < @src.length
+        tree
+      end
+
+      private
+
+      def refuse(reason)
+        raise Refused, reason
+      end
+
+      def peek(offset = 0)
+        @src[@pos + offset]
+      end
+
+      def parse_alt
+        branches = [parse_seq]
+        while peek == "|"
+          @pos += 1
+          branches << parse_seq
+        end
+        [:alt, branches]
+      end
+
+      def parse_seq
+        items = []
+        while @pos < @src.length && peek != "|" && peek != ")"
+          atom = parse_atom
+          next if atom.nil?
+          quant = parse_quant
+          if quant && (atom.first == :anchor)
+            refuse("quantifier on an anchor or assertion")
+          end
+          items << { atom: atom, quant: quant }
+        end
+        [:seq, items]
+      end
+
+      def parse_atom
+        c = peek
+        case c
+        when "("
+          parse_group
+        when "["
+          parse_class
+          [:char]
+        when "\\"
+          parse_escape
+        when "."
+          @pos += 1
+          [:dot]
+        when "^", "$"
+          @pos += 1
+          [:anchor]
+        when "*", "+", "?"
+          refuse("quantifier with nothing to repeat")
+        when "{"
+          if quantifier_at?(@pos)
+            refuse("quantifier with nothing to repeat")
+          end
+          @pos += 1
+          [:char]
+        else
+          @pos += 1
+          [:char]
+        end
+      end
+
+      def parse_escape
+        @pos += 1
+        c = peek
+        refuse("trailing backslash") if c.nil?
+        @pos += 1
+        case c
+        when "Q"
+          close = @src.index("\\E", @pos)
+          @pos = close ? close + 2 : @src.length
+          [:char]
+        when "1".."9"
+          @pos += 1 while peek && peek.match?(/\d/)
+          [:backref]
+        when "k", "g"
+          skip_braced_name
+          [:backref]
+        when "p", "P", "x", "o", "N"
+          skip_braced_name if peek == "{"
+          [:char]
+        when "c"
+          @pos += 1
+          [:char]
+        when "b", "B", "A", "z", "Z", "G", "K"
+          [:anchor]
+        else
+          [:char]
+        end
+      end
+
+      def skip_braced_name
+        open = peek
+        close = { "{" => "}", "<" => ">", "'" => "'" }[open]
+        if close
+          finish = @src.index(close, @pos + 1)
+          refuse("unterminated escape") if finish.nil?
+          @pos = finish + 1
+        else
+          @pos += 1 while peek && peek.match?(/[-+\d]/)
+        end
+      end
+
+      def parse_class
+        @pos += 1
+        @pos += 1 if peek == "^"
+        if peek == "]"
+          @pos += 1
+        end
+        loop do
+          c = peek
+          refuse("unterminated character class") if c.nil?
+          if c == "\\"
+            @pos += 2
+          elsif c == "[" && peek(1) == ":"
+            finish = @src.index(":]", @pos + 2)
+            refuse("unterminated POSIX class") if finish.nil?
+            @pos = finish + 2
+          elsif c == "]"
+            @pos += 1
+            break
+          else
+            @pos += 1
+          end
+        end
+      end
+
+      def parse_group
+        @pos += 1
+        kind = :capture
+        if peek == "?"
+          @pos += 1
+          c = peek
+          case c
+          when ":", ">", "|"
+            @pos += 1
+            kind = :group
+          when "=", "!"
+            @pos += 1
+            kind = :lookaround
+          when "<"
+            if peek(1) == "=" || peek(1) == "!"
+              @pos += 2
+              kind = :lookaround
+            else
+              skip_group_name(">")
+            end
+          when "P"
+            @pos += 1
+            refuse("unsupported group construct") unless peek == "<"
+            skip_group_name(">")
+          when "'"
+            skip_group_name("'")
+          when "#"
+            refuse("inline comment (?#...)")
+          else
+            return parse_inline_flags
+          end
+        end
+        body = parse_alt
+        refuse("unbalanced '('") unless peek == ")"
+        @pos += 1
+        [:group, body, kind]
+      end
+
+      def skip_group_name(close)
+        finish = @src.index(close, @pos + 1)
+        refuse("unterminated group name") if finish.nil?
+        @pos = finish + 1
+      end
+
+      # `(?flags)` or `(?flags:...)`, where flags are `on-off`. The
+      # extended flag turned on is refused; anything that is not a flag
+      # group (recursion, conditionals, callouts) is refused too.
+      def parse_inline_flags
+        start = @pos
+        @pos += 1 while peek && peek.match?(/[a-zA-Z^-]/)
+        flags = @src[start...@pos]
+        refuse("unsupported group construct (?#{peek})") if flags.empty?
+        on = flags.sub(/\A\^/, "").split("-", 2).first.to_s
+        refuse("extended mode (?x) is not allowed") if on.include?("x")
+        unless flags.match?(/\A\^?[imsnUJ]*(?:-[imsnUJ]*)?\z/) || flags.match?(/\A\^?[imsxnUJ]*-[imsxnUJ]*\z/)
+          refuse("unsupported inline flags (?#{flags})")
+        end
+        if peek == ")"
+          @pos += 1
+          return nil
+        end
+        refuse("unsupported group construct") unless peek == ":"
+        @pos += 1
+        body = parse_alt
+        refuse("unbalanced '('") unless peek == ")"
+        @pos += 1
+        [:group, body, :group]
+      end
+
+      def quantifier_at?(idx)
+        @src[idx..].match?(/\A\{\d*,?\d*\}/) && !@src[idx..].start_with?("{}") && !@src[idx..].start_with?("{,}")
+      end
+
+      def parse_quant
+        c = peek
+        quant = case c
+          when "*" then @pos += 1; { min: 0, max: nil }
+          when "+" then @pos += 1; { min: 1, max: nil }
+          when "?" then @pos += 1; { min: 0, max: 1 }
+          when "{"
+            m = @src[@pos..].match(/\A\{(\d*)(,?)(\d*)\}/)
+            return nil if m.nil? || (m[1].empty? && m[3].empty?)
+            @pos += m[0].length
+            min = m[1].empty? ? 0 : m[1].to_i
+            max = if m[2].empty? then min
+              elsif m[3].empty? then nil
+              else m[3].to_i
+              end
+            if min > MAX_REPEAT_COUNT || (max && max > MAX_REPEAT_COUNT)
+              refuse("repeat count above #{MAX_REPEAT_COUNT}")
+            end
+            refuse("repeat range out of order") if max && max < min
+            { min: min, max: max }
+          end
+        return nil if quant.nil?
+        @pos += 1 if peek == "?" || peek == "+"
+        refuse("stacked quantifiers") if %w[* + ?].include?(peek) || (peek == "{" && quantifier_at?(@pos))
+        quant
+      end
+    end
+
     class << self
       # Validates a regex pattern for potential ReDoS vulnerabilities.
+      #
+      # Escaped literal text (what `starts_with`, `ends_with`, and
+      # `contains` build) always passes; its length cap is
+      # `2 * max_length + 4` because escaping can double it. Any other
+      # pattern is parsed and refused when it contains a shape that
+      # backtracks catastrophically on PCRE:
+      #
+      # * a group repeated more than once (`+`, `*`, `{n,}`, `{n}` or
+      #   `{n,m}` with a top above 1) whose body holds a quantifier, an
+      #   alternation, or a backreference: `(a+)+`, `(a|aa)+`, `((a+))+`,
+      #   `(a+){2,}`, `(a+){20}`;
+      # * two adjacent unbounded `.*` / `.+` with more pattern after them;
+      # * an inline comment `(?#...)`, extended mode (`(?x)` or a Regexp
+      #   with `Regexp::EXTENDED`), recursion, conditionals, or anything
+      #   else the reader does not recognize, and unbalanced patterns.
+      #
+      # Repeats of a single atom (`.{1,255}`, `\d{1,100}`, `x{1000}`, `a+`)
+      # and lookarounds without such a shape inside (`^(?!test)`) pass.
       # @param pattern [String, Regexp] the pattern to validate
       # @param max_length [Integer] maximum allowed pattern length
       # @raise [ArgumentError] if the pattern is potentially dangerous
       # @return [String] the validated pattern string
       def validate!(pattern, max_length: MAX_PATTERN_LENGTH)
+        if pattern.is_a?(Regexp) && (pattern.options & Regexp::EXTENDED) != 0
+          raise ArgumentError, "Regex pattern uses extended mode (the x flag), which is not allowed: " \
+                               "it can hide quantifiers in comments. Pattern: #{pattern.source.inspect}"
+        end
         pattern_str = pattern.is_a?(Regexp) ? pattern.source : pattern.to_s
+        literal = literal_pattern?(pattern_str)
+        cap = literal ? (2 * max_length) + 4 : max_length
 
-        if pattern_str.length > max_length
-          raise ArgumentError, "Regex pattern too long (#{pattern_str.length} chars, max #{max_length}). " \
+        if pattern_str.length > cap
+          raise ArgumentError, "Regex pattern too long (#{pattern_str.length} chars, max #{cap}). " \
                                "Long patterns can cause performance issues."
         end
 
-        return pattern_str if literal_pattern?(pattern_str)
+        return pattern_str if literal
 
-        DANGEROUS_PATTERNS.each do |dangerous|
-          if pattern_str.match?(dangerous)
-            raise ArgumentError, "Regex pattern contains potentially dangerous constructs that could cause " \
-                                 "ReDoS (Regular Expression Denial of Service). Pattern: #{pattern_str.inspect}"
+        reason = begin
+            check_tree(Parser.new(pattern_str).parse)
+          rescue Refused => e
+            e.message
           end
+        if reason
+          raise ArgumentError, "Regex pattern contains potentially dangerous constructs that could cause " \
+                               "ReDoS (Regular Expression Denial of Service): #{reason}. Pattern: #{pattern_str.inspect}"
         end
 
         pattern_str
       end
 
       # Whether a pattern is escaped literal text, optionally anchored
-      # (`^text`, `text$`) or wrapped in `.*` (`.*text.*`).
+      # (`^text`, `text$`) or wrapped in `.*` (`.*text.*`). A pattern that is
+      # only `.*` wrappers (`.*.*`) is not literal text.
       # @param pattern_str [String]
       # @return [Boolean]
       def literal_pattern?(pattern_str)
         body = pattern_str.dup
+        dot_prefix = false
         if body.start_with?("^")
           body = body[1..]
         elsif body.start_with?(".*")
           body = body[2..]
+          dot_prefix = true
         end
+        dot_suffix = false
         if body.end_with?(".*") && !body.end_with?("\\.*")
           body = body[0..-3]
+          dot_suffix = true
         elsif body.end_with?("$") && !body.end_with?("\\$")
           body = body[0..-2]
         end
+        return false if dot_prefix && dot_suffix && body.empty?
         LITERAL_BODY.match?(body)
       end
 
@@ -124,6 +411,85 @@ module Parse
         end
         nil
       end
+
+      # @!visibility private
+      # The first refused shape in a parsed pattern, or nil.
+      def check_tree(node)
+        case node.first
+        when :alt
+          node[1].each do |seq|
+            reason = check_tree(seq)
+            return reason if reason
+          end
+        when :seq
+          items = node[1]
+          items.each_with_index do |item, idx|
+            atom = item[:atom]
+            quant = item[:quant]
+            if atom.first == :group
+              if repeats?(quant) && complex?(atom[1])
+                return "a repeated group contains a quantifier, alternation, or backreference"
+              end
+              reason = check_tree(atom[1])
+              return reason if reason
+            end
+            nxt = items[idx + 1]
+            if unbounded_dot?(item) && nxt && unbounded_dot?(nxt) &&
+               !items[(idx + 2)..].all? { |rest| rest[:atom].first == :anchor }
+              return "adjacent unbounded .* or .+ followed by more pattern"
+            end
+          end
+        end
+        nil
+      end
+      private :check_tree
+
+      # @!visibility private
+      def repeats?(quant)
+        !quant.nil? && (quant[:max].nil? || quant[:max] > 1)
+      end
+      private :repeats?
+
+      # @!visibility private
+      def unbounded_dot?(item)
+        item[:atom].first == :dot && item[:quant] && item[:quant][:max].nil?
+      end
+      private :unbounded_dot?
+
+      # @!visibility private
+      # Whether a quantifier lets the engine choose how many times to match
+      # (`?`, `*`, `+`, `{0,n}`, `{n,m}` with m > n, `{n,}`), so each repeat
+      # of an enclosing group can split the input another way. A fixed count
+      # (`{3}`) gives no choice.
+      def branches?(quant)
+        !quant.nil? && (quant[:max].nil? || quant[:max] != quant[:min])
+      end
+      private :branches?
+
+      # @!visibility private
+      # Whether a subtree holds a quantifier that introduces a choice
+      # (including an optional `?`, which matches zero or one time), an
+      # alternation with more than one branch, or a backreference. Any of
+      # these inside a group repeated more than once multiplies the ways a
+      # failing match can be retried: `(a?){100}a{100}` backtracks as badly
+      # as `(a+)+`.
+      def complex?(node)
+        case node.first
+        when :alt
+          return true if node[1].length > 1
+          node[1].any? { |seq| complex?(seq) }
+        when :seq
+          node[1].any? do |item|
+            atom = item[:atom]
+            branches?(item[:quant]) ||
+              atom.first == :backref ||
+              (atom.first == :group && complex?(atom[1]))
+          end
+        else
+          false
+        end
+      end
+      private :complex?
 
       # Checks if a pattern is safe without raising an exception.
       # @param pattern [String, Regexp] the pattern to check

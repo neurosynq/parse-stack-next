@@ -117,17 +117,16 @@ module Parse
       # worst-case backtracking cost on any one pattern bounded.
       MAX_REGEX_PATTERN_LENGTH = 256
 
-      # Allowed $options flag characters. MongoDB accepts i (case
-      # insensitive), m (multi-line), x (extended/whitespace-ignored),
-      # s (dot-all). The dot-all `s` flag is intentionally omitted: it
-      # makes `.` cross newlines, which extends the search frontier on
-      # multi-line text fields and amplifies catastrophic-backtracking
-      # cost for the worst patterns. `imx` covers every real use case
-      # the agent surface needs.
-      ALLOWED_REGEX_OPTIONS = "imx"
+      # Allowed $options flag characters: the shared
+      # {Parse::RegexSecurity::ALLOWED_OPTIONS} list (`imsu`). The extended
+      # flag `x` is refused because it lets comments hide a quantifier from
+      # the pattern check.
+      ALLOWED_REGEX_OPTIONS = defined?(Parse::RegexSecurity::ALLOWED_OPTIONS) ? Parse::RegexSecurity::ALLOWED_OPTIONS : "imsu"
 
-      # Heuristic for nested-quantifier ReDoS patterns (catastrophic
-      # backtracking). Matches a quantifier (`+` or `*`) INSIDE a
+      # Older heuristic for nested-quantifier ReDoS patterns, kept for
+      # callers that reference it. Patterns are now checked by
+      # {Parse::RegexSecurity.validate!}, which parses the pattern. This
+      # heuristic matches a quantifier (`+` or `*`) INSIDE a
       # parenthesized group that is itself followed by a quantifier
       # (`+`, `*`, or `?`) — the structural shape that drives
       # exponential time on adversarial inputs (`(a+)+`, `(a*)*`,
@@ -435,15 +434,17 @@ module Parse
       #
       #   1. $regex must be a String. No Hash/Array/Numeric values.
       #   2. Pattern length ≤ MAX_REGEX_PATTERN_LENGTH (256 chars).
-      #   3. Pattern must not match the nested-quantifier heuristic
-      #      (REDOS_NESTED_QUANTIFIER_RE).
+      #   3. Pattern must pass Parse::RegexSecurity.validate!, which
+      #      parses it and refuses repeated groups holding a quantifier,
+      #      alternation, or backreference, inline comments, and extended
+      #      mode.
       #
       # For $options:
       #
       #   1. Must be a String.
       #   2. Length ≤ 8 (defensive — real-world usage is 0-3 chars).
-      #   3. Every character must appear in ALLOWED_REGEX_OPTIONS (imx).
-      #      The `s` (dot-all) flag is intentionally rejected.
+      #   3. Every character must appear in ALLOWED_REGEX_OPTIONS (imsu).
+      #      The extended `x` flag is rejected.
       #
       # @raise [ConstraintSecurityError] on any rule violation.
       def assert_regex_operand_safe!(op, val)
@@ -465,7 +466,7 @@ module Parse
               reason: :regex_too_long,
             )
           end
-          if REDOS_NESTED_QUANTIFIER_RE.match?(val) || !Parse::RegexSecurity.safe?(val, max_length: MAX_REGEX_PATTERN_LENGTH)
+          unless Parse::RegexSecurity.safe?(val, max_length: MAX_REGEX_PATTERN_LENGTH)
             raise ConstraintSecurityError.new(
               "$regex pattern #{val.inspect} contains a nested quantifier " \
               "or another backtracking-prone construct that can trigger " \
@@ -495,8 +496,8 @@ module Parse
             raise ConstraintSecurityError.new(
               "$options contains disallowed flag(s) " \
               "#{unrecognized.uniq.inspect}. Allowed flags: " \
-              "#{ALLOWED_REGEX_OPTIONS.chars.inspect}. The dot-all " \
-              "`s` flag is intentionally rejected.",
+              "#{ALLOWED_REGEX_OPTIONS.chars.inspect}. The extended " \
+              "`x` flag is rejected.",
               operator: op,
               reason: :invalid_regex,
             )

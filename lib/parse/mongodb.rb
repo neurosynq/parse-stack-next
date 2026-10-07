@@ -595,6 +595,12 @@ module Parse
       end
 
       # Get a MongoDB collection
+      #
+      # This is raw driver access: reads and writes through the returned
+      # collection apply no ACL, CLP, or protectedFields scope, and it is not
+      # refused inside {Parse.without_master_key}. Use the scoped readers
+      # ({.aggregate}, `results_direct`) for anything a caller's identity
+      # should limit.
       # @param name [String] the collection name
       # @return [Mongo::Collection]
       def collection(name, authorizing_client: nil)

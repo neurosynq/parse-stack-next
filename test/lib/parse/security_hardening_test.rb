@@ -1809,18 +1809,21 @@ class SecurityHardeningTest < Minitest::Test
     assert_equal "^foo.*bar.*$", out["title"]["$regex"]
   end
 
-  def test_constraint_translator_refuses_dot_all_options_flag
-    constraints = { "title" => { "$regex" => "^foo", "$options" => "is" } }
+  # 5.8.2: the translator shares Parse::RegexSecurity::ALLOWED_OPTIONS
+  # (`imsu`). The extended `x` flag is refused (it lets comments hide a
+  # quantifier); dot-all `s` is accepted.
+  def test_constraint_translator_refuses_extended_options_flag
+    constraints = { "title" => { "$regex" => "^foo", "$options" => "ix" } }
     err = assert_raises(Parse::Agent::ConstraintTranslator::ConstraintSecurityError) do
       Parse::Agent::ConstraintTranslator.translate(constraints)
     end
     assert_match(/options|flag/i, err.message)
   end
 
-  def test_constraint_translator_accepts_imx_options_flags
-    constraints = { "title" => { "$regex" => "^foo", "$options" => "imx" } }
+  def test_constraint_translator_accepts_ims_options_flags
+    constraints = { "title" => { "$regex" => "^foo", "$options" => "ims" } }
     out = Parse::Agent::ConstraintTranslator.translate(constraints)
-    assert_equal "imx", out["title"]["$options"]
+    assert_equal "ims", out["title"]["$options"]
   end
 
   def test_constraint_translator_refuses_non_string_regex

@@ -81,7 +81,9 @@ module Parse
   # boundary: code inside the block can call {Parse.with_master_key}.
   # `Parse::MongoDB.find`, which reads raw documents with no scope, raises
   # `Parse::ACLScope::ACLRequired` inside the block. `Parse::MongoDB.indexes`
-  # returns index metadata only and stays available.
+  # returns index metadata only and stays available. `Parse::MongoDB.collection`
+  # returns the raw driver collection with no scope and is not refused inside
+  # the block, so code that reads through it directly bypasses the block.
   #
   # @yield runs the block with master-key disabled
   # @return [Object] the block's return value

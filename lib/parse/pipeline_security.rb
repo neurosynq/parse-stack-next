@@ -997,6 +997,21 @@ module Parse
           end
           if %w[$regexMatch $regexFind $regexFindAll].include?(key_str) && value.is_a?(Hash)
             pat = value["regex"] || value[:regex] || value["pattern"] || value[:pattern]
+            # The pattern must be a literal the walker can check: a String
+            # that is not a field path or variable, a Regexp, or a BSON
+            # regex. An expression object (`$literal`, `$concat`) or a
+            # `"$field"` reference would build the pattern at query time,
+            # out of reach of the check, possibly from stored data.
+            unless regex_literal_operand?(pat)
+              raise Error.new(
+                "SECURITY: #{key_str} 'regex' must be a literal pattern (a String that is " \
+                "not a field path or variable, a Regexp, or a BSON regex). Patterns built " \
+                "from expressions or document fields cannot be checked for ReDoS.",
+                stage: stage_idx,
+                operator: key_str,
+                reason: :regex_not_literal,
+              )
+            end
             check_regex_pattern!(pat, operator: key_str, stage_idx: stage_idx)
             opts = value["options"] || value[:options]
             check_regex_options!(opts, operator: key_str, stage_idx: stage_idx) unless opts.nil?
@@ -1074,9 +1089,12 @@ module Parse
         elsif defined?(BSON::Regexp::Raw) && pattern.is_a?(BSON::Regexp::Raw) then pattern.pattern.to_s
         end
       return if source.nil?
-      if source.bytesize > MAX_REGEX_PATTERN_LENGTH
+      # Escaped literal text cannot backtrack, and escaping can double its
+      # length, so it gets a larger cap than an arbitrary pattern.
+      cap = Parse::RegexSecurity.literal_pattern?(source) ? (2 * MAX_REGEX_PATTERN_LENGTH) + 4 : MAX_REGEX_PATTERN_LENGTH
+      if source.bytesize > cap
         raise Error.new(
-          "SECURITY: #{operator} regex pattern exceeds #{MAX_REGEX_PATTERN_LENGTH} bytes " \
+          "SECURITY: #{operator} regex pattern exceeds #{cap} bytes " \
           "(got #{source.bytesize}). Long caller-supplied regex patterns are a " \
           "ReDoS vector; refuse caller-supplied regexes longer than this cap.",
           stage: stage_idx,
@@ -1084,7 +1102,7 @@ module Parse
           reason: :regex_pattern_too_long,
         )
       end
-      Parse::RegexSecurity.validate!(source, max_length: MAX_REGEX_PATTERN_LENGTH)
+      Parse::RegexSecurity.validate!(pattern.is_a?(Regexp) ? pattern : source, max_length: MAX_REGEX_PATTERN_LENGTH)
     rescue ArgumentError => e
       raise Error.new(
         "SECURITY: #{operator} #{e.message}",
@@ -1095,6 +1113,17 @@ module Parse
     end
 
     private_class_method :check_regex_pattern!
+
+    # @!visibility private
+    # Whether a `$regexMatch` / `$regexFind` / `$regexFindAll` `regex`
+    # operand is a literal pattern rather than an expression.
+    def regex_literal_operand?(pattern)
+      return !pattern.start_with?("$") if pattern.is_a?(String)
+      return true if pattern.is_a?(Regexp)
+      defined?(BSON::Regexp::Raw) && pattern.is_a?(BSON::Regexp::Raw)
+    end
+
+    private_class_method :regex_literal_operand?
 
     # @!visibility private
     def check_regex_options!(options, operator:, stage_idx:)

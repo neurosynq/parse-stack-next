@@ -118,7 +118,8 @@ class RegexRouting582Test < Minitest::Test
 
   def test_overlong_pattern_keeps_its_length_reason
     err = assert_raises(Parse::PipelineSecurity::Error) do
-      Parse::PipelineSecurity.validate_filter!({ "name" => { "$regex" => "a" * 600 } })
+      # A non-literal pattern: escaped literal text gets a larger cap.
+      Parse::PipelineSecurity.validate_filter!({ "name" => { "$regex" => "[ab]" * 150 } })
     end
     assert_equal :regex_pattern_too_long, err.reason
   end
@@ -126,10 +127,11 @@ class RegexRouting582Test < Minitest::Test
   # Agent constraint translator
 
   def test_agent_translator_runs_regex_security
-    # Lookahead is not caught by the translator's own nested-quantifier
-    # check, only by Parse::RegexSecurity.
+    # Overlapping alternation under a repeat is not caught by the
+    # translator's own nested-quantifier heuristic, only by
+    # Parse::RegexSecurity.
     err = assert_raises(Parse::Agent::ConstraintTranslator::ConstraintSecurityError) do
-      Parse::Agent::ConstraintTranslator.translate({ "name" => { "$regex" => "(?=a)b" } })
+      Parse::Agent::ConstraintTranslator.translate({ "name" => { "$regex" => "(a|aa)+$" } })
     end
     assert_equal :regex_redos, err.reason
     assert Parse::Agent::ConstraintTranslator.translate({ "name" => { "$regex" => "^abc" } })
