@@ -34,10 +34,14 @@ class AgentIdentityReview582Test < Minitest::Test
     Parse::ACLScope::Resolution.new(mode: :session, user_id: user, permission_strings: ["*", user])
   end
 
+  # A session agent whose construction-time resolution failed, with the
+  # retry backoff already elapsed, so the next use resolves again.
   def unresolved_agent(token = "r:alice")
-    Parse::ACLScope.stub(:resolve!, failing_resolve) do
+    agent = Parse::ACLScope.stub(:resolve!, failing_resolve) do
       Parse::Agent.new(session_token: token)
     end
+    agent.instance_variable_set(:@scope_failed_at, nil)
+    agent
   end
 
   def resolved_agent(token = "r:alice")
@@ -208,5 +212,88 @@ class AgentIdentityReview582Test < Minitest::Test
     agent = resolved_agent("r:alice")
     agent.define_singleton_method(:acl_scope) { nil }
     assert_raises(Parse::Agent::UnresolvedIdentity) { agent.acl_permission_strings }
+  end
+
+  # Re-review follow-ups: construction failures, off-lock resolution,
+  # sub-agent snapshots, marshaling, stop_impersonating!.
+
+  def test_construction_failure_is_recorded_so_first_use_does_not_retry
+    calls = 0
+    counting_fail = ->(*_a, **_k) { calls += 1; raise "server unreachable" }
+    agent = Parse::ACLScope.stub(:resolve!, counting_fail) { Parse::Agent.new(session_token: "r:alice") }
+    assert_equal 1, calls
+    Parse::ACLScope.stub(:resolve!, counting_fail) do
+      2.times { assert_raises(Parse::Agent::UnresolvedIdentity) { agent.acl_scope } }
+    end
+    assert_equal 1, calls, "the first use inside the backoff window must not look up again"
+  end
+
+  def test_invalid_token_is_not_retried
+    calls = 0
+    invalid = ->(*_a, **_k) { calls += 1; raise Parse::Authorization::InvalidSession, "session token invalid or expired" }
+    agent = Parse::ACLScope.stub(:resolve!, invalid) { Parse::Agent.new(session_token: "r:alice") }
+    agent.instance_variable_set(:@scope_failed_at,
+                                Process.clock_gettime(Process::CLOCK_MONOTONIC) - 60)
+    Parse::ACLScope.stub(:resolve!, invalid) do
+      err = assert_raises(Parse::Agent::UnresolvedIdentity) { agent.acl_scope }
+      assert_match(/invalid or expired/, err.message)
+    end
+    assert_equal 1, calls, "a token Parse Server rejected is not looked up again"
+  end
+
+  def test_other_threads_are_not_blocked_while_resolving
+    agent = unresolved_agent("r:alice")
+    started = Queue.new
+    slow = lambda do |opts, **_k|
+      started << true
+      sleep 0.5
+      scope_for(opts[:session_token])
+    end
+    Parse::ACLScope.stub(:resolve!, slow) do
+      resolver = Thread.new { agent.acl_scope }
+      started.pop
+      t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      agent.send(:scope_mutex).synchronize { nil }
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
+      resolver.join
+      assert_operator elapsed, :<, 0.2, "the scope lock must not be held during the lookup"
+    end
+  end
+
+  def test_child_reuses_parent_scope_from_a_consistent_snapshot
+    parent = resolved_agent("r:alice")
+    # The snapshot pairs a token with the scope bound for it.
+    token, scope = parent.send(:scope_snapshot)
+    assert_equal "r:alice", token
+    assert_equal ["*", "alice"], scope.permission_strings
+    calls = 0
+    counting = ->(opts, **_k) { calls += 1; scope_for(opts[:session_token]) }
+    child = Parse::ACLScope.stub(:resolve!, counting) { Parse::Agent.new(parent: parent) }
+    assert_equal 0, calls, "the child reuses the parent's snapshot instead of looking up"
+    assert_equal ["*", "alice"], child.acl_permission_strings
+    # After the parent switches identity, its snapshot no longer matches the
+    # old token, so it is never handed out for it.
+    parent.stub(:resolve_impersonation_token!, "r:bob") { parent.impersonate("bob") }
+    token, scope = parent.send(:scope_snapshot)
+    assert_equal "r:bob", token
+    assert_nil scope
+  end
+
+  def test_agent_and_client_refuse_marshal
+    agent = resolved_agent("r:alice")
+    err = assert_raises(TypeError) { Marshal.dump(agent) }
+    assert_match(/Parse::Agent cannot be marshaled/, err.message)
+    client = Parse::Client.new(server_url: "https://example.test/parse", application_id: "a",
+                               api_key: "k", master_key: "MASTERSECRET")
+    err = assert_raises(TypeError) { Marshal.dump(client) }
+    assert_match(/Parse::Client cannot be marshaled/, err.message)
+  end
+
+  def test_stop_impersonating_is_a_noop_without_impersonation
+    agent = resolved_agent("r:alice")
+    agent.stop_impersonating!
+    assert_equal "r:alice", agent.session_token
+    assert_equal ["*", "alice"], agent.acl_permission_strings,
+                 "an agent built with its own session must not gain master-key posture"
   end
 end

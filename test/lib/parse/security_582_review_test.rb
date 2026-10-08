@@ -138,6 +138,34 @@ class TlsVerificationGuardTest < Minitest::Test
   def test_verification_on_is_accepted
     build({ verify: true, verify_mode: OpenSSL::SSL::VERIFY_PEER })
   end
+
+  def connection_options_client(opts, **kw)
+    capture_io do
+      @c = Parse::Client.new(server_url: "https://prod.test/parse", application_id: "a", api_key: "k",
+                             faraday: opts, **kw)
+    end
+    @c
+  end
+
+  def test_connection_options_are_checked_like_a_hash
+    err = assert_raises(ArgumentError) do
+      connection_options_client(Faraday::ConnectionOptions.new(ssl: { verify: false }))
+    end
+    assert_match(/TLS certificate verification/, err.message)
+    err = assert_raises(ArgumentError) do
+      connection_options_client(Faraday::ConnectionOptions.new(proxy: "http://attacker"))
+    end
+    assert_match(/proxy/, err.message)
+    # Accepted options still apply, and env proxy discovery stays off.
+    client = connection_options_client(Faraday::ConnectionOptions.new(ssl: { verify: true }))
+    conn = client.instance_variable_get(:@conn)
+    assert conn.ssl.verify?
+    assert_nil conn.proxy
+  end
+
+  def test_other_faraday_option_types_are_refused
+    assert_raises(ArgumentError) { connection_options_client("ssl=off") }
+  end
 end
 
 class ResponseErrorTextTest < Minitest::Test
@@ -189,10 +217,14 @@ end
 
 class LoopbackHostRuleTest < Minitest::Test
   def test_loopback_hosts
-    %w[localhost LOCALHOST localhost. 127.0.0.1 127.9.9.9 ::1 [::1] 0.0.0.0].each do |h|
+    # 0.0.0.0 stays local for client URLs (a connect to it reaches this host).
+    %w[localhost LOCALHOST 127.0.0.1 127.0.0.2 127.9.9.9 ::1 [::1] 0.0.0.0].each do |h|
       assert Parse::Client.loopback_host?(h), "#{h} should be loopback"
     end
-    ["10.0.0.1", "example.com", "127.0.0.1.evil.test", "", nil].each do |h|
+    # Malformed addresses go to a resolver by name; a trailing-dot localhost
+    # can skip /etc/hosts.
+    ["10.0.0.1", "example.com", "127.0.0.1.evil.test", "127.999.1.1", "localhost.",
+     "127.1", "0x7f000001", "", nil].each do |h|
       refute Parse::Client.loopback_host?(h), "#{h.inspect} should not be loopback"
     end
   end

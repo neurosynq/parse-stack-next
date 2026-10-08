@@ -34,10 +34,14 @@ class AgentUnresolvedIdentityTest < Minitest::Test
                                     permission_strings: ["*", user_id])
   end
 
+  # A session agent whose construction-time resolution failed, with the
+  # retry backoff already elapsed, so the next use resolves again.
   def unresolved_agent
-    Parse::ACLScope.stub(:resolve!, failing_resolve) do
+    agent = Parse::ACLScope.stub(:resolve!, failing_resolve) do
       Parse::Agent.new(session_token: "r:alice")
     end
+    agent.instance_variable_set(:@scope_failed_at, nil)
+    agent
   end
 
   def test_failed_resolution_is_not_master_posture

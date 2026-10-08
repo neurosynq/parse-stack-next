@@ -444,6 +444,14 @@ module Parse
       as_json.each { |k, v| coder[k] = v }
     end
 
+    # A client holds the master key, REST key, and session tokens, so it is
+    # never marshaled (Rails.cache, DRb, or a job payload would store them in
+    # the clear). Store the configuration and build a new client instead.
+    # @raise [TypeError]
+    def marshal_dump
+      raise TypeError, "Parse::Client cannot be marshaled"
+    end
+
     # A NEW non-master {Parse::Client} that mirrors THIS client's connection
     # settings (`server_url` / `application_id` / `api_key`) but carries no
     # master key and binds `session_token`, so it acts on the server as that
@@ -670,6 +678,12 @@ module Parse
     #    middleware. The default value is 3 seconds. If :expires is set to 0,
     #    caching will be disabled. You can always clear the current state of the
     #    cache using the clear_cache! method on your Parse::Client instance.
+    # @option opts [Boolean] :cache_session_requests Whether this client's
+    #    response cache stores and serves reads made with a session token.
+    #    Overrides {Parse::Middleware::Caching.cache_session_requests} in
+    #    either direction; omit it to use that class default (off). Only
+    #    `true` enables it. With it on, a revoked session keeps reading its
+    #    cached rows until the entry expires.
     # @option opts [String] :cache_namespace Optional prefix applied to every
     #    cache key. Useful when two Parse apps share one Redis instance and
     #    would otherwise collide on identical paths (e.g.
@@ -792,7 +806,7 @@ module Parse
       # scheme; without this guard a caller passing
       #   faraday: { ssl: { verify: false }, proxy: "http://attacker" }
       # would neuter TLS verification on an HTTPS connection.
-      validate_faraday_opts!(opts[:faraday])
+      opts[:faraday] = validate_faraday_opts!(opts[:faraday])
       opts[:faraday].merge!(:url => @server_url)
       @conn = Faraday.new(opts[:faraday]) do |conn|
         # Apply timeouts before any user-supplied middleware sees a request.
@@ -1017,8 +1031,19 @@ module Parse
     #   controlled MITM unless explicitly allowlisted
     #
     # @api private
+    # @return [Hash] the options as a Hash, so a `Faraday::ConnectionOptions`
+    #   (or anything else responding to `to_hash`) is checked and used in the
+    #   same form; any other value raises.
     def validate_faraday_opts!(faraday_opts)
-      return unless faraday_opts.is_a?(Hash)
+      faraday_opts = {} if faraday_opts.nil?
+      unless faraday_opts.is_a?(Hash)
+        unless faraday_opts.respond_to?(:to_hash)
+          raise ArgumentError,
+                "[Parse::Client] opts[:faraday] must be a Hash or Faraday::ConnectionOptions " \
+                "(got #{faraday_opts.class})."
+        end
+        faraday_opts = faraday_opts.to_hash
+      end
 
       ssl = faraday_opts[:ssl] || faraday_opts["ssl"]
       if self.class.url_scheme(@server_url) == "https" && (setting = tls_verification_disabled(ssl))
@@ -1046,6 +1071,7 @@ module Parse
       # `proxy: nil` is the Faraday-documented way to disable
       # env-proxy autodiscovery.
       faraday_opts[:proxy] = nil unless @allow_faraday_proxy
+      faraday_opts
     end
 
     private :validate_faraday_opts!
@@ -1073,12 +1099,6 @@ module Parse
     end
     private :tls_verification_disabled
 
-    # Hosts considered "loopback" for the cleartext-ws:// guard in
-    # {#configure_live_query}. Mirrors
-    # {Parse::LiveQuery::Client::LOOPBACK_HOSTS} so the explicit-URL
-    # path and the derived-URL path agree on what counts as local.
-    LIVE_QUERY_LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1 [::1] 0.0.0.0].freeze
-
     # Whether a URL host is this machine: `localhost`, any `127.0.0.0/8`
     # address, `::1`, or `0.0.0.0` (a connect to the unspecified address
     # reaches the local host on Linux and macOS). Used by the http:// server
@@ -1086,11 +1106,21 @@ module Parse
     # @param host [String, nil]
     # @return [Boolean]
     # @api private
+    #
+    # Addresses are parsed with IPAddr, so a malformed one such as
+    # `127.999.1.1` (which a resolver would look up by name) is not loopback.
+    # `localhost.` with a trailing dot is not either: some resolvers skip
+    # `/etc/hosts` for the fully qualified form. `0.0.0.0` stays local for
+    # client URLs only (it is a bind address everywhere else).
     def self.loopback_host?(host)
-      h = host.to_s.strip.downcase.delete_prefix("[").delete_suffix("]").chomp(".")
+      h = host.to_s.strip.downcase.delete_prefix("[").delete_suffix("]")
       return false if h.empty?
-      return true if h == "localhost" || h == "::1" || h == "0.0.0.0"
-      h.match?(/\A127\.\d{1,3}\.\d{1,3}\.\d{1,3}\z/)
+      return true if h == "localhost" || h == "0.0.0.0"
+      return false unless h.match?(/\A[0-9a-f:.]+\z/)
+      require "ipaddr"
+      IPAddr.new(h).loopback?
+    rescue IPAddr::InvalidAddressError, IPAddr::AddressFamilyError
+      false
     end
 
     # The lowercased scheme of a URL String, or nil when it does not parse.

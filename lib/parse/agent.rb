@@ -924,10 +924,12 @@ module Parse
     def acl_scope
       # The unresolved check and the read happen under one lock, so a
       # concurrent #impersonate cannot clear the scope between them and
-      # hand a session agent a nil (master-looking) scope.
-      scope_mutex.synchronize do
-        session_scope_unresolved? ? ensure_session_scope! : @acl_scope
+      # hand a session agent a nil (master-looking) scope. Resolution itself
+      # runs outside the lock (see #ensure_session_scope!).
+      resolved = scope_mutex.synchronize do
+        session_scope_unresolved? ? :unresolved : @acl_scope
       end
+      resolved == :unresolved ? ensure_session_scope! : resolved
     end
 
     # @return [Boolean] `true` when the agent has a session token whose
@@ -936,6 +938,15 @@ module Parse
     def session_scope_unresolved?
       @acl_scope.nil? && !@session_token.to_s.empty?
     end
+
+    # The session token and its resolved scope read together under the scope
+    # lock, so a sub-agent never pairs one token with another token's scope.
+    # @return [Array(String, Parse::ACLScope::Resolution)] `[token, scope]`;
+    #   either may be nil.
+    def scope_snapshot
+      scope_mutex.synchronize { [@session_token, @acl_scope] }
+    end
+    protected :scope_snapshot
 
     # @return [Boolean] whether this agent may run Atlas Search tools
     #   in master-key-equivalent mode when no `session_token` is set.
@@ -1348,12 +1359,16 @@ module Parse
       self
     end
 
-    # Clear an impersonation binding established via {#impersonate},
-    # returning the agent to master-key posture. Does not revoke the
-    # underlying _Session row (the token may be shared/minted elsewhere).
+    # Clear an impersonation binding established via {#impersonate} (or the
+    # `impersonate_user:` constructor option), returning the agent to
+    # master-key posture. Does not revoke the underlying _Session row (the
+    # token may be shared/minted elsewhere). A no-op on an agent that is not
+    # impersonating: an agent built with its own `session_token:` keeps it,
+    # rather than silently gaining master-key posture.
     # @return [self]
     def stop_impersonating!
       scope_mutex.synchronize do
+        return self if @impersonated_user_id.nil?
         @session_token = nil
         @impersonated_user_id = nil
         @impersonation_label = nil
@@ -2004,10 +2019,11 @@ module Parse
           # client is the same identity: it reuses the parent's resolved
           # scope instead of a second /users/me call, and stays unresolved
           # (lazy path) when the parent has not resolved yet.
-          if parent && @session_token == parent.session_token && @client.equal?(parent.client)
-            parent.instance_variable_get(:@acl_scope)
+          parent_token, parent_scope = parent && @client.equal?(parent.client) ? parent.scope_snapshot : nil
+          if parent_token && parent_token == @session_token
+            parent_scope
           else
-            resolve_session_scope
+            eager_session_scope
           end
         elsif @acl_user_scope
           Parse::ACLScope.resolve_for_user(@acl_user_scope, client: @client)
@@ -4295,6 +4311,13 @@ module Parse
       as_json.each { |k, v| coder[k] = v }
     end
 
+    # An agent holds a session token and a client with its keys, so it is
+    # never marshaled. Build a new agent from configuration instead.
+    # @raise [TypeError]
+    def marshal_dump
+      raise TypeError, "Parse::Agent cannot be marshaled"
+    end
+
     private
 
     # Seconds a failed lazy resolution is remembered before the next tool
@@ -4302,47 +4325,85 @@ module Parse
     # of each waiting out a request to an unreachable Parse Server.
     SCOPE_RETRY_BACKOFF = 5
 
-    # Resolve a session token into a frozen ACL scope, or nil when it cannot
-    # be resolved. Records why in @scope_failure: `:invalid_session` when
-    # Parse Server rejected the token, `:unreachable` otherwise.
-    def resolve_session_scope(token = @session_token)
+    # Resolve a session token into a frozen ACL scope. Does network I/O and
+    # touches no agent state, so it is safe to call without the scope lock.
+    # @return [Array(Parse::ACLScope::Resolution, Symbol)] `[scope, nil]` on
+    #   success, `[nil, :invalid_session]` when Parse Server rejected the
+    #   token, `[nil, :unreachable]` otherwise.
+    def resolve_session_scope(token)
       opts = { session_token: token, client: @client }.compact
-      scope = Parse::ACLScope.resolve!(opts, method_name: :agent_init)&.freeze
-      @scope_failure = nil
-      scope
+      [Parse::ACLScope.resolve!(opts, method_name: :agent_init)&.freeze, nil]
     rescue Parse::Authorization::InvalidSession => e
-      @scope_failure = e.message.to_s.include?("lookup failed") ? :unreachable : :invalid_session
-      nil
+      [nil, e.message.to_s.include?("lookup failed") ? :unreachable : :invalid_session]
     rescue StandardError
-      @scope_failure = :unreachable
-      nil
+      [nil, :unreachable]
     end
 
-    # Retry resolving a session token whose eager resolution failed. Raises
-    # instead of leaving the scope nil, which every caller reads as master.
-    # Runs under the scope lock: concurrent first uses resolve once, and a
-    # concurrent #impersonate cannot bind this token's scope to its token.
+    # Best-effort resolution at construction. A failure is recorded like a
+    # lazy one, so the first use inside the backoff window is refused at once
+    # instead of paying a second lookup.
+    def eager_session_scope
+      token = @session_token
+      scope, failure = resolve_session_scope(token)
+      record_scope_failure(token, failure) if scope.nil?
+      scope
+    end
+
+    # Resolve a session token whose eager resolution failed. Raises instead
+    # of leaving the scope nil, which every caller reads as master.
+    #
+    # The token is read under the scope lock, the lookup runs without it (so
+    # other threads using the agent are not blocked for a request timeout),
+    # and the result is bound under the lock only if the token is unchanged,
+    # so a concurrent #impersonate never ends up with this token's scope.
     def ensure_session_scope!
-      scope_mutex.synchronize do
-        return @acl_scope unless session_scope_unresolved?
-        token = @session_token
-        raise unresolved_identity_error if recent_scope_failure?(token)
-        resolved = resolve_session_scope(token)
-        if resolved.nil?
-          @scope_failed_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          @scope_failed_token = token
-          raise unresolved_identity_error
+      # A concurrent #impersonate can change the token while a lookup runs.
+      # The stale result is dropped and the new identity resolved; a few
+      # rounds bound this if impersonate keeps racing.
+      3.times do
+        token = scope_mutex.synchronize do
+          return @acl_scope unless session_scope_unresolved?
+          raise unresolved_identity_error if scope_failure_blocks?(@session_token)
+          @session_token
         end
-        @acl_scope = resolved
-        @auth_context = nil
-        @scope_failed_at = nil
-        @scope_failed_token = nil
-        resolved
+        resolved, failure = resolve_session_scope(token)
+        bound = scope_mutex.synchronize do
+          if @session_token != token
+            :identity_changed
+          elsif !@acl_scope.nil?
+            # Another thread bound a scope for this token in the meantime.
+            @acl_scope
+          elsif resolved.nil?
+            record_scope_failure(token, failure)
+            raise unresolved_identity_error
+          else
+            @acl_scope = resolved
+            @auth_context = nil
+            @scope_failed_at = nil
+            @scope_failed_token = nil
+            @scope_failure = nil
+            resolved
+          end
+        end
+        return bound unless bound == :identity_changed
+      end
+      raise unresolved_identity_error
+    end
+
+    def record_scope_failure(token, failure)
+      scope_mutex.synchronize do
+        @scope_failed_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        @scope_failed_token = token
+        @scope_failure = failure
       end
     end
 
-    def recent_scope_failure?(token)
+    # Whether a recorded failure for this token refuses the call without a
+    # new lookup: always for a token Parse Server rejected (it will not
+    # become valid), and within the backoff window for an unreachable server.
+    def scope_failure_blocks?(token)
       return false if @scope_failed_at.nil? || @scope_failed_token != token
+      return true if @scope_failure == :invalid_session
       Process.clock_gettime(Process::CLOCK_MONOTONIC) - @scope_failed_at < SCOPE_RETRY_BACKOFF
     end
 
