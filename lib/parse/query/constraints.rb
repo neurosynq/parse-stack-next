@@ -290,7 +290,29 @@ module Parse
       end
 
       def quantifier_at?(idx)
-        @src[idx..].match?(/\A\{\d*,?\d*\}/) && !@src[idx..].start_with?("{}") && !@src[idx..].start_with?("{,}")
+        m = scan_brace_quantifier(idx)
+        !m.nil? && !(m[0].empty? && m[2].empty?)
+      end
+
+      # Read a `{n}`, `{n,}`, `{,m}`, or `{n,m}` count starting at `idx` with a
+      # linear scan. Returns `[min_digits, comma, max_digits, length]`, or nil
+      # when the text there is not a complete count.
+      def scan_brace_quantifier(idx)
+        return nil unless @src[idx] == "{"
+        i = idx + 1
+        j = i
+        j += 1 while j < @src.length && @src[j].match?(/\d/)
+        min_digits = @src[i...j]
+        comma = ""
+        if @src[j] == ","
+          comma = ","
+          j += 1
+        end
+        k = j
+        k += 1 while k < @src.length && @src[k].match?(/\d/)
+        max_digits = @src[j...k]
+        return nil unless @src[k] == "}"
+        [min_digits, comma, max_digits, k - idx + 1]
       end
 
       def parse_quant
@@ -300,13 +322,13 @@ module Parse
           when "+" then @pos += 1; { min: 1, max: nil }
           when "?" then @pos += 1; { min: 0, max: 1 }
           when "{"
-            m = @src[@pos..].match(/\A\{(\d*)(,?)(\d*)\}/)
-            return nil if m.nil? || (m[1].empty? && m[3].empty?)
-            @pos += m[0].length
-            min = m[1].empty? ? 0 : m[1].to_i
-            max = if m[2].empty? then min
-              elsif m[3].empty? then nil
-              else m[3].to_i
+            m = scan_brace_quantifier(@pos)
+            return nil if m.nil? || (m[0].empty? && m[2].empty?)
+            @pos += m[3]
+            min = m[0].empty? ? 0 : m[0].to_i
+            max = if m[1].empty? then min
+              elsif m[2].empty? then nil
+              else m[2].to_i
               end
             if min > MAX_REPEAT_COUNT || (max && max > MAX_REPEAT_COUNT)
               refuse("repeat count above #{MAX_REPEAT_COUNT}")

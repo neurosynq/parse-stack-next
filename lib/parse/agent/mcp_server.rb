@@ -118,18 +118,26 @@ module Parse
       # Shortest API key accepted for a non-loopback bind.
       MIN_PUBLIC_API_KEY_LENGTH = 16
 
-      # Leading or trailing whitespace of any kind, including non-ASCII
-      # spaces such as NBSP that `String#strip` keeps.
-      SURROUNDING_WHITESPACE = /\A[[:space:]]+|[[:space:]]+\z/
-
       # The API key to enforce, or nil when none is configured. Surrounding
       # whitespace (ASCII or Unicode) is stripped, and a blank result is no
       # key.
       # @param key [String, nil]
       # @return [String, nil]
+      # Strip leading and trailing whitespace of any kind (ASCII or Unicode)
+      # with a linear scan from each end.
+      # @param str [String]
+      # @return [String]
+      def self.strip_unicode_space(str)
+        first = 0
+        last = str.length
+        first += 1 while first < last && str[first].match?(/[[:space:]]/)
+        last -= 1 while last > first && str[last - 1].match?(/[[:space:]]/)
+        str[first...last]
+      end
+
       def self.normalize_api_key(key)
         return nil if key.nil?
-        stripped = key.to_s.gsub(SURROUNDING_WHITESPACE, "")
+        stripped = strip_unicode_space(key.to_s)
         stripped.empty? ? nil : stripped
       end
 
