@@ -1138,5 +1138,70 @@ module Parse
     end
 
     private_class_method :check_regex_options!
+
+    # Server-side time limit, in milliseconds, applied to a mongo-direct
+    # read whose filter or pipeline carries a regex that is not escaped
+    # literal text, when the caller gave no `max_time_ms`. The pattern
+    # checker refuses the shapes known to backtrack catastrophically; this
+    # bounds the rest. Set {default_regex_max_time_ms} to nil to disable.
+    DEFAULT_REGEX_MAX_TIME_MS = 5_000
+
+    class << self
+      # @!attribute [rw] default_regex_max_time_ms
+      #   Time limit (ms) for mongo-direct reads that carry a non-literal
+      #   regex and no explicit `max_time_ms`. Defaults to
+      #   {DEFAULT_REGEX_MAX_TIME_MS}; nil disables it.
+      #   @return [Integer, nil]
+      attr_writer :default_regex_max_time_ms
+
+      def default_regex_max_time_ms
+        defined?(@default_regex_max_time_ms) ? @default_regex_max_time_ms : DEFAULT_REGEX_MAX_TIME_MS
+      end
+
+      # The time limit to apply to a read of `node` (a filter or pipeline):
+      # {default_regex_max_time_ms} when it carries a regex that is not
+      # escaped literal text, otherwise nil.
+      # @param node [Object]
+      # @return [Integer, nil]
+      def regex_time_budget(node)
+        budget = default_regex_max_time_ms
+        return nil if budget.nil?
+        nonliteral_regex?(node, 0) ? budget : nil
+      end
+
+      private
+
+      def nonliteral_regex?(node, depth)
+        return false if depth > 64
+        case node
+        when Hash
+          node.any? do |key, value|
+            key_str = key.to_s
+            if key_str == "$regex"
+              nonliteral_pattern?(value)
+            elsif %w[$regexMatch $regexFind $regexFindAll].include?(key_str) && value.is_a?(Hash)
+              nonliteral_pattern?(value["regex"] || value[:regex]) || nonliteral_regex?(value, depth + 1)
+            else
+              nonliteral_regex?(value, depth + 1)
+            end
+          end
+        when Array
+          node.any? { |item| nonliteral_regex?(item, depth + 1) }
+        when Regexp
+          nonliteral_pattern?(node)
+        else
+          defined?(BSON::Regexp::Raw) && node.is_a?(BSON::Regexp::Raw) && nonliteral_pattern?(node)
+        end
+      end
+
+      def nonliteral_pattern?(pattern)
+        source = if pattern.is_a?(String) then pattern
+          elsif pattern.is_a?(Regexp) then pattern.source
+          elsif defined?(BSON::Regexp::Raw) && pattern.is_a?(BSON::Regexp::Raw) then pattern.pattern.to_s
+          end
+        return false if source.nil?
+        !Parse::RegexSecurity.literal_pattern?(source)
+      end
+    end
   end
 end

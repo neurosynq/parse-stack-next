@@ -35,6 +35,17 @@ module Parse
     # Largest repeat count PCRE accepts in `{n}` / `{n,m}`.
     MAX_REPEAT_COUNT = 65_535
 
+    # Most unbounded or wide-range quantified atoms (`*`, `+`, `{n,}`, or
+    # `{n,m}` spanning more than {WIDE_RANGE}) allowed in one sequence
+    # before a literal character none of them can match. Adjacent
+    # overlapping runs such as `\d+\d+\d+\d+` or `.*a.*a.*a.*a` backtrack
+    # polynomially, which at a few hundred characters per document costs as
+    # much as the nested shapes the checker refuses.
+    MAX_WIDE_RUN = 3
+
+    # A `{n,m}` range wider than this counts as wide.
+    WIDE_RANGE = 16
+
     # Raised by {Parser} for a pattern the checker refuses or cannot read.
     # @!visibility private
     class Refused < StandardError; end
@@ -85,13 +96,15 @@ module Parse
       def parse_seq
         items = []
         while @pos < @src.length && peek != "|" && peek != ")"
+          start = @pos
           atom = parse_atom
           next if atom.nil?
+          text = @src[start...@pos]
           quant = parse_quant
           if quant && (atom.first == :anchor)
             refuse("quantifier on an anchor or assertion")
           end
-          items << { atom: atom, quant: quant }
+          items << { atom: atom, quant: quant, text: text }
         end
         [:seq, items]
       end
@@ -118,6 +131,13 @@ module Parse
           if quantifier_at?(@pos)
             refuse("quantifier with nothing to repeat")
           end
+          # `{ 2,}` is literal text on the PCRE2 that MongoDB bundles today,
+          # but newer PCRE2 releases read it as a repeat count. Refuse it so
+          # an upgrade cannot turn it into an unchecked quantifier.
+          spaced = @src[@pos..].match(/\A\{[ \d,]*\}/)
+          if spaced && spaced[0].include?(" ") && spaced[0].match?(/\d/)
+            refuse("whitespace inside a repeat count")
+          end
           @pos += 1
           [:char]
         else
@@ -139,7 +159,14 @@ module Parse
         when "1".."9"
           @pos += 1 while peek && peek.match?(/\d/)
           [:backref]
-        when "k", "g"
+        when "k"
+          skip_braced_name
+          [:backref]
+        when "g"
+          # `\g<n>`, `\g'n'`, and `\g<name>` call a group again (its
+          # quantifiers included), like `(?1)`; `\g{n}` and `\gN` are
+          # backreferences.
+          refuse("subroutine call \\g<...> is not allowed") if peek == "<" || peek == "'"
           skip_braced_name
           [:backref]
         when "p", "P", "x", "o", "N"
@@ -178,10 +205,12 @@ module Parse
           refuse("unterminated character class") if c.nil?
           if c == "\\"
             @pos += 2
-          elsif c == "[" && peek(1) == ":"
-            finish = @src.index(":]", @pos + 2)
-            refuse("unterminated POSIX class") if finish.nil?
-            @pos = finish + 2
+          elsif c == "[" && %w[: . =].include?(peek(1))
+            # PCRE2 reads `[:name:]` (and `[.x.]`, `[=x=]`) only when it is
+            # complete right here; otherwise `[` is a literal and the next
+            # `]` closes the class.
+            posix = @src[@pos..].match(/\A\[([:.=])\^?[a-zA-Z]+\1\]/)
+            @pos += posix ? posix[0].length : 1
           elsif c == "]"
             @pos += 1
             break
@@ -305,7 +334,18 @@ module Parse
       #   `{n,m}` with a top above 1) whose body holds a quantifier, an
       #   alternation, or a backreference: `(a+)+`, `(a|aa)+`, `((a+))+`,
       #   `(a+){2,}`, `(a+){20}`;
+      #   A repeated group stays allowed when each repeat cannot split its
+      #   input more than one way: an alternation of fixed literals with
+      #   distinct first characters (`(foo|bar)+`), or a literal separator
+      #   next to one quantified atom that cannot match it
+      #   (`(-[a-z0-9]+)*`, `(\.[\w-]+)+`, `([\w-]+\.)+`);
       # * two adjacent unbounded `.*` / `.+` with more pattern after them;
+      # * more than three unbounded or wide quantified atoms in a row with
+      #   no literal between them that they cannot match
+      #   (`\d+\d+\d+\d+`, `.*a.*a.*a.*a`); groups without a quantifier are
+      #   read as part of the surrounding sequence;
+      # * a subroutine call (`\g<1>`), whitespace inside a repeat count
+      #   (`{ 2,}`), which newer PCRE2 reads as a quantifier;
       # * an inline comment `(?#...)`, extended mode (`(?x)` or a Regexp
       #   with `Regexp::EXTENDED`), recursion, conditionals, or anything
       #   else the reader does not recognize, and unbalanced patterns.
@@ -387,8 +427,10 @@ module Parse
 
       # Validates every `$regex` (and its `$options`) inside a compiled where
       # clause, at any depth: field values, `$not` / `$elemMatch` wrappers,
-      # and `$or` / `$and` / `$nor` branches. SDK routing markers (`__`
-      # keys) are skipped. Literal patterns built from escaped input pass.
+      # and `$or` / `$and` / `$nor` branches, plus Regexp and BSON regex
+      # values anywhere (equality, `$not`, `$in`, `$nin`, `$all`). SDK
+      # routing markers (`__` keys) are skipped. Literal patterns built from
+      # escaped input pass.
       # @param node [Object] a compiled where clause or part of one.
       # @raise [ArgumentError] when a pattern or its options are unsafe.
       # @return [void]
@@ -399,7 +441,7 @@ module Parse
             key_str = key.to_s
             next if key_str.start_with?("__")
             if key_str == "$regex"
-              validate!(value) if value.is_a?(String) || value.is_a?(Regexp)
+              value.is_a?(String) ? validate!(value) : validate_where!(value)
             elsif key_str == "$options" && (node.key?("$regex") || node.key?(:$regex))
               validate_options!(value)
             else
@@ -408,6 +450,16 @@ module Parse
           end
         when Array
           node.each { |item| validate_where!(item) }
+        when Regexp
+          # A Regexp value (equality, `$not`, `$in`) is a regex match too.
+          validate!(node)
+        else
+          if defined?(BSON::Regexp::Raw) && node.is_a?(BSON::Regexp::Raw)
+            if node.options.to_s.include?("x")
+              raise ArgumentError, "Regex pattern uses extended mode (the x flag), which is not allowed."
+            end
+            validate!(node.pattern.to_s)
+          end
         end
         nil
       end
@@ -423,11 +475,13 @@ module Parse
           end
         when :seq
           items = node[1]
+          reason = wide_run_reason(flatten_items(items))
+          return reason if reason
           items.each_with_index do |item, idx|
             atom = item[:atom]
             quant = item[:quant]
             if atom.first == :group
-              if repeats?(quant) && complex?(atom[1])
+              if repeats?(quant) && complex?(atom[1]) && !separated_repeat?(atom[1])
                 return "a repeated group contains a quantifier, alternation, or backreference"
               end
               reason = check_tree(atom[1])
@@ -443,6 +497,110 @@ module Parse
         nil
       end
       private :check_tree
+
+      # @!visibility private
+      # The sequence with non-repeated, non-lookaround groups spliced in,
+      # so `(?:.*)(?:.*)` reads as `.*.*`.
+      def flatten_items(items)
+        items.flat_map do |item|
+          atom = item[:atom]
+          if atom.first == :group && item[:quant].nil? && atom[2] != :lookaround && atom[1][1].length == 1
+            flatten_items(atom[1][1].first[1])
+          else
+            [item]
+          end
+        end
+      end
+      private :flatten_items
+
+      # @!visibility private
+      def wide?(item)
+        quant = item[:quant]
+        !quant.nil? && (quant[:max].nil? || quant[:max] - quant[:min] > WIDE_RANGE)
+      end
+      private :wide?
+
+      # @!visibility private
+      # A refusal reason when more than {MAX_WIDE_RUN} wide atoms appear
+      # without a literal character between them that none of the wide
+      # atoms in the sequence can match.
+      def wide_run_reason(items)
+        wide_items = items.select { |item| wide?(item) }
+        return nil if wide_items.length <= MAX_WIDE_RUN
+        count = 0
+        items.each do |item|
+          if wide?(item)
+            count += 1
+            return "more than #{MAX_WIDE_RUN} unbounded or wide quantifiers in a row" if count > MAX_WIDE_RUN
+          elsif (ch = literal_char(item)) && wide_items.none? { |w| atom_matches?(w, ch) }
+            count = 0
+          end
+        end
+        nil
+      end
+      private :wide_run_reason
+
+      # @!visibility private
+      # The character a single unquantified literal atom matches (`a`, `-`,
+      # `\.`), or nil.
+      def literal_char(item)
+        return nil unless item[:quant].nil? && item[:atom] == [:char]
+        text = item[:text].to_s
+        if text.length == 1 && !text.match?(/[\\.\[\]()|?*+{}^$]/)
+          text
+        elsif (m = text.match(/\A\\([^A-Za-z0-9])\z/))
+          m[1]
+        end
+      end
+      private :literal_char
+
+      # @!visibility private
+      # Whether an atom (ignoring its quantifier) can match `ch` in either
+      # case. Anything that cannot be checked counts as a match.
+      def atom_matches?(item, ch)
+        atom = item[:atom]
+        return true unless atom == [:char] || atom == [:dot]
+        re = begin
+            Regexp.new(atom == [:dot] ? "." : item[:text].to_s)
+          rescue RegexpError, ArgumentError
+            nil
+          end
+        return true if re.nil?
+        [ch, ch.swapcase, ch.downcase(:fold), ch.upcase].uniq.any? { |c| re.match?(c) }
+      end
+      private :atom_matches?
+
+      # @!visibility private
+      # A repeated group body that cannot split its input more than one way
+      # per repeat, so repeating it is safe:
+      #
+      # * an alternation of fixed literal strings whose first characters
+      #   differ, compared case-insensitively because the pattern may run
+      #   with the `i` option or `(?i)` (`(foo|bar)+`, but not `(a|Aa)+`);
+      # * a mandatory literal separator next to one quantified atom that
+      #   cannot match it (`(-[a-z0-9]+)*`, `(\.[\w-]+)+`, `([\w-]+\.)+`).
+      def separated_repeat?(body)
+        branches = body[1]
+        if branches.length > 1
+          firsts = branches.map do |seq|
+            items = seq[1]
+            return false if items.empty?
+            chars = items.map { |item| literal_char(item) }
+            return false if chars.any?(&:nil?)
+            chars.first.downcase(:fold)
+          end
+          return firsts.uniq.length == firsts.length
+        end
+        items = branches.first[1]
+        return false unless items.length == 2
+        sep, run = items
+        sep, run = run, sep if literal_char(sep).nil?
+        ch = literal_char(sep)
+        return false if ch.nil?
+        return false unless run[:quant] && (run[:atom] == [:char] || run[:atom] == [:dot])
+        !atom_matches?(run, ch)
+      end
+      private :separated_repeat?
 
       # @!visibility private
       def repeats?(quant)

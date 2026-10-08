@@ -1765,6 +1765,9 @@ module Parse
         # `scope` are seeded nil so subscribers see a stable key set
         # even on the raise path (where the block exits before either
         # is written).
+        # A caller regex that is not escaped literal text gets a default
+        # server-side time limit when none was given.
+        max_time_ms ||= Parse::PipelineSecurity.regex_time_budget(pipeline)
         instrument_payload = {
           collection: collection_name,
           stage_count: pipeline.is_a?(Array) ? pipeline.size : 0,
@@ -2198,6 +2201,8 @@ module Parse
                 "Parse.with_master_key."
         end
         max_time_ms = options.delete(:max_time_ms)
+        # A regex that is not escaped literal text gets a default time limit.
+        max_time_ms ||= Parse::PipelineSecurity.regex_time_budget(filter)
         # Consumed like the other auth kwargs so it never reaches the driver.
         find_client = options.delete(:client)
         # Metadata-only AS::N payload: collection, presence-of-filter

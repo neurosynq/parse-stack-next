@@ -1168,6 +1168,7 @@ module Parse
       def run_atlas_pipeline!(collection_name, pipeline, max_time_ms = nil, read_preference: nil,
                                                                             authorizing_client: nil)
         agg_opts = {}
+        max_time_ms ||= Parse::PipelineSecurity.regex_time_budget(pipeline)
         agg_opts[:max_time_ms] = max_time_ms if max_time_ms
         # Atlas Search does not go through Parse::MongoDB.aggregate, so this
         # is the only place its reads meet the binding guard.
