@@ -24,9 +24,16 @@ module Parse
       #   every sub-request under the credentials of this one call (it ignores
       #   per-sub-request headers), so the batch's authority is set here. A
       #   request that names no credentials of its own runs under these.
+      #   Narrowing options always win: `use_master_key: false` here keeps
+      #   the master key off even for a request that set
+      #   `use_master_key: true`. An option here never widens a request.
+      # @note Every request is sent through this client, as
+      #   {Parse::Client#request} sends a single request through the client
+      #   it is called on, even when the request was built for another
+      #   object's class client.
       # @note Each {Parse::Request}'s own credentials (its `session_token:` /
-      #   `use_master_key:` options, its session-token or master-key
-      #   suppression headers, and the client it was built for) are honored.
+      #   `use_master_key:` options and its session-token or master-key
+      #   suppression headers) are honored.
       #   When every request resolves to this client and one set of
       #   credentials, the batch is one call. A transaction that would mix
       #   credentials raises {Parse::BatchOperation::MixedAuthorityError}
@@ -38,13 +45,13 @@ module Parse
       # @return [Array<Parse::Response>] if successful, a set of responses for each operation in the batch.
       # @return [Parse::Response] if an error occurred, the error response.
       # @raise [Parse::BatchOperation::MixedAuthorityError] for a transaction
-      #   whose requests name different credentials or another client.
+      #   whose requests name different credentials.
       def batch_request(batch_operations, **opts)
         unless batch_operations.is_a?(Parse::BatchOperation)
           batch_operations = Parse::BatchOperation.new batch_operations
         end
         call_auth = opts.slice(:session_token, :use_master_key, :suppress_master_key)
-        groups = batch_operations.authority_groups(self, call_auth)
+        groups = batch_operations.send(:authority_groups, self, call_auth, force_client: true)
         if groups.empty?
           return post_batch_operation(batch_operations, opts.except(:suppress_master_key))
         end
@@ -63,7 +70,10 @@ module Parse
         end
         # Mixed credentials, not a transaction: send one call per set of
         # credentials, keeping responses in request order.
-        routed = Parse::BatchOperation.new(batch_operations.requests)
+        # Assigned, not re-added: `add` would drop tagged duplicates and leave
+        # fewer responses than requests.
+        routed = Parse::BatchOperation.new
+        routed.requests = batch_operations.requests.dup
         routed.client = self
         routed.batch_defaults = call_auth
         routed.submit

@@ -1,7 +1,8 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
-require "digest"
+require "openssl"
+require "securerandom"
 require_relative "request"
 require_relative "response"
 
@@ -50,24 +51,39 @@ module Parse
     class MixedAuthorityError < Parse::Error; end
 
     # @!visibility private
+    # Per-process random key for {.credential_fingerprint}'s digests, so a
+    # fingerprint cannot be compared against a precomputed digest of a key.
+    FINGERPRINT_KEY = SecureRandom.bytes(32).freeze
+
+    # @!visibility private
     # A comparable identity for the credentials a client sends: server URL,
-    # application id, digests of the REST and master keys, and its bound
-    # session token. Two client objects with the same configuration (for
-    # example a class client memoized before a second `Parse.setup`) have the
-    # same fingerprint and are batched together. The keys are digested so the
-    # fingerprint never holds a secret.
+    # application id, and keyed digests (HMAC-SHA256 under a per-process
+    # random key) of the REST key, master key, and bound session token. Two
+    # client objects with the same configuration (for example a class client
+    # memoized before a second `Parse.setup`) have the same fingerprint and
+    # are batched together. The fingerprint never holds a secret.
+    #
+    # With `session_scoped: true` the master key and bound session token are
+    # left out: a request that names its own session token (or an explicit
+    # blank one) never sends the master key or the client's bound token, so
+    # those do not change its credentials.
+    # @note Only these settings are compared. Custom Faraday middleware or
+    #   headers added in a client's setup block are not part of the
+    #   fingerprint, so two clients that differ only there are treated as
+    #   the same credentials and their requests may be sent through either.
     # @param c [Parse::Client]
+    # @param session_scoped [Boolean]
     # @return [Array]
-    def self.credential_fingerprint(c)
+    def self.credential_fingerprint(c, session_scoped: false)
       return [:client, c.object_id] unless c.respond_to?(:application_id) && c.respond_to?(:server_url)
       digest = lambda do |v|
-        v.nil? || v.to_s.empty? ? nil : ::Digest::SHA256.hexdigest(v.to_s)
+        v.nil? || v.to_s.empty? ? nil : OpenSSL::HMAC.hexdigest("SHA256", FINGERPRINT_KEY, v.to_s)
       end
+      base = [c.server_url.to_s.sub(%r{/+\z}, ""), c.application_id.to_s,
+              digest.call(c.respond_to?(:api_key) ? c.api_key : nil)]
+      return base + [:session_scoped] if session_scoped
       bound = c.respond_to?(:session_token) ? c.session_token : nil
-      [c.server_url.to_s.sub(%r{/+\z}, ""), c.application_id.to_s,
-       digest.call(c.respond_to?(:api_key) ? c.api_key : nil),
-       digest.call(c.respond_to?(:master_key) ? c.master_key : nil),
-       digest.call(bound)]
+      base + [digest.call(c.respond_to?(:master_key) ? c.master_key : nil), digest.call(bound)]
     end
 
     # Default number of threads used to dispatch batch segments concurrently.
@@ -95,16 +111,19 @@ module Parse
     attr_accessor :requests, :responses, :transaction
 
     # @return [Parse::Client] the client used for requests that were not
-    #   built for a specific client. Requests built from an object
+    #   built for a specific client. In a batch with no client set
+    #   explicitly, requests built from an object
     #   ({Parse::Object#change_requests}, {Parse::Object#destroy_request})
     #   carry their class's client and are sent through it.
     def client
       @client ||= Parse::Client.client
     end
 
-    # Set the client used for requests that were not built for a specific
-    # client. A transaction whose requests were built for another client
-    # raises {MixedAuthorityError}.
+    # Set the client every request in this batch is sent through. An
+    # explicitly chosen client wins over the class client a request was
+    # built for, as {Parse::Client#request} ignores it for a single request;
+    # each request's own `session_token:` / `use_master_key:` options and
+    # headers still apply.
     # @param c [Parse::Client]
     def client=(c)
       @client = c
@@ -247,7 +266,7 @@ module Parse
       # `POST /batch` call, so requests built for different credentials are
       # sent as separate calls, each with its own client and options. This
       # is decided before anything is sent.
-      groups = authority_groups
+      groups = authority_groups(client, batch_defaults, force_client: @explicit_client)
 
       if @transaction
         if groups.size > 1
@@ -258,11 +277,6 @@ module Parse
                 "Save these objects in separate transactions."
         end
         group = groups.first
-        if @explicit_client && self.class.credential_fingerprint(group[:client]) != self.class.credential_fingerprint(client)
-          raise MixedAuthorityError,
-                "This transaction's requests were built for a different client than the " \
-                "one set on the batch. Use the objects' own client."
-        end
         # One request, one transaction. Exceptions propagate unchanged so the
         # caller can roll back its local state.
         result = group[:client].batch_request(self, **group[:opts])
@@ -279,7 +293,9 @@ module Parse
           g, entries = slice
           reqs = entries.map(&:last)
           begin
-            [entries, align_responses(reqs, g[:client].batch_request(BatchOperation.new(reqs), **g[:opts])), nil]
+            chunk = BatchOperation.new
+            chunk.requests = reqs
+            [entries, align_responses(reqs, g[:client].batch_request(chunk, **g[:opts])), nil]
           rescue StandardError => e
             [entries, Array.new(reqs.size) { exception_response(e) }, e]
           end
@@ -300,36 +316,56 @@ module Parse
 
     private
 
-    # Group the requests by the credentials they were built for: the client
-    # (a request's own, else this batch's) plus an explicit session token
-    # and an explicit `use_master_key:` from the request's options. Requests
-    # with no explicit authority on this batch's client form one group sent
-    # with no extra options, so an ambient `Parse.with_session`,
-    # `Parse.client_mode`, or `Parse.without_master_key` applies exactly as
-    # it does to a single request.
-    # Credentials come from {Parse::Request#explicit_authority} (options,
-    # then headers), falling back to `default_opts` for a request that names
-    # none.
-    # @param default_client [Parse::Client] client for requests built for none.
-    # @param default_opts [Hash] `session_token:` / `use_master_key:` applied to
-    #   requests that name no credentials of their own.
+    # Group the requests by the credentials they would have as single
+    # requests: the client (a request's own class client in an implicit
+    # batch, else this batch's), plus the request's session token,
+    # `use_master_key:`, and master-key suppression from
+    # {Parse::Request#explicit_authority}. Requests with no explicit
+    # authority on this batch's client form one group sent with no extra
+    # options, so an ambient `Parse.with_session`, `Parse.client_mode`, or
+    # `Parse.without_master_key` applies exactly as it does to a single
+    # request.
+    #
+    # `default_opts` (call options from {Parse::API::Batch#batch_request})
+    # apply to a request that names no credentials of its own. Narrowing
+    # call options always win: `use_master_key: false` and master-key
+    # suppression from the call override a request's own
+    # `use_master_key: true`. A call option never widens a request.
+    # @param default_client [Parse::Client] client for requests built for
+    #   none, and for every request when `force_client` is true.
+    # @param default_opts [Hash] `session_token:` / `use_master_key:` /
+    #   `suppress_master_key:` call options.
+    # @param force_client [Boolean] send every request through
+    #   `default_client` (the caller chose the client explicitly).
     # @return [Array<Hash>] groups in first-appearance order, each with
     #   `:client`, `:opts`, and `:entries` (`[index, request]` pairs).
     # @!visibility private
-    def authority_groups(default_client = client, default_opts = batch_defaults)
+    def authority_groups(default_client = client, default_opts = batch_defaults, force_client: false)
       defaults = default_opts.is_a?(Hash) ? default_opts : {}
+      default_token = self.class.resolve_session_option(defaults, :session_token)
+      fingerprints = {}
+      fingerprint = lambda do |c, scoped|
+        fingerprints[[c.object_id, scoped]] ||= self.class.credential_fingerprint(c, session_scoped: scoped)
+      end
       groups = {}
       @requests.each_with_index do |req, index|
-        target = req.respond_to?(:client) && req.client ? req.client : default_client
+        target = if force_client
+            default_client
+          elsif req.respond_to?(:client) && req.client
+            req.client
+          else
+            default_client
+          end
         # Credentials resolve as they do for a single request: options, then
         # the session-token and master-key-suppression headers.
         named = req.respond_to?(:explicit_authority) ? req.explicit_authority : {}
-        token = named.key?(:session_token) ? named[:session_token] : defaults[:session_token]
-        token = token.session_token if !token.nil? && token.respond_to?(:session_token)
-        token = token.to_s unless token.nil?
+        token = named.key?(:session_token) ? named[:session_token] : default_token
         master = named.key?(:use_master_key) ? named[:use_master_key] : defaults[:use_master_key]
+        master = nil unless master == true || master == false
+        # Narrowing call options win over a request's own master opt-in.
+        master = false if defaults[:use_master_key] == false
         suppress = named[:suppress_master_key] == true || defaults[:suppress_master_key] == true
-        key = [self.class.credential_fingerprint(target), token, master, suppress]
+        key = [fingerprint.call(target, !token.nil?), token, master, suppress]
         existing = groups[key]
         if existing && !existing[:client].equal?(default_client) && target.equal?(default_client)
           # Same credentials as an earlier client object: send through the
@@ -347,7 +383,25 @@ module Parse
       end
       groups.values
     end
-    public :authority_groups
+
+    # @!visibility private
+    # The session token named under `key` in `opts`, resolved the way
+    # {Parse::Client#request} resolves it: a user object yields its token,
+    # and a value that is present but resolves to nil or blank becomes `""`
+    # so the explicit-blank branch fails closed (no master key, no ambient
+    # or bound token). nil when the option is absent or literally nil.
+    # @param opts [Hash]
+    # @param key [Symbol]
+    # @return [String, nil]
+    def self.resolve_session_option(opts, key)
+      return nil unless opts.is_a?(Hash)
+      raw = opts[key]
+      return nil if raw.nil?
+      token = raw.respond_to?(:session_token) ? raw.session_token : raw
+      return "" if token.nil?
+      token = token.to_s
+      token.strip.empty? ? "" : token
+    end
 
     # Whether `req` repeats a request already in the batch for the same
     # tagged object.

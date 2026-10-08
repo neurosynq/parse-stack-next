@@ -57,21 +57,28 @@ module Parse
     # master-key suppression header is set. A key is absent when the request
     # does not name it, so ambient context (`Parse.with_session`,
     # `client_mode`, a bound client token) still applies.
+    #
+    # A `session_token:` option that is present but resolves to no token (a
+    # user object without one, or a blank string) is returned as `""`, so a
+    # batch fails closed the same way a single request does: no master key
+    # and no ambient or bound token. `use_master_key:` is returned only when
+    # it is exactly `true` or `false`; {Parse::Client#request} treats any
+    # other value as not set, and so does a batch.
     # @return [Hash] with optional `:session_token` (String),
     #   `:use_master_key` (Boolean), and `:suppress_master_key` (true) keys.
     def explicit_authority
       o = opts.is_a?(Hash) ? opts : {}
       result = {}
-      token = o[:session_token]
-      token = token.session_token if !token.nil? && token.respond_to?(:session_token)
+      token = Parse::BatchOperation.resolve_session_option(o, :session_token)
       if token.nil?
         header_token = self.class.header_value(headers, Parse::Protocol::SESSION_TOKEN)
-        token = header_token if header_token.is_a?(String)
+        if header_token.is_a?(String)
+          token = header_token.strip.empty? ? "" : header_token
+        end
       end
-      result[:session_token] = token.to_s unless token.nil?
-      if o.key?(:use_master_key) && !o[:use_master_key].nil?
-        result[:use_master_key] = o[:use_master_key] ? true : false
-      end
+      result[:session_token] = token unless token.nil?
+      master = o[:use_master_key]
+      result[:use_master_key] = master if master == true || master == false
       # The suppression header wins over `use_master_key: true` in the
       # authentication middleware, so a batch must carry it as a header
       # rather than fold it into `use_master_key:` (which would also change

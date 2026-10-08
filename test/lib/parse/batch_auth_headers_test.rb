@@ -67,6 +67,69 @@ class BatchAuthHeadersTest < Minitest::Test
     assert_nil auth[Parse::Protocol::MASTER_KEY]
   end
 
+  # use_master_key that is not exactly true/false is "not set" for a single
+  # request; a batch must not turn it into true.
+
+  def test_string_false_master_under_ambient_session_matches_single_request
+    auth = Parse.with_session("r:amb") { compare(opts: { use_master_key: "false" }) }
+    assert_equal "r:amb", auth[Parse::Protocol::SESSION_TOKEN]
+    assert_nil auth[Parse::Protocol::MASTER_KEY]
+  end
+
+  def test_integer_master_under_ambient_session_matches_single_request
+    auth = Parse.with_session("r:amb") { compare(opts: { use_master_key: 1 }) }
+    assert_nil auth[Parse::Protocol::MASTER_KEY]
+  end
+
+  def test_integer_master_in_client_mode_matches_single_request
+    prior = Parse.client_mode
+    Parse.client_mode = true
+    auth = compare(opts: { use_master_key: 1 })
+    assert_nil auth[Parse::Protocol::MASTER_KEY]
+  ensure
+    Parse.client_mode = prior
+  end
+
+  def test_truthy_master_in_anonymous_block_matches_single_request
+    auth = Parse.with_session(nil) { compare(opts: { use_master_key: "yes" }) }
+    assert_nil auth[Parse::Protocol::MASTER_KEY]
+    assert_nil auth[Parse::Protocol::SESSION_TOKEN]
+  end
+
+  # A session object with no token fails closed, never falls back to master.
+
+  def test_tokenless_session_object_matches_single_request
+    tokenless = Struct.new(:session_token).new(nil)
+    auth = compare(opts: { session_token: tokenless })
+    assert_nil auth[Parse::Protocol::MASTER_KEY]
+    assert_nil auth[Parse::Protocol::SESSION_TOKEN]
+  end
+
+  def test_tokenless_session_call_option_never_sends_master
+    tokenless = Struct.new(:session_token).new(nil)
+    @client.batch_request([Parse::Request.new(:put, "/parse/classes/X/abc", body: { v: 1 })],
+                          session_token: tokenless)
+    auth = auth_of(@seen.last)
+    assert_nil auth[Parse::Protocol::MASTER_KEY]
+    assert_nil auth[Parse::Protocol::SESSION_TOKEN]
+  end
+
+  # Narrowing call options win over a request's own master opt-in.
+
+  def test_call_use_master_key_false_overrides_request_true
+    @client.batch_request([Parse::Request.new(:put, "/parse/classes/X/abc", body: { v: 1 },
+                                                                            opts: { use_master_key: true })],
+                          use_master_key: false)
+    assert_nil auth_of(@seen.last)[Parse::Protocol::MASTER_KEY]
+  end
+
+  def test_call_options_never_widen_a_request
+    @client.batch_request([Parse::Request.new(:put, "/parse/classes/X/abc", body: { v: 1 },
+                                                                            opts: { use_master_key: false })],
+                          use_master_key: true)
+    assert_nil auth_of(@seen.last)[Parse::Protocol::MASTER_KEY]
+  end
+
   def test_no_explicit_credentials_matches_single_request
     auth = compare({})
     assert_equal "mk", auth[Parse::Protocol::MASTER_KEY]

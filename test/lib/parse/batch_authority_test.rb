@@ -196,12 +196,15 @@ class BatchAuthorityTest < Minitest::Test
     assert_equal %w[ID_a ID_b], responses.map { |r| r.result["objectId"] }
   end
 
-  def test_direct_transaction_with_a_request_for_another_client_raises
+  def test_direct_transaction_uses_the_client_it_is_called_on
+    # Like Parse::Client#request for a single request, batch_request sends
+    # through the client it is called on, not the object's class client.
     obj = saved(BatchAuthorityBoundWidget, "B1", "b1")
     batch = Parse::BatchOperation.new(nil, transaction: true)
     batch.add(obj)
-    assert_raises(Parse::BatchOperation::MixedAuthorityError) { DEFAULT_CLIENT.batch_request(batch) }
-    assert_empty @calls
+    DEFAULT_CLIENT.batch_request(batch)
+    assert_equal 1, calls_on(DEFAULT_CLIENT).size
+    assert_empty calls_on(BOUND_CLIENT)
   end
 
   # Clients with the same configuration are one set of credentials
@@ -242,6 +245,72 @@ class BatchAuthorityTest < Minitest::Test
     end
     assert_equal 1, @calls.size
     assert_same one, @calls.first[:client]
+  end
+
+  # An explicitly chosen client wins over the class client a request was
+  # built for (P1): a narrower client is never overridden by a master one.
+
+  def test_batch_request_on_an_explicit_client_never_uses_the_class_client
+    obj = saved(BatchAuthorityBoundWidget, "B1", "b1")
+    DEFAULT_CLIENT.batch_request(Parse::BatchOperation.new(obj.change_requests))
+    assert_equal 1, calls_on(DEFAULT_CLIENT).size
+    assert_empty calls_on(BOUND_CLIENT)
+  end
+
+  def test_batch_with_client_set_never_uses_the_class_client
+    obj = saved(BatchAuthorityBoundWidget, "B1", "b1")
+    batch = Parse::BatchOperation.new
+    batch.client = DEFAULT_CLIENT
+    batch.add(obj)
+    batch.submit
+    assert_equal 1, calls_on(DEFAULT_CLIENT).size
+    assert_empty calls_on(BOUND_CLIENT)
+  end
+
+  def test_implicit_batch_still_uses_the_class_client
+    obj = saved(BatchAuthorityBoundWidget, "B1", "b1")
+    Parse::BatchOperation.new(obj.change_requests).submit
+    assert_equal 1, calls_on(BOUND_CLIENT).size
+    assert_empty calls_on(DEFAULT_CLIENT)
+  end
+
+  # A request naming its own session ignores master keys and bound tokens
+  # when comparing credentials (P3-6).
+
+  def test_same_explicit_session_on_clients_differing_only_in_master_key_is_one_transaction
+    one = self.class.configured_client(master_key: "mk1")
+    two = self.class.configured_client(master_key: "mk2", session_token: "r:bound")
+    a = Parse::Request.new(:put, "/parse/classes/X/a", body: { v: 1 }, opts: { session_token: "r:u" }).tap { |r| r.client = one }
+    b = Parse::Request.new(:put, "/parse/classes/X/b", body: { v: 2 }, opts: { session_token: "r:u" }).tap { |r| r.client = two }
+    with_recording(one, two) do
+      Parse::BatchOperation.new([a, b], transaction: true).submit
+    end
+    assert_equal 1, @calls.size
+    assert_equal "r:u", @calls.first[:opts][:session_token]
+  end
+
+  # A mixed batch_request keeps every request when routed (P3-5).
+
+  def test_routed_mixed_batch_keeps_tagged_duplicates_assigned_directly
+    r1 = Parse::Request.new(:put, "/parse/classes/X/a", body: { name: "a" }, opts: { session_token: "r:1" }).tap { |r| r.tag = 7 }
+    r2 = Parse::Request.new(:put, "/parse/classes/X/a", body: { name: "a" }, opts: { session_token: "r:1" }).tap { |r| r.tag = 7 }
+    r3 = Parse::Request.new(:put, "/parse/classes/X/b", body: { name: "b" }, opts: { session_token: "r:2" })
+    batch = Parse::BatchOperation.new
+    batch.requests = [r1, r2, r3]
+    responses = DEFAULT_CLIENT.batch_request(batch)
+    assert_equal 3, responses.size
+    assert_equal 3, @calls.sum { |c| sent_requests(c).size }
+  end
+
+  # Fingerprints are keyed digests; the authority grouping is internal.
+
+  def test_authority_groups_is_not_public
+    refute_includes Parse::BatchOperation.public_instance_methods, :authority_groups
+  end
+
+  def test_fingerprint_is_not_a_plain_sha256_of_the_key
+    fp = Parse::BatchOperation.credential_fingerprint(self.class.configured_client(master_key: "mk-x"))
+    refute_includes fp, Digest::SHA256.hexdigest("mk-x")
   end
 
   def test_clients_with_different_master_keys_still_raise_in_a_transaction
@@ -328,13 +397,14 @@ class BatchAuthorityTest < Minitest::Test
     assert_empty @calls
   end
 
-  def test_transaction_on_a_batch_with_another_explicit_client_raises
+  def test_transaction_on_a_batch_with_an_explicit_client_uses_it
     obj = saved(BatchAuthorityBoundWidget, "B1", "b1")
     batch = Parse::BatchOperation.new(nil, transaction: true)
     batch.client = DEFAULT_CLIENT
     batch.add(obj)
-    assert_raises(Parse::BatchOperation::MixedAuthorityError) { batch.submit }
-    assert_empty @calls
+    batch.submit
+    assert_equal 1, calls_on(DEFAULT_CLIENT).size
+    assert_empty calls_on(BOUND_CLIENT)
   end
 
   def test_mixed_clients_in_array_save_are_split_and_applied_in_order
