@@ -430,6 +430,119 @@ class IdentityRevocation581Test < Minitest::Test
     assert_equal ["UC"], auth.users
   end
 
+  # With a master key, a session-scoped delete still looks up as that user,
+  # so it cannot read other users' tokens and owners (P3-2).
+  def test_session_scoped_batch_destroy_looks_up_as_the_user_even_with_a_master_key
+    victim = session_ref("SV1")
+    auth = FakeAuth.new(auth_owners = { "SV1" => "VICTIM" })
+    seen = []
+    client = victim.client
+    client.stub(:authorization, auth) do
+      client.stub(:find_objects, session_lookup([], seen)) do
+        client.stub(:batch_request, batch_responder(["SV1"])) do
+          [victim].destroy(session: "r:attacker")
+        end
+      end
+    end
+    assert_equal 1, seen.size
+    assert_equal "r:attacker", seen.first[:opts][:session_token]
+    assert_nil seen.first[:opts][:metadata_master]
+    # The row was invisible to the caller: nothing is forgotten, the recorded
+    # owner is not used, and nothing is reset.
+    assert_empty auth.tokens
+    assert_empty auth.users
+    assert_equal 0, auth.resets
+    assert_equal "VICTIM", auth_owners["SV1"]
+  end
+
+  # A caller allowed to delete a session it cannot read: when the delete
+  # succeeds, the session is gone, so its owner's cached identities go too.
+  def test_invisible_session_deleted_successfully_invalidates_the_recorded_owner
+    s = session_ref("SV3")
+    auth = FakeAuth.new("SV3" => "OWNER3")
+    client = s.client
+    client.stub(:authorization, auth) do
+      client.stub(:find_objects, session_lookup([], [])) do
+        client.stub(:batch_request, batch_responder([])) do
+          [s].destroy(session: "r:deleter")
+        end
+      end
+    end
+    assert_equal ["OWNER3"], auth.users
+    assert_equal 0, auth.resets
+  end
+
+  def test_invisible_sessions_deleted_successfully_without_an_owner_reset_at_most_once
+    auth = FakeAuth.new
+    client = Parse::Client.client
+    client.stub(:authorization, auth) do
+      client.stub(:find_objects, session_lookup([], [])) do
+        client.stub(:batch_request, batch_responder([])) do
+          bogus_sessions(20).destroy(session: "r:deleter")
+          bogus_sessions(20).destroy(session: "r:deleter")
+        end
+      end
+    end
+    assert_equal 1, auth.resets, "a successful delete of unreadable rows falls back to one rate-limited reset"
+    assert_empty auth.users
+  end
+
+  def test_invisible_session_denied_or_not_found_forgets_nothing
+    [[{ "code" => 101, "error" => "not found" }], [{ "code" => 119, "error" => "denied" }]].each do |(body)|
+      clear_reset_limiter
+      s = session_ref("SV4")
+      auth = FakeAuth.new("SV4" => "OWNER4")
+      responder = ->(batch, **_o) { batch.requests.map { Parse::Response.new(body) } }
+      client = s.client
+      client.stub(:authorization, auth) do
+        client.stub(:find_objects, session_lookup([], [])) do
+          client.stub(:batch_request, responder) { [s].destroy(session: "r:deleter") }
+        end
+      end
+      assert_empty auth.users, "code #{body["code"]} on an unreadable row forgets nothing"
+      assert_equal 0, auth.resets
+    end
+  end
+
+  def test_single_invisible_destroy_uses_owner_only_when_it_succeeds
+    ok = session_ref("SV5")
+    auth = FakeAuth.new("SV5" => "OWNER5")
+    ok.client.stub(:authorization, auth) do
+      ok.client.stub(:find_objects, session_lookup([], [])) do
+        ok.client.stub(:delete_object, ->(*_a, **_k) { Parse::Response.new({}) }) do
+          ok.destroy(session: "r:deleter")
+        end
+      end
+    end
+    assert_equal ["OWNER5"], auth.users
+
+    denied = session_ref("SV6")
+    auth2 = FakeAuth.new("SV6" => "OWNER6")
+    denied.client.stub(:authorization, auth2) do
+      denied.client.stub(:find_objects, session_lookup([], [])) do
+        denied.client.stub(:delete_object, ->(*_a, **_k) { Parse::Response.new({ "code" => 101, "error" => "nope" }) }) do
+          denied.destroy(session: "r:deleter")
+        end
+      end
+    end
+    assert_empty auth2.users
+    assert_equal 0, auth2.resets
+  end
+
+  def test_master_batch_destroy_still_uses_the_recorded_owner
+    gone = session_ref("SV2")
+    auth = FakeAuth.new({ "SV2" => "OWNER2" })
+    client = gone.client
+    client.stub(:authorization, auth) do
+      client.stub(:find_objects, session_lookup([], [])) do
+        client.stub(:batch_request, batch_responder(["SV2"])) do
+          [gone].destroy
+        end
+      end
+    end
+    assert_equal ["OWNER2"], auth.users
+  end
+
   def test_client_without_master_key_or_session_skips_the_lookup
     @client.instance_variable_set(:@master_key, nil)
     s = session_ref("SC2")

@@ -202,7 +202,10 @@ module Parse
       #   Integrators with a CDN in front of Parse files add their CDN host:
       #   `Parse::File.trusted_url_hosts << "cdn.example.com"`. Wildcard
       #   entries via leading "." (e.g. `".cdn.example.com"`) match any
-      #   subdomain.
+      #   subdomain. Entries are compared against the URL's host as written,
+      #   so list internationalized hosts in their punycode (`xn--`) form.
+      #   The port is not part of the match: any port on a trusted host is
+      #   accepted.
       attr_writer :trusted_url_hosts
 
       def trusted_url_hosts
@@ -251,6 +254,20 @@ module Parse
 
       def untrusted_url_policy
         @untrusted_url_policy ||= :warn
+      end
+
+      # @return [Boolean] whether a URL whose file name starts with `tfss-`
+      #   (the legacy Parse hosted-files prefix) is accepted from any host.
+      #   Defaults to `true`, the long-standing contract for apps that serve
+      #   migrated legacy files from their own bucket. The file name alone
+      #   proves nothing about the host, so a writer who can store a File
+      #   value named `tfss-...` can point it anywhere. Set this to `false`
+      #   to require `tfss-` URLs to come from {trusted_url_hosts} like any
+      #   other URL (`files.parsetfss.com` is trusted by default).
+      attr_writer :trust_legacy_tfss_on_any_host
+
+      def trust_legacy_tfss_on_any_host
+        @trust_legacy_tfss_on_any_host.nil? ? true : @trust_legacy_tfss_on_any_host
       end
 
       # @return [Array<Integer>] Allowed remote ports for URL fetches.
@@ -776,8 +793,8 @@ module Parse
     # set to true, it will make sure it returns a secure url.
     # @return [String] the url string for the file.
     def url
-      if @url.present? && Parse::File.force_ssl && @url.starts_with?("http://")
-        return @url.sub("http://", "https://")
+      if @url.present? && Parse::File.force_ssl && Parse::Client.url_scheme(@url) == "http"
+        return @url.strip.sub(/\Ahttp:/i, "https:")
       end
       @url
     end
@@ -958,28 +975,63 @@ module Parse
     # - raises {UntrustedHostError} when policy is `:raise`.
     #
     # On `:warn`, the URL is accepted but a single warning per host is
-    # emitted (deduplicated process-wide). Empty / non-string / non-http
-    # values pass through unchanged so callers can clear the field.
+    # emitted (deduplicated process-wide). Empty / non-string values and
+    # relative paths (no scheme) pass through unchanged so callers can
+    # clear the field. Any other scheme (`javascript:`, `data:`, ...) and a
+    # scheme-relative value (`//host`, `\\host`) are checked like an
+    # untrusted host.
+    #
+    # The value is first normalized the way a browser parses it (ASCII tab,
+    # CR, and LF removed anywhere; leading and trailing C0 controls and
+    # spaces stripped). The scheme is then matched case-insensitively,
+    # because browsers resolve `HTTPS://host`, ` https://host`,
+    # `https:host`, `https:\\host`, and `https:///host` to the same
+    # remote host. An http(s) value that is not a well-formed
+    # `scheme://host` URL, does not parse, or has no host is treated as an
+    # untrusted host rather than passed through.
     def self.sanitize_hydrated_url(raw, fallback: nil, name: nil)
       return raw if raw.nil?
       return raw unless raw.is_a?(String) && !raw.empty?
-      return raw unless raw.start_with?("http://") || raw.start_with?("https://")
+      candidate = browser_normalized_url(raw)
+      return raw if candidate.empty?
 
-      uri = begin
-          URI.parse(raw)
-        rescue URI::InvalidURIError
-          return raw  # malformed URL — leave it alone; downstream code already handles
+      host = nil
+      if candidate.match?(SCHEME_RELATIVE_PREFIX)
+        # `//host`, `\\host`, `/\host`, and `\/host` are scheme-relative:
+        # browsers resolve them to `host` on the page's scheme.
+        candidate = "https:" + candidate.sub(SCHEME_RELATIVE_PREFIX, "//")
+      elsif !candidate.match?(HTTP_SCHEME_PREFIX)
+        # A relative path ("a.png", "/files/a.png") passes through. Any
+        # other scheme (javascript:, data:, vbscript:, file:, ...) is not a
+        # file URL and is treated as untrusted.
+        return raw unless candidate.match?(URL_SCHEME_PREFIX)
+        return apply_untrusted_url_policy(raw, fallback, "(#{candidate[URL_SCHEME_PREFIX].downcase} URL)")
+      end
+
+      if candidate.match?(WELL_FORMED_HTTP_URL)
+        host = begin
+            URI.parse(candidate).host.to_s.downcase
+          rescue URI::InvalidURIError
+            nil
+          end
+        host = nil if host && host.empty?
+      end
+
+      if host
+        return raw if trusted_url_host?(host)
+        # tfss-prefixed filenames can be served from arbitrary hosts (the
+        # legacy hosted-files contract) unless the app turned that off.
+        if trust_legacy_tfss_on_any_host
+          basename = name || File.basename(candidate)
+          return raw if basename.to_s.start_with?("tfss-")
         end
-      host = uri.host.to_s.downcase
-      return raw if host.empty?
+      end
+      apply_untrusted_url_policy(raw, fallback, host || "(malformed URL)")
+    end
 
-      # tfss-prefixed filenames can be served from arbitrary hosts (the
-      # legacy hosted-files contract). Accept those regardless of host.
-      basename = name || File.basename(raw)
-      return raw if basename.to_s.start_with?("tfss-")
-
-      return raw if trusted_url_host?(host)
-
+    # Apply {untrusted_url_policy} to a refused URL.
+    # @!visibility private
+    def self.apply_untrusted_url_policy(raw, fallback, host)
       case untrusted_url_policy
       when :raise
         raise UntrustedHostError,
@@ -993,6 +1045,31 @@ module Parse
         raw
       end
     end
+
+    # An http or https scheme, any case, at the start of a stripped value.
+    # @!visibility private
+    HTTP_SCHEME_PREFIX = /\Ahttps?:/i
+
+    # Any URL scheme (RFC 3986 `scheme ":"`) at the start of a value.
+    # @!visibility private
+    URL_SCHEME_PREFIX = /\A[a-z][a-z0-9+.\-]*:/i
+
+    # Two leading slashes or backslashes in any mix: a scheme-relative URL.
+    # @!visibility private
+    SCHEME_RELATIVE_PREFIX = %r{\A[/\\][/\\]}
+
+    # The value a browser would parse: ASCII tab, CR, and LF removed
+    # anywhere, then leading and trailing C0 controls and spaces stripped
+    # (WHATWG URL parsing).
+    # @!visibility private
+    def self.browser_normalized_url(value)
+      value.delete("\t\r\n").sub(/\A[\x00-\x20]+/, "").sub(/[\x00-\x20]+\z/, "")
+    end
+
+    # `http://` or `https://` (any case) followed by a host character, so
+    # `https:host`, `https:\\host`, and `https:///host` do not match.
+    # @!visibility private
+    WELL_FORMED_HTTP_URL = %r{\Ahttps?://[^/\\\s]}i
 
     # @!visibility private
     def self.trusted_url_host?(host)

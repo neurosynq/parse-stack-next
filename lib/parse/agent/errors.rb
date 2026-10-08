@@ -89,6 +89,23 @@ module Parse
       end
     end
 
+    # Raised when a session-token agent needs its resolved claim set (for
+    # the SDK-side CLP check, an ACL `$match`, or a sub-agent subset check)
+    # but the token could not be resolved. A session agent is never treated
+    # as master-key posture just because its token did not resolve: the
+    # check fails closed instead. A subclass of {AccessDenied}, so tool
+    # dispatch reports it as an `:access_denied` refusal
+    # (`kind: :unresolved_identity`).
+    class UnresolvedIdentity < AccessDenied
+      def initialize(message = nil)
+        super(nil, message || "This agent's session could not be resolved, so its " \
+                              "permissions cannot be checked. The request was refused " \
+                              "rather than run without them; retry once Parse Server is " \
+                              "reachable, or rebuild the agent with a valid session token.",
+              kind: :unresolved_identity)
+      end
+    end
+
     # Authentication failure for MCP transport adapters. Custom auth blocks
     # passed to Parse::Agent::MCPRackApp should raise this (or a subclass) to
     # signal an unauthenticated/unauthorized request; the transport layer

@@ -41,6 +41,65 @@ module Parse
     # Used to correlate batching requests with their responses.
     attr_accessor :tag
 
+    # @!visibility private
+    # The client this request belongs to, when it was built for a specific
+    # one (an object's class client). A {Parse::BatchOperation} sends a
+    # request through this client, so a write built for a session-bound
+    # client is never batched through another client's credentials. nil
+    # means the batch's own client.
+    attr_accessor :client
+
+    # @!visibility private
+    # The credentials this request names explicitly, resolved the way
+    # {Parse::Client#request} resolves them for a single request: the
+    # `session_token:` option, else an `X-Parse-Session-Token` header; and
+    # the `use_master_key:` option; and `suppress_master_key: true` when the
+    # master-key suppression header is set. A key is absent when the request
+    # does not name it, so ambient context (`Parse.with_session`,
+    # `client_mode`, a bound client token) still applies.
+    #
+    # A `session_token:` option that is present but resolves to no token (a
+    # user object without one, or a blank string) is returned as `""`, so a
+    # batch fails closed the same way a single request does: no master key
+    # and no ambient or bound token. `use_master_key:` is returned only when
+    # it is exactly `true` or `false`; {Parse::Client#request} treats any
+    # other value as not set, and so does a batch.
+    # @return [Hash] with optional `:session_token` (String),
+    #   `:use_master_key` (Boolean), and `:suppress_master_key` (true) keys.
+    def explicit_authority
+      o = opts.is_a?(Hash) ? opts : {}
+      result = {}
+      token = Parse::BatchOperation.resolve_session_option(o, :session_token)
+      if token.nil?
+        header_token = self.class.header_value(headers, Parse::Protocol::SESSION_TOKEN)
+        if header_token.is_a?(String)
+          token = header_token.strip.empty? ? "" : header_token
+        end
+      end
+      result[:session_token] = token unless token.nil?
+      master = o[:use_master_key]
+      result[:use_master_key] = master if master == true || master == false
+      # The suppression header wins over `use_master_key: true` in the
+      # authentication middleware, so a batch must carry it as a header
+      # rather than fold it into `use_master_key:` (which would also change
+      # how the ambient and bound session tokens apply).
+      if self.class.header_value(headers, Parse::Middleware::Authentication::DISABLE_MASTER_KEY).present?
+        result[:suppress_master_key] = true
+      end
+      result
+    end
+
+    # @!visibility private
+    # Case-insensitive header lookup.
+    # @return [Object, nil]
+    def self.header_value(headers, name)
+      return nil unless headers.is_a?(Hash)
+      return headers[name] if headers.key?(name)
+      wanted = name.to_s.downcase
+      headers.each { |k, v| return v if k.to_s.downcase == wanted }
+      nil
+    end
+
     # @!attribute [rw] request_id
     #   @return [String] unique identifier for this request to enable idempotency
     attr_accessor :request_id

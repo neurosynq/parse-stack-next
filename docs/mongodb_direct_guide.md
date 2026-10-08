@@ -287,6 +287,9 @@ raw = Parse::MongoDB.find(
 Convenience wrapper around `db.find`. Accepts `limit:`, `skip:`, `sort:`,
 `projection:`, `hint:`, `max_time_ms:`. When `:limit` is omitted the call applies
 `DEFAULT_FIND_LIMIT = 1000` and warns; pass `limit: 0` to opt out.
+`find` reads raw documents unscoped, so it raises `Parse::ACLScope::ACLRequired`
+inside `Parse.without_master_key`; `Parse::MongoDB.indexes` (metadata only) is
+allowed there.
 
 ### Forcing an index with `hint`
 
@@ -760,6 +763,32 @@ the pipeline — whether at the top level or nested inside
 legitimate read stages — but they read from arbitrary collections. Never
 pass attacker-controlled input into a pipeline; build the pipeline in
 trusted code and interpolate only validated values.
+
+#### Regex patterns and the default time limit
+
+Every caller-supplied regex on these paths (`$regex` strings, Ruby
+`Regexp` and BSON regex values, and the `regex` operand of `$regexMatch`,
+`$regexFind`, and `$regexFindAll`) goes through `Parse::RegexSecurity`,
+which parses the pattern and refuses shapes that backtrack heavily on
+PCRE: nested or overlapping repeats such as `(a+)+` or `(a|aa)+`, more
+than three unbounded quantifiers in a row with no separating literal
+(`\d+\d+\d+\d+`), subroutine calls (`\g<1>`), inline comments, and
+extended mode. Escaped literal text, such as the patterns `starts_with`,
+`ends_with`, and `contains` build, always passes the shape check.
+
+A pattern check cannot prove every regex is cheap, so mongo-direct reads
+whose filter or pipeline carries a regex that is not escaped literal text
+also get a server-side `max_time_ms` of
+`Parse::PipelineSecurity.default_regex_max_time_ms` (5000 ms by default)
+when the caller passed none. This covers `Parse::MongoDB.aggregate` and
+`find`, `results_direct`, `count_direct`, Atlas Search, and vector and
+hybrid search. Set the attribute to a different value, or to `nil` to
+turn the default off; an explicit `max_time_ms:` always wins. A query that
+runs past the limit raises `Parse::MongoDB::ExecutionTimeout`.
+
+REST queries are executed by Parse Server, which applies no regex check of
+its own. Set `databaseOptions.maxTimeMS` in the Parse Server configuration
+to bound those.
 
 ### Layer 2: Row-level ACL enforcement (`Parse::ACLScope`) — scoped only
 

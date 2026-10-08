@@ -116,7 +116,10 @@ module FieldGuardsEndToEndSetup
   def setup
     super
     Parse::Webhooks.instance_variable_set(:@routes, nil)
-    Parse::Webhooks.allow_unauthenticated = true
+    # Authenticate with the key the test Parse Server sends, so a forwarded
+    # master-key request reads as master? and Ruby-initiated saves dedup.
+    @prior_webhook_key = Parse::Webhooks.instance_variable_get(:@key)
+    Parse::Webhooks.key = Parse::Test::WebhookTestServer::KEY
     # The test Rack server is reachable from the Parse Server container via
     # host.docker.internal, which does not resolve from the host running this
     # process. Bypass the registration-time SSRF guard so the URL passes.
@@ -161,7 +164,7 @@ module FieldGuardsEndToEndSetup
       # Swallow teardown reachability failures; parent resets DB anyway.
     end
     @server&.stop!
-    Parse::Webhooks.allow_unauthenticated = false
+    Parse::Webhooks.instance_variable_set(:@key, @prior_webhook_key)
     Parse::Webhooks.instance_variable_set(:@allow_private_webhook_urls, @prior_allow_private_webhook_urls)
     super
   end

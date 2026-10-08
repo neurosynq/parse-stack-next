@@ -50,7 +50,7 @@ module Parse
             end
 
             endpoint = ENV["HOOKS_URL"] || ""
-            unless endpoint.starts_with?("http://") || endpoint.starts_with?("https://")
+            unless %w[http https].include?(Parse::Client.url_scheme(endpoint))
               raise "The ENV variable HOOKS_URL must be a <http/s> url : '#{endpoint}'. Ex. https://12345678.ngrok.io/webhooks"
             end
           end

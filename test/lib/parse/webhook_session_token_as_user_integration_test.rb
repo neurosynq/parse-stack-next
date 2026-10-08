@@ -62,7 +62,9 @@ module WebhookSessionTokenSetup
   def setup
     super
     Parse::Webhooks.instance_variable_set(:@routes, nil)
-    Parse::Webhooks.allow_unauthenticated = true
+    # Authenticate with the key the test Parse Server sends.
+    @prior_webhook_key = Parse::Webhooks.instance_variable_get(:@key)
+    Parse::Webhooks.key = Parse::Test::WebhookTestServer::KEY
     @prior_allow_private_webhook_urls = Parse::Webhooks.instance_variable_get(:@allow_private_webhook_urls)
     Parse::Webhooks.allow_private_webhook_urls = true
 
@@ -85,7 +87,7 @@ module WebhookSessionTokenSetup
       # parent resets DB anyway
     end
     @server&.stop!
-    Parse::Webhooks.allow_unauthenticated = false
+    Parse::Webhooks.instance_variable_set(:@key, @prior_webhook_key)
     Parse::Webhooks.instance_variable_set(:@allow_private_webhook_urls, @prior_allow_private_webhook_urls)
     super
   end

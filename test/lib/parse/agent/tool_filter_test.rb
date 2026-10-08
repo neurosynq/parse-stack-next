@@ -318,9 +318,17 @@ class AgentToolFilterTest < Minitest::Test
   end
 
   def test_explicit_session_token_overrides_inherited
-    parent = Parse::Agent.new(session_token: "r:parent_token")
-    sub = Parse::Agent.new(parent: parent, session_token: "r:child_token")
-    assert_equal "r:child_token", sub.session_token
+    # Both tokens belong to the same user, so the child's claim set is a
+    # subset of the parent's. (An unresolved parent token cannot be
+    # compared, so these must resolve; see AgentUnresolvedIdentityTest.)
+    same_user = lambda do |_opts, **_kw|
+      Parse::ACLScope::Resolution.new(mode: :session, user_id: "u1", permission_strings: ["*", "u1"])
+    end
+    Parse::ACLScope.stub(:resolve!, same_user) do
+      parent = Parse::Agent.new(session_token: "r:parent_token")
+      sub = Parse::Agent.new(parent: parent, session_token: "r:child_token")
+      assert_equal "r:child_token", sub.session_token
+    end
   end
 
   def test_parent_inheritance_does_not_inherit_permissions

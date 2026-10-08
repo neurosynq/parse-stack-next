@@ -638,11 +638,16 @@ module Parse
       #
       # Identical constraints collapse to one.
       def constraint_reduce(clauses)
-        clauses.reduce({}) do |clause, subclause|
+        reduced = clauses.reduce({}) do |clause, subclause|
           subclause_json = subclause.as_json || {}
           subclause_json.each { |key, value| merge_constraint_entry!(clause, key, value) }
           clause
         end
+        # A raw `{ "$regex" => ... }` in a where hash (or under `$not`,
+        # `$elemMatch`, or an OR branch) never passes through the regex
+        # constraint's own check, so every compiled pattern is checked here.
+        Parse::RegexSecurity.validate_where!(reduced)
+        reduced
       end
 
       # Operators whose meaning depends on a partner operator in the same
@@ -2522,10 +2527,9 @@ module Parse
         opts.delete(:session_token)
         opts[:metadata_master] = Parse::Client::METADATA_MASTER_REQUEST
       end
-      # for now, don't cache requests where we disable master_key or provide session token
-      # if opts[:use_master_key] == false || opts[:session_token].present?
-      #   opts[:cache] = false
-      # end
+      # Session reads are kept out of the response cache by the caching
+      # middleware, which sees the effective session whichever way it was
+      # supplied. See Parse::Middleware::Caching.cache_session_requests.
       opts
     end
 

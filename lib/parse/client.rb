@@ -419,6 +419,39 @@ module Parse
       "session_token=#{@session_token ? "[FILTERED]" : "nil"}>"
     end
 
+    # Redacted JSON form. ActiveSupport's default `as_json` serializes every
+    # instance variable, so a client in a JSON log or error-tracker context
+    # (or inside an object that serializes it, such as a {Parse::Agent})
+    # would emit the master key, REST key, and bound session token.
+    # @return [Hash]
+    def as_json(*)
+      {
+        "server_url" => @server_url,
+        "app_id" => @application_id,
+        "master_key" => @master_key ? "[FILTERED]" : nil,
+        "session_token" => @session_token ? "[FILTERED]" : nil,
+      }
+    end
+
+    # @return [String] the redacted {#as_json} summary as JSON.
+    def to_json(*args)
+      as_json.to_json(*args)
+    end
+
+    # YAML (Psych) serializes instance variables too; emit the redacted
+    # summary instead.
+    def encode_with(coder)
+      as_json.each { |k, v| coder[k] = v }
+    end
+
+    # A client holds the master key, REST key, and session tokens, so it is
+    # never marshaled (Rails.cache, DRb, or a job payload would store them in
+    # the clear). Store the configuration and build a new client instead.
+    # @raise [TypeError]
+    def marshal_dump
+      raise TypeError, "Parse::Client cannot be marshaled"
+    end
+
     # A NEW non-master {Parse::Client} that mirrors THIS client's connection
     # settings (`server_url` / `application_id` / `api_key`) but carries no
     # master key and binds `session_token`, so it acts on the server as that
@@ -645,6 +678,12 @@ module Parse
     #    middleware. The default value is 3 seconds. If :expires is set to 0,
     #    caching will be disabled. You can always clear the current state of the
     #    cache using the clear_cache! method on your Parse::Client instance.
+    # @option opts [Boolean] :cache_session_requests Whether this client's
+    #    response cache stores and serves reads made with a session token.
+    #    Overrides {Parse::Middleware::Caching.cache_session_requests} in
+    #    either direction; omit it to use that class default (off). Only
+    #    `true` enables it. With it on, a revoked session keeps reading its
+    #    cached rows until the entry expires.
     # @option opts [String] :cache_namespace Optional prefix applied to every
     #    cache key. Useful when two Parse apps share one Redis instance and
     #    would otherwise collide on identical paths (e.g.
@@ -704,7 +743,9 @@ module Parse
       @allow_faraday_proxy = opts.fetch(:allow_faraday_proxy, false)
 
       # Security check for HTTP usage (except localhost/127.0.0.1 for development)
-      if @server_url&.start_with?("http://") && !@server_url.match?(%r{^http://(localhost|127\.0\.0\.1)(:|/)})
+      # The scheme and host come from URI parsing, so `HTTP://` and leading
+      # whitespace are treated as plain http, not as a secure URL.
+      if self.class.url_scheme(@server_url) == "http" && !self.class.loopback_host?(self.class.url_host(@server_url))
         if @require_https
           raise ArgumentError, "[Parse::Client] HTTPS required but server URL uses HTTP: #{@server_url}. " \
                                "Set require_https: false or use an HTTPS URL."
@@ -765,7 +806,7 @@ module Parse
       # scheme; without this guard a caller passing
       #   faraday: { ssl: { verify: false }, proxy: "http://attacker" }
       # would neuter TLS verification on an HTTPS connection.
-      validate_faraday_opts!(opts[:faraday])
+      opts[:faraday] = validate_faraday_opts!(opts[:faraday])
       opts[:faraday].merge!(:url => @server_url)
       @conn = Faraday.new(opts[:faraday]) do |conn|
         # Apply timeouts before any user-supplied middleware sees a request.
@@ -937,6 +978,10 @@ module Parse
               # old workers still read the legacy shape, so invalidation has to
               # hit both until every old worker is drained.
               delete_legacy_variants: opts.fetch(:cache_delete_legacy_variants, true),
+              # Per-client override of
+              # Parse::Middleware::Caching.cache_session_requests; omitted
+              # means the class default applies.
+              **(opts.key?(:cache_session_requests) ? { cache_session_requests: opts[:cache_session_requests] } : {}),
             }
 
             # Inform about opt-in cache behavior
@@ -986,19 +1031,27 @@ module Parse
     #   controlled MITM unless explicitly allowlisted
     #
     # @api private
+    # @return [Hash] the options as a Hash, so a `Faraday::ConnectionOptions`
+    #   (or anything else responding to `to_hash`) is checked and used in the
+    #   same form; any other value raises.
     def validate_faraday_opts!(faraday_opts)
-      return unless faraday_opts.is_a?(Hash)
+      faraday_opts = {} if faraday_opts.nil?
+      unless faraday_opts.is_a?(Hash)
+        unless faraday_opts.respond_to?(:to_hash)
+          raise ArgumentError,
+                "[Parse::Client] opts[:faraday] must be a Hash or Faraday::ConnectionOptions " \
+                "(got #{faraday_opts.class})."
+        end
+        faraday_opts = faraday_opts.to_hash
+      end
 
       ssl = faraday_opts[:ssl] || faraday_opts["ssl"]
-      if ssl.is_a?(Hash)
-        verify = ssl.key?(:verify) ? ssl[:verify] : ssl["verify"]
-        if verify == false && @server_url.to_s.start_with?("https://")
-          raise ArgumentError,
-            "[Parse::Client] Refusing to disable TLS certificate verification " \
-            "(opts[:faraday][:ssl][:verify] = false) on an HTTPS server URL. " \
-            "Fix the server certificate or downgrade the URL to http:// " \
-            "(with require_https: false) for explicit local testing."
-        end
+      if self.class.url_scheme(@server_url) == "https" && (setting = tls_verification_disabled(ssl))
+        raise ArgumentError,
+          "[Parse::Client] Refusing to disable TLS certificate verification " \
+          "(opts[:faraday][:ssl] #{setting}) on an HTTPS server URL. " \
+          "Fix the server certificate or downgrade the URL to http:// " \
+          "(with require_https: false) for explicit local testing."
       end
 
       proxy = faraday_opts[:proxy] || faraday_opts["proxy"]
@@ -1018,15 +1071,82 @@ module Parse
       # `proxy: nil` is the Faraday-documented way to disable
       # env-proxy autodiscovery.
       faraday_opts[:proxy] = nil unless @allow_faraday_proxy
+      faraday_opts
     end
 
     private :validate_faraday_opts!
 
-    # Hosts considered "loopback" for the cleartext-ws:// guard in
-    # {#configure_live_query}. Mirrors
-    # {Parse::LiveQuery::Client::LOOPBACK_HOSTS} so the explicit-URL
-    # path and the derived-URL path agree on what counts as local.
-    LIVE_QUERY_LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1 [::1] 0.0.0.0].freeze
+    # Which TLS setting in a Faraday `ssl:` option (a Hash or a
+    # `Faraday::SSLOptions`) turns certificate or hostname verification off,
+    # or nil when none does: `verify: false`, `verify_mode: VERIFY_NONE`, or
+    # `verify_hostname: false`.
+    # @api private
+    def tls_verification_disabled(ssl)
+      read = lambda do |key|
+        if ssl.is_a?(Hash)
+          ssl.key?(key) ? ssl[key] : ssl[key.to_s]
+        elsif ssl.respond_to?(key)
+          ssl.public_send(key)
+        end
+      end
+      return nil if ssl.nil?
+      return "verify: false" if read.call(:verify) == false
+      if defined?(OpenSSL::SSL::VERIFY_NONE) && read.call(:verify_mode) == OpenSSL::SSL::VERIFY_NONE
+        return "verify_mode: VERIFY_NONE"
+      end
+      return "verify_hostname: false" if read.call(:verify_hostname) == false
+      nil
+    end
+    private :tls_verification_disabled
+
+    # Whether a URL host is this machine: `localhost`, any `127.0.0.0/8`
+    # address, `::1`, or `0.0.0.0` (a connect to the unspecified address
+    # reaches the local host on Linux and macOS). Used by the http:// server
+    # warning and the LiveQuery cleartext guards so they agree.
+    # @param host [String, nil]
+    # @return [Boolean]
+    # @api private
+    #
+    # Addresses are parsed with IPAddr, so a malformed one such as
+    # `127.999.1.1` (which a resolver would look up by name) is not loopback.
+    # `localhost.` with a trailing dot is not either: some resolvers skip
+    # `/etc/hosts` for the fully qualified form. `0.0.0.0` stays local for
+    # client URLs only (it is a bind address everywhere else).
+    def self.loopback_host?(host)
+      h = host.to_s.strip.downcase.delete_prefix("[").delete_suffix("]")
+      return false if h.empty?
+      return true if h == "localhost" || h == "0.0.0.0"
+      return false unless h.match?(/\A[0-9a-f:.]+\z/)
+      require "ipaddr"
+      IPAddr.new(h).loopback?
+    rescue IPAddr::InvalidAddressError, IPAddr::AddressFamilyError
+      false
+    end
+
+    # The lowercased scheme of a URL String, or nil when it does not parse.
+    # Leading and trailing whitespace is ignored. Scheme checks go through
+    # this instead of a case-sensitive prefix match, which let `HTTP://` and
+    # `WS://` past the plaintext guards.
+    # @param url [String, nil]
+    # @return [String, nil]
+    # @api private
+    def self.url_scheme(url)
+      return nil if url.nil?
+      URI.parse(url.to_s.strip).scheme&.downcase
+    rescue URI::InvalidURIError
+      nil
+    end
+
+    # The lowercased host of a URL String, or nil when it does not parse.
+    # @param url [String, nil]
+    # @return [String, nil]
+    # @api private
+    def self.url_host(url)
+      return nil if url.nil?
+      URI.parse(url.to_s.strip).host&.downcase
+    rescue URI::InvalidURIError
+      nil
+    end
 
     # Configure LiveQuery with the given options
     # @param opts [Hash] configuration options
@@ -1049,7 +1169,7 @@ module Parse
       # `live_query: { url: "ws://prod-host" }` or
       # `live_query_url: "ws://prod-host"` bypassed it — the master key
       # and any session token would ride the connect frame in cleartext.
-      validate_live_query_url!(resolved_url, allow_insecure: live_query_opts[:allow_insecure])
+      resolved_url = validate_live_query_url!(resolved_url, allow_insecure: live_query_opts[:allow_insecure])
 
       # Warn (don't raise) on `live_query: { ... }` keys that are not
       # `Parse::LiveQuery::Configuration` setters. The block form would
@@ -1079,20 +1199,14 @@ module Parse
       end
     end
 
+    # Validate an explicit LiveQuery URL at configure time with the same
+    # rules {Parse::LiveQuery::Client} applies, and return the URL to use
+    # (`http://` and `https://` are mapped to `ws://` and `wss://`).
+    # @return [String, nil]
     # @api private
     def validate_live_query_url!(url, allow_insecure:)
-      return unless url.is_a?(String) && url.start_with?("ws://")
-
-      host = URI.parse(url).host.to_s rescue ""
-      return if LIVE_QUERY_LOOPBACK_HOSTS.include?(host)
-      return if allow_insecure
-
-      raise ArgumentError,
-        "[Parse::Client] Refusing explicit insecure LiveQuery URL #{url.inspect}. " \
-        "The connect frame carries the master key and any session token in " \
-        "plaintext on this socket. Use wss:// for routable hosts, or pass " \
-        "`live_query: { allow_insecure: true }` to opt into cleartext for " \
-        "local development on a non-loopback address."
+      return url unless url.is_a?(String)
+      Parse::LiveQuery::Client.normalize_url(url, allow_insecure: allow_insecure)
     end
 
     # @api private
@@ -1383,7 +1497,9 @@ module Parse
         # `with_session(token_b)` resolved user B, and the identity cache
         # then mapped token A (or a garbage token) to user B for its TTL.
         if raw_token.nil?
-          header_token = headers[Parse::Protocol::SESSION_TOKEN]
+          # Same lookup a batch uses for each request's own credentials
+          # (Parse::Request#explicit_authority).
+          header_token = Parse::Request.header_value(headers, Parse::Protocol::SESSION_TOKEN)
           raw_token = header_token if header_token.is_a?(String)
         end
         # SEC-02:an EXPLICITLY-supplied session_token that is a blank /

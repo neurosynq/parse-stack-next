@@ -721,6 +721,7 @@ module Parse
       # whose stage 0 is `$vectorSearch`.
       def run_pipeline!(collection_name, pipeline, max_time_ms: nil, authorizing_client: nil)
         agg_opts = {}
+        max_time_ms ||= Parse::PipelineSecurity.regex_time_budget(pipeline)
         agg_opts[:max_time_ms] = max_time_ms if max_time_ms
         # Vector search bypasses Parse::MongoDB.aggregate, so the binding
         # guard only sees this read if the authorizing client arrives here.

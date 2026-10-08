@@ -3069,7 +3069,12 @@ songs.save
 
 # you can also destroy a set of objects
 songs.destroy
+
+# send every write as a specific user (ACL and CLP enforced)
+songs.save(session: user)
 ```
+
+Each write in a batch keeps the credentials it was built for. Parse Server runs a `POST /batch` under one credential, so objects whose classes use clients with different credentials (for example a class bound to `Parse.client.become(token)`; identically configured clients are merged), or raw `Parse::Request`s carrying different `session_token:` or `use_master_key:` options, are sent as separate batch calls, each with its own credentials. Responses still come back in request order.
 
 ### Magic `save_all`
 By default, all Parse queries have a maximum fetch limit of 1000. While using the `:max` option, Parse-Stack can increase this up to 11,000. In the cases where you need to update a large number of objects, you can utilize the `Parse::Object#save_all` method to fetch, modify and save objects.
@@ -3131,6 +3136,7 @@ end
 - **Mixed operations**: Support create, update, and delete operations in single transaction
 - **Error handling**: Comprehensive error handling with meaningful exception messages
 - **Object ID assignment**: New objects automatically receive their `objectId`, `createdAt`, and `updatedAt` from the server response after successful transaction
+- **One credential**: A transaction runs with the credentials of its objects' class client, or as a given user with `Parse::Object.transaction(session: user)`. Objects bound to clients with different credentials raise `Parse::BatchOperation::MixedAuthorityError` before anything is sent, because a transaction cannot be split.
 
 ```ruby
 # Transaction with custom retry limit and error handling

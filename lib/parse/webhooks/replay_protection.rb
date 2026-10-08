@@ -124,16 +124,26 @@ module Parse
         # works with any Rack request. Replay dedup applies only when
         # `request_id` or an `X-Parse-Webhook-Nonce` header is present.
         def verify!(env, body_str, request_id)
+          check(env, body_str, request_id).first
+        end
+
+        # @!visibility private
+        # Same checks as {.verify!}, also reporting whether a signature was
+        # verified. The signing secret is read once, so the answer always
+        # matches the check that ran.
+        # @return [Array(String, Boolean)] the error message (nil when the
+        #   request passes) and true when it carried a valid signature.
+        def check(env, body_str, request_id)
           secret = signing_secret
           signed_key = nil
           if secret && !secret.empty?
             ts_header = env[HEADER_TIMESTAMP].to_s
             sig_header = env[HEADER_SIGNATURE].to_s
-            return "Missing webhook signature." if ts_header.empty? || sig_header.empty?
-            return "Invalid webhook timestamp." unless ts_header =~ /\A-?\d{1,12}\z/
+            return ["Missing webhook signature.", false] if ts_header.empty? || sig_header.empty?
+            return ["Invalid webhook timestamp.", false] unless ts_header =~ /\A-?\d{1,12}\z/
             ts = ts_header.to_i
             skew = (Time.now.to_i - ts).abs
-            return "Stale webhook timestamp." if skew > signing_max_skew_seconds
+            return ["Stale webhook timestamp.", false] if skew > signing_max_skew_seconds
             # A sender that signs a per-delivery nonce (`ts.nonce.body`) gets a
             # distinct signature for every delivery, so identical bodies sent
             # in the same second are not mistaken for replays. The original
@@ -145,7 +155,7 @@ module Parse
               expected = OpenSSL::HMAC.hexdigest("SHA256", secret, material)
               ActiveSupport::SecurityUtils.secure_compare(expected, sig_header)
             end
-            return "Invalid webhook signature." unless matched
+            return ["Invalid webhook signature.", false] unless matched
             # A signed delivery is deduplicated on its signature, which covers
             # the timestamp and body and cannot be changed without the secret.
             # Keying it on the unsigned nonce would let a captured request be
@@ -157,23 +167,23 @@ module Parse
           if signed_key
             window = [replay_window_seconds, signing_max_skew_seconds * 2].max
             digest = Digest::SHA256.hexdigest(signed_key)
-            return "Webhook replay detected." if cache.seen?(digest, window)
+            return ["Webhook replay detected.", false] if cache.seen?(digest, window)
             cache.record(digest, replay_cache_size)
-            return nil
+            return [nil, true]
           end
 
           # Dedup only when the delivery carries a per-delivery identifier.
           # Keying on the body alone rejects legitimate identical requests.
           nonce = request_id.to_s.strip
           nonce = env[HEADER_NONCE].to_s.strip if nonce.empty?
-          return nil if nonce.empty?
+          return [nil, false] if nonce.empty?
 
           digest = Digest::SHA256.hexdigest("#{nonce}\x1f#{body_str}")
           if cache.seen?(digest, replay_window_seconds)
-            return "Webhook replay detected."
+            return ["Webhook replay detected.", false]
           end
           cache.record(digest, replay_cache_size)
-          nil
+          [nil, false]
         end
       end
 

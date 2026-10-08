@@ -35,7 +35,9 @@ class WebhookAfterFindIntegrationTest < Minitest::Test
   def setup
     super
     Parse::Webhooks.instance_variable_set(:@routes, nil)
-    Parse::Webhooks.allow_unauthenticated = true
+    # Authenticate with the key the test Parse Server sends.
+    @prior_webhook_key = Parse::Webhooks.instance_variable_get(:@key)
+    Parse::Webhooks.key = Parse::Test::WebhookTestServer::KEY
     @prior_private = Parse::Webhooks.instance_variable_get(:@allow_private_webhook_urls)
     Parse::Webhooks.allow_private_webhook_urls = true
     @server = Parse::Test::WebhookTestServer.new.start!
@@ -56,7 +58,7 @@ class WebhookAfterFindIntegrationTest < Minitest::Test
     rescue StandardError
     end
     @server&.stop!
-    Parse::Webhooks.allow_unauthenticated = false
+    Parse::Webhooks.instance_variable_set(:@key, @prior_webhook_key)
     Parse::Webhooks.instance_variable_set(:@allow_private_webhook_urls, @prior_private)
     super
   end

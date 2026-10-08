@@ -47,6 +47,11 @@ export PARSE_SERVER_MASTER_KEY_IPS="${PARSE_SERVER_MASTER_KEY_IPS:-127.0.0.1/32,
 # Optional REST API key — accept a default of empty when not provided
 # by the compose file. Parse Server tolerates an unset REST key.
 export PARSE_SERVER_REST_API_KEY="${PARSE_SERVER_REST_API_KEY:-}"
+# Webhook key sent as X-Parse-Webhook-Key on trigger and function calls.
+# The compose file supplies it; the webhook integration tests configure the
+# same value on the SDK side (PARSE_TEST_WEBHOOK_KEY) so webhook requests are
+# authenticated.
+export PARSE_SERVER_WEBHOOK_KEY="${PARSE_SERVER_WEBHOOK_KEY:-psnext-it-webhook-key}"
 export PARSE_SERVER_MOUNT_PATH="${PARSE_SERVER_MOUNT_PATH:-/parse}"
 export PARSE_SERVER_CLOUD="${PARSE_SERVER_CLOUD:-/parse-server/cloud/main.js}"
 export PARSE_SERVER_LOG_LEVEL="${PARSE_SERVER_LOG_LEVEL:-info}"

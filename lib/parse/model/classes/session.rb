@@ -251,12 +251,15 @@ module Parse
         # already revoked elsewhere or one the caller cannot see; dropping
         # cached entries is idempotent in both cases. A raised delete still
         # drops the token it named but leaves the owner alone. A single
-        # delete cannot tell "already gone" from "denied", so an absent row
-        # only uses the recorded owner, never the reset fallback.
+        # delete that returns false cannot tell "already gone" from
+        # "denied", so it never resets and forgets nothing for a row the
+        # caller could not read; one that returns true removed the row, so
+        # the recorded owner (or the rate-limited reset) applies.
         if result.nil?
           _forget_identity!(token.is_a?(String) ? token : nil, nil)
         else
-          _forget_identity!(token, owner_id, reset_fallback: false)
+          deleted = result == true
+          _forget_identity!(token, owner_id, reset_fallback: deleted, deleted: deleted)
         end
       end
     end
@@ -312,16 +315,23 @@ module Parse
 
       # Look up the token and owner of every session about to be deleted that
       # does not carry them, so the delete can drop their identity entries.
-      # One `_Session` query per client. A client with a master key reads it
-      # as SDK metadata (it works inside `Parse.without_master_key`); one
-      # without reads it with `session_token`, or skips the lookup when there
-      # is none. The query never uses the response cache: its rows carry live
-      # session tokens.
+      # One `_Session` query per client. When the delete runs as a user
+      # (`session_token`), the lookup runs as that user too, so it only
+      # reads sessions that user can see. Otherwise a client with a master
+      # key reads it as SDK metadata (it works inside
+      # `Parse.without_master_key`), and one without skips the lookup. The
+      # query never uses the response cache: its rows carry live session
+      # tokens.
       #
       # A row the lookup did not return is marked absent: there is nothing
-      # to forget for it. Only a lookup that raised marks its sessions
-      # `:unknown`, which makes their delete reset the client's identity
-      # cache (rate limited).
+      # to forget for it. A row a session-scoped lookup could not see is
+      # marked `:invisible`: a denied or not-found delete of it forgets
+      # nothing and never resets, so a user deleting session ids they cannot
+      # read cannot evict other users' cached identities. A delete of it
+      # that succeeds removed a session the caller was allowed to delete, so
+      # its recorded owner (or the rate-limited reset) is used. Only
+      # a lookup that raised marks its sessions `:unknown`, which makes
+      # their delete reset the client's identity cache (rate limited).
       # @param sessions [Array<Parse::Object>]
       # @param session_token [String, nil] the delete's own session.
       # @!visibility private
@@ -337,15 +347,16 @@ module Parse
             next
           end
           ids = group.map(&:id).uniq
+          scoped = !token.nil?
           found = begin
               query = Parse::Session.query(:objectId.in => ids, limit: ids.size)
               query.keys(:session_token, :user)
               query.client = cl
               query.cache = false
-              if has_master
-                query.instance_variable_set(:@_metadata_master, true)
-              else
+              if scoped
                 query.session_token = token
+              else
+                query.instance_variable_set(:@_metadata_master, true)
               end
               query.results.to_h do |row|
                 owner = row.instance_variable_get(:@user)
@@ -362,6 +373,8 @@ module Parse
                 :unknown
               elsif (row = found[o.id]) && (row[0].is_a?(String) || row[1])
                 row
+              elsif scoped
+                :invisible
               else
                 :absent
               end
@@ -379,10 +392,14 @@ module Parse
       identity = _identity_for_destroy
       _clear_identity_for_destroy!
       return unless Parse::Session.send(:_destroy_applied?, response)
+      deleted = response.nil? || (response.respond_to?(:success?) && response.success?)
+      # A row the caller could not read counts only when the delete itself
+      # succeeded: "object not found" there may mean "not yours".
+      return if identity[0] == :invisible && !deleted
       # The batch response tells success and "object not found" apart from
       # a denial, so an absent row whose owner was never recorded may fall
       # back to the rate-limited reset here.
-      _forget_identity!(*identity, reset_fallback: true)
+      _forget_identity!(*identity, reset_fallback: true, deleted: deleted)
     end
     private :_after_batch_destroy
 
@@ -451,6 +468,10 @@ module Parse
       token = @session_token.is_a?(String) && !@session_token.empty? ? @session_token : nil
       owner_id = _identity_owner_id
       return [:unknown, owner_id] if looked_up == :unknown
+      # A session-scoped lookup could not see the row: forget what this
+      # instance carries; with nothing at all, mark it invisible so only a
+      # delete that succeeds may use the recorded owner or the reset.
+      return (token || owner_id ? [token, owner_id] : [:invisible, nil]) if looked_up == :invisible
       if looked_up == :absent
         # No row to read: the session is gone or not visible. Forget what
         # this instance carries; with nothing at all, mark it absent so the
@@ -476,8 +497,15 @@ module Parse
     # Drop the token and the owner's entries from this session's client's
     # identity plane.
     # @!visibility private
-    def _forget_identity!(token, owner_id, reset_fallback: false)
+    def _forget_identity!(token, owner_id, reset_fallback: false, deleted: false)
       cl = client
+      if token == :invisible
+        # The caller could not read the row. Only a delete that succeeded
+        # touches other identities: the recorded owner, else the
+        # rate-limited reset. A denied or not-found delete forgets nothing.
+        return unless deleted
+        token = :absent
+      end
       if token == :absent
         # The row was not readable before the delete. Use the owner recorded
         # when this session was last loaded; without one, and only when the

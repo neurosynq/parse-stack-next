@@ -264,19 +264,77 @@ module Parse
       self
     end
 
+    # A summary that never prints result values: login, signup, and
+    # `users/me` responses carry a live `sessionToken` (and sometimes
+    # `authData`), and any other row can carry private data, so inspect
+    # shows only the shape of the result.
     # @!visibility private
     def inspect
       if error?
-        "#<#{self.class} @code=#{code} @error='#{error}'>"
+        "#<#{self.class} @code=#{code} @error='#{safe_error_text}' @http_status=#{http_status.inspect}>"
       else
-        "#<#{self.class} @result='#{@result}'>"
+        "#<#{self.class} @http_status=#{http_status.inspect} @result=#{result_summary}>"
       end
     end
 
-    # @return [String] JSON encoded object, or an error string.
+    # @return [String] JSON encoded object, or an error string. Credential
+    #   fields (`sessionToken`, `password`, `authData`, MFA recovery codes
+    #   and secrets, keys) are replaced with a placeholder, and credential
+    #   text inside string values (`password=x`, `X-Parse-Master-Key: mk`)
+    #   is filtered too, so printing the response with `to_s` or `inspect`
+    #   does not leak a live session token. The error form has its text redacted and control characters
+    #   escaped. `#result`, `#to_json`, and `#as_json` return the raw values
+    #   by design; do not log those.
     def to_s
-      return "[E-#{@code}] #{@request} : #{@error} (#{@http_status})" if error?
-      @result.to_json
+      if error?
+        return "[E-#{@code}] #{safe_request_text} : #{safe_error_text} (#{@http_status})"
+      end
+      result = redacted_result
+      return Parse::Middleware::BodyBuilder.redact_patterns(result) if result.is_a?(String)
+      # Text patterns run on string values before encoding, never on the
+      # encoded JSON, so escaped quotes cannot defeat them or corrupt it.
+      Parse::Middleware::BodyBuilder.redact_string_values!(result).to_json
+    end
+
+    private
+
+    # Maximum error text length kept in `to_s` / `inspect`.
+    SAFE_ERROR_TEXT_LENGTH = 1_000
+
+    # The server's error text with credentials redacted, truncated, and
+    # control characters escaped, matching what the client logs.
+    def safe_error_text
+      text = Parse::Middleware::BodyBuilder.redact(@error.to_s)[0, SAFE_ERROR_TEXT_LENGTH]
+      Parse::TerminalSafe.sanitize_line(text)
+    rescue StandardError
+      "[unprintable error]"
+    end
+
+    # The request line (method and path, including any query string) with
+    # credentials redacted and control characters escaped.
+    def safe_request_text
+      Parse::TerminalSafe.sanitize_line(Parse::Middleware::BodyBuilder.redact(@request.to_s))
+    rescue StandardError
+      "[unprintable request]"
+    end
+
+    # Class and size of the result, without its values.
+    def result_summary
+      case @result
+      when Array then "Array(#{@result.size})"
+      when Hash then "Hash(#{@result.size} keys)"
+      when nil then "nil"
+      else @result.class.name
+      end
+    end
+
+    # A deep copy of the result with credential fields replaced.
+    def redacted_result
+      return @result unless @result.is_a?(Hash) || @result.is_a?(Array)
+      copy = JSON.parse(@result.to_json)
+      Parse::Middleware::BodyBuilder.scrub_sensitive!(copy)
+    rescue StandardError
+      "[unprintable result]"
     end
   end
 end

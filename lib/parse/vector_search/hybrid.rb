@@ -749,8 +749,11 @@ module Parse
         end
 
         def run_pipeline!(collection_name, pipeline, authorizing_client: nil)
+          agg_opts = {}
+          budget = Parse::PipelineSecurity.regex_time_budget(pipeline)
+          agg_opts[:max_time_ms] = budget if budget
           Parse::MongoDB.collection(collection_name, authorizing_client: authorizing_client)
-                        .aggregate(pipeline).to_a
+                        .aggregate(pipeline, agg_opts).to_a
         end
 
         def assert_clp_find!(collection_name, resolution)

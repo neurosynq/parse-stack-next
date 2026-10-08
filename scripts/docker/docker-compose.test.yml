@@ -115,6 +115,12 @@ services:
       PARSE_SERVER_APPLICATION_ID: ${PARSE_APP_ID:-psnextItAppId}
       PARSE_SERVER_MASTER_KEY:     ${PARSE_MASTER_KEY:-psnextItMasterKey}
       PARSE_SERVER_REST_API_KEY:   ${PARSE_API_KEY:-psnext-it-rest-key}
+      # Webhook key Parse Server sends as X-Parse-Webhook-Key on every
+      # trigger and function call. The webhook integration tests set
+      # Parse::Webhooks.key to the same value (PARSE_TEST_WEBHOOK_KEY), so
+      # requests are authenticated and `payload.master?` reflects a real
+      # master-key request.
+      PARSE_SERVER_WEBHOOK_KEY:    ${PARSE_IT_WEBHOOK_KEY:-psnext-it-webhook-key}
       PARSE_SERVER_DATABASE_URI:   mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:-password}@mongo:27017/parse_stack_next_it?authSource=admin&directConnection=true
       # Accept client-supplied objectId on create. Required by the
       # `parse_reference precompute: true` DSL. The SDK only forwards

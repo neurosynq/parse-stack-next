@@ -230,6 +230,38 @@ caching path the two never meet. Three points are worth knowing anyway.
 
 ## Auth scoping of cached responses
 
+### Session reads are not cached by default
+
+A read made with a session token is never read from or stored in the response
+cache unless the application opts in:
+
+```ruby
+Parse::Middleware::Caching.cache_session_requests = true   # every client
+Parse.setup(cache_session_requests: true, ...)            # one client
+```
+
+Only `true` enables it (a `"true"` String from an environment variable does
+not). A client's own `cache_session_requests:` option overrides the class
+default in either direction.
+
+A cached answer is served without contacting Parse Server, so it cannot notice
+that the session was revoked (logout, `Parse::Session#destroy`, `logout_all!`,
+a password change) or that the user lost a role or row access through a change
+this process did not make. With the default, every REST session read reaches
+Parse Server, which checks the token and the current ACLs and CLPs each time.
+Mongo-direct reads, including agent tools that route there, do not go through
+this cache; they resolve the session through the identity plane, whose
+revocation behavior is described in
+[Identity and role caching](#identity-and-role-caching). This
+applies however the session reached the request: an explicit `session_token:`,
+`Parse.with_session`, or a client bound to a session. Master-key and
+anonymous reads cache as before, and writes made with a session still
+invalidate cached entries. Turning the option on trades that guarantee for
+speed: a revoked or narrowed session keeps reading its cached responses until
+they expire, so keep `expires:` short if you enable it.
+
+### The auth discriminator
+
 The cache key carries an auth discriminator, and this is a correctness property
 rather than an optimization.
 
@@ -251,9 +283,9 @@ URL digest is placed before the discriminator, so every auth variant of one
 resource shares a prefix, which is exactly what lets a write invalidate the
 resource for all callers with a single pattern delete.
 
-One consequence worth planning for: a heavily multi-user endpoint produces one
-cache entry per session per URL. Cardinality scales with active sessions, not
-with distinct resources.
+One consequence worth planning for, once session caching is enabled: a heavily
+multi-user endpoint produces one cache entry per session per URL. Cardinality
+scales with active sessions, not with distinct resources.
 
 ## Identity and role caching
 
@@ -703,8 +735,10 @@ Work down this list.
    so deliberately.
 5. Is this a `fetch!` or `reload!`? Those default to write-only mode, which by
    design never reads from the cache. Use `fetch_cache!` to accept a cached body.
-6. Is the caller a different session? Entries are not shared across auth
-   identities, so the first request for each session is always a miss.
+6. Is the read made with a session token? Session reads bypass the cache
+   unless `Parse::Middleware::Caching.cache_session_requests = true`. With it
+   on, entries are not shared across auth identities, so the first request for
+   each session is always a miss.
 7. Is the store process-local? A Moneta memory store behind several workers hits
    only when the same worker handles the repeat.
 8. Has something set `Parse::Middleware::Caching.enabled = false`? That is the
@@ -725,6 +759,7 @@ All events are `ActiveSupport::Notifications`.
 | `parse.cache.store` | the same, plus `duration_ms` |
 | `parse.cache.delete` | the same, emitted on an invalidating write |
 | `parse.cache.error` | the same, plus `error` (the exception class name only) |
+| `parse.cache.bypass` | the same, plus `reason: :session` for a session read kept out of the cache |
 | `parse.cache.evict` | `pattern_digest`, `deleted`, `duration_ms` |
 | `parse.synchronize_create.acquired` | `key_digest`, `wait_ms` |
 | `parse.synchronize_create.contended` | `key_digest`, `elapsed_ms` |

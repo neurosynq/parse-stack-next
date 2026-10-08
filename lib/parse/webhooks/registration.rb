@@ -84,12 +84,34 @@ module Parse
         end
       end
 
+      # Check that a webhook endpoint is an http(s) URL (scheme compared
+      # case-insensitively, surrounding whitespace ignored) and return it
+      # stripped. Plain http:// to a host that is not this machine is
+      # allowed but warns: Parse Server sends the webhook key on every call,
+      # so it would travel in cleartext.
+      # @param endpoint [String]
+      # @return [String]
+      # @raise [ArgumentError]
+      # @!visibility private
+      def validate_hooks_endpoint!(endpoint)
+        url = endpoint.to_s.strip
+        scheme = Parse::Client.url_scheme(url)
+        host = Parse::Client.url_host(url)
+        unless %w[http https].include?(scheme) && host.present? && url.match?(%r{\Ahttps?://}i)
+          raise ArgumentError, "The HOOKS_URL must be http/s: '#{endpoint}'"
+        end
+        if scheme == "http" && !Parse::Client.loopback_host?(host)
+          warn "[Parse::Webhooks] SECURITY WARNING: webhook endpoint #{url} uses http://. " \
+               "Parse Server sends the webhook key with every call, so it travels in " \
+               "cleartext. Use an https:// endpoint."
+        end
+        url
+      end
+
       # Registers all webhook functions registered with Parse::Stack with Parse server.
       # @param endpoint [String] a https url that points to the webhook server.
       def register_functions!(endpoint)
-        unless endpoint.present? && (endpoint.starts_with?("http://") || endpoint.starts_with?("https://"))
-          raise ArgumentError, "The HOOKS_URL must be http/s: '#{endpoint}''"
-        end
+        endpoint = validate_hooks_endpoint!(endpoint)
         assert_webhook_url_safe!(endpoint)
         endpoint += "/" unless endpoint.ends_with?("/")
         functionsMap = {}
@@ -114,9 +136,7 @@ module Parse
       # @param endpoint [String] a https url that points to the webhook server.
       # @param include_wildcard [Boolean] Allow wildcard registrations
       def register_triggers!(endpoint, include_wildcard: false)
-        unless endpoint.present? && (endpoint.starts_with?("http://") || endpoint.starts_with?("https://"))
-          raise ArgumentError, "The HOOKS_URL must be http/s: '#{endpoint}''"
-        end
+        endpoint = validate_hooks_endpoint!(endpoint)
         assert_webhook_url_safe!(endpoint)
         endpoint += "/" unless endpoint.ends_with?("/")
         all_triggers = Parse::API::Hooks::TRIGGER_NAMES_LOCAL
