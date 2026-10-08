@@ -1474,7 +1474,7 @@ module Parse
         # require a fresh HMAC over the body. Done before JSON parsing so
         # a malformed payload can't bypass dedup, and before any handler
         # runs so side effects aren't repeated.
-        replay_error = ReplayProtection.verify!(
+        replay_error, signature_verified = ReplayProtection.check(
           request.env,
           body_str,
           request.env["HTTP_X_PARSE_REQUEST_ID"]
@@ -1483,8 +1483,10 @@ module Parse
           response.write error(replay_error)
           return response.finish
         end
-        secret = ReplayProtection.signing_secret
-        authenticated ||= !(secret.nil? || secret.to_s.empty?)
+        # Uses the result of the check that just ran, not a second read of
+        # the signing secret, so a secret changed mid-request cannot mark an
+        # unverified request as authenticated.
+        authenticated ||= signature_verified
 
         # Parse Server registers each trigger at
         # `<endpoint>/<triggerName>/<className>`. For beforeFind/afterFind the

@@ -217,9 +217,13 @@ Requests are accepted only when `X-Parse-Webhook-Key` matches
 Rack app refuses every request unless you opt in with
 `Parse::Webhooks.allow_unauthenticated = true` (or
 `PARSE_WEBHOOK_ALLOW_UNAUTHENTICATED=true`), which is meant for local
-development and tests.
+development and tests. A signing secret does not replace the key: with no key
+configured, a signed request is still refused unless `allow_unauthenticated`
+is on. When both are configured, the key must match and the signature must
+verify.
 
-`payload.master?` is true only when the body says the master key was used AND
+`payload.master?` is true only when the body says the master key was used (a
+JSON `true`; Parse Server never sends a string) AND
 the request was authenticated: the webhook key matched, or a configured
 signature (`PARSE_WEBHOOK_SIGNING_SECRET`) verified. On unauthenticated ingress
 any caller can put `"master": true` in the body, so `master?` returns false

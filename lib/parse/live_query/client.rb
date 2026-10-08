@@ -512,21 +512,13 @@ module Parse
         nil
       end
 
-      # Loopback hostnames exempt from the `ws://` refusal in
-      # {#derive_websocket_url}. These addresses can't reach the
-      # Internet, so the cleartext-credentials threat model doesn't
-      # apply — but we still emit a warning so the operator knows
-      # they're on `ws://`.
-      LOOPBACK_HOSTS = %w[localhost 127.0.0.1 ::1 [::1] 0.0.0.0].freeze
-
       # Normalize and validate an explicit LiveQuery URL, returning the URL
       # to connect to.
       #
       # - The scheme is compared case-insensitively and the URL is stripped.
       # - `https://` is mapped to `wss://` and `http://` to `ws://`, with a
-      #   one-time deprecation warning. (5.8.2 briefly refused these; the
-      #   connector used to open them as a plaintext socket, so the `https`
-      #   mapping is strictly safer than before.)
+      #   one-time deprecation warning. The connector used to open them as a
+      #   plaintext socket, so the `https` mapping is strictly safer.
       # - Plaintext `ws://` (including a mapped `http://`) is refused on a
       #   host that is not this machine ({Parse::Client.loopback_host?})
       #   unless `allow_insecure` is set, in which case it warns.

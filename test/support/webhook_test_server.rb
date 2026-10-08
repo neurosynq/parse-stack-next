@@ -17,6 +17,12 @@ module Parse
       # must add `extra_hosts: ["host.docker.internal:host-gateway"]`.
       DOCKER_HOST = "host.docker.internal".freeze
 
+      # Webhook key the test Parse Server sends (PARSE_SERVER_WEBHOOK_KEY in
+      # scripts/docker/docker-compose.test.yml). Webhook integration tests set
+      # Parse::Webhooks.key to this so requests are authenticated and
+      # `payload.master?` reflects a real master-key request.
+      KEY = ENV.fetch("PARSE_TEST_WEBHOOK_KEY", "psnext-it-webhook-key").freeze
+
       attr_reader :port, :url, :app
 
       def initialize(app: Parse::Webhooks, port: nil, bind: "0.0.0.0")

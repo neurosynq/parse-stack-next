@@ -116,6 +116,54 @@ class WebhookMasterTrustTest < Minitest::Test
     assert_equal true, seen, "a verified signature authenticates the request"
   end
 
+  def signed_headers(secret, body, signature: nil)
+    ts = Time.now.to_i.to_s
+    {
+      Parse::Webhooks::ReplayProtection::HEADER_TIMESTAMP => ts,
+      Parse::Webhooks::ReplayProtection::HEADER_SIGNATURE => signature || OpenSSL::HMAC.hexdigest("SHA256", secret, "#{ts}.#{body}"),
+    }
+  end
+
+  def test_key_match_with_bad_signature_is_rejected
+    Parse::Webhooks.key = "secret"
+    Parse::Webhooks::ReplayProtection.signing_secret = "sign-secret"
+    ran = false
+    Parse::Webhooks.route(:before_save, "TrustProbe") { ran = true; parse_object }
+    body = before_save_body(master: true)
+    reply = call(build_env(body, key_header: "secret", headers: signed_headers("sign-secret", body, signature: "0" * 64)))
+    refute ran, "a bad signature must reject the request even when the key matches"
+    assert_match(/signature/i, reply["error"].to_s)
+  end
+
+  def test_key_and_signature_both_valid_keep_master
+    Parse::Webhooks.key = "secret"
+    Parse::Webhooks::ReplayProtection.signing_secret = "sign-secret"
+    seen = nil
+    Parse::Webhooks.route(:before_save, "TrustProbe") { seen = [master?, authenticated?]; parse_object }
+    body = before_save_body(master: true)
+    call(build_env(body, key_header: "secret", headers: signed_headers("sign-secret", body)))
+    assert_equal [true, true], seen
+  end
+
+  def test_signed_request_without_key_is_refused_when_unauthenticated_is_off
+    Parse::Webhooks::ReplayProtection.signing_secret = "sign-secret"
+    ran = false
+    Parse::Webhooks.route(:before_save, "TrustProbe") { ran = true; parse_object }
+    body = before_save_body(master: true)
+    reply = call(build_env(body, headers: signed_headers("sign-secret", body)))
+    refute ran, "a signing secret alone does not admit requests without a key"
+    refute_nil reply["error"]
+  end
+
+  def test_replay_check_reports_signature_verification
+    Parse::Webhooks::ReplayProtection.signing_secret = "sign-secret"
+    body = before_save_body(master: true)
+    env = build_env(body, headers: signed_headers("sign-secret", body))
+    assert_equal [nil, true], Parse::Webhooks::ReplayProtection.check(env, body, nil)
+    Parse::Webhooks::ReplayProtection.signing_secret = nil
+    assert_equal [nil, false], Parse::Webhooks::ReplayProtection.check(build_env(body), body, nil)
+  end
+
   def reject_body(master:, request_id:)
     before_save_body(master: master, request_id: request_id,
                      object: { "className" => "RejectProbe", "title" => "t" })
@@ -171,6 +219,15 @@ class WebhookMasterTrustTest < Minitest::Test
     refute payload.master?
     refute payload.claimed_master?
     assert Parse::Webhooks::Payload.new(JSON.generate("triggerName" => "beforeSave", "master" => true)).master?
+  end
+
+  def test_only_json_true_is_master
+    %w[true 1 yes].each do |raw|
+      payload = Parse::Webhooks::Payload.new(JSON.generate("triggerName" => "beforeSave", "master" => raw))
+      refute payload.claimed_master?, "string #{raw.inspect} must not count as master"
+      refute payload.master?
+    end
+    refute Parse::Webhooks::Payload.new(JSON.generate("triggerName" => "beforeSave", "master" => 1)).master?
   end
 
   def test_in_process_payload_is_authenticated_by_default

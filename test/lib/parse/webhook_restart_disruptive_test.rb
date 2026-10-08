@@ -52,12 +52,12 @@ class WebhookRestartDisruptiveTest < Minitest::Test
     #   * allow_private_webhook_urls — the registration SSRF guard refuses
     #     private/loopback hosts, but the test host is only reachable from
     #     the container via host.docker.internal (a private address).
-    #   * allow_unauthenticated — the in-process app fails closed without a
-    #     configured webhook key, and the test server runs without one.
+    #   * the webhook key: the in-process app fails closed without one, so
+    #     use the key the test Parse Server sends.
     @saved_allow_private = Parse::Webhooks.allow_private_webhook_urls
-    @saved_allow_unauth = Parse::Webhooks.allow_unauthenticated
+    @saved_webhook_key = Parse::Webhooks.instance_variable_get(:@key)
     Parse::Webhooks.allow_private_webhook_urls = true
-    Parse::Webhooks.allow_unauthenticated = true
+    Parse::Webhooks.key = Parse::Test::WebhookTestServer::KEY
 
     # Register a synchronous webhook function whose handler echoes a param
     # and a fixed marker, so a successful round-trip is unambiguous.
@@ -80,7 +80,7 @@ class WebhookRestartDisruptiveTest < Minitest::Test
     Parse::Webhooks.routes.function.delete(FUNCTION_NAME) if Parse::Webhooks.routes.respond_to?(:function)
 
     Parse::Webhooks.allow_private_webhook_urls = @saved_allow_private
-    Parse::Webhooks.allow_unauthenticated = @saved_allow_unauth
+    Parse::Webhooks.instance_variable_set(:@key, @saved_webhook_key)
 
     # Bulletproof restore for the next test / the rest of the suite.
     Parse::Test::DockerHelper.ensure_server_running!
