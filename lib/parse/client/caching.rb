@@ -480,8 +480,9 @@ module Parse
       # Emit an ActiveSupport::Notifications event under the `parse.cache.*`
       # namespace.
       #
-      # **Payload shape (stable):** `{ event:, namespace:, method:, url_path:,
-      # [reason:], [duration_ms:], [error:] }`.
+      # **Payload shape (stable):** `{ event:, namespace:, cache_tenant:,
+      # method:, url_path:, [reason:], [duration_ms:], [error:] }`.
+      # `cache_tenant` is the active `Parse.with_cache_tenant` value, or nil.
       #
       # **Security invariants:**
       # - The cache key is NEVER emitted. The key contains a hashed
@@ -504,13 +505,6 @@ module Parse
       # subscribers cheap — counter increments, in-memory accumulators, or
       # non-blocking sinks like StatsD-over-UDP.
       # @!visibility private
-      # Whether this middleware caches session reads: its own
-      # `cache_session_requests:` option when given, else the class default.
-      # @!visibility private
-      def cache_session_requests?
-        @cache_session_requests.nil? ? self.class.cache_session_requests : @cache_session_requests
-      end
-
       def instrument_cache(event, **extra)
         return unless defined?(ActiveSupport::Notifications)
         payload = {
@@ -519,6 +513,13 @@ module Parse
           cache_tenant: @cache_tenant,
         }.merge!(extra)
         ActiveSupport::Notifications.instrument("parse.cache.#{event}", payload)
+      end
+
+      # Whether this middleware caches session reads: its own
+      # `cache_session_requests:` option when given, else the class default.
+      # @!visibility private
+      def cache_session_requests?
+        @cache_session_requests.nil? ? self.class.cache_session_requests : @cache_session_requests
       end
 
       # Delete the canonical cache_key plus its legacy un-namespaced and

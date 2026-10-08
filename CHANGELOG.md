@@ -24,19 +24,30 @@ Behavior Notes.
 - **FIXED**: The TLS guard also refuses `ssl: { verify_mode:
   OpenSSL::SSL::VERIFY_NONE }`, `ssl: { verify_hostname: false }`, and a
   `Faraday::SSLOptions` with verification off on an https server URL. Before,
-  only a Hash with `verify: false` was caught.
+  only a Hash with `verify: false` was caught. A `faraday:` option passed as
+  `Faraday::ConnectionOptions` gets the same TLS and proxy guards as a Hash,
+  and any other non-Hash value raises.
 - **FIXED**: `Parse::LiveQuery::Client.new` validates an explicit or
-  configured URL as it already did a derived one. Plaintext `ws://` to a
-  routable host is refused without `allow_insecure`. **CHANGED**: an
-  `http://` or `https://` LiveQuery URL is used as `ws://` or `wss://` with a
-  one-time deprecation warning (it used to be opened without TLS), both at
-  configure time and in the client.
+  configured URL, as `Parse.setup` does. Plaintext `ws://` to a routable host
+  is refused without `allow_insecure`, and a URL whose scheme is not `ws`,
+  `wss`, `http`, or `https` raises `ArgumentError`. **CHANGED**: an
+  `https://` LiveQuery URL is used as `wss://` (it used to be opened without
+  TLS), and an `http://` URL as `ws://` under the same loopback rule, each
+  with a one-time deprecation warning.
 - **FIXED**: `Parse::File` URLs hydrated from Parse JSON no longer skip the
-  `trusted_url_hosts` check when the scheme is uppercase (`HTTPS://`) or the
-  URL is malformed (`https:host`, `https:\\host`, `https:///host`, leading
-  whitespace), all of which browsers resolve to the remote host. Under
+  `trusted_url_hosts` check when the scheme is uppercase (`HTTPS://`), the
+  URL has leading whitespace, or the URL is malformed (`https:host`,
+  `https:\\host`, `https:///host`), all of which browsers resolve to the
+  remote host. Under
   `untrusted_url_policy = :raise` or `:strip`, a malformed http(s) URL is
-  treated as untrusted. `force_ssl` upgrades `HTTP://` URLs too.
+  treated as untrusted. `force_ssl` upgrades `HTTP://` URLs too. Hydration
+  reads a URL the way a browser does (tabs and newlines removed, leading
+  control characters stripped), checks scheme-relative values (`//host`,
+  `\\host`) against `trusted_url_hosts`, and treats `javascript:`, `data:`,
+  and other non-http(s) URLs as untrusted.
+- **NEW**: `Parse::File.trust_legacy_tfss_on_any_host = false` requires
+  `tfss-` file URLs to come from `trusted_url_hosts`. The default (`true`)
+  keeps accepting them from any host.
 - **FIXED**: `Parse::Response#inspect` prints only the status and the
   result's shape, and `#to_s` replaces credential fields with `[FILTERED]`:
   session tokens, passwords, `authData`, access and refresh tokens, API,
@@ -44,8 +55,16 @@ Behavior Notes.
   (`recovery`, `recoveryCodes`, `secret`, `authDataResponse`), and
   storage-form columns (`_session_token`, `_hashed_password`,
   `_email_verify_token`, `_perishable_token`, `_password_history`,
-  `_auth_data_*`). The same list drives log redaction. Error text in `to_s`
-  and `inspect` is redacted and escaped. `#result` is unchanged.
+  `_auth_data_*`). The same list drives log redaction, which also covers
+  header-shaped text (`X-Parse-Master-Key: ...`, `X-Parse-REST-API-Key`,
+  `X-Parse-Session-Token`, `X-Parse-Javascript-Key`, `X-Parse-Client-Key`,
+  `X-Parse-Webhook-Key`, `Authorization: Bearer ...`). `to_s` also filters
+  credential text inside string values (`password=...`), and its error form
+  redacts the request line and error text. Text patterns run on string values
+  before encoding, and a quoted value is redacted whole (spaces included,
+  and after an auth scheme: `password="a b"`, `Authorization: Bearer "x"`),
+  so the output stays valid JSON; log redaction of JSON bodies works the same
+  way. `#result` is unchanged.
 - **IMPROVED**: Webhook endpoint registration accepts the scheme in any case
   and warns when an `http://` endpoint on a routable host would carry the
   webhook key in cleartext.
@@ -65,7 +84,14 @@ Behavior Notes.
   `session_token:` / `use_master_key:` options, its `X-Parse-Session-Token`
   header, and its master-key suppression header (which keeps the master key
   off even with `use_master_key: true`). The same rules apply to direct
-  `Parse::Client#batch_request` calls.
+  `Parse::Client#batch_request` calls. A client chosen explicitly
+  (`BatchOperation#client=`, or the client `batch_request` is called on) is
+  used for every request, as `Parse::Client#request` uses it for a single
+  request; an object's class client applies only to implicit batches
+  (`Array#save`, `Array#destroy`, `Parse.batch`). A `use_master_key:` that is
+  not exactly `true` or `false` is treated as unset, a `session_token:` that
+  resolves to no token fails closed, and narrowing `batch_request` options
+  (`use_master_key: false`) override a request's own `use_master_key: true`.
 - **FIXED**: `Parse::Object.transaction` runs with its objects' class client.
   A transaction that mixes credentials raises
   `Parse::BatchOperation::MixedAuthorityError` before anything is sent,
@@ -73,7 +99,16 @@ Behavior Notes.
   be split. Clients are compared by their credentials (server, application,
   keys, and bound session), not by object identity, so classes whose clients
   were configured identically, such as before and after a second
-  `Parse.setup`, still share one transaction.
+  `Parse.setup`, still share one transaction. Requests that name their own
+  session token are compared without the master key or bound session, so
+  `transaction(session:)` across clients that differ only in those is sent as
+  one call.
+- **FIXED**: `Array#destroy(session:)` on sessions looks up their tokens and
+  owners as that user, so deleting session ids the user cannot see no longer
+  evicts other users' cached identities or triggers a reset. A session the
+  caller could not read is still treated as deleted when its delete succeeds:
+  its recorded owner is invalidated, or the rate-limited reset applies. A
+  denied or not-found delete of such a row forgets nothing.
 - **NEW**: `Array#save(session:)`, `Array#destroy(session:)`, and
   `Parse::Object.transaction(session:)` send every write in the call as the
   given user.
@@ -94,8 +129,8 @@ Behavior Notes.
   methods on `Parse::Client`, return a redacted summary, so JSON log
   formatters and error trackers that serialize an agent or client no longer
   emit its session token, master key, or REST key.
-- **FIXED**: A sub-agent that holds its parent's session token reuses the
-  parent's resolved scope instead of resolving it again. A failed resolution
+- **FIXED**: A sub-agent that holds its parent's session token on the
+  parent's client reuses the parent's resolved scope instead of resolving it again. A failed resolution
   of a different child token is reported as `Parse::Agent::UnresolvedIdentity`,
   not as an attempt to widen the parent's scope.
 - **FIXED**: Lazy session resolution, `impersonate`, and `refresh_scope!` are
@@ -106,6 +141,19 @@ Behavior Notes.
   gets its own error message. `acl_scope` checks and reads the scope under
   the same lock, and `acl_permission_strings` never returns nil for a
   session-token agent.
+- **FIXED**: A session agent whose token cannot be resolved records the
+  failure at construction too, so the first use inside the 5-second window is
+  refused without a second lookup, and a token Parse Server rejected is not
+  retried. The lookup runs outside the agent's scope lock, so other threads
+  using the agent are not blocked for a request timeout, and the result binds
+  only if the token is unchanged. A sub-agent reuses its parent's scope only
+  from a token-and-scope snapshot taken under the parent's lock.
+- **FIXED**: `Parse::Client` and `Parse::Agent` refuse `Marshal.dump`
+  (`TypeError`), so a client's master key or an agent's session token cannot
+  land in a marshaled cache or job payload.
+- **CHANGED**: `Parse::Agent#stop_impersonating!` is a no-op on an agent that
+  is not impersonating, instead of dropping a constructor-supplied session
+  token and leaving master-key posture.
 
 #### Response cache
 
@@ -130,6 +178,8 @@ Behavior Notes.
   (`Model.query(name: { "$regex" => ... })`, `:field.eq`, `:field.not`,
   `$elemMatch`, and `:or` branches) goes through the same ReDoS check as
   `:field.like`. Before, only the regex constraints themselves were checked.
+  Ruby `Regexp` and BSON regex values under `$not`, `$in`, `$nin`, and `$all`
+  are checked too.
 - **FIXED**: Mongo-direct filters and pipelines (`results_direct`,
   `count_direct`, `Query#aggregate`, `Parse::MongoDB.aggregate` and `find`,
   Atlas Search and vector filters, LiveQuery `where`, and the agent
@@ -144,14 +194,32 @@ Behavior Notes.
   `(a+){2,}`, `(a+){20}`, `^(a?){100}a{100}$`), inline comments
   `(?#...)`, extended mode, and patterns it cannot read. Before, several of
   these shapes passed. Repeats of a single atom (`^.{1,255}$`, `\d{1,100}`)
-  and simple lookarounds (`^(?!test)`) are accepted. Escaped literal patterns
+  and simple lookarounds (`^(?!test)`) are accepted; the old checker refused
+  them for `:field.like`. Escaped literal patterns
   built by `contains`, `starts_with`, and `ends_with` get a longer length cap,
-  so long values keep compiling.
+  so long values keep compiling. It also refuses subroutine calls (`\g<1>`,
+  `\g'1'`), more than three unbounded or wide quantifiers in a row with no
+  separating literal they cannot match (`\d+\d+\d+\d+`, `.*a.*a.*a.*a`),
+  and whitespace inside a repeat count (`{ 2,}`), and reads `[:` that is not a
+  complete POSIX class as a literal, as PCRE2 does. A repeated group is
+  allowed when each repeat cannot split its input two ways: fixed
+  alternatives whose first characters differ even ignoring case
+  (`^(foo|bar)+$`, but not `(?i)^(a|Aa)+$`) or a literal
+  separator next to one run that cannot match it
+  (`^[a-z0-9]+(?:-[a-z0-9]+)*$`, `(\.[\w-]+)+`, `([\w-]+\.)+`).
 - **FIXED**: `$regexMatch`, `$regexFind`, and `$regexFindAll` in
   caller-supplied pipelines require a literal `regex` (a String that is not a
   field path or variable, a Regexp, or a BSON regex). An expression or
   `"$field"` operand raises `Parse::PipelineSecurity::Error`
   (`reason: :regex_not_literal`).
+- **IMPROVED**: Mongo-direct reads (`Parse::MongoDB.aggregate` and `find`,
+  `results_direct`, `count_direct`, Atlas Search, and vector and hybrid
+  search) whose filter or pipeline carries a regex that is not escaped literal
+  text get a server-side `max_time_ms` of
+  `Parse::PipelineSecurity.default_regex_max_time_ms` (5000 ms) when the
+  caller passed none. Set it to nil to turn this off; an explicit
+  `max_time_ms:` always wins. For REST queries, set Parse Server's
+  `databaseOptions.maxTimeMS`.
 - **FIXED**: `Parse::MongoDB.find` raises `Parse::ACLScope::ACLRequired` inside
   `Parse.without_master_key` instead of reading raw documents unscoped.
   `Parse::MongoDB.indexes` (metadata only) stays available.
@@ -165,58 +233,84 @@ Behavior Notes.
   field guards, ACL owner resolution, or handler `payload.master?` checks, and
   no longer triggers the Ruby-initiated callback dedup, so a forged `_RB_`
   request id cannot make a write skip model callbacks (including a
-  `before_save` that rejects it). Only `true` or `"true"` count as master, and
-  `payload.claimed_master?` exposes the raw claim for diagnostics only.
+  `before_save` that rejects it). Only a JSON `true` counts as master.
+  `payload.authenticated?` reports whether the request was authenticated, and
+  `payload.claimed_master?` exposes the raw claim; both are for diagnostics
+  only. Signature verification and the authenticated flag come from one read
+  of the signing secret.
 
 #### Behavior Notes
 
-- A LiveQuery `https://` URL is used as `wss://` (and a loopback `http://` as
-  `ws://`) with a deprecation warning; configure the `ws(s)://` URL directly.
-  A padded MCP API key is enforced without its surrounding whitespace.
-- `Parse::Response#to_s` replaces credential-bearing values with
+- **Transport.** A LiveQuery `https://` URL is used as `wss://` (and a
+  loopback `http://` as `ws://`) with a deprecation warning; configure the
+  `ws(s)://` URL directly. Other LiveQuery schemes raise. `HTTP://` with
+  `require_https`, and an https server URL with TLS verification disabled
+  (`verify: false`, `verify_mode`, `verify_hostname`, or `SSLOptions`), raise.
+  Loopback hosts for these checks are `localhost`, `127.0.0.0/8`, `::1`, and
+  `0.0.0.0`, parsed as addresses (`127.999.1.1` and `localhost.` are not
+  loopback). A padded MCP API key is enforced without its surrounding
+  whitespace. Hydrated `Parse::File` URLs with an uppercase scheme or leading
+  whitespace are checked against `trusted_url_hosts`; malformed http(s) URLs
+  are refused or stripped under `:raise` / `:strip` and warn under `:warn`,
+  as are non-http(s) schemes (`javascript:`, `data:`, `file:`) and
+  scheme-relative values pointing at an untrusted host.
+- **Printing.** `Parse::Response#to_s` replaces credential-bearing values with
   `"[FILTERED]"` and `#inspect` no longer shows values; read `#result` (or
-  `#result.to_json`) for raw data.
-- `HTTP://` with `require_https`, and an https server URL with TLS
-  verification disabled through `verify_mode` or `verify_hostname`, now
-  raise. Hydrated `Parse::File` URLs that are malformed http(s) are refused or
-  stripped under `:raise` / `:strip`, and warn under `:warn`.
-- `Parse::Agent#inspect` and `#to_s` print a redacted one-line summary.
-- A session-token agent that cannot resolve its token refuses tool calls that
-  need its permissions rather than running them without the SDK-side check. A
-  sub-agent of such a parent can inherit the parent's token, but building one
-  with a different identity raises until the parent's token resolves.
-- Queries that set `cache: true` (or run under `Parse.default_query_cache =
-  true`) with a session token no longer get cache hits. Set
-  `Parse::Middleware::Caching.cache_session_requests = true` to restore the
-  old behavior, and keep `expires:` short if you do.
-- A raw `$regex`, or a `Regexp` in a mongo-direct filter, that the ReDoS check
-  rejects now raises: `ArgumentError` on REST queries,
+  `#result.to_json`) for raw data. `to_s` may also filter text in string
+  values that looks like a credential (`password=...`). `Parse::Agent` and `Parse::Client`
+  `inspect`, `to_s`, `as_json`, `to_json`, and `to_yaml` print redacted
+  summaries.
+- **Agents.** A session-token agent that cannot resolve its token refuses
+  tool calls that need its permissions. `Agent#acl_scope` can now raise
+  `Parse::Agent::UnresolvedIdentity`, and `acl_scope?` is true for any
+  session-token agent; custom handlers that test `agent.acl_scope` for
+  truthiness should use `agent.acl_scope?`. A sub-agent of an unresolved
+  parent can inherit the parent's token, but one with a different identity
+  raises until the parent's token resolves. A session agent built while Parse
+  Server is unreachable refuses calls for 5 seconds before retrying.
+  Marshaling a `Parse::Client` or `Parse::Agent` raises `TypeError`; store the
+  configuration and build a new client instead.
+- **Response cache.** Queries that set `cache: true` (or run under
+  `Parse.default_query_cache = true`) with a session token no longer get cache
+  hits. Set `cache_session_requests` to `true` (only a literal `true`
+  enables it) to restore the old behavior, and keep `expires:` short if you
+  do.
+- **Regex.** A raw `$regex`, or a `Regexp` in a mongo-direct filter, that the
+  ReDoS check rejects now raises: `ArgumentError` on REST queries,
   `Parse::PipelineSecurity::Error` (or `Parse::MongoDB::DeniedOperator`) on
   direct paths. Escaped literal patterns, including those built by
-  `starts_with`, `ends_with`, and `contains`, are always accepted. Rejected
-  shapes are groups repeated more than once that contain a variable-count
-  quantifier (including `?`), alternation, or backreference, plus `(?#...)` comments and extended mode.
-- Caller-supplied regex `$options` (REST, mongo-direct, and the agent
-  translator) accept `i`, `m`, `s`, and `u`. The extended flag `x`, and
-  Regexp values built with `Regexp::EXTENDED`, raise because extended mode
-  lets comments hide a quantifier. The agent translator now accepts `s`.
-- `Parse::MongoDB.collection` returns raw driver access with no scope and is
-  not refused inside `Parse.without_master_key`.
-- Code that calls `Parse::MongoDB.find` inside `Parse.without_master_key`
-  should wrap it in `Parse.with_master_key` or use a scoped read.
-- A batch or transaction of objects whose class is bound to a session client
-  now runs as that user, as a single save does, so writes the user may not
-  make are refused instead of succeeding as master. A transaction mixing
-  credentials raises `MixedAuthorityError`, and a non-transactional batch with
-  mixed credentials is sent as several calls.
-- Under `Parse::Webhooks.allow_unauthenticated` with no signing secret,
-  `payload.master?` is false even for a master-key request Parse Server
-  forwards, so master-only field guards and handler `master?` checks refuse
-  it, and saves made by the SDK itself are no longer recognized as
-  Ruby-initiated, so their model callbacks run in process and again through
-  the webhook. Configure `PARSE_SERVER_WEBHOOK_KEY` (or a signing secret) to
-  restore master trust and dedup; use `payload.claimed_master?` only for
-  diagnostics.
+  `starts_with`, `ends_with`, and `contains`, pass the shape check and get a
+  length cap about twice the normal one. Caller-supplied `$options` accept
+  `i`, `m`, `s`, and `u`; an unknown flag, a non-String value, the extended
+  flag `x`, or a Regexp built with `Regexp::EXTENDED` raises. The agent
+  translator now accepts `s` and `u` and no longer accepts `x`. A pattern with
+  more than three unbounded quantifiers in a row and no literal between them
+  (for example `^\w+\s+\w+\s+\w+\s+\w+$`) is refused; add a literal
+  separator or split the query. A mongo-direct read carrying a non-literal
+  regex and no `max_time_ms` times out after 5 seconds with
+  `Parse::MongoDB::ExecutionTimeout`; pass `max_time_ms:` or set
+  `Parse::PipelineSecurity.default_regex_max_time_ms` to change it.
+- **Direct reads.** Code that calls `Parse::MongoDB.find` inside
+  `Parse.without_master_key` should wrap it in `Parse.with_master_key` or use
+  a scoped read. `Parse::MongoDB.collection` returns raw driver access with no
+  scope and is not refused inside the block.
+- **Batches.** A batch or transaction of objects whose class is bound to a
+  session client now runs as that user, as a single save does. A transaction
+  mixing credentials raises `MixedAuthorityError`, and a non-transactional
+  batch with mixed credentials is sent as several calls. An explicitly chosen
+  batch client (`client=` or the `batch_request` receiver) is used for every
+  request instead of each object's class client.
+  `Client#batch_request` accepts `session_token:` and `use_master_key:`. A
+  blank `session:`, or a user with no session token, raises `ArgumentError`.
+- **Webhooks.** `payload.master?` and `payload.claimed_master?` no longer
+  treat the string `"true"` as master; Parse Server always sends a JSON
+  boolean. Under `Parse::Webhooks.allow_unauthenticated` with no signing
+  secret, `payload.master?` is false even for a master-key request Parse
+  Server forwards, so master-only field guards and handler `master?` checks
+  refuse it, and saves made by the SDK itself run their model callbacks in
+  process and again through the webhook. Configure a webhook key
+  (`PARSE_SERVER_WEBHOOK_KEY` on Parse Server and `Parse::Webhooks.key` in the
+  app) or a signing secret to restore master trust and dedup.
 
 ### 5.8.1
 

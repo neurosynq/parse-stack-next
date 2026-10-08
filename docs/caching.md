@@ -249,9 +249,10 @@ that the session was revoked (logout, `Parse::Session#destroy`, `logout_all!`,
 a password change) or that the user lost a role or row access through a change
 this process did not make. With the default, every REST session read reaches
 Parse Server, which checks the token and the current ACLs and CLPs each time.
-Mongo-direct reads and agent tools do not go through this cache; they resolve
-the session through the identity plane, whose revocation behavior is described
-in [Identity and role caching](#identity-and-role-caching). This
+Mongo-direct reads, including agent tools that route there, do not go through
+this cache; they resolve the session through the identity plane, whose
+revocation behavior is described in
+[Identity and role caching](#identity-and-role-caching). This
 applies however the session reached the request: an explicit `session_token:`,
 `Parse.with_session`, or a client bound to a session. Master-key and
 anonymous reads cache as before, and writes made with a session still

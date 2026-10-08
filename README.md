@@ -3074,7 +3074,7 @@ songs.destroy
 songs.save(session: user)
 ```
 
-Each write in a batch keeps the credentials it was built for. Parse Server runs a `POST /batch` under one credential, so objects whose classes use different clients (for example a class bound to `Parse.client.become(token)`), or raw `Parse::Request`s carrying different `session_token:` or `use_master_key:` options, are sent as separate batch calls, each with its own credentials. Responses still come back in request order.
+Each write in a batch keeps the credentials it was built for. Parse Server runs a `POST /batch` under one credential, so objects whose classes use clients with different credentials (for example a class bound to `Parse.client.become(token)`; identically configured clients are merged), or raw `Parse::Request`s carrying different `session_token:` or `use_master_key:` options, are sent as separate batch calls, each with its own credentials. Responses still come back in request order.
 
 ### Magic `save_all`
 By default, all Parse queries have a maximum fetch limit of 1000. While using the `:max` option, Parse-Stack can increase this up to 11,000. In the cases where you need to update a large number of objects, you can utilize the `Parse::Object#save_all` method to fetch, modify and save objects.
