@@ -53,7 +53,24 @@ module Parse
       ].freeze
       # Key prefixes whose values are always redacted.
       SENSITIVE_KEY_PREFIXES = %w[_auth_data_].freeze
-      SENSITIVE_PATTERN = /(#{(SENSITIVE_FIELDS + SENSITIVE_KEY_PREFIXES.map { |p| "#{p}\\w+" }).join("|")})(["']?\s*[=:>]\s*["']?)([^"&\s,}\]]+)/i
+      # A credential value: a double- or single-quoted string (with escapes),
+      # taken whole so a quoted value with spaces is redacted entirely, or an
+      # unquoted run up to a delimiter.
+      SENSITIVE_VALUE = /(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"'&\s,}\]]+)/
+      SENSITIVE_PATTERN = /(#{(SENSITIVE_FIELDS + SENSITIVE_KEY_PREFIXES.map { |p| "#{p}\\w+" }).join("|")})(["']?\s*[=:>]\s*)(#{SENSITIVE_VALUE.source})/i
+      # Credential header names whose value is redacted when they appear as
+      # text (`X-Parse-Master-Key: mk`, `Authorization: Bearer x`), for
+      # example in an error message or a pasted request. Real request
+      # headers are redacted through {REDACTED_HEADERS}.
+      SENSITIVE_HEADER_NAMES = %w[
+        X-Parse-Master-Key X-Parse-REST-API-Key X-Parse-Session-Token
+        X-Parse-Javascript-Key X-Parse-Client-Key X-Parse-Webhook-Key
+        Authorization
+      ].freeze
+      # Header-shaped text: a credential header name, a `:` or `=`
+      # separator, an optional auth scheme (`Bearer`, `Basic`, `Token`),
+      # then the value.
+      SENSITIVE_HEADER_PATTERN = /(#{SENSITIVE_HEADER_NAMES.map { |n| Regexp.escape(n) }.join("|")})(["']?\s*[=:]\s*)((?:bearer|basic|token)\s+)?(#{SENSITIVE_VALUE.source})/i
       # Lookup set of sensitive field names for structural (JSON) redaction
       # — case-insensitive match on the key, not the value. Walks the parsed
       # structure so nested objects like {"password":{"nested":"value"}}
@@ -151,30 +168,79 @@ module Parse
       def self.redact(str)
         s = str.to_s
         return s if s.empty?
-        after_structural = s
         if (parsed = try_parse_json(s))
           scrubbed = scrub_sensitive!(parsed)
           compact_vectors!(scrubbed)
           begin
-            after_structural = scrubbed.to_json
+            # Text patterns run on each string value before encoding, never
+            # on the encoded JSON: escaped quotes inside a value
+            # (`password=\"x\"`) would defeat them and could corrupt the JSON.
+            return redact_string_values!(scrubbed).to_json
           rescue StandardError
-            after_structural = s
+            # Fall through to the text pass on the original string.
           end
         end
-        after_structural.gsub(SENSITIVE_PATTERN) do
+        redact_patterns(s)
+      end
+
+      # Apply {redact_patterns} to every String value in a parsed JSON
+      # structure, in place. Keys are left alone (the structural pass already
+      # replaced the values of sensitive keys).
+      # @param obj [Object] a parsed JSON value.
+      # @return [Object] obj.
+      def self.redact_string_values!(obj)
+        case obj
+        when Hash
+          obj.each { |k, v| obj[k] = v.is_a?(String) ? redact_patterns(v) : redact_string_values!(v) }
+        when Array
+          obj.map! { |v| v.is_a?(String) ? redact_patterns(v) : redact_string_values!(v) }
+        end
+        obj
+      end
+
+      # The regex pass of {redact} on its own: replaces values that follow
+      # a credential field name (`password=x`, `"sessionToken":"r:x"`) or a
+      # credential header name (`X-Parse-Master-Key: mk`,
+      # `Authorization: Bearer x`). Use it on text that is not JSON, or on
+      # JSON that has already been scrubbed structurally.
+      # @param str [String]
+      # @return [String]
+      def self.redact_patterns(str)
+        s = str.to_s
+        return s if s.empty?
+        s = s.gsub(SENSITIVE_PATTERN) do
           key_part = $1
           sep_part = $2
           val_part = $3
-          # Skip values that the structural pass already redacted —
-          # otherwise the regex value-class `[^"&\s,}\]]+` stops at the
-          # bracket and we end up with `[FILTERED]]` from the trailing
-          # close-bracket left over from `"[FILTERED]"`.
-          if val_part == "[FILTERED" || val_part == REDACTED_PLACEHOLDER
-            "#{key_part}#{sep_part}#{val_part}"
-          else
-            "#{key_part}#{sep_part}#{REDACTED_PLACEHOLDER}"
-          end
+          # Skip values that the structural pass already redacted. The
+          # value class `[^"&\s,}\]]+` stops at the bracket, so without
+          # this a second pass would turn `"[FILTERED]"` into
+          # `[FILTERED]]`.
+          "#{key_part}#{sep_part}#{redacted_value(val_part)}"
         end
+        s.gsub(SENSITIVE_HEADER_PATTERN) do
+          name_part = $1
+          sep_part = $2
+          scheme_part = $3
+          val_part = $4
+          "#{name_part}#{sep_part}#{scheme_part}#{redacted_value(val_part)}"
+        end
+      end
+
+      # @!visibility private
+      def self.already_redacted?(value)
+        value == "[FILTERED" || value == REDACTED_PLACEHOLDER
+      end
+
+      # @!visibility private
+      # The placeholder for a matched value, keeping the value's own quotes
+      # so quoted text (and JSON) stays well formed. A value that is already
+      # the placeholder is left as is.
+      def self.redacted_value(value)
+        quote = value[0] if value.length >= 2 && (value[0] == '"' || value[0] == "'") && value[-1] == value[0]
+        inner = quote ? value[1..-2] : value
+        return value if already_redacted?(inner)
+        quote ? "#{quote}#{REDACTED_PLACEHOLDER}#{quote}" : REDACTED_PLACEHOLDER
       end
 
       # @!visibility private

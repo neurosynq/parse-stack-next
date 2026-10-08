@@ -279,17 +279,21 @@ module Parse
 
     # @return [String] JSON encoded object, or an error string. Credential
     #   fields (`sessionToken`, `password`, `authData`, MFA recovery codes
-    #   and secrets, keys) are replaced with a placeholder, so printing the
-    #   response with `to_s` or `inspect` does not leak a live session
-    #   token. The error form has its text redacted and control characters
+    #   and secrets, keys) are replaced with a placeholder, and credential
+    #   text inside string values (`password=x`, `X-Parse-Master-Key: mk`)
+    #   is filtered too, so printing the response with `to_s` or `inspect`
+    #   does not leak a live session token. The error form has its text redacted and control characters
     #   escaped. `#result`, `#to_json`, and `#as_json` return the raw values
     #   by design; do not log those.
     def to_s
       if error?
-        request_text = Parse::TerminalSafe.sanitize_line(@request.to_s)
-        return "[E-#{@code}] #{request_text} : #{safe_error_text} (#{@http_status})"
+        return "[E-#{@code}] #{safe_request_text} : #{safe_error_text} (#{@http_status})"
       end
-      redacted_result.to_json
+      result = redacted_result
+      return Parse::Middleware::BodyBuilder.redact_patterns(result) if result.is_a?(String)
+      # Text patterns run on string values before encoding, never on the
+      # encoded JSON, so escaped quotes cannot defeat them or corrupt it.
+      Parse::Middleware::BodyBuilder.redact_string_values!(result).to_json
     end
 
     private
@@ -304,6 +308,14 @@ module Parse
       Parse::TerminalSafe.sanitize_line(text)
     rescue StandardError
       "[unprintable error]"
+    end
+
+    # The request line (method and path, including any query string) with
+    # credentials redacted and control characters escaped.
+    def safe_request_text
+      Parse::TerminalSafe.sanitize_line(Parse::Middleware::BodyBuilder.redact(@request.to_s))
+    rescue StandardError
+      "[unprintable request]"
     end
 
     # Class and size of the result, without its values.
