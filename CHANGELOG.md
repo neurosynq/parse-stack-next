@@ -1,5 +1,19 @@
 ## parse-stack-next Changelog
 
+### 5.8.3
+
+A maintenance release that refreshes locked dependencies to their latest
+compatible versions. No SDK behavior changes.
+
+#### Dependency updates
+
+- **CHANGED**: Bumped locked dependencies to their latest compatible releases:
+  `faraday` 2.14.4 → 2.15.0, `faraday-net_http` 3.4.4 → 3.5.0, `graphql`
+  2.6.11 → 2.6.13, `json` 3.0.2 → 3.1.0, `net-http` 0.9.1 → 0.10.0,
+  `prettyprint` 0.2.0 → 0.2.1, `pry` 0.16.0 → 0.16.1, `rack-test` 2.2.0 →
+  2.3.0, and `uri` 1.1.1 → 1.1.2. `net-http` 0.10.0 adds `net-protocol` 0.4.0
+  and `timeout` 0.6.1 as new transitive dependencies.
+
 ### 5.8.2
 
 A security and correctness patch. No new features beyond the `session:`
