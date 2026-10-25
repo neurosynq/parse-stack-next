@@ -1,6 +1,8 @@
 # encoding: UTF-8
 # frozen_string_literal: true
 
+require_relative "../pipeline_security"
+
 module Parse
   module GraphQL
     # Generates `GraphQL::Schema::Object` subclasses from Parse::Object
@@ -14,6 +16,47 @@ module Parse
     # (`song.album`, `band.fans`, etc.) — so no resolvers are emitted.
     # Pagination arguments, Loaders, and Relay connections are deferred
     # until query/mutation passthrough lands (TODO §7).
+    #
+    # == Schema shape, not an authorization layer
+    #
+    # The generated types describe the shape of a Parse class. They do not
+    # authorize anything. Default graphql-ruby resolution reads whatever is
+    # on the object handed to the resolver, so the resolvers (or the objects
+    # passed to them) must enforce ACL, CLP, and protectedFields for the
+    # requesting user. The usual way is to resolve through queries run with
+    # that user's session token, so Parse Server applies its own checks.
+    # Omitting a field from a type does not stop a resolver from loading or
+    # returning it through another path.
+    #
+    # == Field policy
+    #
+    # Output is deterministic: the same model and the same options always
+    # produce the same fields. Without `protected_fields: :fetch`, no CLP
+    # cache or ambient state is consulted.
+    #
+    # * Credential denylist (always on). Session tokens, auth data,
+    #   passwords, device tokens, and every column in
+    #   {Parse::PipelineSecurity::INTERNAL_FIELDS_DENYLIST} (see
+    #   {SENSITIVE_FIELD_NAMES}) are dropped, matched by local accessor or
+    #   wire name. The denylist only keeps known credential columns out; it
+    #   is not a substitute for protectedFields.
+    # * `exclude_fields:` drops caller-listed fields.
+    # * `protected_fields:` applies the class's public (`"*"`)
+    #   protectedFields, only when supplied or explicitly fetched. With the
+    #   default (`nil`) no protectedFields lookup happens at all, so a field
+    #   such as `_User.email` is emitted unless it is excluded or supplied
+    #   here. Pass a Hash (`{ "ClassName" => [:field, ...] }`) to supply the
+    #   lists, or `:fetch` to load each class's CLP from the server through
+    #   `Parse::CLPScope.protected_fields_for` (a schema request per class,
+    #   which includes `Parse::CLPScope.default_protected_fields`). A failed
+    #   fetch raises {ProtectedFieldsUnavailable}.
+    # * `include_sensitive:` emits a field the denylist or protectedFields
+    #   would drop. `exclude_fields:` still wins over it.
+    #
+    # has_many fields are emitted as plain unpaginated lists (`[Type]`), and
+    # nested selections are not bounded here. A schema built from these
+    # types should set `max_depth` and `max_complexity` (graphql-ruby schema
+    # class methods) so a single query cannot walk an unbounded object graph.
     #
     # Cross-class references (pointers, has_many) require all referenced
     # model types to be in the registry BEFORE field emission. Use
@@ -57,14 +100,53 @@ module Parse
       # `id: ID` field separately.
       OMITTED_TYPES = %i[acl].freeze
 
+      # Credential field names that are never emitted, whatever their
+      # declared type. Compared against both the local accessor and the
+      # Parse wire name. Columns starting with `_auth_data_` are also
+      # dropped.
+      SENSITIVE_FIELD_NAMES = (
+        %w[session_token sessionToken auth_data authData password
+           device_token deviceToken] +
+        Parse::PipelineSecurity::INTERNAL_FIELDS_DENYLIST
+      ).to_set.freeze
+
+      # Prefixes of credential columns that are never emitted.
+      SENSITIVE_FIELD_PREFIXES = Parse::PipelineSecurity::INTERNAL_FIELDS_PREFIX_DENYLIST
+
+      # Raised when `protected_fields: :fetch` was requested and a class's
+      # CLP could not be loaded. The generator refuses to emit the type
+      # rather than emit fields the caller asked to have filtered.
+      class ProtectedFieldsUnavailable < StandardError; end
+
       # Generate types for a list of models in one call. Two-pass:
       # creates empty stub classes for every model first so cross-class
       # references resolve regardless of declaration order.
       #
+      # The result is a schema shape, not an authorization layer: resolvers
+      # must enforce ACL, CLP, and protectedFields for the requesting user
+      # (for example by resolving through queries run with that user's
+      # session token). has_many fields are unpaginated lists, so set
+      # `max_depth` and `max_complexity` on the schema.
+      #
       # @param model_classes [Array<Class>] Parse::Object subclasses.
+      # @param include_sensitive [Array<Symbol, String>] fields to emit even
+      #   though they are in {SENSITIVE_FIELD_NAMES} or the class's public
+      #   protectedFields. Matched by local accessor or wire name.
+      # @param exclude_fields [Array<Symbol, String>, Hash] fields never to
+      #   emit. An Array applies to every class; a Hash maps a Parse class
+      #   name or model class to that class's Array. Matched by local
+      #   accessor or wire name, and applied even over `include_sensitive:`.
+      # @param protected_fields [nil, :fetch, Hash] source of each class's
+      #   public protectedFields. `nil` (default) performs no lookup.
+      #   `:fetch` loads each class's CLP from the server and raises
+      #   {ProtectedFieldsUnavailable} when it cannot. A Hash maps a Parse
+      #   class name or model class to its protected field list.
       # @return [Hash{String => Class}] registry of generated types
       #   keyed by Parse class name.
-      def self.generate_all(model_classes)
+      # @raise [ProtectedFieldsUnavailable] when `protected_fields: :fetch`
+      #   cannot load a class's CLP.
+      def self.generate_all(model_classes, include_sensitive: [], exclude_fields: [], protected_fields: nil)
+        validate_protected_fields_option!(protected_fields)
         registry = {}
         # Pass 1: stub classes registered by parse_class name.
         model_classes.each do |model|
@@ -73,7 +155,10 @@ module Parse
         end
         # Pass 2: populate fields. Cross-references now resolve.
         model_classes.each do |model|
-          new(model, registry: registry, _prebuilt: registry[model.parse_class]).populate_fields
+          new(model, registry: registry, _prebuilt: registry[model.parse_class],
+                     include_sensitive: include_sensitive,
+                     exclude_fields: exclude_fields,
+                     protected_fields: protected_fields).populate_fields
         end
         detect_name_collisions!(registry)
         registry
@@ -101,15 +186,43 @@ module Parse
       # in the registry — otherwise an error is raised at field-emit
       # time. Prefer `generate_all` when you have a graph of models.
       #
+      # The result is a schema shape, not an authorization layer; see
+      # {generate_all}.
+      #
       # @param model_class [Class] a Parse::Object subclass.
       # @param registry [Hash, nil] shared registry; mutated in place.
+      # @param include_sensitive [Array<Symbol, String>] see {generate_all}.
+      # @param exclude_fields [Array<Symbol, String>, Hash] see {generate_all}.
+      # @param protected_fields [nil, :fetch, Hash] see {generate_all}.
       # @return [Class] anonymous `GraphQL::Schema::Object` subclass.
-      def self.generate(model_class, registry: nil)
+      # @raise [ProtectedFieldsUnavailable] see {generate_all}.
+      def self.generate(model_class, registry: nil, include_sensitive: [], exclude_fields: [], protected_fields: nil)
         validate!(model_class)
+        validate_protected_fields_option!(protected_fields)
         registry ||= {}
         stub = registry[model_class.parse_class] ||= build_stub(model_class)
-        new(model_class, registry: registry, _prebuilt: stub).populate_fields
+        new(model_class, registry: registry, _prebuilt: stub,
+                         include_sensitive: include_sensitive,
+                         exclude_fields: exclude_fields,
+                         protected_fields: protected_fields).populate_fields
         stub
+      end
+
+      def self.validate_protected_fields_option!(value)
+        return if value.nil? || value == :fetch || value.is_a?(Hash)
+        raise ArgumentError,
+              "Parse::GraphQL::TypeGenerator: protected_fields: must be nil, :fetch, " \
+              "or a Hash of class name => field list, got #{value.inspect}"
+      end
+
+      # Look up a per-class option keyed by Parse class name (String or
+      # Symbol) or by the model class itself.
+      def self.per_class_value(map, model_class)
+        name = model_class.parse_class
+        [name, name.to_sym, model_class].each do |key|
+          return map[key] if map.key?(key)
+        end
+        nil
       end
 
       def self.validate!(model_class)
@@ -128,10 +241,15 @@ module Parse
         end
       end
 
-      def initialize(model_class, registry:, _prebuilt:)
+      def initialize(model_class, registry:, _prebuilt:, include_sensitive: [],
+                     exclude_fields: [], protected_fields: nil)
         @model_class = model_class
         @registry = registry
         @klass = _prebuilt
+        @include_sensitive = Array(include_sensitive).map(&:to_s).to_set
+        excluded = exclude_fields.is_a?(Hash) ? self.class.per_class_value(exclude_fields, model_class) : exclude_fields
+        @exclude_fields = Array(excluded).map(&:to_s).to_set
+        @protected_fields_option = protected_fields
       end
 
       def populate_fields
@@ -153,6 +271,7 @@ module Parse
 
         @model_class.field_map.each do |local_key, _remote_field|
           next if skip_keys.include?(local_key)
+          next if withheld?(local_key)
           parse_type = @model_class.fields[local_key]
           next if parse_type.nil?
           next if OMITTED_TYPES.include?(parse_type)
@@ -176,6 +295,7 @@ module Parse
       def emit_belongs_to_fields
         @model_class.references.each do |parse_field, target_class_name|
           accessor = field_to_accessor(parse_field)
+          next if withheld?(accessor)
           target = registry_lookup!(target_class_name)
           @klass.field(accessor, target, null: true)
         end
@@ -184,6 +304,7 @@ module Parse
       def emit_has_one_fields
         return unless @model_class.respond_to?(:has_one_associations)
         @model_class.has_one_associations.each do |name, meta|
+          next if withheld?(name)
           target = registry_lookup!(meta[:target_class])
           @klass.field(name, target, null: true)
         end
@@ -192,6 +313,7 @@ module Parse
       def emit_has_many_fields
         return unless @model_class.respond_to?(:has_many_associations)
         @model_class.has_many_associations.each do |name, meta|
+          next if withheld?(name)
           target = registry_lookup!(meta[:target_class])
           @klass.field(name, [target], null: true)
         end
@@ -216,6 +338,63 @@ module Parse
                "type; emitting as JSON scalar."
           Parse::GraphQL::Types::JSON
         end
+      end
+
+      # True when a field must not be emitted. Order: an explicit
+      # `exclude_fields:` entry always drops the field; `include_sensitive:`
+      # then keeps it; otherwise a credential name or a public protectedField
+      # from the `protected_fields:` source drops it.
+      def withheld?(local_key)
+        local = local_key.to_s
+        remote = (@model_class.field_map[local_key.to_sym] || local).to_s
+        names = [local, remote]
+        return true if names.any? { |n| @exclude_fields.include?(n) }
+        return false if names.any? { |n| @include_sensitive.include?(n) }
+        return true if names.any? { |n| sensitive_name?(n) }
+        names.any? { |n| public_protected_fields.include?(n) }
+      end
+
+      def sensitive_name?(name)
+        SENSITIVE_FIELD_NAMES.include?(name) ||
+          SENSITIVE_FIELD_PREFIXES.any? { |prefix| name.start_with?(prefix) }
+      end
+
+      # Public protectedFields for this class from the explicit
+      # `protected_fields:` source. `nil` performs no lookup, a Hash supplies
+      # the list, and `:fetch` loads the CLP from the server.
+      def public_protected_fields
+        return @public_protected_fields if defined?(@public_protected_fields)
+        list = case @protected_fields_option
+               when nil then []
+               when :fetch then fetch_public_protected_fields
+               when Hash then self.class.per_class_value(@protected_fields_option, @model_class)
+               end
+        @public_protected_fields = Array(list).map(&:to_s).to_set
+      end
+
+      # Loads the class's CLP through Parse::CLPScope, which the caller opted
+      # into with `protected_fields: :fetch`. Parse::CLPScope records a failed
+      # schema request as unresolvable and reports an empty protected set for
+      # it, so resolvability is checked first and a failure raises instead of
+      # emitting every field.
+      def fetch_public_protected_fields
+        class_name = @model_class.parse_class
+        evaluation = Parse::CLPScope.evaluate_access(class_name, :get, claims: ["*"], authenticated: false)
+        if evaluation.reason == :clp_unresolvable
+          raise ProtectedFieldsUnavailable,
+                "Parse::GraphQL::TypeGenerator: could not load the CLP for #{class_name} " \
+                "(protected_fields: :fetch). Check the schema request, or supply " \
+                "protected_fields: as a Hash."
+        end
+        # strict: an entry that expires and fails to refetch after the check
+        # above raises instead of reading as "nothing protected".
+        Parse::CLPScope.protected_fields_for(class_name, ["*"], strict: true)
+      rescue ProtectedFieldsUnavailable
+        raise
+      rescue StandardError => e
+        raise ProtectedFieldsUnavailable,
+              "Parse::GraphQL::TypeGenerator: could not load protectedFields for " \
+              "#{class_name} (protected_fields: :fetch): #{e.class}: #{e.message}"
       end
 
       def registry_lookup!(target_class_name)

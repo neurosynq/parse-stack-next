@@ -1353,7 +1353,7 @@ module Parse
         @auth_context = nil
         @scope_failed_at = nil
         @scope_failed_token = nil
-        no_master_key = @client.respond_to?(:master_key) && @client.master_key.nil?
+        no_master_key = client_lacks_master_key?
         @client_mode = no_master_key && !@session_token.to_s.empty?
       end
       self
@@ -1936,7 +1936,7 @@ module Parse
       # constructor assertions with no REST equivalent — Parse Server's
       # REST surface offers no "act as user-pointer" affordance, so the
       # SDK cannot honor them without a master key.
-      no_master_key = @client.respond_to?(:master_key) && @client.master_key.nil?
+      no_master_key = client_lacks_master_key?
       session_token_present = !@session_token.nil? && !@session_token.to_s.empty?
       @client_mode = no_master_key && session_token_present
 
@@ -4256,6 +4256,17 @@ module Parse
 
     private
 
+    # True when the underlying client will not send a master key. A blank
+    # key (nil, empty, or whitespace only) counts as absent, matching the
+    # HTTP authentication middleware, which never sends a blank key. A
+    # client that does not expose `master_key` keeps the historical
+    # master-key posture.
+    # @return [Boolean]
+    def client_lacks_master_key?
+      return false unless @client.respond_to?(:master_key)
+      @client.master_key.to_s.strip.empty?
+    end
+
     public
 
     # A redacted one-line summary. Never includes the session token, the
@@ -4521,7 +4532,7 @@ module Parse
     # Fail-closed: raises rather than silently widening to master-key
     # posture.
     def resolve_impersonation_token!(user, mint:)
-      if @client.respond_to?(:master_key) && @client.master_key.nil?
+      if client_lacks_master_key?
         raise ArgumentError,
               "impersonate_user: requires a Parse::Client with a master_key to " \
               "resolve a session token for another user."

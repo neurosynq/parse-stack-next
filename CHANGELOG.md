@@ -1,5 +1,309 @@
 ## parse-stack-next Changelog
 
+### 5.8.4
+
+A security patch across the agent, MCP, Atlas Search, mongo-direct, transport,
+cache, webhook, LiveQuery, GraphQL, MFA, and cursor surfaces, with raised
+dependency floors and a release-workflow fix. Outcomes that change are listed
+under Behavior Notes.
+
+#### Agent tools
+
+- **FIXED**: `semantic_search` now applies the agent's `classes:` allowlist,
+  the CLP `find` check for scoped agents, and the per-agent `filters:` for the
+  searched class, as every other read tool does. Before, it checked only the
+  global hidden flag and the tenant scope, so an agent limited to one class
+  could search any other searchable class, including rows its per-agent filter
+  excludes. The per-agent filter is ANDed into the post-search match after the
+  caller's filter is checked, so a caller filter on the same field narrows the
+  result but cannot replace it. A retrieval profile's hybrid lexical filter is
+  likewise ANDed with it instead of merged over it. Per-agent filter fields
+  resolve through the class's declared properties, so a declared server name
+  such as `PublicState` addresses that column and a pointer uses its `_p_`
+  column; a field the class does not declare raises
+  `Parse::Agent::ValidationError` instead of being guessed.
+- **FIXED**: A `$relatedTo` constraint built by an agent must name the owning
+  object with a plain objectId string. An operator or other non-String value
+  (`"objectId" => { "$exists" => true }`) now raises a
+  `ConstraintSecurityError` with reason `:invalid_object_id`. Against Parse
+  Server below 9.10.5 that shape matches the relation of every owning object
+  without checking the owning object's ACL (GHSA-58m4-cqvw-4vgh). The relation
+  `key` must be a field name (`:invalid_key`), and a constraint that names
+  `object` or `key` under both a String and a Symbol key is refused
+  (`:duplicate_key`).
+- **FIXED**: The agent constraint translator refuses a `__type` value (Pointer,
+  Date, and the other Parse types) that also carries an operator key, with
+  reason `:operator_in_parse_type`. Such a hash was passed through without
+  validation, so `{ "__type" => "Pointer", "$relatedTo" => ... }` inside an
+  `$or` skipped the operator checks.
+
+#### MCP and agent identity
+
+- **FIXED**: An agent on a client whose master key is empty or whitespace is
+  treated as having no master key, as the HTTP layer already did. Before, it
+  took master posture: the `acl_user:` / `acl_role:` and `impersonate`
+  refusals were skipped while requests went out without the key.
+- **FIXED**: MCP resource subscriptions apply the agent's tenant scope and
+  per-agent filter as the LiveQuery subscription constraint. Before, a
+  subscription covered the whole class, so `resources/updated` notifications
+  reported writes in other tenants and in rows the filter excludes.
+- **NEW**: A loopback-bound MCP server refuses requests whose `Host` header is
+  not a loopback host (DNS-rebinding defense from the MCP specification).
+  `allowed_hosts:` on `Parse::Agent::MCPServer` and `MCPRackApp` lists
+  additional hosts.
+
+#### Atlas Search
+
+- **FIXED**: Atlas Search refuses Parse Server's internal columns
+  (`_hashed_password`, `_perishable_token`, `_email_verify_token`,
+  `_session_token`, `_auth_data_*`, `_rperm`, and the rest of the internal
+  field list) when named as a search path, highlight path, sort key,
+  autocomplete field, or facet path, for every caller including master. A
+  wildcard path glob that matches one of them (`*token`, `?hashed*`) and a
+  `queryString` query that names one (`_perishable_token:a*`) are refused the
+  same way, including a field name written with Lucene escapes
+  (`_hashed\_password:a*`) and globs over the `_auth_data_<provider>`
+  columns, and the native hybrid search applies the check to its lexical
+  branch. Globs are tested against stored column names only, and credential
+  columns only on `_User` and `_Session`, so a glob such as `s*` on another
+  class is not refused. On a dynamically mapped index, a `wildcard` or `regex` operator over
+  `_perishable_token` let a caller count matches per prefix and recover a
+  password-reset token. On
+  `_User` and `_Session`, a non-master caller is also refused a path that
+  reaches every field, including a wildcard path object inside a path array,
+  since on such an index it includes those columns.
+  Refusals raise `Parse::CLPScope::Denied` before the pipeline runs.
+
+#### Mongo-direct
+
+- **FIXED**: `$jsonSchema` is refused at any depth in mongo-direct filters and
+  pipelines, alongside `$where` and `$function`. Its `properties` name fields
+  inside the operator value, out of reach of the protectedFields key checks,
+  so `{ $jsonSchema: { properties: { email: { pattern: "^a" } } } }` on
+  `_User` read a protected field one character at a time. Its `pattern` also
+  skipped the SDK's regex checks and the default regex time limit.
+- **FIXED**: `Parse::MongoDB.find` is refused inside `Parse.with_session`
+  (with a token or anonymous), as it already was inside
+  `Parse.without_master_key`. `find` reads raw documents with no ACL, CLP, or
+  protectedFields, so inside a session block it returned every row with
+  master authority. A `Parse.with_master_key` block entered inside the session
+  block still allows it; one wrapped around the session block does not.
+- **FIXED**: The protectedFields and internal-field checks cover
+  `$setWindowFields`, `$densify`, `$fill`, `$bucket`, `$bucketAuto`,
+  `$sortByCount`, and a top-level `$search` / `$searchMeta`. A scoped pipeline
+  could sort, partition, or fill on a protected field there and read its order.
+  Credential columns are refused in those stage arguments for every caller.
+- **FIXED**: The mongo-direct field conversion resolves a pointer's declared
+  server name (`belongs_to :owner_ref, field: "OwnerRef"`) to its `_p_OwnerRef`
+  column on every path. A constraint keyed by `OwnerRef` reached the wrong
+  column, where a `$ne` or `$exists: false` matched every row.
+
+#### Schema consistency for scoped reads
+
+- **FIXED**: The mongo-direct protected-field check read the class schema
+  through the default client and treated an unresolvable schema as having
+  no protected fields, while the CLP gate and the protected-field strip read
+  it separately through the requesting app's client. Two outcomes followed
+  for a scoped caller. If the schema fetch failed and then succeeded between
+  the check and the gate, a `$match` on a protected field ran. In a
+  multi-app process whose default app had no protectedFields on the class,
+  a pipeline such as `$group: { _id: "$ssn" }` returned the protected value,
+  since the strip removes only the key. The check now uses the requesting
+  app's client, refuses a scoped caller when the schema cannot be resolved,
+  and each `Parse::MongoDB.aggregate`, Atlas Search, vector search, and
+  hybrid search call reads one schema snapshot for every step.
+
+#### Regular-expression validation
+
+- **FIXED**: `Parse::RegexSecurity` no longer compiles any part of a caller's
+  pattern with Ruby's `Regexp`. Its separator check passed a character class,
+  braced escape, or `\Q...\E` atom from the caller's `$regex` to
+  `Regexp.new`, so agent and MCP `$regex` arguments, `:field.like` and
+  `:field.regex` values, raw `where` hashes, and mongo-direct and Atlas
+  Search filters reached Ruby's regular-expression compiler. That compiler
+  has memory-safety bugs fixed in Ruby 3.3.13, 3.4.12, and 4.0.9 (GitLab-assigned
+  CVE-2026-89078, CVE-2026-93577, CVE-2026-97229, CVE-2026-110264), and
+  `\Q...\E` reached it as live syntax because it does not support that
+  construct. Character membership is now decided from the validator's own
+  parse (literals, `\d \w \s` and their negations, ranges); any construct
+  it cannot evaluate counts as a possible match, which refuses the pattern
+  rather than passing it. Patterns are still sent to Parse Server and MongoDB
+  as strings and compiled only by MongoDB's PCRE engine.
+
+#### Transport and caching
+
+- **FIXED**: `Parse::Client` refuses an absolute (`https://host/...`, any case)
+  or protocol-relative (`//host`, `\\host`) request path with `ArgumentError`
+  before sending, so a caller-supplied path cannot send the master key or a
+  session token to another host. `connected?` raises on such a path.
+- **FIXED**: `PARSE_REQUIRE_HTTPS` accepts `true`, `1`, or `yes` in any case.
+  Before, only the exact string `true` enabled it.
+- **FIXED**: Credentials embedded in the server URL (`https://user:pass@...`)
+  are shown as `[FILTERED]` in `inspect`, `as_json`, and warnings, with a
+  one-time warning that the URL contains them.
+- **CHANGED**: A `cache:` store that deserializes with Marshal (Moneta's
+  default value serializer) over an external backend is refused with
+  `ArgumentError`; anyone able to write to that backend could run code on each
+  cache read. Use `Parse::Cache::Redis` (or a `redis://` URL string), an
+  in-process store, or pass `allow_marshal_cache: true` to accept the risk. The embedding cache's `MonetaStore` applies the same rule with
+  `allow_marshal: true`. In-process stores (`:Memory`, `:LRUHash`, `:Null`)
+  are accepted.
+
+#### File fetches
+
+- **FIXED**: Remote `Parse::File` fetches also refuse the NAT64
+  (`64:ff9b::/96`) and 6to4 (`2002::/16`) ranges, which embed an IPv4
+  address that can be internal on networks that route them.
+
+#### Webhooks and LiveQuery
+
+- **FIXED**: A whitespace-only webhook signing secret counts as unset, so it
+  can no longer serve as a guessable HMAC key that grants master trust. A blank
+  `PARSE_SERVER_WEBHOOK_KEY` no longer hides `PARSE_WEBHOOK_KEY`.
+- **FIXED**: The webhook handler refuses a declared `Content-Length` over 1 MB
+  before reading, and reads at most 1 MB plus one byte. Before, it read the
+  whole body and then checked the size.
+- **FIXED**: LiveQuery events for `_User` and `_Session` have `sessionToken`,
+  `authData`, and other credential columns removed before hydration. On a
+  Parse Server affected by GHSA-349r-988w-x3jp, an `$or` subscription could
+  receive other users' events carrying their session tokens.
+
+#### Ambient identity lifetime
+
+- **NEW**: `Parse.with_session` documents its identity contract: the session
+  token and master-key state last for the block on the current fiber and are
+  restored on exit, including on exception, so reused request threads carry
+  nothing between requests. Threads and Fibers created inside the block
+  inherit the identity for their whole lifetime, which suits short-lived
+  work for that user. `Parse.without_ambient_identity { }` runs a block with
+  no inherited identity, for workers started inside a session block.
+- **FIXED**: LiveQuery's event, reader, reconnect, and health-check threads
+  start without the caller's ambient identity, so callbacks no longer run
+  with a session token inherited from whichever block first started the
+  client. A thread started from restricted code (a session block or
+  `Parse.without_master_key`) keeps the master key suppressed, so callbacks
+  never gain authority the starting code lacked;
+  `Parse.without_ambient_identity(keep_restrictions: true)` applies the same
+  rule to application workers. A reconnect scheduled inside `Parse.without_master_key` keeps the
+  master key withheld.
+
+#### GraphQL, MFA, and cursors
+
+- **FIXED**: `Parse::GraphQL::TypeGenerator` never emits credential fields
+  (`session_token`, `auth_data`, `password`, `device_token`, and the internal
+  field list). Field resolution bypassed `as_json` redaction, so a generated
+  `Session` type served bearer tokens. `include_sensitive: [:field]` opts a
+  field back in.
+- **NEW**: The generator takes an explicit field policy: `exclude_fields:`
+  (an Array, or a Hash per class) and `protected_fields:`, either a Hash per
+  class or `:fetch`, which loads each class's public protectedFields from
+  the server and raises `ProtectedFieldsUnavailable` if it cannot. Without
+  those options it reads no CLP at all, so the same models always produce
+  the same types. Generated types are a schema shape, not an authorization
+  layer: resolvers must still enforce ACL, CLP, and protectedFields for the
+  requesting user.
+- **FIXED**: `mfa_required?` requires a String username. A Hash value became
+  a query operator run under the master key, which let a pre-login endpoint
+  report MFA status for an arbitrary matching account.
+- **NEW**: `Parse::MFA.verify(secret, code, after:)` passes `after:` to ROTP,
+  and `Parse::MFA.verify_timestamp` returns the accepted time step, so an
+  application using `verify` as its own second factor can refuse a code used
+  again within the drift window.
+- **NEW**: `Parse::Cursor` state can be signed with HMAC-SHA256
+  (`Parse::Cursor.signing_secret=`, or `secret:`), and
+  `deserialize(json, expected_class:)` refuses a different class. A signing
+  secret must be a String of at least 32 bytes; a blank, short, or non-String
+  secret raises `ArgumentError`. Length does not make a key strong, so the
+  documentation calls for 32 bytes from a cryptographic random source
+  (`SecureRandom.hex(32)`). With a secret configured, `trusted: true` does
+  not bypass signature verification. Unsigned state is meant only for trusted
+  persistence (state the process stored where clients cannot change it):
+  pass `trusted: true` to load it silently. Without that flag it still loads
+  in this release with a one-time warning; a future minor release will
+  require it. Saved date positions now round-trip as dates.
+- **CHANGED**: `parse-console -m` warns that a master key on the command line
+  is visible in the process list and shell history.
+
+#### Documentation
+
+- **CHANGED**: The MCP guide states that the per-agent rate limiter does not
+  limit across requests when an agent is built per request, and that
+  deployments must enforce limits per client at the proxy or gateway.
+- **CHANGED**: The MFA documentation states that `Parse::MFA.verify` and the
+  SDK's MFA-disable flow are client-side checks, that Parse Server is the
+  enforcement boundary (disabling MFA must be guarded server-side), that
+  replay protection needs an atomic compare-and-set on the stored
+  timestamp, and that `authorized_by:` must be the authenticated operator.
+- **CHANGED**: `Parse::File` documents that a file built from a URL records
+  the remote server's Content-Type, which is attacker-controlled when the URL
+  is, and that applications decoding stored files must sniff content and
+  disable untrusted decoders (for libvips, `VIPS_BLOCK_UNTRUSTED` or
+  `Vips.block_untrusted(true)`).
+
+#### Dependencies, CI, and release workflow
+
+- **CHANGED**: The gemspec requires `faraday` 2.14.3 or later (CVE-2026-54297,
+  CVE-2026-33637, GHSA-33mh-2634-fwr2). The 2026-04 rack advisories are fixed
+  per branch in 2.2.23, 3.1.21, and 3.2.6, with no fixed 3.0 release, so the
+  `rack` requirement is 2.2.23 or later with every released vulnerable 3.0,
+  3.1, and 3.2 version excluded by name. Rack 2.2 applications remain
+  supported. The optional `mongo` guidance is 2.26 or later (CVE-2026-88030)
+  and `graphql` 2.6.9 or later.
+- **CHANGED**: The integration test stack runs Parse Server 9.10.7 and Atlas
+  Local 8.0.34. CI uses `ruby/setup-ruby` 1.334.0, which installs the patched
+  Ruby 3.3.13, 3.4.12, and 4.0.9 for those matrix legs, and pins every action
+  to a commit SHA. The Ruby 3.2 leg remains for legacy compatibility; 3.2 is
+  end of life and has no release with the October 2026 regular-expression
+  compiler fixes.
+- **FIXED**: The release workflow waits up to 45 minutes for Gem Tests on the
+  release commit to be created and finish before judging it. A release
+  published right after its merge commit landed failed the gate because the
+  tests on that commit had not finished yet.
+- **CHANGED**: The local Ruby version is now 3.4.12, which includes the
+  October 2026 regular-expression compilation fixes.
+- **NEW**: Gem Tests runs `bundle exec bundle-audit check --update` against
+  the committed lockfile on pull requests and pushes to main. Known gem
+  vulnerabilities or an advisory-database update failure fail the check,
+  and the release workflow's Gem Tests gate includes this job.
+
+#### Behavior Notes
+
+- A `cache:` store with Moneta's default Marshal serializer over a file or
+  network backend now raises `ArgumentError` at `Parse.setup`.
+- `Parse::Client#get`/`post`/`put`/`delete` and `connected?` raise
+  `ArgumentError` for an absolute or protocol-relative path.
+- A loopback-bound MCP server refuses requests whose `Host` is not a loopback
+  host or listed in `allowed_hosts:`.
+- An application subscribed to its own `_User` through LiveQuery no longer
+  receives its `sessionToken` in events.
+- `faraday` below 2.14.3, `rack` below 2.2.23, and the vulnerable `rack`
+  3.0.x, 3.1.0 to 3.1.20, and 3.2.0 to 3.2.5 releases no longer satisfy the
+  gemspec.
+- `Parse::Cursor` signing secrets shorter than 32 bytes, blank, or not
+  Strings raise `ArgumentError`.
+- `mfa_required?(nil)` and other non-String usernames raise `ArgumentError`
+  instead of returning false.
+- A per-agent filter (including a `:default` filter) that names a field the
+  searched class does not declare makes `semantic_search` raise
+  `Parse::Agent::ValidationError`; the other read tools return no rows in
+  that case.
+- A scoped mongo-direct, Atlas Search, or vector search call on a class
+  whose schema cannot be resolved is refused before it runs.
+- Applications that compile regular expressions from untrusted input
+  themselves should run Ruby 3.3.13, 3.4.12, or 4.0.9 or later. The SDK no
+  longer does so. Ruby 3.2 remains supported for legacy compatibility only:
+  it is end of life and does not receive these fixes.
+- An agent `call_method` handler that runs under a session-scoped agent is
+  executed inside `Parse.with_session`, so a handler that calls
+  `Parse::MongoDB.find` now raises `Parse::ACLScope::ACLRequired`. Use
+  `Parse::MongoDB.aggregate` or `Parse::Query#results_direct`, which apply
+  the session, or wrap a deliberate master read in `Parse.with_master_key`.
+- A pipeline or filter that used `$jsonSchema` on the mongo-direct path now
+  raises `Parse::PipelineSecurity::Error` (or
+  `Parse::MongoDB::DeniedOperator`).
+- A non-master Atlas Search over `_User` or `_Session` with no `fields:` is
+  refused; name the fields to search.
+
 ### 5.8.3
 
 A maintenance release that refreshes locked dependencies to their latest

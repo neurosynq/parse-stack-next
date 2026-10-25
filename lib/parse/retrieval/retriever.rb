@@ -264,9 +264,12 @@ module Parse
       # contract. `merge_filters` is last-wins, so ordering the tenant
       # constraint LAST guarantees its key survives any caller collision:
       # callers can narrow the result set but never escape their tenant.
-      lexical[:filter] = merge_filters(filter, lexical[:filter], tenant_filter_hash(klass, tenant_scope))
+      # `filter` may hold an operator-imposed constraint (the agent tool's
+      # per-agent filter), so a hybrid config's own lexical filter is ANDed
+      # with it rather than merged over it.
+      lexical[:filter] = merge_filters(and_filters(filter, lexical[:filter]), tenant_filter_hash(klass, tenant_scope))
       vector[:field] ||= field unless field.nil?
-      vector[:filter] = merge_filters(vector[:filter], filter)
+      vector[:filter] = and_filters(vector[:filter], filter)
       vector[:vector_filter] = merge_filters(vector[:vector_filter], merged_vector_filter)
 
       klass.hybrid_search(
@@ -389,6 +392,15 @@ module Parse
       return nil if field.nil?
       value = tenant_scope.key?(:value) ? tenant_scope[:value] : tenant_scope["value"]
       { wire_name(klass, field) => value }
+    end
+
+    # @!visibility private
+    # AND non-empty filter hashes together. Returns nil when nothing is
+    # left to apply, and a single filter unwrapped.
+    def and_filters(*filters)
+      present = filters.reject { |f| f.nil? || (f.respond_to?(:empty?) && f.empty?) }
+      return nil if present.empty?
+      present.length == 1 ? present.first : { "$and" => present }
     end
 
     # @!visibility private

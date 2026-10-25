@@ -397,4 +397,155 @@ class AtlasSearchProtectedPathsTest < Minitest::Test
     Parse::AtlasSearch.faceted_search("Song", "hi", facets, master: true, limit: 0)
     assert ran?
   end
+
+  # ---------------------------------------------------------------
+  # Parse Server internal columns (refused for every caller)
+  # ---------------------------------------------------------------
+
+  def test_internal_path_detection
+    assert PATHS.internal_path?("_perishable_token")
+    assert PATHS.internal_path?(:_hashed_password)
+    assert PATHS.internal_path?("_auth_data_google.id")
+    assert PATHS.internal_path?(["title", "_email_verify_token"])
+    assert PATHS.internal_path?({ "value" => "_session_token", "multi" => "en" })
+    assert PATHS.internal_path?({ "wildcard" => "_perish*" })
+    refute PATHS.internal_path?("title")
+    refute PATHS.internal_path?({ "wildcard" => "*" })
+  end
+
+  def test_search_with_stage_refuses_internal_wildcard_path_even_for_master
+    s = stage("wildcard" => { "path" => "_perishable_token", "query" => "a*",
+                              "allowAnalyzedField" => true })
+    seed_clp("_User", { "find" => { "*" => true } })
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::AtlasSearch.search_with_stage("_User", s, master: true)
+    end
+    refute ran?("_User")
+  end
+
+  def test_search_with_stage_refuses_internal_sort_key
+    s = stage("text" => { "query" => "x", "path" => "title" })
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::AtlasSearch.search_with_stage("Open", s, session_token: @token,
+                                                      sort: { "_hashed_password" => 1 })
+    end
+    refute ran?("Open")
+  end
+
+  def test_search_with_stage_refuses_all_fields_path_on_user_for_scoped_caller
+    seed_clp("_User", { "find" => { "*" => true } })
+    s = stage("wildcard" => { "path" => { "wildcard" => "*" }, "query" => "a*" })
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::AtlasSearch.search_with_stage("_User", s, session_token: @token)
+    end
+    refute ran?("_User")
+  end
+
+  def test_autocomplete_on_internal_field_is_refused
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::AtlasSearch.autocomplete("Open", "ab", field: "_email_verify_token", master: true)
+    end
+    refute ran?("Open")
+  end
+
+  def test_faceted_search_on_internal_field_is_refused_for_master
+    facets = { tokens: { type: :string, path: :_perishable_token } }
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::AtlasSearch.faceted_search("Open", nil, facets, master: true)
+    end
+    refute ran?("Open")
+  end
+
+  def test_search_fields_naming_internal_column_are_refused
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::AtlasSearch.search("Open", "x", fields: ["_hashed_password"], session_token: @token)
+    end
+    refute ran?("Open")
+  end
+
+  def test_master_glob_reaching_internal_column_is_refused
+    seed_clp("_User", { "find" => { "*" => true } })
+    %w[*token ?hashed* *password*].each do |glob|
+      s = stage("wildcard" => { "path" => { "wildcard" => glob }, "query" => "a*",
+                                "allowAnalyzedField" => true })
+      assert_raises(Parse::CLPScope::Denied, glob) do
+        Parse::AtlasSearch.search_with_stage("_User", s, master: true)
+      end
+    end
+    refute ran?("_User")
+  end
+
+  def test_master_query_string_naming_internal_column_is_refused
+    seed_clp("_User", { "find" => { "*" => true } })
+    s = stage("queryString" => { "defaultPath" => "username", "query" => "_perishable_token:a*" })
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::AtlasSearch.search_with_stage("_User", s, master: true)
+    end
+    refute ran?("_User")
+  end
+
+  def test_all_fields_path_still_allowed_where_not_credential_collection
+    s = stage("text" => { "query" => "x", "path" => { "wildcard" => "*" } })
+    Parse::AtlasSearch.search_with_stage("Open", s, session_token: @token)
+    assert ran?("Open")
+  end
+
+  def test_master_all_fields_search_on_user_still_runs
+    seed_clp("_User", { "find" => { "*" => true } })
+    s = stage("text" => { "query" => "x", "path" => { "wildcard" => "*" } })
+    Parse::AtlasSearch.search_with_stage("_User", s, master: true)
+    assert ran?("_User")
+  end
+
+  def test_native_hybrid_lexical_field_naming_internal_column_is_refused
+    seed_clp("_User", { "find" => { "*" => true } })
+    lex = { query: "x", fields: ["_perishable_token"], index: "default" }
+    vec = { field: "embedding", query_vector: [0.1, 0.2], index: "v" }
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::VectorSearch::Hybrid.send(:run_native, "_User", lex, vec, 10,
+                                       k_constant: 60, weights: nil,
+                                       scope_opts: { master: true })
+    end
+    refute ran?("_User")
+  end
+
+  def test_wildcard_inside_path_array_on_session_is_refused_for_scoped_caller
+    seed_clp("_Session", { "find" => { "*" => true } })
+    s = stage("text" => { "query" => "x", "path" => ["title", { "wildcard" => "*" }] })
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::AtlasSearch.search_with_stage("_Session", s, session_token: @token)
+    end
+    refute ran?("_Session")
+  end
+
+  def test_escaped_query_string_field_naming_internal_column_is_refused
+    s = stage("queryString" => { "defaultPath" => "title", "query" => "_hashed\\_password:a*" })
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::AtlasSearch.search_with_stage("Open", s, master: true)
+    end
+    refute ran?("Open")
+  end
+
+  def test_auth_data_globs_are_refused
+    seed_clp("_User", { "find" => { "*" => true } })
+    ["_auth_data_f*", "*data_facebook*"].each do |glob|
+      s = stage("wildcard" => { "path" => { "wildcard" => glob }, "query" => "a*" })
+      assert_raises(Parse::CLPScope::Denied, glob) do
+        Parse::AtlasSearch.search_with_stage("_User", s, master: true)
+      end
+    end
+    q = stage("queryString" => { "defaultPath" => "username", "query" => "_auth_data_facebook.id:1*" })
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::AtlasSearch.search_with_stage("_User", q, master: true)
+    end
+    refute ran?("_User")
+  end
+
+  def test_globs_matching_only_rest_names_are_allowed_outside_credential_classes
+    %w[s* *_at *count].each do |glob|
+      s = stage("wildcard" => { "path" => { "wildcard" => glob }, "query" => "a*" })
+      Parse::AtlasSearch.search_with_stage("Open", s, session_token: @token)
+    end
+    assert ran?("Open")
+  end
 end

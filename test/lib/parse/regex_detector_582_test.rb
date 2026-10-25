@@ -285,4 +285,59 @@ class RegexDetector582Test < Minitest::Test
     end
     assert_nil coll.find_max_time_ms
   end
+
+  # The validator decides everything from its own parse and never compiles
+  # caller text with Ruby's Regexp (Onigmo). Compiling attacker patterns
+  # exposes the regexp-compiler memory-safety bugs fixed in Ruby 3.3.13,
+  # 3.4.12, and 4.0.9; `\Q...\E` in particular reaches Onigmo as live
+  # syntax because Onigmo does not support it.
+  ONIGMO_PROBES = [
+    "(-[a-z]+)*", "(\\.[\\w-]+)+", "([\\w-]+\\.)+", "(-\\Q(a|b\\E+)*", "(-[a-z(?<x>]+)*",
+    "(-\\p{L}+)*", "(-\\x{41}+)*", "[a-z]+-\\Qxy\\E+[0-9]+\\w+.+",
+    "a+b+c+d+e+-f", "(-[[:alpha:]]+)*", "(_\\w+)*", "(-\\d+)*",
+  ].freeze
+
+  def test_validator_never_compiles_caller_text
+    compiled = []
+    hook = Module.new do
+      define_method(:new) do |*args, **kw|
+        if caller_locations(1, 1).first.path.end_with?("query/constraints.rb")
+          compiled << args.first
+        end
+        super(*args, **kw)
+      end
+    end
+    Regexp.singleton_class.prepend(hook)
+    ONIGMO_PROBES.each do |pattern|
+      begin
+        Parse::RegexSecurity.validate!(pattern)
+      rescue StandardError
+        nil
+      end
+      Parse::RegexSecurity.safe?(pattern) if Parse::RegexSecurity.respond_to?(:safe?)
+    end
+    assert_empty compiled, "RegexSecurity compiled caller text with Regexp.new"
+  ensure
+    hook&.send(:remove_method, :new) if hook
+  end
+
+  def test_separator_checks_without_compiling
+    %w[(-[a-z]+)* (\.[\w-]+)+ ([\w-]+\.)+ (-\d+)* (-[A-Z]+)*].each do |pattern|
+      assert Parse::RegexSecurity.safe?(pattern), pattern
+    end
+    %w[(_\w+)* (-[\w-]+)* (a[a-z]+)* (-[^a]+)*].each do |pattern|
+      refute Parse::RegexSecurity.safe?(pattern), pattern
+    end
+  end
+
+  # Each class member is checked on its own; a matcher that only remembered
+  # the last member accepted these ReDoS patterns and refused these safe ones.
+  def test_class_membership_uses_every_member
+    ["^([.a]+\\.)+$", "[a\\-z]+-[a\\-z]+-[a\\-z]+-[a\\-z]+-[a\\-z]+"].each do |pattern|
+      refute Parse::RegexSecurity.safe?(pattern), pattern
+    end
+    ["^([^,a]+,)+$", "[^]a]+\\][^]a]+\\][^]a]+\\][^]a]+\\]"].each do |pattern|
+      assert Parse::RegexSecurity.safe?(pattern), pattern
+    end
+  end
 end

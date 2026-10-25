@@ -86,10 +86,15 @@ module Parse
     # execute server-side JavaScript (`$where`, `$function`,
     # `$accumulator`) or mutate the database (`$out`, `$merge`) or the
     # server itself (`$collMod`, `$createIndex`, `$dropIndex`,
-    # `$planCacheSetFilter`, `$planCacheClear`). None of them are needed
-    # for read queries.
+    # `$planCacheSetFilter`, `$planCacheClear`). `$jsonSchema` is refused
+    # because its `properties` name fields inside a value, out of reach of
+    # the key-based protectedFields checks, and its `pattern` runs a regex
+    # that skips {Parse::RegexSecurity} and the regex time limit; a
+    # `{ $jsonSchema: { properties: { email: { pattern: "^a" } } } }` match
+    # reads a protected field one character at a time. None of them are
+    # needed for read queries.
     DENIED_OPERATORS = %w[
-      $where $function $accumulator
+      $where $function $accumulator $jsonSchema
       $out $merge
       $collMod $createIndex $dropIndex
       $planCacheSetFilter $planCacheClear
@@ -441,18 +446,71 @@ module Parse
 
       require_relative "atlas_search/protected_paths" unless defined?(Parse::AtlasSearch::ProtectedPaths)
 
-      protected_set = Parse::CLPScope.protected_fields_for(collection_name, perms)
+      # Read the schema the CLP gate reads: the resolution's client, not the
+      # default one, so a multi-app setup scans the right application's
+      # protectedFields. `strict:` fails closed when the schema is
+      # unresolvable; an empty set would let a `$match` on a protected
+      # field through as a value oracle.
+      client = schema_client_for(resolution)
+      protected_set = Parse::CLPScope.protected_fields_for(collection_name, perms, client: client, strict: true)
+      # A joined class whose schema is unresolvable is refused after the
+      # walk, so a denial that names a protected field of the queried class
+      # is reported first.
+      unresolved = nil
       sets = Hash.new do |memo, klass|
-        memo[klass] = Parse::CLPScope.protected_fields_for(klass, perms)
+        memo[klass] = begin
+            Parse::CLPScope.protected_fields_for(klass, perms, client: client, strict: true)
+          rescue Parse::CLPScope::Denied => e
+            unresolved ||= e
+            Set.new
+          end
       end
       sets[collection_name.to_s] = protected_set || Set.new
 
       pipeline.each_with_index do |stage, idx|
+        refuse_internal_search_paths!(stage, collection_name.to_s, resolution)
         walk_stage_refs!(stage, collection_name.to_s, sets, "pipeline[#{idx}]")
         refuse_protected_stage_keys!(stage, collection_name.to_s, sets, "pipeline[#{idx}]")
       end
+      raise unresolved if unresolved
       nil
     end
+
+    # The client whose schema decides CLP for a resolution, matching
+    # {Parse::MongoDB.clp_client_for}: the resolution's client when it holds
+    # a master key (it can read `/schemas`), otherwise nil (the default).
+    #
+    # @!visibility private
+    def schema_client_for(resolution)
+      return nil unless defined?(Parse::ACLScope) && Parse::ACLScope.respond_to?(:client_of)
+      c = Parse::ACLScope.client_of(resolution)
+      return nil if c.nil?
+      return nil unless c.respond_to?(:master_key) && !c.master_key.to_s.empty?
+      c
+    end
+
+    private_class_method :schema_client_for
+
+    # Refuse a top-level `$search` / `$searchMeta` stage whose paths name a
+    # Parse Server internal column, or (on `_User` / `_Session`, for a
+    # non-master scope) reach every field through a wildcard or queryString.
+    # {walk_for_denied!} refuses internal names for every caller; this adds
+    # the collection-aware wildcard rule.
+    #
+    # @!visibility private
+    def refuse_internal_search_paths!(stage, collection_name, resolution)
+      return unless stage.is_a?(Hash)
+      stage.each do |op, body|
+        next unless %w[$search $searchMeta].include?(op.to_s)
+        Parse::AtlasSearch::ProtectedPaths.assert_no_internal_paths!(
+          stage: body, collection_name: collection_name, resolution: resolution,
+          method_name: "Parse::MongoDB.aggregate", what: "#{op} path",
+        )
+      end
+      nil
+    end
+
+    private_class_method :refuse_internal_search_paths!
 
     # Whether no stage of `pipeline` can change a row's identity
     # (`_id` / `objectId`).
@@ -630,6 +688,10 @@ module Parse
     #   sub-pipeline (the joined class, with ITS protected set), and the
     #   same for `$unionWith` and `$graphLookup`, so an `$inQuery` style
     #   join cannot probe the joined class's protected fields either.
+    # * `$setWindowFields`, `$densify`, and `$fill` partition, sort, and
+    #   output fields (see {refuse_protected_window_keys!});
+    # * `$bucket` / `$bucketAuto` `groupBy` and `$sortByCount` references;
+    # * `$search` / `$searchMeta` paths, sort keys, and queryString texts.
     #
     # @!visibility private
     def refuse_protected_stage_keys!(stage, class_name, sets, path)
@@ -665,12 +727,97 @@ module Parse
           end
         when "$lookup", "$graphLookup", "$unionWith"
           refuse_protected_join_keys!(op.to_s, body, class_name, sets, path)
+        when "$setWindowFields", "$densify", "$fill"
+          refuse_protected_window_keys!(op.to_s, body, class_name, own, path)
+        when "$bucket", "$bucketAuto"
+          next unless body.is_a?(Hash)
+          group_by = body["groupBy"] || body[:groupBy]
+          paths.each_expr_reference(group_by) do |ref|
+            raise_protected_key!(class_name, ref, "#{path}.#{op}.groupBy") if paths.touches?(ref, own)
+          end
+        when "$sortByCount"
+          paths.each_expr_reference(body) do |ref|
+            raise_protected_key!(class_name, ref, "#{path}.$sortByCount") if paths.touches?(ref, own)
+          end
+        when "$search", "$searchMeta"
+          next if own.nil? || own.empty?
+          paths.each_search_reference(body) do |ref|
+            if ref != paths::ALL_FIELDS && (ref.is_a?(String) || ref.is_a?(Symbol))
+              raise_protected_key!(class_name, ref, "#{path}.#{op}") if paths.touches?(ref, own)
+            elsif ref == paths::ALL_FIELDS || paths.touches?(ref, own)
+              # A wildcard path, an Array or path object naming a protected
+              # field, or a queryString text (which can name any field).
+              raise Parse::CLPScope::Denied.new(
+                class_name, :find,
+                "This user is not allowed to query protected fields on class #{class_name}: " \
+                "#{path}.#{op} uses a path that reaches every field or a protected one " \
+                "(#{ref == paths::ALL_FIELDS ? "queryString or wildcard" : ref.inspect}). " \
+                "Name the fields to search explicitly.",
+              )
+            end
+          end
         end
       end
       nil
     end
 
     private_class_method :refuse_protected_stage_keys!
+
+    # Refuse a `$setWindowFields`, `$densify`, or `$fill` stage that
+    # partitions, sorts, or fills on a protected field. Each decides row
+    # order or the values written into neighbouring rows from the field it
+    # names, so the output reveals the field even after the strip:
+    #
+    # * `$setWindowFields`: `partitionBy` expression references, `sortBy`
+    #   keys, and field references inside each `output` window (including
+    #   `window.documents` / `window.range` bounds);
+    # * `$densify`: `field` and `partitionByFields` (bare field names);
+    # * `$fill`: `sortBy` keys, `partitionBy` expression references,
+    #   `partitionByFields`, and `output` keys (the fields being filled).
+    #
+    # @!visibility private
+    def refuse_protected_window_keys!(op, body, class_name, own, path)
+      return unless body.is_a?(Hash)
+      return if own.nil? || own.empty?
+      paths = Parse::AtlasSearch::ProtectedPaths
+      fetch = ->(key) { body.key?(key) ? body[key] : body[key.to_sym] }
+
+      sort_by = fetch.call("sortBy")
+      if sort_by.is_a?(Hash)
+        sort_by.each_key do |key|
+          raise_protected_key!(class_name, key, "#{path}.#{op}.sortBy") if paths.touches?(key.to_s, own)
+        end
+      end
+
+      paths.each_expr_reference(fetch.call("partitionBy")) do |ref|
+        raise_protected_key!(class_name, ref, "#{path}.#{op}.partitionBy") if paths.touches?(ref, own)
+      end
+
+      Array(fetch.call("partitionByFields")).each do |name|
+        next unless name.is_a?(String) || name.is_a?(Symbol)
+        raise_protected_key!(class_name, name, "#{path}.#{op}.partitionByFields") if paths.touches?(name.to_s, own)
+      end
+
+      if op == "$densify"
+        field = fetch.call("field")
+        raise_protected_key!(class_name, field, "#{path}.$densify.field") if
+          (field.is_a?(String) || field.is_a?(Symbol)) && paths.touches?(field.to_s, own)
+      end
+
+      output = fetch.call("output")
+      return unless output.is_a?(Hash)
+      output.each do |name, spec|
+        if op == "$fill" && paths.touches?(name.to_s, own)
+          raise_protected_key!(class_name, name, "#{path}.$fill.output")
+        end
+        paths.each_expr_reference(spec) do |ref|
+          raise_protected_key!(class_name, ref, "#{path}.#{op}.output.#{name}") if paths.touches?(ref, own)
+        end
+      end
+      nil
+    end
+
+    private_class_method :refuse_protected_window_keys!
 
     # @!visibility private
     def refuse_protected_join_keys!(op, body, class_name, sets, path)
@@ -983,6 +1130,17 @@ module Parse
               )
             end
           end
+          # Stages that name fields by BARE string value rather than by key
+          # or `$<field>` reference (`$densify.field`, `$fill`
+          # `partitionByFields`, `$search` paths, join fields). The key and
+          # reference screens above and below do not see these, so they are
+          # held to the same credential / internal rule here.
+          if BARE_FIELD_NAME_STAGES.include?(key_str)
+            refuse_internal_bare_field_names!(
+              key_str, value, depth: depth, stage_idx: stage_idx,
+              allow_internal_fields: allow_internal_fields,
+            )
+          end
           # Caller-supplied regex patterns. Catches the two shapes Mongo
           # accepts: the find-form `{ field: { $regex: "..." } }` (key ==
           # "$regex", value a String or a Regexp) and the aggregation-form
@@ -1078,6 +1236,85 @@ module Parse
     end
 
     private_class_method :walk_for_denied!
+
+    # Stages whose arguments name a field by bare string value.
+    # @!visibility private
+    BARE_FIELD_NAME_STAGES = %w[
+      $densify $fill $setWindowFields $search $searchMeta
+      $geoNear $lookup $graphLookup
+    ].freeze
+
+    # Refuse a bare field name in a stage argument that names an internal
+    # Parse Server column. Credential columns are refused for every caller;
+    # `_rperm` / `_wperm` / `_tombstone` only when `allow_internal_fields`
+    # is false, matching the `$match` key rule in {walk_for_denied!}.
+    # @!visibility private
+    def refuse_internal_bare_field_names!(op, body, depth:, stage_idx:, allow_internal_fields:)
+      return unless body.is_a?(Hash)
+      fetch = ->(key) { body.key?(key) ? body[key] : body[key.to_sym] }
+      names = case op
+        when "$densify" then [fetch.call("field"), *Array(fetch.call("partitionByFields"))]
+        when "$fill", "$setWindowFields" then Array(fetch.call("partitionByFields"))
+        when "$geoNear" then [fetch.call("key"), fetch.call("distanceField"), fetch.call("includeLocs")]
+        when "$lookup" then [fetch.call("localField"), fetch.call("foreignField")]
+        when "$graphLookup"
+          [fetch.call("connectFromField"), fetch.call("connectToField"), fetch.call("depthField")]
+        when "$search", "$searchMeta"
+          require_relative "atlas_search/protected_paths" unless defined?(Parse::AtlasSearch::ProtectedPaths)
+          paths = Parse::AtlasSearch::ProtectedPaths
+          refs = []
+          paths.each_search_reference(body) { |ref| refs << ref }
+          paths.each_query_string_field(body) do |field|
+            refs << (field.match?(/[*?]/) ? { "wildcard" => field } : field)
+          end
+          refs
+        else []
+        end
+      names.each do |name|
+        next unless internal_field_name?(name, allow_internal_fields)
+        raise Error.new(
+          "SECURITY: #{op} at nesting depth #{depth}" \
+          "#{stage_idx ? " inside stage #{stage_idx}" : ""} names internal Parse Server " \
+          "field #{name.inspect}. This column (password hash, session token, auth data, " \
+          "or ACL pointer) must not appear in a user-influenced pipeline; partitioning, " \
+          "sorting, or matching on it reveals its value.",
+          stage: stage_idx,
+          operator: op,
+          reason: :denied_internal_field,
+        )
+      end
+      nil
+    end
+
+    private_class_method :refuse_internal_bare_field_names!
+
+    # Whether a bare field name (a String, an Array of names, or an Atlas
+    # `{ value: }` / `{ wildcard: }` path object) names an internal column.
+    # @!visibility private
+    def internal_field_name?(name, allow_internal_fields)
+      case name
+      when String, Symbol
+        head = name.to_s.split(".").first.to_s
+        return false if head.empty?
+        credential = CREDENTIAL_FIELDS_DENYLIST.include?(head) ||
+                     INTERNAL_FIELDS_PREFIX_DENYLIST.any? { |prefix| head.start_with?(prefix) }
+        credential || (!allow_internal_fields && INTERNAL_FIELDS_DENYLIST.include?(head))
+      when Array
+        name.any? { |n| internal_field_name?(n, allow_internal_fields) }
+      when Hash
+        value = name.key?("value") ? name["value"] : name[:value]
+        glob = name.key?("wildcard") ? name["wildcard"] : name[:wildcard]
+        return true if !value.nil? && internal_field_name?(value, allow_internal_fields)
+        require_relative "atlas_search/protected_paths" unless defined?(Parse::AtlasSearch::ProtectedPaths)
+        # The collection is not known here, so the credential columns count
+        # (the conservative answer).
+        Parse::AtlasSearch::ProtectedPaths.internal_glob?(glob, include_acl: !allow_internal_fields)
+      else
+        false
+      end
+    end
+
+    private_class_method :internal_field_name?
 
     # @!visibility private
     # Run a caller-supplied regex pattern (String, Regexp, or

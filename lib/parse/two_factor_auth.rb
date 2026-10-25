@@ -52,6 +52,20 @@ module Parse
   # @example Login with MFA
   #   user = Parse::User.login_with_mfa("username", "password", "123456")
   #
+  # == Enforcement Boundary
+  #
+  # {MFA.verify}, {MFA.verify_timestamp} and the SDK's self-disable flow
+  # ({Parse::User#disable_mfa!}) are client-side checks. They are not the
+  # enforcement boundary. Parse Server's MFA adapter enforces MFA at login,
+  # and that is the boundary.
+  #
+  # Disabling MFA is an ordinary user update (`authData: { mfa: nil }`).
+  # Anyone holding the user's session token can send that REST update
+  # directly without going through the SDK. Protect it server-side, for
+  # example with a `beforeSave` trigger on `_User` or a Cloud Code function
+  # that refuses to clear `authData.mfa` unless a fresh code was verified on
+  # the server for that request.
+  #
   # @see https://github.com/parse-community/parse-server/blob/master/src/Adapters/Auth/mfa.js
   #
   module MFA
@@ -181,21 +195,72 @@ module Parse
 
       # Verify a TOTP code locally (for testing/validation before sending to server).
       #
+      # A code stays valid for its whole time step plus one step of drift on
+      # each side, so without `after:` the same code verifies repeatedly for
+      # roughly 90 seconds. That is fine for checking a code before sending it
+      # to Parse Server, which tracks reuse itself. An application that uses
+      # this method as its own second factor must store the timestamp of the
+      # last accepted code per user (see {verify_timestamp}) and pass it back
+      # as `after:` on the next attempt, or a captured code can be replayed.
+      #
+      # Reading the stored timestamp, calling this method, and then writing
+      # the new timestamp is not enough on its own: two concurrent requests
+      # with the same code can both read the old value and both succeed.
+      # Update the stored value atomically, as a compare-and-set keyed on the
+      # previous timestamp (a conditional update that only matches when the
+      # stored value still equals the one passed as `after:`), or record each
+      # accepted step under a database unique constraint on user and time
+      # step. Treat the code as accepted only when that write succeeds.
+      #
+      # This method is a client-side check. Parse Server's MFA adapter, which
+      # enforces MFA at login, is the enforcement boundary (see {Parse::MFA}).
+      #
       # @param secret [String] Base32-encoded secret
       # @param code [String] The 6-digit code to verify
+      # @param after [Integer, Time, nil] reject codes from this time step and
+      #   earlier. Pass the value returned by {verify_timestamp} for the last
+      #   accepted code. nil (the default) applies no replay check.
       # @return [Boolean] True if valid
       #
       # @example
       #   if Parse::MFA.verify(secret, "123456")
       #     puts "Code is valid!"
       #   end
-      def verify(secret, code)
-        return false if secret.blank? || code.blank?
+      #
+      # @example Rejecting reuse
+      #   ok = Parse::MFA.verify(secret, code, after: user_record.mfa_last_used_at)
+      def verify(secret, code, after: nil)
+        !verify_timestamp(secret, code, after: after).nil?
+      end
+
+      # Verify a TOTP code and return the start of the matching time step.
+      #
+      # Store the returned value after a successful login and pass it as
+      # `after:` on the next call to {verify} or {verify_timestamp}; codes from
+      # that step or earlier are then refused. The store must be atomic
+      # (compare-and-set on the previous value, or a unique constraint on user
+      # and time step) so concurrent requests with the same code cannot both
+      # succeed. See {verify}.
+      #
+      # @param secret [String] Base32-encoded secret
+      # @param code [String] The 6-digit code to verify
+      # @param after [Integer, Time, nil] reject codes from this time step and earlier
+      # @return [Integer, nil] Unix timestamp of the matching step, or nil when
+      #   the code is invalid or was already used
+      #
+      # @example
+      #   ts = Parse::MFA.verify_timestamp(secret, code, after: last_used_at)
+      #   if ts
+      #     last_used_at = ts # persist per user
+      #   end
+      def verify_timestamp(secret, code, after: nil)
+        return nil if secret.blank? || code.blank?
 
         ensure_rotp!
+        after = normalize_after(after)
         drift_seconds = config[:period]
-        totp_instance = totp(secret)
-        totp_instance.verify(code.to_s, drift_behind: drift_seconds, drift_ahead: drift_seconds).present?
+        totp(secret).verify(code.to_s, drift_behind: drift_seconds,
+                                       drift_ahead: drift_seconds, after: after)
       end
 
       # Get the current TOTP code (for testing/debugging).
@@ -308,6 +373,18 @@ module Parse
       end
 
       private
+
+      # ROTP compares `after` by time step; accept Integer, Time or DateTime.
+      def normalize_after(after)
+        case after
+        when nil then nil
+        when Integer then after
+        when Time then after.to_i
+        when DateTime, Date then after.to_time.to_i
+        else
+          raise ArgumentError, "after: must be an Integer timestamp or Time, got #{after.class}"
+        end
+      end
 
       def ensure_rotp!
         raise DependencyError.new("rotp") unless rotp_available?

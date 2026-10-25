@@ -1233,6 +1233,29 @@ class SecurityHardeningTest < Minitest::Test
     assert_equal "members", out["$relatedTo"]["key"]
   end
 
+  # GHSA-58m4-cqvw-4vgh: an operator as the owning object's objectId makes
+  # Parse Server below 9.10.5 match relations of every owning object.
+  def test_constraint_translator_relatedTo_refuses_non_string_object_id
+    [{ "$exists" => true }, { "$ne" => "x" }, ["a"], 42, "", "a b", "x" * 33].each do |oid|
+      constraints = {
+        "$relatedTo" => {
+          "object" => { "__type" => "Pointer", "className" => "AccessibleClass", "objectId" => oid },
+          "key" => "members",
+        },
+      }
+      err = assert_raises(Parse::Agent::ConstraintTranslator::ConstraintSecurityError, oid.inspect) do
+        Parse::Agent::ConstraintTranslator.translate(constraints)
+      end
+      assert_equal :invalid_object_id, err.reason
+    end
+  end
+
+  def test_constraint_translator_relatedTo_accepts_storage_form_object
+    constraints = { "$relatedTo" => { "object" => "AccessibleClass$abc123", "key" => "members" } }
+    out = Parse::Agent::ConstraintTranslator.translate(constraints)
+    assert out.key?("$relatedTo")
+  end
+
   # ─── $relatedTo fails closed on the mongo-direct path ──────────────────────
   #
   # The mongo-direct translator does not resolve Parse Relations (the
@@ -2020,6 +2043,32 @@ class SecurityHardeningTest < Minitest::Test
     assert_kind_of Hash, out
   end
 
+  def test_constraint_translator_refuses_operator_inside_parse_type_hash
+    [
+      { "$or" => [{ "__type" => "Pointer", "$relatedTo" => { "object" => "A$b", "key" => "k" } }] },
+      { "f" => { "__type" => "Date", "$where" => "1" } },
+    ].each do |constraints|
+      err = assert_raises(Parse::Agent::ConstraintTranslator::ConstraintSecurityError) do
+        Parse::Agent::ConstraintTranslator.translate(constraints)
+      end
+      assert_equal :operator_in_parse_type, err.reason
+    end
+  end
+
+  def test_constraint_translator_relatedTo_refuses_duplicate_and_bad_key
+    good = { "__type" => "Pointer", "className" => "AccessibleClass", "objectId" => "abc123" }
+    dup = { "$relatedTo" => { "object" => good, :object => good, "key" => "members" } }
+    err = assert_raises(Parse::Agent::ConstraintTranslator::ConstraintSecurityError) do
+      Parse::Agent::ConstraintTranslator.translate(dup)
+    end
+    assert_equal :duplicate_key, err.reason
+    bad_key = { "$relatedTo" => { "object" => good, "key" => { "$ne" => "x" } } }
+    err = assert_raises(Parse::Agent::ConstraintTranslator::ConstraintSecurityError) do
+      Parse::Agent::ConstraintTranslator.translate(bad_key)
+    end
+    assert_equal :invalid_key, err.reason
+  end
+
   private
 
   def silenced_warn
@@ -2029,4 +2078,5 @@ class SecurityHardeningTest < Minitest::Test
   ensure
     $VERBOSE = original
   end
+
 end

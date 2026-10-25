@@ -488,6 +488,7 @@ module Parse
           pointer_fields = resolve_pointer_fields!(collection_name, resolution)
           protected_fields = Parse::CLPScope.protected_fields_for(
             collection_name, resolution.permission_strings,
+            client: Parse::MongoDB.clp_client_for(resolution), strict: true,
           )
           # Unconditional: `Parse::AtlasSearch` may already be partially
           # defined by a submodule (session, protected_paths) without the
@@ -495,6 +496,13 @@ module Parse
           require_relative "../atlas_search"
           Parse::AtlasSearch.send(:assert_search_fields_allowed!,
                                   Array(lex[:fields]).map(&:to_s), protected_fields, resolution)
+          # The lexical branch is built here, not by AtlasSearch.search, so
+          # apply its internal-field refusal to the same stage.
+          Parse::AtlasSearch::ProtectedPaths.assert_no_internal_paths!(
+            stage: lexical_search_stage(lex, oversample).first,
+            collection_name: collection_name, resolution: resolution,
+            method_name: "Parse::VectorSearch::Hybrid.search", what: "$search path",
+          )
           Parse::VectorSearch.validate_query_vector!(vec[:query_vector])
           Parse::PipelineSecurity.validate_filter!(vec[:vector_filter]) if vec[:vector_filter]
           Parse::PipelineSecurity.validate_filter!(vec[:filter]) if vec[:filter]
@@ -761,6 +769,7 @@ module Parse
           # user, and role grants first; then pointerFields / readUserFields).
           # Raises Parse::CLPScope::Denied when the scope cannot find at all.
           Parse::CLPScope.row_constraint_for!(collection_name, :find, resolution,
+                                              client: Parse::MongoDB.clp_client_for(resolution),
                                               label: "hybrid-search")
           nil
         end
@@ -772,6 +781,7 @@ module Parse
           # permits? / pointer_fields_for pair missed readUserFields entirely
           # and over-restricted a public grant that also listed pointerFields.
           Parse::CLPScope.row_constraint_for!(collection_name, :find, resolution,
+                                              client: Parse::MongoDB.clp_client_for(resolution),
                                               label: "hybrid-search")
         end
 
@@ -822,6 +832,17 @@ module Parse
         def symbolize(hash)
           return {} if hash.nil?
           hash.each_with_object({}) { |(k, v), out| out[k.to_sym] = v }
+        end
+      end
+
+      # One Parse::CLPScope schema snapshot per hybrid search, shared by the
+      # native path's CLP gate and protectedFields lookups and by the
+      # client path's lexical and vector branches.
+      class << self
+        alias_method :search_without_schema_snapshot, :search
+        # @!visibility private
+        def search(*args, **kwargs, &block)
+          Parse::CLPScope.with_snapshot { search_without_schema_snapshot(*args, **kwargs, &block) }
         end
       end
     end

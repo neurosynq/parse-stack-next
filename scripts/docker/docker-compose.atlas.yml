@@ -28,7 +28,7 @@ services:
     # Pinned patch tag rather than the floating :8.0 — mongodb-atlas-local has
     # known per-patch start-up flakiness (see testcontainers/testcontainers-java#10267
     # and MongoDB community forum 321179). Bump deliberately, not by drift.
-    image: mongodb/mongodb-atlas-local:8.0.10
+    image: mongodb/mongodb-atlas-local:8.0.34
     container_name: ${PSNEXT_PREFIX:-psnext-it}-atlas
     # `hostname` is called out by the official compose example — the embedded
     # single-node replica set advertises this name, and a stable value makes
@@ -62,7 +62,7 @@ services:
     # race the search-index subsystem).
 
   atlas-init:
-    image: mongodb/mongodb-atlas-local:8.0.10
+    image: mongodb/mongodb-atlas-local:8.0.34
     container_name: ${PSNEXT_PREFIX:-psnext-it}-atlas-init
     depends_on:
       atlas-local:

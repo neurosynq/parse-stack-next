@@ -288,12 +288,29 @@ class EmbeddingsCacheTest < Minitest::Test
     assert_equal [0.5, -1.5, 2.0], store.get("k"), "JSON value must round-trip"
   end
 
-  def test_moneta_store_warns_on_marshal_serializing_store
+  def test_moneta_store_refuses_marshal_serializing_external_store
     require "moneta"
     # Moneta's default value serializer is Marshal (class name "...MarshalValue").
-    marshaling = Moneta.new(:Memory)
-    assert_output(nil, /SECURITY.*Marshal|value_serializer: nil/m) do
-      CACHE::MonetaStore.new(marshaling)
+    # The Redis adapter connects lazily, so no server is needed here.
+    marshaling = Moneta.new(:Redis, url: "redis://127.0.0.1:1/0")
+    err = assert_raises(ArgumentError) { CACHE::MonetaStore.new(marshaling) }
+    assert_match(/Marshal/, err.message)
+    assert_match(/value_serializer: nil/, err.message)
+  end
+
+  def test_moneta_store_marshal_external_store_allowed_with_opt_in_warns
+    require "moneta"
+    marshaling = Moneta.new(:Redis, url: "redis://127.0.0.1:1/0")
+    assert_output(nil, /SECURITY.*allow_marshal/m) do
+      CACHE::MonetaStore.new(marshaling, allow_marshal: true)
+    end
+  end
+
+  def test_moneta_store_accepts_in_process_marshal_store_and_json_redis
+    require "moneta"
+    assert_output(nil, "") { CACHE::MonetaStore.new(Moneta.new(:Memory)) }
+    assert_output(nil, "") do
+      CACHE::MonetaStore.new(Moneta.new(:Redis, url: "redis://127.0.0.1:1/0", value_serializer: nil))
     end
   end
 

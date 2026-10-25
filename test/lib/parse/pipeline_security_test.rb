@@ -321,6 +321,23 @@ class PipelineSecurityTest < Minitest::Test
     end
   end
 
+  # `$jsonSchema` names fields inside its value (out of reach of the
+  # key-based protectedFields checks) and its `pattern` skips RegexSecurity.
+  def test_json_schema_is_denied_at_any_depth
+    probe = { "$jsonSchema" => { "properties" => { "email" => { "pattern" => "^a" } } } }
+    assert_raises(Parse::PipelineSecurity::Error) do
+      Parse::PipelineSecurity.validate_filter!(probe)
+    end
+    assert_raises(Parse::PipelineSecurity::Error) do
+      Parse::PipelineSecurity.validate_pipeline!([{ "$match" => { "$or" => [probe] } }, { "$count" => "n" }])
+    end
+    Parse::MongoDB.stub(:collection, ->(_name, **_o) { raise "should not reach collection" }) do
+      assert_raises(Parse::MongoDB::DeniedOperator) do
+        Parse::MongoDB.aggregate("_User", [{ "$match" => probe }, { "$count" => "n" }])
+      end
+    end
+  end
+
   def test_mongodb_aggregate_raises_denied_operator_on_function_in_pipeline
     Parse::MongoDB.stub(:collection, ->(_name, **_o) { raise "should not reach collection" }) do
       pipeline = [{

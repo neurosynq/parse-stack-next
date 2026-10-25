@@ -48,6 +48,8 @@ module Parse
         # @example
         #   user = Parse::User.login_with_mfa("john", "password123", "123456")
         def login_with_mfa(username, password, mfa_token)
+          # Validate only: the login body sends the username exactly as given.
+          mfa_username!(username)
           raise MFA::RequiredError, "MFA token is required" if mfa_token.blank?
 
           # `client.login_with_mfa` always goes out without the master key
@@ -74,18 +76,35 @@ module Parse
         # This queries the user's authData.mfa status using the afterFind hook
         # which returns { status: "enabled" } or { status: "disabled" }.
         #
-        # @param username [String] The username to check
+        # @param username [String] The username to check. Must be a String.
+        #   A Hash here would reach the query as an operator (for example
+        #   `{"$regex" => "^a"}`) and probe usernames, so anything else is refused.
         # @return [Boolean] True if MFA is required
+        # @raise [ArgumentError] if username is not a String or is blank
         #
         # @example
         #   if Parse::User.mfa_required?("john")
         #     # Show MFA input field
         #   end
         def mfa_required?(username)
+          username = mfa_username!(username)
           user = where(username: username).first
           return false unless user
 
           user.mfa_enabled?
+        end
+
+        private
+
+        # Coerce an MFA helper's username argument to a non-blank String.
+        # @raise [ArgumentError] on a non-String or blank value.
+        def mfa_username!(username)
+          unless username.is_a?(String)
+            raise ArgumentError, "username must be a String, got #{username.class}"
+          end
+          stripped = username.strip
+          raise ArgumentError, "username must not be blank" if stripped.empty?
+          stripped
         end
       end
 
@@ -271,6 +290,15 @@ module Parse
       # This requires a valid current MFA token (TOTP or recovery code)
       # to verify the user's identity before disabling MFA.
       #
+      # The code check is performed by this SDK method, not by Parse Server.
+      # The SDK first submits the code to confirm it is accepted, then sends
+      # a separate `authData: { mfa: nil }` update. Parse Server accepts that
+      # second update from any holder of the session token, with or without
+      # the first step, so this method is not an enforcement boundary.
+      # Protect MFA removal server-side, for example with a `beforeSave`
+      # trigger on `_User` or a Cloud Code function that requires a fresh code
+      # verified on the server. See {Parse::MFA} for the enforcement boundary.
+      #
       # @param current_token [String] Current TOTP code or recovery code
       # @return [Boolean] True if disabled successfully
       # @raise [Parse::MFA::VerificationError] If token is invalid
@@ -296,8 +324,9 @@ module Parse
         #      code is the deliberate confirmation gate for turning MFA off.)
         #   2. Disable MFA by unlinking the provider with `{ mfa: nil }`.
         #
-        # This keeps self-disable gated on a valid current code even though the
-        # server offers no dedicated TOTP self-disable endpoint.
+        # Step 1 is a check made by this SDK method only. Parse Server does
+        # not link the two requests, so a session-token holder can send step 2
+        # directly; server-side protection is required (see YARD above).
         verify = client.update_user(id, { authData: { mfa: { old: current_token } } },
                                     session_token: session_token)
         # Classify the two-step response POSITIVELY instead of treating
@@ -352,8 +381,15 @@ module Parse
       # support; when given, the operator must belong to the role (or any
       # of its child roles) or `ForbiddenError` is raised.
       #
-      # @param authorized_by [Parse::User, Parse::Pointer] the operator
-      #   performing the override. Required.
+      # `authorized_by:` must be the authenticated operator, resolved from the
+      # caller's own verified session (for example the current admin user of
+      # the request after authentication). Never build it from an id or
+      # pointer supplied in the request body or parameters; the role check
+      # would then validate whichever user the requester names.
+      #
+      # @param authorized_by [Parse::User, Parse::Pointer] the authenticated
+      #   operator performing the override. Required. Never an id taken
+      #   from the request.
       # @param admin_role [Parse::Role, String, nil] role (or role name)
       #   that `authorized_by` must belong to. Library-enforced. Either
       #   this or `allow_unverified: true` is REQUIRED (fail-closed).

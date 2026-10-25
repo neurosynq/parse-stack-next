@@ -599,7 +599,7 @@ module Parse
           else
             raise ArgumentError,
               "[Parse::LiveQuery] Refusing to derive insecure ws:// URL from " \
-              "http:// server URL (#{server_url.inspect}). The LiveQuery " \
+              "http:// server URL (#{Parse::Client.redact_url_userinfo(server_url).inspect}). The LiveQuery " \
               "connect frame carries the master key and any session token " \
               "in plaintext on this socket. Use an https:// Parse server URL " \
               "(so wss:// is derived) or pass an explicit wss:// `url:` to " \
@@ -785,8 +785,10 @@ module Parse
 
       # Start background thread for reading messages
       def start_reader_thread
+        # Long-lived: started without the caller's ambient identity, so frame
+        # handling and the threads it starts do not inherit a session token.
         @reader_thread = Thread.new do
-          read_loop
+          Parse.without_ambient_identity(keep_restrictions: true) { read_loop }
         end
         @reader_thread.abort_on_exception = false
       end
@@ -962,9 +964,15 @@ module Parse
         subscription = @subscriptions[request_id]
         return unless subscription
 
+        class_name = message.dig("object", "className") || subscription.class_name
+        # Remove `_User` / `_Session` credential fields (sessionToken,
+        # authData) before anything else sees the payload. The payload's own
+        # className is checked as well as the subscription's class.
+        message = Event.scrub_message(message, subscription.class_name)
+
         event = Event.new(
           type: op.to_sym,
-          class_name: message.dig("object", "className") || subscription.class_name,
+          class_name: class_name,
           object_data: message["object"],
           original_data: message["original"],
           request_id: request_id,
@@ -1051,14 +1059,24 @@ module Parse
 
         Logging.info("Scheduling reconnect", delay: delay.round(2))
 
+        # The reconnect thread runs without the caller's ambient identity. A
+        # reconnect scheduled inside Parse.without_master_key on an admin
+        # client therefore latches the master-key withhold here, before the
+        # thread drops the block state, so the reconnect cannot elevate.
+        if admin_connection? && Parse.respond_to?(:master_key_disabled?) && Parse.master_key_disabled?
+          @master_key_withheld = true
+        end
+
         @reconnect_thread = Thread.new do
-          sleep delay
-          @monitor.synchronize do
-            @reconnect_thread = nil
+          Parse.without_ambient_identity do
+            sleep delay
+            @monitor.synchronize do
+              @reconnect_thread = nil
+            end
+            @reconnect_interval = [@reconnect_interval * cfg.reconnect_multiplier,
+                                   cfg.max_reconnect_interval].min
+            connect
           end
-          @reconnect_interval = [@reconnect_interval * cfg.reconnect_multiplier,
-                                 cfg.max_reconnect_interval].min
-          connect
         end
       end
 

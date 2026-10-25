@@ -1777,6 +1777,11 @@ module Parse
           scope: nil,
           result_count: nil,
         }
+        # One schema entry per class for the whole request: the protected-
+        # field scanner, the CLP row gate, the join gate, and the protected-
+        # field strip below all read the same snapshot, so a cache expiry
+        # and refetch between them cannot change the decision.
+        Parse::CLPScope.with_snapshot do
         ActiveSupport::Notifications.instrument("parse.mongodb.aggregate", instrument_payload) do |payload|
           # Resolve auth kwargs into a Parse::ACLScope::Resolution. The
           # call MUTATES the temporary kwargs hash (popping the auth
@@ -1942,6 +1947,7 @@ module Parse
 
           payload[:result_count] = results.size
           results
+        end
         end
       rescue => e
         raise_if_timeout!(e, collection_name, max_time_ms)
@@ -2199,6 +2205,19 @@ module Parse
                 "inside Parse.without_master_key. Use a scoped read (Parse::MongoDB.aggregate " \
                 "with session_token:, or Parse::Query#results_direct), or run the call inside " \
                 "Parse.with_master_key."
+        end
+        if (Parse.current_session_token || Parse.anonymous_session?) &&
+           Fiber[Parse::INNERMOST_AUTH_BLOCK_KEY] != :master
+          # Inside Parse.with_session the caller expects that user's (or
+          # the anonymous) authority. `find` cannot apply it, so refuse
+          # instead of returning every row. A Parse.with_master_key block
+          # entered inside the session block states the master authority
+          # explicitly and is allowed; one wrapped around it is not.
+          raise Parse::ACLScope::ACLRequired,
+                "Parse::MongoDB.find runs unscoped (master authority) and is refused " \
+                "inside Parse.with_session. Use Parse::Query#results_direct, which applies " \
+                "the ambient session, or Parse::MongoDB.aggregate with session_token:, or " \
+                "run the call inside a Parse.with_master_key block nested in the session block."
         end
         max_time_ms = options.delete(:max_time_ms)
         # A regex that is not escaped literal text gets a default time limit.

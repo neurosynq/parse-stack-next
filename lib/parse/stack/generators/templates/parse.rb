@@ -8,5 +8,5 @@ Parse.setup app_id: ENV["PARSE_SERVER_APPLICATION_ID"],
             server_url: "https://localhost:1337/parse"
 # optional
 #    logging: false,
-#      cache: Moneta.new(:File, dir: 'tmp/cache'),
+#      cache: Parse::Cache::Redis.new(url: ENV['REDIS_URL']),
 #    expires: 1 # cache ttl 1 second

@@ -233,8 +233,18 @@ module Parse
 
       # Translate a hash value (could be operators or a pointer/object)
       def translate_hash_value(hash, depth:, agent: nil)
-        # Check if it's a Parse type (Pointer, Date, File, GeoPoint)
-        return hash if parse_type?(hash)
+        # Check if it's a Parse type (Pointer, Date, File, GeoPoint). A Parse
+        # type value carries no operators, so a `__type` hash that also has a
+        # `$` key is refused instead of being passed through unvalidated.
+        if parse_type?(hash)
+          op_key = hash.keys.find { |k| k.to_s.start_with?("$") }
+          return hash if op_key.nil?
+          raise ConstraintSecurityError.new(
+            "SECURITY: a `__type` value cannot also carry the operator #{op_key}.",
+            operator: op_key.to_s,
+            reason: :operator_in_parse_type,
+          )
+        end
 
         # Classify each key INDEPENDENTLY rather than branching on whether
         # *every* key is an operator. A hash that mixes an operator key with a
@@ -366,8 +376,62 @@ module Parse
             reason: :cross_class_denied,
           )
         end
+        # The owning object must be one concrete object. An operator or any
+        # other non-String objectId (`{ "$exists" => true }`) makes Parse
+        # Server below 9.10.5 match relations of every owning object, without
+        # the owning object's ACL (GHSA-58m4-cqvw-4vgh).
+        # A Hash holding both "object" and :object (or "key" and :key) would
+        # let the checks read one entry while the other is sent.
+        %w[object key].each do |slot|
+          next unless val.is_a?(Hash) && val.key?(slot) && val.key?(slot.to_sym)
+          raise ConstraintSecurityError.new(
+            "SECURITY: $relatedTo names `#{slot}` twice (String and Symbol keys).",
+            operator: "$relatedTo",
+            reason: :duplicate_key,
+          )
+        end
+        key = val["key"] || val[:key]
+        unless key.is_a?(String) && RELATED_TO_KEY_RE.match?(key)
+          raise ConstraintSecurityError.new(
+            "SECURITY: $relatedTo requires `key` to be a relation field name.",
+            operator: "$relatedTo",
+            reason: :invalid_key,
+          )
+        end
+        object_id = related_to_object_id(val)
+        unless object_id.is_a?(String) && RELATED_TO_OBJECT_ID_RE.match?(object_id)
+          raise ConstraintSecurityError.new(
+            "SECURITY: $relatedTo requires the owning object's objectId to be a " \
+            "plain objectId string.",
+            operator: "$relatedTo",
+            reason: :invalid_object_id,
+          )
+        end
         assert_embedded_class_accessible!("$relatedTo", owning_class, agent: agent)
         translate_value(val, depth: depth, agent: agent)
+      end
+
+      # objectId shape accepted for a `$relatedTo` owning object (the same
+      # character set the agent tools accept for an object_id argument).
+      RELATED_TO_OBJECT_ID_RE = /\A[A-Za-z0-9_-]{1,32}\z/.freeze
+
+      # Field-name shape accepted for a `$relatedTo` relation key.
+      RELATED_TO_KEY_RE = /\A[A-Za-z][A-Za-z0-9_]{0,127}\z/.freeze
+
+      # The objectId of a `$relatedTo` constraint's owning object, in
+      # whichever of the forms {.related_to_owning_class} accepts. Returns
+      # the raw value (possibly a Hash) so the caller can reject non-Strings.
+      def related_to_object_id(val)
+        return nil unless val.is_a?(Hash)
+        obj = val["object"] || val[:object]
+        return obj.id if obj.respond_to?(:parse_class) && obj.respond_to?(:id)
+        case obj
+        when Hash
+          o = obj.transform_keys(&:to_s)
+          o["objectId"]
+        when String
+          obj.include?("$") ? obj.split("$", 2).last : nil
+        end
       end
 
       # Extract the Parse class name of a `$relatedTo` constraint's owning

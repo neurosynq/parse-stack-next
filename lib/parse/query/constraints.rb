@@ -576,21 +576,114 @@ module Parse
       end
       private :literal_char
 
+      # Shorthand classes the membership check understands, as ASCII sets.
+      # Characters outside ASCII never reach this check: {#literal_char}
+      # only yields ASCII punctuation, letters, and digits.
+      SHORTHAND_CLASSES = {
+        "d" => ->(c) { c.match?(/\A[0-9]\z/) },
+        "w" => ->(c) { c.match?(/\A[A-Za-z0-9_]\z/) },
+        "s" => ->(c) { c.match?(/\A[ \t\r\n\f\v]\z/) },
+      }.freeze
+
       # @!visibility private
       # Whether an atom (ignoring its quantifier) can match `ch` in either
       # case. Anything that cannot be checked counts as a match.
+      #
+      # The pattern text is never compiled with Ruby's Regexp: the caller's
+      # pattern is meant for MongoDB's PCRE engine, and compiling attacker
+      # text with Onigmo exposes the regexp-compiler memory-safety bugs
+      # fixed in Ruby 3.3.13, 3.4.12, and 4.0.9 (GitLab CVE-2026-89078 and
+      # related). Membership is decided from the parsed atom instead: a
+      # literal, a `\<punct>` escape, `\d \w \s` and their negations, or
+      # a character class built from those and ranges.
       def atom_matches?(item, ch)
         atom = item[:atom]
-        return true unless atom == [:char] || atom == [:dot]
-        re = begin
-            Regexp.new(atom == [:dot] ? "." : item[:text].to_s)
-          rescue RegexpError, ArgumentError
-            nil
-          end
-        return true if re.nil?
-        [ch, ch.swapcase, ch.downcase(:fold), ch.upcase].uniq.any? { |c| re.match?(c) }
+        return true if atom == [:dot]
+        return true unless atom == [:char]
+        variants = [ch, ch.swapcase, ch.downcase(:fold), ch.upcase].uniq
+        text = item[:text].to_s
+        if text.start_with?("[")
+          class_matches?(text, variants)
+        else
+          single = single_matcher(text)
+          single.nil? || variants.any? { |c| single.call(c) }
+        end
       end
       private :atom_matches?
+
+      # @!visibility private
+      # A predicate for one non-class atom's text, or nil when it cannot be
+      # checked (the caller then counts it as a match).
+      def single_matcher(text)
+        if text.length == 1 && !"\\.[]()|?*+{}^$".include?(text)
+          ->(c) { c == text }
+        elsif text.length == 2 && text.start_with?("\\")
+          code = text[1]
+          if SHORTHAND_CLASSES.key?(code)
+            SHORTHAND_CLASSES[code]
+          elsif SHORTHAND_CLASSES.key?(code.downcase)
+            ->(c) { !SHORTHAND_CLASSES[code.downcase].call(c) }
+          elsif !code.match?(/[A-Za-z0-9]/)
+            ->(c) { c == code }
+          end
+        end
+      end
+      private :single_matcher
+
+      # @!visibility private
+      # Whether a `[...]` class can match any of `variants`. Members are
+      # literals, `\<punct>` escapes, `\d \w \s` (and negations), and
+      # `a-z` ranges; any other construct (POSIX classes, `\p{...}`, nested
+      # sets) makes the class count as a match.
+      def class_matches?(text, variants)
+        body = text[1...-1].to_s
+        negated = body.start_with?("^")
+        body = body[1..] if negated
+        members = []
+        i = 0
+        while i < body.length
+          c = body[i]
+          if c == "\\"
+            code = body[i + 1]
+            return true if code.nil?
+            if SHORTHAND_CLASSES.key?(code.downcase)
+              members << single_matcher("\\#{code}")
+              i += 2
+              next
+            end
+            return true if code.match?(/[A-Za-z0-9]/)
+            lo = code
+            i += 2
+          elsif c == "["
+            return true
+          else
+            lo = c
+            i += 1
+          end
+          if body[i] == "-" && i + 1 < body.length
+            hi = body[i + 1]
+            return true if hi == "\\" || hi == "["
+            # Members are plain data, not closures: a lambda built inside
+            # this loop would close over the loop's variables and see only
+            # their last values.
+            members << [:range, lo, hi]
+            i += 2
+          else
+            members << [:literal, lo]
+          end
+        end
+        member = lambda do |v|
+          members.any? do |m|
+            case m
+            when Proc then m.call(v)
+            when Array
+              m[0] == :range ? (v >= m[1] && v <= m[2]) : v == m[1]
+            end
+          end
+        end
+        negated ? !variants.all?(&member) : variants.any?(&member)
+      end
+      private :class_matches?
 
       # @!visibility private
       # A repeated group body that cannot split its input more than one way

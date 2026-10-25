@@ -166,6 +166,27 @@ class RegexRouting582Test < Minitest::Test
     assert_match(/without_master_key/, err.message)
   end
 
+  def test_find_is_refused_inside_with_session
+    [ "r:session-token", nil ].each do |token|
+      err = assert_raises(Parse::ACLScope::ACLRequired, token.inspect) do
+        Parse.with_session(token) { Parse::MongoDB.find("RxPost", {}) }
+      end
+      assert_match(/with_session/, err.message)
+    end
+  end
+
+  def test_find_inside_with_session_allowed_under_nested_with_master_key
+    raised = begin
+        Parse.with_session("r:session-token") do
+          Parse.with_master_key { Parse::MongoDB.find("RxPost", {}) }
+        end
+        nil
+      rescue StandardError => e
+        e
+      end
+    refute_kind_of Parse::ACLScope::ACLRequired, raised
+  end
+
   def test_find_outside_the_block_is_not_refused_for_scope
     raised = begin
         Parse::MongoDB.find("RxPost", {})
@@ -184,5 +205,14 @@ class RegexRouting582Test < Minitest::Test
     Parse::MongoDB.stub(:collection, fake) do
       assert_equal [{ "name" => "_id_" }], Parse.without_master_key { Parse::MongoDB.indexes("RxPost") }
     end
+  end
+
+  def test_find_refused_when_with_master_key_wraps_with_session
+    err = assert_raises(Parse::ACLScope::ACLRequired) do
+      Parse.with_master_key do
+        Parse.with_session("r:session-token") { Parse::MongoDB.find("RxPost", {}) }
+      end
+    end
+    assert_match(/with_session/, err.message)
   end
 end

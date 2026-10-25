@@ -16,7 +16,9 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Tag matches lib/parse/stack/version.rb
         if: github.event_name == 'release'
@@ -34,10 +36,37 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           # The LATEST completed Gem Tests (ruby.yml) run for this SHA must have
-          # succeeded. No run, a run still in progress, or a latest run (or
-          # rerun) that failed all fail the release; an older success does not
-          # outweigh a newer failure.
-          latest=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ruby.yml/runs?head_sha=${SHA}&per_page=50" \
+          # succeeded. A latest run (or rerun) that failed fails the release; an
+          # older success does not outweigh a newer failure.
+          #
+          # A release published right after its merge commit lands starts
+          # before Gem Tests on that commit has been created or has finished.
+          # Wait up to 45 minutes (a Gem Tests run usually takes 10 to 30) for
+          # a run to exist and for every run on the SHA to complete, then judge
+          # the latest completed one. Timing out with a run still unfinished
+          # fails the release instead of judging an older completed run.
+          runs_url="repos/${GITHUB_REPOSITORY}/actions/workflows/ruby.yml/runs?head_sha=${SHA}&per_page=50"
+          deadline=$(( $(date +%s) + 2700 ))
+          while :; do
+            # A failed API call is retried on the next poll rather than
+            # aborting the step.
+            counts=$(gh api "${runs_url}" \
+              --jq '[(.workflow_runs | length), ([.workflow_runs[] | select(.status != "completed")] | length)] | @tsv') || counts=""
+            total=$(cut -f1 <<<"${counts}")
+            pending=$(cut -f2 <<<"${counts}")
+            total=${total:-0}
+            pending=${pending:-1}
+            if [ -n "${counts}" ] && [ "${total}" -gt 0 ] && [ "${pending}" -eq 0 ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::Timed out waiting for Gem Tests on ${SHA} (runs: ${total}, unfinished: ${pending}). Wait for CI on this commit, then re-run this workflow."
+              exit 1
+            fi
+            echo "Waiting for Gem Tests on ${SHA} (runs: ${total}, unfinished: ${pending})..."
+            sleep 30
+          done
+          latest=$(gh api "${runs_url}" \
             --jq '[.workflow_runs[] | select(.status == "completed")] | sort_by(.updated_at) | last | .conclusion // "none"')
           echo "Latest completed Gem Tests conclusion for ${SHA}: ${latest}"
           if [ "${latest}" != "success" ]; then
@@ -45,7 +74,7 @@ jobs:
             exit 1
           fi
 
-      - uses: ruby/setup-ruby@b1da4809b005e0178fe08a1d57317bffc00b7b4c # v1.332.0
+      - uses: ruby/setup-ruby@26e5b7d197ebf60545ee9667bcbace0be11ccaec # v1.334.0
         with:
           ruby-version: "3.4"
           bundler-cache: true
@@ -65,7 +94,9 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v7
+      # Credentials stay persisted here: `rake release` (via
+      # rubygems/release-gem) pushes the version tag with git.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # bundler-cache (next step) writes --local path / --local
       # deployment into the tracked `.bundle/config`, which would leave
@@ -75,7 +106,7 @@ jobs:
       # letting Bundler resolve vendor/bundle in the next step.
       - run: git update-index --skip-worktree .bundle/config
 
-      - uses: ruby/setup-ruby@b1da4809b005e0178fe08a1d57317bffc00b7b4c # v1.332.0
+      - uses: ruby/setup-ruby@26e5b7d197ebf60545ee9667bcbace0be11ccaec # v1.334.0
         with:
           ruby-version: "3.4"
           bundler-cache: true

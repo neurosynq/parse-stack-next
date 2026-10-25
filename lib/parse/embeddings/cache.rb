@@ -110,8 +110,9 @@ module Parse
       # MITM, and the cache key is derived from (often user-supplied)
       # embedded text. `MonetaStore` JSON-(de)serializes values itself, but
       # that only closes the vector IF Moneta is not also Marshaling on top;
-      # `value_serializer: nil` ensures it is not. `MonetaStore` emits a
-      # one-time warning if it is handed a Marshal-serializing store.
+      # `value_serializer: nil` ensures it is not. `MonetaStore` raises
+      # ArgumentError if it is handed a Marshal-serializing store over an
+      # external backend, unless constructed with `allow_marshal: true`.
       # TTL is forwarded via Moneta's `expires:` option when the
       # backend supports it, ignored otherwise.
       #
@@ -130,18 +131,29 @@ module Parse
         #   forwarded as `expires:` when the backend supports
         #   `store(key, value, expires:)`. nil = no expiry.
         # @param namespace [String] key prefix.
-        def initialize(moneta, ttl: nil, namespace: "emb:")
+        # @param allow_marshal [Boolean] accept a store that deserializes
+        #   values with Marshal over a backend outside this process. Logs a
+        #   security warning. Default false.
+        # @raise [ArgumentError] when the store deserializes values with
+        #   Marshal over an external backend and `allow_marshal` is not set.
+        def initialize(moneta, ttl: nil, namespace: "emb:", allow_marshal: false)
           unless moneta.respond_to?(:[]) && moneta.respond_to?(:[]=)
             raise ArgumentError,
                   "Parse::Embeddings::Cache::MonetaStore expects a Moneta-compatible " \
                   "store responding to #[] and #[]= (got #{moneta.class})."
           end
           if marshaling_value_store?(moneta)
-            warn "[Parse::Embeddings::Cache::MonetaStore] SECURITY: the supplied Moneta " \
-                 "store deserializes values with Marshal. A cache read Marshal.loads bytes " \
-                 "from the backing store, which is a remote-code-execution vector when the " \
-                 "store is shared/untrusted. Rebuild it with value_serializer: nil, e.g. " \
-                 "Moneta.new(:Redis, url: ..., value_serializer: nil)."
+            unless allow_marshal
+              raise ArgumentError,
+                    "Parse::Embeddings::Cache::MonetaStore: the supplied Moneta store " \
+                    "deserializes values with Marshal, which allows code execution by anyone " \
+                    "able to write to the backing store. Rebuild it with value_serializer: nil, " \
+                    "e.g. Moneta.new(:Redis, url: ..., value_serializer: nil), or pass " \
+                    "allow_marshal: true to accept the risk."
+            end
+            warn "[Parse::Embeddings::Cache::MonetaStore] SECURITY: allow_marshal: true accepts " \
+                 "a Moneta store that deserializes values with Marshal. Anyone able to write to " \
+                 "the backing store can execute code in this process."
           end
           @moneta = moneta
           @ttl = ttl && Float(ttl)
@@ -204,8 +216,16 @@ module Parse
         # Marshal. Moneta names its transformer proxy after the active
         # serializers (e.g. "...MarshalValue"); a store built with
         # value_serializer: nil has no "...Value" segment. Used only to warn.
+        # Shares the detection {Parse::Client} applies to its :cache option:
+        # a Marshal value transformer anywhere in the proxy chain over a
+        # backend outside this process. In-process stores (`:Memory`,
+        # `:LRUHash`, `:Null`) only hold values this process wrote.
         def marshaling_value_store?(moneta)
-          moneta.class.name.to_s.include?("MarshalValue")
+          if defined?(Parse::Client) && Parse::Client.respond_to?(:marshal_value_cache?)
+            Parse::Client.marshal_value_cache?(moneta)
+          else
+            moneta.class.name.to_s.include?("MarshalValue")
+          end
         rescue StandardError
           false
         end

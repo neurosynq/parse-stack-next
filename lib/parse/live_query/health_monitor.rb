@@ -69,7 +69,7 @@ module Parse
           @last_pong_at = Time.now
           @awaiting_pong = false
 
-          @ping_thread = Thread.new { ping_loop }
+          @ping_thread = Thread.new { Parse.without_ambient_identity(keep_restrictions: true) { ping_loop } }
           @ping_thread.abort_on_exception = false
 
           Logging.debug("Health monitor started", ping_interval: @ping_interval, pong_timeout: @pong_timeout)

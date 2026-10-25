@@ -62,7 +62,7 @@ default.
 - **`PSNEXT_PREFIX`** (default `psnext-it`) names the Compose project and every
   container. Set it (e.g. `PSNEXT_PREFIX=psnext-ci`) to run a second, fully
   separate copy.
-- **Versions**: Parse Server is pinned to `parseplatform/parse-server:9.10.3`
+- **Versions**: Parse Server is pinned to `parseplatform/parse-server:9.10.7`
   (see `scripts/docker/Dockerfile.parse`), MongoDB `mongo:9` (`MONGO_VERSION`), Redis
   `redis:7-alpine`, Dashboard `parseplatform/parse-dashboard:9`.
 - **Database**: Parse uses `parse_stack_next_it`.

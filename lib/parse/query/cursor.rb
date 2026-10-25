@@ -197,10 +197,53 @@ module Parse
       }
     end
 
+    # Maximum JSON nesting accepted when parsing a serialized cursor.
+    MAX_JSON_NESTING = 20
+
+    # Envelope version for signed cursor tokens.
+    SIGNED_VERSION = 2
+
+    class << self
+      # Secret used to HMAC-sign serialized cursors. When set, {#serialize}
+      # emits a signed token and {.deserialize} refuses any token without a
+      # valid signature. A per-call `secret:` argument overrides it. The
+      # secret must be a String of at least {MIN_SECRET_BYTES} bytes;
+      # anything else raises ArgumentError, since a blank or short key is
+      # guessable and would make signed tokens forgeable.
+      #
+      # The length check cannot tell a random key from a long guessable one.
+      # Generate the secret from a cryptographic random source, store it with
+      # your other application secrets, and keep it out of source control:
+      #
+      #   ruby -rsecurerandom -e 'puts SecureRandom.hex(32)'   # 32 random bytes, 64 hex characters
+      #
+      #   Parse::Cursor.signing_secret = ENV.fetch("PARSE_CURSOR_SECRET")
+      #
+      # Rotating the secret invalidates every token signed with the old one.
+      # @return [String, nil]
+      attr_reader :signing_secret
+
+      # @param value [String, nil]
+      def signing_secret=(value)
+        @signing_secret = value.nil? ? nil : validate_secret!(value)
+      end
+    end
+
+    # Shortest signing secret accepted, in bytes (the HMAC-SHA256 block
+    # recommendation for a random key is at least 32 bytes).
+    MIN_SECRET_BYTES = 32
+
     # Serialize the cursor state to a JSON string for persistence.
     # Useful for background jobs that may be interrupted and resumed.
     #
+    # The token contains the class name and the full query constraints.
+    # Without a secret it is plain JSON that anyone holding it can edit. When
+    # a secret is configured (via {.signing_secret} or `secret:`), the state
+    # is wrapped in an envelope with an HMAC-SHA256 signature that
+    # {.deserialize} verifies before rebuilding the query.
+    #
     # @example Save cursor state for later
+    #   Parse::Cursor.signing_secret = ENV["CURSOR_SECRET"]
     #   cursor = Song.cursor(limit: 100)
     #   cursor.next_page
     #   state = cursor.serialize
@@ -208,11 +251,12 @@ module Parse
     #
     # @example Resume in a background job
     #   state = redis.get("cursor:#{job_id}")
-    #   cursor = Parse::Cursor.deserialize(state)
+    #   cursor = Parse::Cursor.deserialize(state, expected_class: Song)
     #   cursor.each_page { |page| process(page) }
     #
+    # @param secret [String, nil] signing secret; defaults to {.signing_secret}
     # @return [String] JSON string containing cursor state
-    def serialize
+    def serialize(secret: self.class.signing_secret)
       require "json"
       state = {
         class_name: @query.table,
@@ -228,33 +272,91 @@ module Parse
         order_direction: @order_direction,
         version: 1,  # For future compatibility
       }
-      JSON.generate(state)
+      payload = JSON.generate(state)
+      return payload if secret.nil?
+
+      JSON.generate(v: SIGNED_VERSION, state: payload, sig: self.class.sign(payload, secret))
     end
 
     # Alias for serialize
+    # @param secret [String, nil] signing secret; defaults to {.signing_secret}
     # @return [String] JSON string containing cursor state
-    def to_json
-      serialize
+    def to_json(*_args, secret: self.class.signing_secret)
+      serialize(secret: secret)
     end
 
     # Deserialize a cursor from a previously serialized state.
     #
+    # The state names the class to query and the constraints to apply, so a
+    # token from an untrusted source (a client, a URL parameter) can query any
+    # class with any constraints unless it is signed. Configure a secret and
+    # pass `expected_class:` before accepting a token from outside the
+    # process.
+    #
+    # - With a secret (from `secret:` or {.signing_secret}), the token must be
+    #   a signed envelope whose HMAC matches; the comparison is constant-time.
+    #   Unsigned or tampered tokens raise ArgumentError.
+    # - Without a secret, an unsigned token is accepted only as trusted
+    #   persistence: state the process wrote itself and stored where clients
+    #   cannot change it (a job queue, a server-side table). Pass
+    #   `trusted: true` to say so. Without it, an unsigned token is still
+    #   accepted in this release with a one-time warning; a future minor
+    #   release will require `trusted: true`. Never use this mode on
+    #   client-supplied tokens.
+    #
     # @param json_string [String] the serialized cursor state
+    # @param secret [String, nil] signing secret; defaults to {.signing_secret}
+    # @param expected_class [Class, String, nil] refuse tokens for any other
+    #   Parse class
+    # @param trusted [Boolean] the caller asserts an unsigned token came from
+    #   trusted persistence; ignored when a secret is in effect
     # @return [Parse::Cursor] a cursor restored to the saved state
-    # @raise [ArgumentError] if the JSON is invalid or missing required fields
+    # @raise [ArgumentError] if the JSON is invalid, missing required fields,
+    #   fails signature verification, or names a different class
     #
     # @example Resume a cursor
-    #   cursor = Parse::Cursor.deserialize(saved_state)
+    #   cursor = Parse::Cursor.deserialize(saved_state, expected_class: Song)
     #   cursor.each_page { |page| process(page) }
-    def self.deserialize(json_string)
+    def self.deserialize(json_string, secret: signing_secret, expected_class: nil, trusted: false)
       require "json"
-      state = JSON.parse(json_string, symbolize_names: true)
+      require "active_support/security_utils"
+      raise ArgumentError, "Invalid cursor state: expected a String" unless json_string.is_a?(String)
+      secret = validate_secret!(secret) unless secret.nil?
+
+      state = parse_state(json_string)
+      signed = state.is_a?(Hash) && state.key?(:sig) && state.key?(:state)
+
+      if signed
+        if secret.nil?
+          raise ArgumentError, "Signed cursor state requires a signing secret to verify"
+        end
+        payload = state[:state]
+        sig = state[:sig]
+        unless payload.is_a?(String) && sig.is_a?(String) &&
+               ActiveSupport::SecurityUtils.secure_compare(sign(payload, secret), sig)
+          raise ArgumentError, "Invalid cursor state: signature mismatch"
+        end
+        state = parse_state(payload)
+      elsif secret
+        raise ArgumentError, "Invalid cursor state: unsigned cursor refused while a signing secret is configured"
+      else
+        warn_unsigned_once unless trusted
+      end
+
+      raise ArgumentError, "Invalid cursor state: expected a JSON object" unless state.is_a?(Hash)
 
       # Validate required fields
       required = [:class_name, :page_size, :order_field, :order_direction]
       missing = required.select { |f| state[f].nil? }
       unless missing.empty?
         raise ArgumentError, "Invalid cursor state: missing #{missing.join(", ")}"
+      end
+
+      if expected_class
+        expected_name = expected_class.respond_to?(:parse_class) ? expected_class.parse_class : expected_class.to_s
+        unless state[:class_name].to_s == expected_name
+          raise ArgumentError, "Cursor state is for class #{state[:class_name].to_s.inspect}, expected #{expected_name.inspect}"
+        end
       end
 
       # Get the model class
@@ -286,9 +388,53 @@ module Parse
 
     # Alias for deserialize
     # @param json_string [String] the serialized cursor state
+    # @param kwargs [Hash] `secret:`, `expected_class:`, and `trusted:`, as for {.deserialize}
     # @return [Parse::Cursor] a cursor restored to the saved state
-    def self.from_json(json_string)
-      deserialize(json_string)
+    def self.from_json(json_string, **kwargs)
+      deserialize(json_string, **kwargs)
+    end
+
+    # HMAC-SHA256 of a serialized cursor payload, hex encoded.
+    # @!visibility private
+    def self.sign(payload, secret)
+      require "openssl"
+      OpenSSL::HMAC.hexdigest("SHA256", validate_secret!(secret), payload)
+    end
+
+    # The secret, when it is a String of at least {MIN_SECRET_BYTES} bytes
+    # that is not only whitespace.
+    # @!visibility private
+    # @raise [ArgumentError]
+    def self.validate_secret!(secret)
+      unless secret.is_a?(String) && !secret.strip.empty? && secret.bytesize >= MIN_SECRET_BYTES
+        raise ArgumentError,
+              "Parse::Cursor signing secret must be a String of at least #{MIN_SECRET_BYTES} " \
+              "bytes (got #{secret.class}#{secret.is_a?(String) ? ", #{secret.bytesize} bytes" : ""})."
+      end
+      secret
+    end
+
+    # @!visibility private
+    def self.parse_state(json)
+      JSON.parse(json, symbolize_names: true, max_nesting: MAX_JSON_NESTING)
+    rescue JSON::ParserError => e
+      raise ArgumentError, "Invalid cursor state: #{e.message}"
+    end
+
+    # @!visibility private
+    def self.warn_unsigned_once
+      return if @warned_unsigned
+      @warned_unsigned = true
+      warn "[Parse::Cursor] Deserializing an unsigned cursor. Unsigned cursor state can " \
+           "name any class and constraints; never accept it from a client. Set " \
+           "Parse::Cursor.signing_secret to sign and verify cursors, or pass trusted: true " \
+           "for state the process stored itself. A future minor release will require one of them."
+    end
+
+    # Reset the one-time unsigned warning. Test-only.
+    # @!visibility private
+    def self.reset_unsigned_warning!
+      @warned_unsigned = false
     end
 
     private
@@ -307,8 +453,10 @@ module Parse
 
     # Deserialize a value from JSON storage
     def self.deserialize_value(value)
-      return value unless value.is_a?(Hash) && value["__type"] == "Date"
-      DateTime.parse(value["iso"])
+      return value unless value.is_a?(Hash)
+      type = value["__type"] || value[:__type]
+      return value unless type == "Date"
+      DateTime.parse(value["iso"] || value[:iso])
     end
 
     # Set up the ordering for cursor pagination.
