@@ -1557,7 +1557,6 @@ module Parse
         end
 
         begin
-          result = true
           if payload.function? && payload.function_name.present?
             # An unknown function must fail. Answering success would tell the
             # caller that a function ran when nothing did.
