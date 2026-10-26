@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require_relative "stack/version"
+require_relative "stack/rack_advisory"
 require_relative "terminal_safe"
 require_relative "client"
 require_relative "query"
@@ -16,6 +17,8 @@ require_relative "schema/index_migrator"
 require_relative "schema/search_index_migrator"
 require_relative "lookup_rewriter"
 require_relative "console"
+
+Parse::Stack::RackAdvisory.check!
 
 module Parse
   class Error < StandardError; end
