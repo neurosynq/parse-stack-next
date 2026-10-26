@@ -52,7 +52,7 @@ class TransportHardening584Test < Minitest::Test
     vars.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
     yield
   ensure
-    saved.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+    saved&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
   end
 
   # ---- request paths -------------------------------------------------------

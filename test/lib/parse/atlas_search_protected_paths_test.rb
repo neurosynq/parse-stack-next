@@ -558,4 +558,15 @@ class AtlasSearchProtectedPathsTest < Minitest::Test
     end
     refute ran?("Open")
   end
+
+  # The queryString field scan runs on caller text; a long run of field
+  # characters with no colon must not take quadratic time.
+  def test_query_string_field_scan_is_linear
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    PATHS.query_string_fields("*" * 200_000)
+    PATHS.query_string_fields("a" * 200_000 + " ")
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    assert elapsed < 1.0, "queryString field scan took #{elapsed.round(3)}s"
+    assert_equal ["_hashed_password", "title"], PATHS.query_string_fields("_hashed\\_password:a* AND title : x")
+  end
 end

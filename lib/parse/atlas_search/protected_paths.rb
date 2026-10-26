@@ -189,9 +189,14 @@ module Parse
 
       # Field names written into a `queryString` query, with Lucene escapes
       # removed first (`_hashed\_password:a*` names `_hashed_password`).
+      # A match starts only at a token boundary and the quantifiers are
+      # possessive, so a long run of field characters with no colon is
+      # scanned in linear time.
       # @!visibility private
+      QUERY_STRING_FIELD_RE = /(?<![A-Za-z0-9_.*?])([A-Za-z0-9_.*?]++)\s*+:/.freeze
+
       def query_string_fields(text)
-        text.to_s.gsub(/\\(.)/m, "\\1").scan(/([A-Za-z0-9_.*?]+)\s*:/).map(&:first)
+        text.to_s.gsub(/\\(.)/m, "\\1").scan(QUERY_STRING_FIELD_RE).map(&:first)
       end
 
       # Whether a path reference reaches fields by glob: the all-fields
