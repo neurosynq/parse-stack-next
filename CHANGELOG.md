@@ -246,10 +246,12 @@ under Behavior Notes.
 
 - **CHANGED**: The gemspec requires `faraday` 2.14.3 or later (CVE-2026-54297,
   CVE-2026-33637, GHSA-33mh-2634-fwr2). The 2026-04 rack advisories are fixed
-  per branch in 2.2.23, 3.1.21, and 3.2.6, with no fixed 3.0 release, so the
-  `rack` requirement is 2.2.23 or later with every released vulnerable 3.0,
-  3.1, and 3.2 version excluded by name. Rack 2.2 applications remain
-  supported. The optional `mongo` guidance is 2.26 or later (CVE-2026-88030)
+  per branch in 2.2.23, 3.1.21, and 3.2.6, with no fixed 3.0 release. The
+  `rack` requirement is 2.2.23 or later, and loading the SDK on a vulnerable
+  Rack 3.x release (3.0.x, 3.1.0 to 3.1.20, or 3.2.0 to 3.2.5) prints a
+  one-time warning naming the fixed release. RubyGems limits a requirement
+  string to 255 characters, too short to exclude each of those releases by
+  name. Rack 2.2 applications remain supported. The optional `mongo` guidance is 2.26 or later (CVE-2026-88030)
   and `graphql` 2.6.9 or later.
 - **CHANGED**: The integration test stack runs Parse Server 9.10.7 and Atlas
   Local 8.0.34. CI uses `ruby/setup-ruby` 1.334.0, which installs the patched
@@ -278,9 +280,9 @@ under Behavior Notes.
   host or listed in `allowed_hosts:`.
 - An application subscribed to its own `_User` through LiveQuery no longer
   receives its `sessionToken` in events.
-- `faraday` below 2.14.3, `rack` below 2.2.23, and the vulnerable `rack`
-  3.0.x, 3.1.0 to 3.1.20, and 3.2.0 to 3.2.5 releases no longer satisfy the
-  gemspec.
+- `faraday` below 2.14.3 and `rack` below 2.2.23 no longer satisfy the
+  gemspec. A vulnerable `rack` 3.x release still installs and prints a
+  load-time warning.
 - `Parse::Cursor` signing secrets shorter than 32 bytes, blank, or not
   Strings raise `ArgumentError`.
 - `mfa_required?(nil)` and other non-String usernames raise `ArgumentError`

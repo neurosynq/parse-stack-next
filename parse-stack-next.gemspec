@@ -55,16 +55,11 @@ Gem::Specification.new do |spec|
   spec.add_runtime_dependency "moneta", "< 2"
   spec.add_runtime_dependency "connection_pool", ">= 2.2", "< 4"
   # Rack's 2026-04 advisories are fixed per branch: 2.2.23, 3.1.21, and
-  # 3.2.6 (the 3.0 line has no fixed release). A single floor cannot express
-  # that, so the released vulnerable 3.x versions are excluded by name and
-  # Rack 2.2 applications stay supported.
-  rack_vulnerable_3x =
-    %w[3.0.0 3.0.1 3.0.2 3.0.3 3.0.4 3.0.4.1 3.0.4.2 3.0.5 3.0.6 3.0.6.1 3.0.7
-       3.0.8 3.0.9 3.0.9.1 3.0.10 3.0.11 3.0.12 3.0.13 3.0.14 3.0.15 3.0.16
-       3.0.17 3.0.18] +
-    (0..20).map { |patch| "3.1.#{patch}" } +
-    (0..5).map { |patch| "3.2.#{patch}" }
-  spec.add_runtime_dependency "rack", [">= 2.2.23", "< 4"] + rack_vulnerable_3x.map { |v| "!= #{v}" }
+  # 3.2.6 (the 3.0 line has no fixed release). RubyGems limits a dependency's
+  # requirement string to 255 characters, too short to exclude each vulnerable
+  # 3.x release by name, so the floor covers the 2.2 line and
+  # Parse::Stack::RackAdvisory warns at load time on a vulnerable 3.x release.
+  spec.add_runtime_dependency "rack", ">= 2.2.23", "< 4"
   spec.add_runtime_dependency "csv", "~> 3.3"
   spec.add_runtime_dependency "ostruct", "~> 0.6"
 
