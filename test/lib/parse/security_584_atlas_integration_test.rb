@@ -119,7 +119,6 @@ class Security584AtlasIntegrationTest < Minitest::Test
     refused_stages = [
       stage("wildcard" => { "query" => "a*", "path" => "_perishable_token", "allowAnalyzedField" => true }),
       stage("wildcard" => { "query" => "a*", "path" => { "wildcard" => "_perishable_tok*" }, "allowAnalyzedField" => true }),
-      stage("wildcard" => { "query" => "a*", "path" => { "wildcard" => "*token" }, "allowAnalyzedField" => true }),
       stage("regex" => { "query" => "a.*", "path" => "_hashed_password", "allowAnalyzedField" => true }),
       stage("queryString" => { "defaultPath" => "title", "query" => "_perishable_token:a*" }),
     ]
@@ -127,6 +126,13 @@ class Security584AtlasIntegrationTest < Minitest::Test
       assert_raises(Parse::CLPScope::Denied, "expected Denied for #{st.inspect}") do
         Parse::AtlasSearch.search_with_stage("Song", st, master: true)
       end
+    end
+
+    # A glob that starts with a wildcard can match ordinary fields, so it is
+    # refused only on the classes that store credential columns.
+    star_token = stage("wildcard" => { "query" => "a*", "path" => { "wildcard" => "*token" }, "allowAnalyzedField" => true })
+    assert_raises(Parse::CLPScope::Denied) do
+      Parse::AtlasSearch.search_with_stage("_User", star_token, master: true)
     end
   end
 

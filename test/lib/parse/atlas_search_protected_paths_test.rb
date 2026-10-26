@@ -548,4 +548,14 @@ class AtlasSearchProtectedPathsTest < Minitest::Test
     end
     assert ran?("Open")
   end
+
+  def test_underscore_prefixed_glob_refused_on_any_class
+    %w[_perishable_tok* _hashed* _session_t?ken].each do |glob|
+      s = stage("wildcard" => { "path" => { "wildcard" => glob }, "query" => "a*" })
+      assert_raises(Parse::CLPScope::Denied, glob) do
+        Parse::AtlasSearch.search_with_stage("Open", s, master: true)
+      end
+    end
+    refute ran?("Open")
+  end
 end

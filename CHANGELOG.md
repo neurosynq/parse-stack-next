@@ -64,9 +64,11 @@ under Behavior Notes.
   same way, including a field name written with Lucene escapes
   (`_hashed\_password:a*`) and globs over the `_auth_data_<provider>`
   columns, and the native hybrid search applies the check to its lexical
-  branch. Globs are tested against stored column names only, and credential
-  columns only on `_User` and `_Session`, so a glob such as `s*` on another
-  class is not refused. On a dynamically mapped index, a `wildcard` or `regex` operator over
+  branch. Globs are tested against stored column names only. A glob that
+  starts with `_` (which no Parse field does) is refused on every class when
+  it reaches a credential column; a glob that starts with a wildcard counts
+  credential columns only on `_User` and `_Session`, so `s*` or `*count` on
+  another class is not refused. On a dynamically mapped index, a `wildcard` or `regex` operator over
   `_perishable_token` let a caller count matches per prefix and recover a
   password-reset token. On
   `_User` and `_Session`, a non-master caller is also refused a path that

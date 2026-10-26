@@ -170,11 +170,17 @@ module Parse
         g = glob.to_s
         return false if g == "*"
         samples = include_acl ? ACL_COLUMNS.dup : []
-        if collection_name.nil? || CREDENTIAL_COLLECTIONS.include?(collection_name.to_s)
+        prefix = g[/\A[^*?\[\\]*/].to_s
+        # Parse fields never start with `_`, so a glob whose literal prefix
+        # does can only reach internal columns: test it against the
+        # credential columns on every class. A glob that starts with a
+        # wildcard (`*token`, `s*`) can match ordinary fields, so the
+        # credential columns count only where they are stored.
+        if prefix.start_with?("_") || collection_name.nil? ||
+           CREDENTIAL_COLLECTIONS.include?(collection_name.to_s)
           samples.concat(CREDENTIAL_GLOB_SAMPLES)
           # `_auth_data_<provider>` columns are open-ended: refuse a glob whose
           # literal prefix reaches into that namespace (`_auth_data_f*`, `_a*`).
-          prefix = g[/\A[^*?\[\\]*/].to_s
           return true if !prefix.empty? &&
                          (prefix.start_with?("_auth_data_") || "_auth_data_".start_with?(prefix))
         end
