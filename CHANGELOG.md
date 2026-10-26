@@ -298,8 +298,9 @@ under Behavior Notes.
 - An agent `call_method` handler that runs under a session-scoped agent is
   executed inside `Parse.with_session`, so a handler that calls
   `Parse::MongoDB.find` now raises `Parse::ACLScope::ACLRequired`. Use
-  `Parse::MongoDB.aggregate` or `Parse::Query#results_direct`, which apply
-  the session, or wrap a deliberate master read in `Parse.with_master_key`.
+  `Parse::Query#results_direct`, which applies the ambient session,
+  `Parse::MongoDB.aggregate` with an explicit `session_token:`, or wrap a
+  deliberate master read in `Parse.with_master_key`.
 - A pipeline or filter that used `$jsonSchema` on the mongo-direct path now
   raises `Parse::PipelineSecurity::Error` (or
   `Parse::MongoDB::DeniedOperator`).
