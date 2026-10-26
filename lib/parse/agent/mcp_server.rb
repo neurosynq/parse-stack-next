@@ -72,7 +72,10 @@ module Parse
         # @param session_token [String, nil] optional session token
         # @param host [String] host to bind to
         # @param rate_limiter [#check!, nil] optional external rate limiter
-        def run(port: nil, permissions: :readonly, session_token: nil, host: "127.0.0.1", api_key: nil, rate_limiter: nil)
+        # @param allowed_hosts [Array<String>, nil] extra `Host` header values
+        #   to accept (see {#initialize})
+        def run(port: nil, permissions: :readonly, session_token: nil, host: "127.0.0.1", api_key: nil,
+                rate_limiter: nil, allowed_hosts: nil)
           unless Parse::Agent.mcp_enabled?
             raise "MCP server not enabled. Call Parse::Agent.enable_mcp! first"
           end
@@ -84,6 +87,7 @@ module Parse
             host: host,
             api_key: api_key,
             rate_limiter: rate_limiter,
+            allowed_hosts: allowed_hosts,
           )
           server.start
         end
@@ -111,6 +115,19 @@ module Parse
       #   Redis-backed). When provided, replaces the default in-process
       #   {Parse::Agent::RateLimiter}. Must respond to `#check!` and raise
       #   {Parse::Agent::RateLimitExceeded} when the budget is exhausted.
+      #   One limiter serves the whole server and is shared by every
+      #   principal, so it does not limit any single client. Enforce
+      #   per-client limits at a reverse proxy or API gateway; see
+      #   "Deployment-layer limits" in docs/mcp_guide.md.
+      # @param pre_auth_rate_limiter [#check!, nil] limiter consulted before
+      #   authentication on every request (see
+      #   {Parse::Agent::MCPRackApp#initialize}). Not forwarded by {.run};
+      #   construct the server with {#initialize} and call {#start} to use it.
+      # @param allowed_hosts [Array<String>, nil] `Host` header values to accept
+      #   besides the loopback hosts, as `"name"` (any port) or `"name:port"`.
+      #   On a loopback bind every request whose `Host` is not a loopback host
+      #   or listed here is refused with 403 (DNS-rebinding protection). On a
+      #   non-loopback bind, setting it restricts `Host` to the listed values.
       # @raise [ArgumentError] if rate_limiter is provided but does not respond to :check!
       # Loopback hosts that are safe to bind to without an API key.
       LOOPBACK_HOSTS = %w[127.0.0.1 ::1 localhost].freeze
@@ -144,7 +161,8 @@ module Parse
       def initialize(port: 3001, host: "127.0.0.1", permissions: :readonly,
                      session_token: nil, api_key: nil, rate_limiter: nil,
                      pre_auth_rate_limiter: nil,
-                     allowed_origins: nil, require_custom_header: nil)
+                     allowed_origins: nil, require_custom_header: nil,
+                     allowed_hosts: nil)
         if rate_limiter && !rate_limiter.respond_to?(:check!)
           raise ArgumentError, "rate_limiter must respond to #check!"
         end
@@ -233,6 +251,10 @@ module Parse
           allowed_origins: allowed_origins,
           require_custom_header: require_custom_header,
           loopback_csrf_default: loopback_csrf_default,
+          # DNS-rebinding: on a loopback bind, refuse any request whose Host
+          # header is not a loopback host or listed in allowed_hosts:.
+          loopback_bind: LOOPBACK_HOSTS.include?(host.to_s),
+          allowed_hosts: allowed_hosts,
         )
       end
 

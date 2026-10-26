@@ -87,8 +87,13 @@ Use the wrapper rather than a bare `Moneta.new(:Redis, ...)`. Moneta serializes
 values with Marshal by default, so every cache read would `Marshal.load` bytes
 returned by Redis, which is a remote-code-execution primitive when that Redis is
 shared, unauthenticated, or reachable over a plaintext connection. The wrapper
-forces `value_serializer: nil` and encodes values as JSON itself. If you supply
-your own Moneta store, build it with `value_serializer: nil`.
+forces `value_serializer: nil` and encodes values as JSON itself. A raw Moneta
+store that keeps the Marshal serializer over an external backend is refused with
+`ArgumentError` unless you pass `allow_marshal_cache: true`; in-process stores
+(`:Memory`, `:LRUHash`, `:Null`) are accepted. Setting `value_serializer: nil` on
+a raw file or Redis store is not a substitute for the wrapper: the response
+cache stores Hash values, which such a backend cannot hold without a
+serializer, so every lookup misses.
 
 The wrapper refuses a Moneta `prefix:` option, because it would rewrite the
 physical key layout underneath the SCAN patterns that scoped clearing depends

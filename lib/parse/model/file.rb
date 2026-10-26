@@ -86,6 +86,11 @@ module Parse
       # cloud-metadata endpoint that must not be reachable from SDK fetches).
       "100.100.100.200/32",
       "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8", "::ffff:0:0/96",
+      # NAT64 (RFC 6052) and 6to4 (RFC 3056) embed an IPv4 address, which on
+      # a NAT64 or 6to4 network can be an internal or metadata address.
+      "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16",
+      # Deprecated IPv4-compatible IPv6 (RFC 4291 2.5.5.1), e.g. ::127.0.0.1.
+      "::/96",
     ].map { |c| IPAddr.new(c) }.freeze
     # Restrictive port allowlist for Parse::File URL fetches. By default
     # only the standard HTTP/HTTPS ports are permitted. Operators may
@@ -543,8 +548,12 @@ module Parse
       end
 
       # @!visibility private
-      # Fetches a remote URL with strict SSRF defenses. Refuses non-HTTP
-      # schemes, RFC1918 / loopback / cloud-metadata addresses, oversized
+      # Fetches a remote URL with strict SSRF defenses. The returned object's
+      # `content_type` is the remote server's `Content-Type` header, which is
+      # controlled by whoever controls the URL; callers must not trust it as
+      # the file's real type (see {Parse::File#initialize}).
+      #
+      # Refuses non-HTTP schemes, RFC1918 / loopback / cloud-metadata addresses, oversized
       # bodies, and slow upstreams. Returns the open-uri Tempfile/StringIO
       # the caller can read from.
       #
@@ -716,6 +725,29 @@ module Parse
     # If the first parameter is a hash, we assume it might be the Parse File hash format which contains url and name fields only.
     # If the first paramter is a Parse::File, then we copy fields over
     # Otherwise, creating a new file requires a name, the actual contents (usually from a File.open("local.jpg").read ) and the mime-type
+    #
+    # == Remote URL content type is untrusted
+    #
+    # Passing a URL String here, or assigning a URL String to a `:file`
+    # property (which calls this initializer), downloads the URL and records
+    # the remote server's `Content-Type` header as {#mime_type}. No content
+    # sniffing is performed. When the URL comes from a request, the server
+    # behind it is chosen by the requester, and so is the recorded type.
+    #
+    # - Do not assign request strings to file properties or pass them here.
+    #   Build files from bytes your application received
+    #   (`Parse::File.new(name, bytes, type)`) and determine `type`
+    #   server-side from the content.
+    # - Any consumer that decodes stored files (image processing such as
+    #   libvips or ImageMagick, Active Storage variants, document parsers)
+    #   should treat the stored mime type as untrusted, sniff the content
+    #   before choosing a decoder, and disable decoders for untrusted formats.
+    #   For libvips 8.13 and later, set `VIPS_BLOCK_UNTRUSTED` in the
+    #   environment or call `Vips.block_untrusted(true)` (ruby-vips 2.2.1 and
+    #   later).
+    # - Keep {Parse::File.allowed_remote_hosts} restricted to the hosts the
+    #   application expects to fetch from.
+    #
     # @param name [String]
     # @param contents [Object]
     # @param mime_type [String] Default see default_mime_type
@@ -761,7 +793,9 @@ module Parse
       @mime_type ||= mime_type
     end
 
-    # This creates a new Parse File Object with from a URL, saves it and returns it
+    # This creates a new Parse File Object with from a URL, saves it and returns it.
+    # The saved mime type is the remote server's `Content-Type` header and is
+    # untrusted when the URL is (see {#initialize}).
     # @param url [String] A url which will be used to create the file and automatically save it.
     # @return [Parse::File] A newly saved file based on contents of _url_
     def self.create(url)

@@ -1424,6 +1424,40 @@ The `Parse::Agent::RateLimitExceeded` constant is a stable top-level alias — e
 
 Per-user rate limiting follows the same pattern: key the Redis counter on the verified user identity extracted during authentication.
 
+### Deployment-layer limits
+
+The SDK's limiters are not a substitute for limits at the deployment layer.
+
+- `Parse::Agent::RateLimiter` is created per `Parse::Agent` instance. With an `agent_factory:` that builds an agent per request, it does not limit anything across requests.
+- `MCPServer` keeps one limiter for the whole server. Every principal (every API key holder, every client IP) draws from that one budget, so a single noisy client can exhaust it for all others, and it does not limit any one client.
+- `pre_auth_rate_limiter:` is called as `check!` with no arguments, before authentication. It sees no client identity, so it limits total request volume rather than any one caller.
+
+Production deployments should enforce a per-client limit (keyed on API key, user, or IP) at a reverse proxy or API gateway in front of the MCP endpoint, and also pass a shared `pre_auth_rate_limiter:` so unauthenticated traffic cannot drive unbounded Parse Server session lookups. Back the limiter with a shared store (for example Redis) when more than one process serves the endpoint.
+
+```ruby
+$pre_auth_limiter = MyRedisRateLimiter.new(key: "mcp_pre_auth", limit: 600, window: 60)
+
+# Rack mount (MCPRackApp, or Parse::Agent.rack_app which forwards kwargs)
+mcp_app = Parse::Agent::MCPRackApp.new(
+  pre_auth_rate_limiter: $pre_auth_limiter,
+  agent_factory: ->(env) {
+    # ... auth ...
+    Parse::Agent.new(permissions: :readonly, rate_limiter: $shared_redis_limiter)
+  },
+)
+
+# Standalone server. MCPServer.run does not forward pre_auth_rate_limiter:,
+# so construct the server directly.
+Parse::Agent::MCPServer.new(
+  port:                  3001,
+  api_key:               ENV["MCP_API_KEY"],
+  rate_limiter:          $shared_redis_limiter,
+  pre_auth_rate_limiter: $pre_auth_limiter,
+).start
+```
+
+On exhaustion the pre-auth limiter must raise an exception responding to `#retry_after` (such as `Parse::Agent::RateLimitExceeded`); the request is answered with HTTP 429 and a `Retry-After` header.
+
 ---
 
 ## Custom Tools

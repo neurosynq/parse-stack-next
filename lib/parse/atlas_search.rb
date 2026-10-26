@@ -359,6 +359,7 @@ module Parse
         # highlights" state — fail loudly instead.
         protected_fields = Parse::CLPScope.protected_fields_for(
           collection_name, resolution.permission_strings,
+          client: Parse::MongoDB.clp_client_for(resolution), strict: true,
         )
         assert_highlight_field_allowed!(options[:highlight_field], protected_fields, resolution)
 
@@ -436,6 +437,7 @@ module Parse
         pointer_fields = resolve_pointer_fields!(collection_name, resolution)
         protected_fields = Parse::CLPScope.protected_fields_for(
           collection_name, resolution.permission_strings,
+          client: Parse::MongoDB.clp_client_for(resolution), strict: true,
         )
         assert_highlight_field_allowed!(options[:highlight_field], protected_fields, resolution)
         # The caller built this stage, so any operator path, sort key, or
@@ -521,8 +523,13 @@ module Parse
         # protectedFields contract.
         protected_fields = Parse::CLPScope.protected_fields_for(
           collection_name, resolution.permission_strings,
+          client: Parse::MongoDB.clp_client_for(resolution), strict: true,
         )
         field_str = field.to_s
+        ProtectedPaths.assert_no_internal_paths!(
+          paths: field_str, collection_name: collection_name, resolution: resolution,
+          method_name: "Parse::AtlasSearch.autocomplete", what: "autocomplete field",
+        )
         if ProtectedPaths.enforce?(resolution, protected_fields) &&
            ProtectedPaths.touches?(field_str, protected_fields)
           raise Parse::CLPScope::Denied.new(
@@ -713,6 +720,13 @@ module Parse
           end
         end
 
+        # No caller, master included, may facet on or search a Parse Server
+        # internal column.
+        ProtectedPaths.assert_no_internal_paths!(
+          stage: search_meta_stage, collection_name: collection_name, resolution: resolution,
+          method_name: "Parse::AtlasSearch.faceted_search", what: "facet or search path",
+        )
+
         # A non-master caller (the public fallback when no auth kwargs are
         # passed) must not facet on, or text-match against, a protected
         # field: bucket values and counts would reveal it directly, and a
@@ -720,6 +734,7 @@ module Parse
         unless resolution.master?
           facet_protected = Parse::CLPScope.protected_fields_for(
             collection_name, resolution.permission_strings,
+            client: Parse::MongoDB.clp_client_for(resolution), strict: true,
           )
           ProtectedPaths.assert_search_stage_allowed!(
             search_meta_stage, facet_protected, resolution,
@@ -807,6 +822,23 @@ module Parse
         # .autocomplete callers build safe stages via SearchBuilder, so this
         # only ever fires for a caller-supplied stage.
         assert_search_stage_safe!(search_stage)
+        # Parse Server's internal columns are refused as a search path,
+        # highlight path, or sort key for every caller (see
+        # ProtectedPaths.assert_no_internal_paths!).
+        ProtectedPaths.assert_no_internal_paths!(
+          stage: search_stage, collection_name: collection_name, resolution: resolution,
+          method_name: "Parse::AtlasSearch.search", what: "$search path",
+        )
+        ProtectedPaths.assert_no_internal_paths!(
+          paths: highlight_field, collection_name: collection_name, resolution: resolution,
+          what: "highlight path",
+        ) unless highlight_field.nil?
+        if sort.is_a?(Hash) && !sort.empty?
+          ProtectedPaths.assert_no_internal_paths!(
+            paths: sort.keys.map(&:to_s), collection_name: collection_name,
+            resolution: resolution, what: "sort key",
+          )
+        end
         pipeline = [search_stage]
 
         # Score projection.
@@ -1058,6 +1090,7 @@ module Parse
         # user, and role grants first; then pointerFields / readUserFields).
         # Raises Parse::CLPScope::Denied when the scope cannot find at all.
         Parse::CLPScope.row_constraint_for!(collection_name, :find, resolution,
+                                            client: Parse::MongoDB.clp_client_for(resolution),
                                             label: "Atlas Search")
         nil
       end
@@ -1073,6 +1106,7 @@ module Parse
         # permits? / pointer_fields_for pair missed readUserFields entirely
         # and over-restricted a public grant that also listed pointerFields.
         Parse::CLPScope.row_constraint_for!(collection_name, :find, resolution,
+                                            client: Parse::MongoDB.clp_client_for(resolution),
                                             label: "Atlas Search")
       end
 
@@ -1288,6 +1322,7 @@ module Parse
           unless resolution.master?
             protected_fields = Parse::CLPScope.protected_fields_for(
               collection_name, resolution.permission_strings,
+              client: Parse::MongoDB.clp_client_for(resolution), strict: true,
             )
             ProtectedPaths.assert_filter_allowed!(
               filter, protected_fields, resolution, collection_name: collection_name,
@@ -1398,5 +1433,32 @@ module Parse
     # cannot hold a second, divergent copy. Initializing them at load time
     # would also require a configured client before one exists.
     @master_warned = false
+
+    # Each public entry point resolves the class schema once: the CLP gate,
+    # pointerFields check, and protectedFields lookups inside one call share
+    # a single Parse::CLPScope snapshot, so a cache expiry between them
+    # cannot change the decision.
+    class << self
+      alias_method :search_without_schema_snapshot, :search
+      # @!visibility private
+      def search(*args, **kwargs, &block)
+        Parse::CLPScope.with_snapshot { search_without_schema_snapshot(*args, **kwargs, &block) }
+      end
+      alias_method :search_with_stage_without_schema_snapshot, :search_with_stage
+      # @!visibility private
+      def search_with_stage(*args, **kwargs, &block)
+        Parse::CLPScope.with_snapshot { search_with_stage_without_schema_snapshot(*args, **kwargs, &block) }
+      end
+      alias_method :autocomplete_without_schema_snapshot, :autocomplete
+      # @!visibility private
+      def autocomplete(*args, **kwargs, &block)
+        Parse::CLPScope.with_snapshot { autocomplete_without_schema_snapshot(*args, **kwargs, &block) }
+      end
+      alias_method :faceted_search_without_schema_snapshot, :faceted_search
+      # @!visibility private
+      def faceted_search(*args, **kwargs, &block)
+        Parse::CLPScope.with_snapshot { faceted_search_without_schema_snapshot(*args, **kwargs, &block) }
+      end
+    end
   end
 end

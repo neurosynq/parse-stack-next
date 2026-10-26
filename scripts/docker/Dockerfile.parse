@@ -2,9 +2,11 @@
 # cached to a pre-patch 8.4.0 build). 9.10.0 added the MFA / authData security
 # fixes (GHSA-pfj7-wv7c-22pr, auth-provider validation bypass on login, and
 # GHSA-37mj-c2wf-cx96 / CVE-2026-33627, TOTP secret leak via /users/me).
-# 9.10.3 is the current baseline: it adds the
-# `enableLiveQueryClassLevelPermissionRoles` option that start-parse.sh enables.
-FROM parseplatform/parse-server:9.10.3
+# 9.10.3 added the `enableLiveQueryClassLevelPermissionRoles` option that
+# start-parse.sh enables. 9.10.7 is the current baseline: it fixes
+# GHSA-rq3w-5c6f-p7wr (authData), GHSA-qmg9-m772-5rm7, GHSA-58m4-cqvw-4vgh
+# and GHSA-349r-988w-x3jp.
+FROM parseplatform/parse-server:9.10.7
 
 # Switch to root to copy and set permissions
 USER root

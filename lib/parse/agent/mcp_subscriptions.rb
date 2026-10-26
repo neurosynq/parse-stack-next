@@ -119,6 +119,33 @@ module Parse
         [class_name, kind]
       end
 
+      # Build the LiveQuery `where` for a resource subscription so change
+      # events only fire for rows the agent may read. Composes the same row
+      # scoping the read tools apply: the class's agent tenant scope and the
+      # operator's per-agent filter (`Parse::Agent.new(filters: ...)`). Both
+      # are security boundaries, so neither can be dropped. The class's
+      # canonical filter is not applied: it is an LLM-controllable
+      # convenience on the read path, and a row leaving the canonical state
+      # still produces a LiveQuery `leave` event for the scoped subscription.
+      #
+      # Without this, a subscription opened the whole class: a tenant-scoped
+      # or filtered agent received a notification (a change and timing
+      # signal) for every write in every tenant.
+      #
+      # @param agent [Parse::Agent]
+      # @param class_name [String]
+      # @return [Hash] REST wire-format `where` (empty when no scoping applies).
+      # @raise [Parse::Agent::AccessDenied] when the class is tenant-scoped and
+      #   the agent has no tenant binding.
+      def self.subscription_where_for(agent, class_name)
+        tools = Parse::Agent::Tools
+        scope = tools.resolve_tenant_scope!(agent, class_name)
+        where = tools.apply_tenant_scope_to_where(nil, scope, class_name)
+        where = tools.apply_per_agent_filter_to_where(where, class_name, agent: agent)
+        return {} if where.nil? || where.empty?
+        Parse::Agent::ConstraintTranslator.translate(where, agent, class_name)
+      end
+
       # Derive LiveQuery subscribe credentials from a subscribing agent.
       #
       # @param agent [Parse::Agent]
@@ -541,6 +568,9 @@ module Parse
           Parse::Agent::Tools.assert_class_accessible!(class_name, agent: agent, op: op)
 
           creds = MCPSubscriptions.live_query_credentials_for(agent)
+          # Row scoping parity with the read path: tenant scope plus the
+          # per-agent filter become the subscription's server-side `where`.
+          where = MCPSubscriptions.subscription_where_for(agent, class_name)
 
           # Idempotent: a repeat subscribe to the same URI is a no-op rather
           # than a second LiveQuery socket subscription. Enforce the per-session
@@ -573,7 +603,8 @@ module Parse
             publish_update(session_id, uri)
           end
 
-          sub = client_for(creds).subscribe(class_name, **creds)
+          sub_opts = where.empty? ? creds : creds.merge(where: where)
+          sub = client_for(creds).subscribe(class_name, **sub_opts)
           Parse::LiveQuery::EVENTS.each do |event|
             sub.on(event) { debouncer.trigger }
           end

@@ -1634,8 +1634,8 @@ module Parse
         # boundary if the class's CLP doesn't grant that op to any
         # entry in the agent's claim set. Master-key posture
         # (`acl_permission_strings` is nil) bypasses — same contract
-        # as Parse::ACLScope. Lookup failures fail-open (Parse Server
-        # still enforces CLP on its own REST surface).
+        # as Parse::ACLScope. A schema lookup that fails refuses the call
+        # (Parse::CLPScope.permits? fails closed).
         if op && agent && agent.respond_to?(:acl_permission_strings)
           perms = agent.acl_permission_strings
           unless Parse::CLPScope.permits?(class_name.to_s, op, perms)
@@ -4785,7 +4785,7 @@ module Parse
         # Allow some keys to be nil (missing values) — they pass through.
         return [nil, pairs] unless pairs.all? { |k, _| k.nil? || (k.is_a?(String) && k.include?("$")) }
         cls = classes.compact.first
-        rewritten = pairs.map { |k, v| [k.is_a?(String) ? k.sub(/\A#{cls}\$/, "") : k, v] }
+        rewritten = pairs.map { |k, v| [k.is_a?(String) ? k.delete_prefix("#{cls}$") : k, v] }
         [cls, rewritten]
       end
 

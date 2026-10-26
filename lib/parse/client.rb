@@ -414,7 +414,7 @@ module Parse
     # a client is logged or surfaced in an error reporter. Show only the
     # connection identity and a boolean for each credential's presence.
     def inspect
-      "#<#{self.class.name} server_url=#{@server_url.inspect} " \
+      "#<#{self.class.name} server_url=#{self.class.redact_url_userinfo(@server_url).inspect} " \
       "app_id=#{@application_id.inspect} master_key=#{@master_key ? "[FILTERED]" : "nil"} " \
       "session_token=#{@session_token ? "[FILTERED]" : "nil"}>"
     end
@@ -426,7 +426,7 @@ module Parse
     # @return [Hash]
     def as_json(*)
       {
-        "server_url" => @server_url,
+        "server_url" => self.class.redact_url_userinfo(@server_url),
         "app_id" => @application_id,
         "master_key" => @master_key ? "[FILTERED]" : nil,
         "session_token" => @session_token ? "[FILTERED]" : nil,
@@ -673,6 +673,16 @@ module Parse
     #    You may set the default expiration time with the expires option.
     #    At any point in time you may clear the cache by calling the {Parse::Client#clear_cache!}
     #    method on the client connection. See {https://github.com/minad/moneta Moneta}.
+    #    A store that deserializes values with Marshal over a backend outside
+    #    this process (Moneta's default, e.g. `Moneta.new(:Redis, url: ...)`)
+    #    raises ArgumentError. Use {Parse::Cache::Redis} (or a `redis://` URL
+    #    string), which stores JSON. In-process stores such as
+    #    `Moneta.new(:Memory)` are accepted. A plain `value_serializer: nil`
+    #    is not a substitute: the response cache stores Hash values, which a
+    #    file or Redis backend cannot hold without a serializer.
+    # @option opts [Boolean] :allow_marshal_cache Accept a :cache store that
+    #    deserializes values with Marshal over an external backend. Logs a
+    #    security warning. Default false.
     # @option opts [Integer] :expires Sets the default cache expiration time
     #    (in seconds) for successful non-empty GET requests when using the caching
     #    middleware. The default value is 3 seconds. If :expires is set to 0,
@@ -739,20 +749,30 @@ module Parse
       bound_token = bound_token.to_s.strip
       @session_token = bound_token.empty? ? nil : bound_token
 
-      @require_https = opts.fetch(:require_https, ENV["PARSE_REQUIRE_HTTPS"] == "true")
+      @require_https = opts.fetch(:require_https) { self.class.env_flag_enabled?(ENV["PARSE_REQUIRE_HTTPS"]) }
       @allow_faraday_proxy = opts.fetch(:allow_faraday_proxy, false)
 
       # Security check for HTTP usage (except localhost/127.0.0.1 for development)
       # The scheme and host come from URI parsing, so `HTTP://` and leading
       # whitespace are treated as plain http, not as a secure URL.
+      # Credentials embedded in the URL (`https://user:pass@host/parse`) are
+      # sent as a Basic Authorization header and would otherwise appear in
+      # every message below, in #inspect, and in #as_json. Those surfaces
+      # print a redacted form; warn once so the operator can move them out.
+      if self.class.url_userinfo?(@server_url) && !Parse::Client.instance_variable_get(:@userinfo_warned)
+        Parse::Client.instance_variable_set(:@userinfo_warned, true)
+        warn "[Parse::Client] SECURITY WARNING: the Parse server URL contains embedded credentials " \
+             "(user:password@). They are redacted from logs, but prefer configuring them outside the URL: " \
+             "#{self.class.redact_url_userinfo(@server_url)}"
+      end
       if self.class.url_scheme(@server_url) == "http" && !self.class.loopback_host?(self.class.url_host(@server_url))
         if @require_https
-          raise ArgumentError, "[Parse::Client] HTTPS required but server URL uses HTTP: #{@server_url}. " \
+          raise ArgumentError, "[Parse::Client] HTTPS required but server URL uses HTTP: #{self.class.redact_url_userinfo(@server_url)}. " \
                                "Set require_https: false or use an HTTPS URL."
         else
           warn "[Parse::Client] SECURITY WARNING: Using HTTP instead of HTTPS for Parse server. " \
                "This exposes credentials and data to network interception. " \
-               "Use HTTPS in production: #{@server_url}"
+               "Use HTTPS in production: #{self.class.redact_url_userinfo(@server_url)}"
         end
       end
 
@@ -885,6 +905,29 @@ module Parse
 
             unless [:key?, :[], :delete, :store].all? { |method| opts[:cache].respond_to?(method) }
               raise ArgumentError, "Parse::Client option :cache needs to be a type of Moneta store"
+            end
+
+            # SECURITY: a caller-built Moneta store keeps Moneta's default
+            # Marshal value serializer unless told otherwise, so every cache
+            # hit would `Marshal.load` the bytes stored in the backend. For a
+            # shared or network-reachable backend (Redis over `redis://`, a
+            # cache another service can write) that is a code-execution
+            # primitive. Refuse it unless the caller opts in explicitly.
+            # In-process stores (`:Memory`, `:LRUHash`, `:Null`) are exempt:
+            # only this process can write the values they hold.
+            if self.class.marshal_value_cache?(opts[:cache])
+              unless opts[:allow_marshal_cache]
+                raise ArgumentError,
+                      "[Parse::Client] The :cache store deserializes values with Marshal " \
+                      "(Moneta's default value serializer), which allows code execution by anyone " \
+                      "able to write to the cache backend. Use Parse::Cache::Redis (or a redis:// URL " \
+                      "string), an in-process store such as Moneta.new(:Memory), or pass " \
+                      "`allow_marshal_cache: true` " \
+                      "to accept the risk."
+              end
+              warn "[Parse::Client] SECURITY WARNING: allow_marshal_cache: true accepts a cache store " \
+                   "that deserializes values with Marshal. Anyone able to write to the cache backend " \
+                   "can execute code in this process."
             end
 
             # If the caller passed a `Parse::Cache::Redis` wrapper, let its
@@ -1148,6 +1191,95 @@ module Parse
       nil
     end
 
+    # Matches an authority whose userinfo (`user:pass@`) precedes the host.
+    # Greedy up to the last `@` before the path, so an unencoded `@` in the
+    # password is still covered.
+    URL_USERINFO_PATTERN = %r{\A([[:space:]]*[a-z][a-z0-9+.\-]*://)[^/?#]*@}i
+    private_constant :URL_USERINFO_PATTERN
+
+    # Whether a URL String embeds userinfo (`user:pass@host`).
+    # @param url [String, nil]
+    # @return [Boolean]
+    # @api private
+    def self.url_userinfo?(url)
+      !url.nil? && URL_USERINFO_PATTERN.match?(url.to_s)
+    end
+
+    # The URL with any userinfo replaced by `[FILTERED]`, for logging and
+    # serialization. Other parts of the URL are unchanged.
+    # @param url [String, nil]
+    # @return [String, nil]
+    # @api private
+    def self.redact_url_userinfo(url)
+      return url if url.nil?
+      url.to_s.sub(URL_USERINFO_PATTERN, '\1[FILTERED]@')
+    end
+
+    # Whether an environment flag is set to a true value: `true`, `1`, or
+    # `yes`, ignoring case and surrounding whitespace.
+    # @param value [String, nil]
+    # @return [Boolean]
+    # @api private
+    def self.env_flag_enabled?(value)
+      %w[true 1 yes].include?(value.to_s.strip.downcase)
+    end
+
+    # Whether a request path would leave the configured server: it has a URI
+    # scheme (`https:`, `HTTP:`, any other `scheme:`) or is protocol-relative
+    # (`//host`, or the `\\host`, `/\host` and `\/host` forms some URL
+    # parsers normalize to it). Leading whitespace and control characters are
+    # ignored. Relative paths, with or without a query string, are safe.
+    # @param uri [String, URI, nil]
+    # @return [Boolean]
+    # @api private
+    def self.unsafe_request_path?(uri)
+      return false if uri.nil?
+      path = uri.to_s.sub(/\A[[:space:][:cntrl:]]+/, "")
+      path.match?(/\A[a-z][a-z0-9+.\-]*:/i) || path.match?(%r{\A[/\\]{2}})
+    end
+
+    # In-process Moneta adapters. Values they hold were written by this
+    # process, so a Marshal value serializer on them is not reachable from
+    # outside it.
+    IN_PROCESS_CACHE_ADAPTERS = %w[
+      Moneta::Adapters::Memory
+      Moneta::Adapters::LRUHash
+      Moneta::Adapters::Null
+    ].freeze
+    private_constant :IN_PROCESS_CACHE_ADAPTERS
+
+    # Whether a Moneta store applies a Marshal value transformer over a
+    # backend outside this process. Walks the proxy chain through `adapter`
+    # (Expires, Logger, Transformer, ...) to the innermost adapter. Moneta
+    # names each compiled transformer class after its chains, for example
+    # `MarshalPrefixKeyMarshalValue`, so the value chain is the part after the
+    # last `Key`. {Parse::Cache::Redis} disables Moneta's value serializer and
+    # is never flagged.
+    # @param store [Object]
+    # @return [Boolean]
+    # @api private
+    def self.marshal_value_cache?(store)
+      return false if defined?(Parse::Cache::Redis) && store.is_a?(Parse::Cache::Redis)
+      marshal_value = false
+      innermost = store
+      node = store
+      16.times do
+        break if node.nil?
+        innermost = node
+        name = node.class.name.to_s.split("::").last.to_s
+        if node.class.name.to_s.start_with?("Moneta::Transformer::") && name.end_with?("Value")
+          marshal_value ||= name.sub(/\A.*Key/, "").include?("Marshal")
+        end
+        break unless node.respond_to?(:adapter)
+        nxt = node.adapter
+        break if nxt.equal?(node)
+        node = nxt
+      end
+      marshal_value && !IN_PROCESS_CACHE_ADAPTERS.include?(innermost.class.name.to_s)
+    rescue StandardError
+      false
+    end
+
     # Configure LiveQuery with the given options
     # @param opts [Hash] configuration options
     # @option opts [String] :live_query_url WebSocket URL for LiveQuery server (wss://...)
@@ -1321,7 +1453,9 @@ module Parse
     # is raised.
     # @param method [Symbol] The method type of the HTTP request (ex. :get, :post).
     #   - This parameter can also be a {Parse::Request} object.
-    # @param uri [String] the url path. It should not be an absolute url.
+    # @param uri [String] the url path, relative to the configured server URL.
+    #   An absolute (`https://...`) or protocol-relative (`//host/...`) path
+    #   raises ArgumentError.
     # @param body [Hash] the body of the request.
     # @param query [Hash] the set of url query parameters to use in a GET request.
     # @param headers [Hash] additional headers to apply to this request.
@@ -1452,6 +1586,14 @@ module Parse
 
         # http method
         method = method.downcase.to_sym
+        # Faraday resolves an absolute or protocol-relative path against the
+        # configured base URL by replacing its host, so a caller-supplied
+        # path such as `https://other.example/x` or `//other.example/x` would
+        # carry the master key and session token to that host.
+        if self.class.unsafe_request_path?(uri)
+          raise ArgumentError, "[Parse::Client] Refusing request path #{uri.to_s.strip[0, 80].inspect}: " \
+                               "paths must be relative to the configured server URL."
+        end
         # set the User-Agent
         headers[USER_AGENT_HEADER] = USER_AGENT_VERSION
 

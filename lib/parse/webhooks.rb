@@ -154,6 +154,8 @@ module Parse
     HTTP_PARSE_APPLICATION_ID = "HTTP_X_PARSE_APPLICATION_ID"
     # The content type that needs to be sent back to Parse server.
     CONTENT_TYPE = "application/json"
+    # The largest webhook request body accepted, in bytes (1 MB).
+    MAX_BODY_BYTES = 1_048_576
 
     # The Parse Webhook Key to be used for authenticating webhook requests.
     # See {Parse::Webhooks.key} on setting this value.
@@ -1341,7 +1343,11 @@ module Parse
       end
 
       def key
-        @key ||= ENV["PARSE_SERVER_WEBHOOK_KEY"] || ENV["PARSE_WEBHOOK_KEY"]
+        # `presence` so an empty or whitespace-only PARSE_SERVER_WEBHOOK_KEY
+        # (common in container env files that declare every variable) does
+        # not hide a configured PARSE_WEBHOOK_KEY. Both blank leaves the key
+        # nil, which the endpoint treats as unconfigured and refuses.
+        @key ||= ENV["PARSE_SERVER_WEBHOOK_KEY"].presence || ENV["PARSE_WEBHOOK_KEY"].presence
       end
 
       # When no webhook key is configured, the endpoint refuses requests by
@@ -1463,12 +1469,26 @@ module Parse
           return response.finish
         end
 
-        request.body.rewind
-        body_str = request.body.read
-        if body_str.bytesize > 1_048_576
+        # Refuse an oversize payload before buffering it. A declared
+        # Content-Length over the limit is rejected without reading the body,
+        # and the read itself is capped at one byte past the limit, so a body
+        # that omits or understates its length still cannot make this process
+        # buffer more than the limit plus one byte.
+        declared_length = request.env["CONTENT_LENGTH"].to_s.strip
+        if declared_length.match?(/\A\d+\z/) && declared_length.to_i > MAX_BODY_BYTES
           response.write error("Payload too large.")
           return response.finish
         end
+        request.body.rewind
+        body_str = request.body.read(MAX_BODY_BYTES + 1).to_s
+        if body_str.bytesize > MAX_BODY_BYTES
+          response.write error("Payload too large.")
+          return response.finish
+        end
+        # `read(length)` returns binary (ASCII-8BIT) data. Retag it as UTF-8
+        # so the signature material and JSON parsing see the same string the
+        # unbounded `read` returned before.
+        body_str.force_encoding(Encoding::UTF_8)
 
         # NEW-EXT-4: reject in-window replays and (when configured)
         # require a fresh HMAC over the body. Done before JSON parsing so
@@ -1537,7 +1557,6 @@ module Parse
         end
 
         begin
-          result = true
           if payload.function? && payload.function_name.present?
             # An unknown function must fail. Answering success would tell the
             # caller that a function ran when nothing did.

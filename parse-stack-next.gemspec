@@ -50,11 +50,21 @@ Gem::Specification.new do |spec|
   spec.add_runtime_dependency "activemodel", [">= 6.1", "< 9"]
   spec.add_runtime_dependency "activesupport", [">= 6.1", "< 9"]
   spec.add_runtime_dependency "parallel", [">= 1.6", "< 3"]
-  spec.add_runtime_dependency "faraday", "~> 2.0"
+  spec.add_runtime_dependency "faraday", [">= 2.14.3", "< 3"]
   spec.add_runtime_dependency "faraday-net_http_persistent", "~> 2.0"
   spec.add_runtime_dependency "moneta", "< 2"
   spec.add_runtime_dependency "connection_pool", ">= 2.2", "< 4"
-  spec.add_runtime_dependency "rack", ">= 2.0.6", "< 4"
+  # Rack's 2026-04 advisories are fixed per branch: 2.2.23, 3.1.21, and
+  # 3.2.6 (the 3.0 line has no fixed release). A single floor cannot express
+  # that, so the released vulnerable 3.x versions are excluded by name and
+  # Rack 2.2 applications stay supported.
+  rack_vulnerable_3x =
+    %w[3.0.0 3.0.1 3.0.2 3.0.3 3.0.4 3.0.4.1 3.0.4.2 3.0.5 3.0.6 3.0.6.1 3.0.7
+       3.0.8 3.0.9 3.0.9.1 3.0.10 3.0.11 3.0.12 3.0.13 3.0.14 3.0.15 3.0.16
+       3.0.17 3.0.18] +
+    (0..20).map { |patch| "3.1.#{patch}" } +
+    (0..5).map { |patch| "3.2.#{patch}" }
+  spec.add_runtime_dependency "rack", [">= 2.2.23", "< 4"] + rack_vulnerable_3x.map { |v| "!= #{v}" }
   spec.add_runtime_dependency "csv", "~> 3.3"
   spec.add_runtime_dependency "ostruct", "~> 0.6"
 
@@ -70,14 +80,16 @@ Gem::Specification.new do |spec|
   # Optional dependency for direct MongoDB queries and Atlas Search
   # Required for: Parse::MongoDB, Parse::AtlasSearch, mongo_direct query methods
   # Users can add this to their Gemfile for direct MongoDB access:
-  #   gem 'mongo', '~> 2.18'
-  # Use mongo 2.26 or newer against MongoDB 9.0 servers.
+  #   gem 'mongo', '>= 2.26', '< 3'
+  # mongo 2.26.0 or newer is recommended: it fixes CVE-2026-88030 and is
+  # required against MongoDB 9.0 servers.
   # Note: The gem is loaded at runtime only when MongoDB features are used
 
   # Optional dependency for GraphQL schema type generation
   # Required for: Parse::GraphQL::TypeGenerator
   # Users can add this to their Gemfile for graphql-ruby type generation:
-  #   gem 'graphql', '~> 2.0'
+  #   gem 'graphql', '>= 2.6.9', '< 3'
+  # graphql 2.6.9 or newer is recommended (GHSA-j7xr-4g94-r9h3, GHSA-rmxg-5p3r-j6hh).
   # Note: The gem is loaded at runtime only when `require "parse/graphql"` is called.
   spec.add_development_dependency "graphql", "~> 2.0"
 

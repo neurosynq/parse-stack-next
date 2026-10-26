@@ -123,6 +123,10 @@ module Parse
 
         klass = Parse::Agent::MetadataRegistry.resolve_searchable!(class_name)
         cname = klass.parse_class
+        # The same class gate every other read tool runs: the per-agent
+        # `classes:` allowlist and the CLP `find` check for scoped agents.
+        # resolve_searchable! only consults the global hidden flag.
+        Parse::Agent::Tools.assert_class_accessible!(cname, agent: agent, op: :find)
 
         unless query.is_a?(String) && !query.strip.empty?
           raise Parse::Agent::ValidationError, "semantic_search: `query` must be a non-empty String."
@@ -155,6 +159,10 @@ module Parse
         end
         assert_filter_fields_allowed!(filter, allowed)
         assert_filter_fields_allowed!(vector_filter, allowed)
+        # The operator's per-agent filter (`filters: { Class => {...} }`) is
+        # ANDed into the post-search match after the caller's filter has been
+        # checked, so it is unconditional, as on every other read tool.
+        filter = compose_per_agent_filter(agent, klass, cname, filter)
 
         # Tenant scope (nil for unscoped classes / bypassed admins; raises
         # AccessDenied for an un-bound agent on a scoped class).
@@ -269,6 +277,80 @@ module Parse
         end
         emit_search_event(cname, prof, effective_k, retrieve_k, reranker, envelope, dropped, started)
         envelope
+      end
+
+      # @!visibility private
+      # The caller's post-search filter with the agent's per-agent filter for
+      # `cname` ANDed in. The per-agent filter is converted to storage form
+      # against the class's declared fields (see {.per_agent_storage_filter}).
+      # The caller's filter gets the pointer conversion
+      # Parse::Retrieval.retrieve would have applied, since retrieve converts
+      # only top-level keys and both sides end up nested under `$and`.
+      def compose_per_agent_filter(agent, klass, cname, filter)
+        per_agent = agent.respond_to?(:filter_for) ? agent.filter_for(cname) : nil
+        return filter if per_agent.nil? || per_agent.empty?
+        scoped = per_agent_storage_filter(klass, per_agent)
+        return scoped if filter.nil? || filter.empty?
+        caller_filter = Parse::Retrieval.send(:translate_pointer_filter_values, klass, filter)
+        { "$and" => [scoped, caller_filter] }
+      end
+
+      # Built-in columns a per-agent filter may name, with their stored names.
+      PER_AGENT_BUILTIN_COLUMNS = {
+        "objectId" => "_id", "createdAt" => "_created_at", "updatedAt" => "_updated_at",
+      }.freeze
+
+      # @!visibility private
+      # A REST-form per-agent filter rewritten for a post-search `$match`.
+      # Each field is resolved through the class's declared properties, by
+      # its Ruby name or its declared server name (`PublicState` stays
+      # `PublicState`), so it addresses the stored column exactly; pointer
+      # fields use their `_p_` column and storage-form values, and Date and
+      # pointer values are converted. A field the class does not declare is
+      # refused: guessing its column could aim a negative operator such as
+      # `$ne` at a column that does not exist, which matches every row.
+      def per_agent_storage_filter(klass, node)
+        case node
+        when Array
+          node.map { |child| per_agent_storage_filter(klass, child) }
+        when Hash
+          node.each_with_object({}) do |(key, value), out|
+            k = key.to_s
+            if %w[$and $or $nor].include?(k)
+              # A single Hash is one clause; Array(hash) would split it into
+              # key/value pairs.
+              clauses = value.is_a?(Hash) ? [value] : Array(value)
+              out[k] = per_agent_storage_filter(klass, clauses)
+            elsif k.start_with?("$")
+              raise Parse::Agent::ValidationError,
+                    "semantic_search: per-agent filter operator #{k} is not supported on this tool."
+            else
+              column, pointer = per_agent_column(klass, k)
+              converted = klass.query.send(:convert_value_for_direct_mongodb, k, value)
+              out[pointer ? "_p_#{column}" : column] = converted
+            end
+          end
+        else
+          node
+        end
+      end
+
+      # @!visibility private
+      # [stored column, pointer?] for a per-agent filter field.
+      def per_agent_column(klass, name)
+        return [PER_AGENT_BUILTIN_COLUMNS[name], false] if PER_AGENT_BUILTIN_COLUMNS.key?(name)
+        fmap = klass.respond_to?(:field_map) ? klass.field_map : {}
+        local = if klass.fields.key?(name.to_sym)
+            name.to_sym
+          else
+            fmap.find { |_l, remote| remote.to_s == name }&.first
+          end
+        if local.nil?
+          raise Parse::Agent::ValidationError,
+                "semantic_search: per-agent filter field #{name.inspect} is not a declared " \
+                "property of #{klass.parse_class}."
+        end
+        [(fmap[local] || local).to_s, klass.fields[local] == :pointer]
       end
 
       # @!visibility private

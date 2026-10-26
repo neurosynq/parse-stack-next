@@ -80,10 +80,16 @@ module Parse
   # This is a guard against accidental master-key use, not an isolation
   # boundary: code inside the block can call {Parse.with_master_key}.
   # `Parse::MongoDB.find`, which reads raw documents with no scope, raises
-  # `Parse::ACLScope::ACLRequired` inside the block. `Parse::MongoDB.indexes`
+  # `Parse::ACLScope::ACLRequired` inside the block, and inside a
+  # {Parse.with_session} block unless a {Parse.with_master_key} block is
+  # nested inside the session block. `Parse::MongoDB.indexes`
   # returns index metadata only and stays available. `Parse::MongoDB.collection`
   # returns the raw driver collection with no scope and is not refused inside
   # the block, so code that reads through it directly bypasses the block.
+  #
+  # The state is restored on exit and is inherited by Threads and Fibers
+  # created inside the block; see "Ambient identity lifetime" on
+  # {Parse.with_session} and {Parse.without_ambient_identity}.
   #
   # @yield runs the block with master-key disabled
   # @return [Object] the block's return value
@@ -107,15 +113,29 @@ module Parse
   # inside a session-scoped block. If no master key is configured on the
   # client, this is a no-op — the helper does not synthesise one.
   #
+  # The state is restored on exit and is inherited by Threads and Fibers
+  # created inside the block; see "Ambient identity lifetime" on
+  # {Parse.with_session} and {Parse.without_ambient_identity}.
+  #
   # @yield runs the block with master-key enabled (if configured)
   # @return [Object] the block's return value
   def self.with_master_key
     previous = Fiber[MASTER_KEY_STATE_KEY]
+    previous_innermost = Fiber[INNERMOST_AUTH_BLOCK_KEY]
     Fiber[MASTER_KEY_STATE_KEY] = :enabled
+    Fiber[INNERMOST_AUTH_BLOCK_KEY] = :master
     yield
   ensure
     Fiber[MASTER_KEY_STATE_KEY] = previous
+    Fiber[INNERMOST_AUTH_BLOCK_KEY] = previous_innermost
   end
+
+  # Fiber-local key naming the innermost of {.with_master_key} (`:master`)
+  # and {.with_session} (`:session`) blocks the current fiber is inside.
+  # `Parse::MongoDB.find` consults it to allow a master read only when the
+  # master block was entered inside the session block.
+  # @!visibility private
+  INNERMOST_AUTH_BLOCK_KEY = :__parse_innermost_auth_block__
 
   # @return [Boolean] true if the current fiber is inside a
   #   {.without_master_key} block. Consulted by the authentication
@@ -147,8 +167,41 @@ module Parse
   #
   # Fiber-local, not thread-local: concurrent fibers (and threads, since
   # each thread starts with its own root fiber) do not share state.
-  # Survives Faraday retries — the token lives for the lifetime of the
+  # Survives Faraday retries. The token lives for the lifetime of the
   # block, not just the first HTTP attempt.
+  #
+  # == Ambient identity lifetime
+  #
+  # The ambient identity (this session token, the master-key state set by
+  # {.with_master_key} and {.without_master_key}, and the innermost-block
+  # marker) follows these rules:
+  #
+  # * It lasts for the block on the current fiber. On exit the previous
+  #   values are restored, whether the block returns, raises, or is left
+  #   with `break`/`throw`.
+  # * Threads and Fibers created inside the block inherit it for their
+  #   whole lifetime. This is Ruby's fiber-storage semantics: a new Thread
+  #   or Fiber starts with a copy of the creating fiber's storage, and that
+  #   copy is not cleared when the creating block exits. The inheritance is
+  #   intended for short-lived work done on behalf of the same user, such
+  #   as a parallel fetch that is joined before the block returns.
+  # * Long-lived workers and pooled threads (job processors, schedulers,
+  #   connection readers, thread pools created lazily on first use) should
+  #   not be created inside a session block. When that cannot be arranged,
+  #   start the worker body with {.without_ambient_identity}, which runs it
+  #   with all three values cleared. Assigning `Fiber[...] = nil` on the
+  #   storage keys is not public API.
+  # * A reused request thread (Puma, Sidekiq, a thread pool) does not keep
+  #   identity between units of work, because each block restores the
+  #   value it found on entry. A job that runs outside any block sees no
+  #   ambient token even if the previous job on the same thread ran inside
+  #   one.
+  #
+  # The SDK's LiveQuery background threads (socket reader, reconnect,
+  # health ping, event dispatch) start under {.without_ambient_identity},
+  # so LiveQuery callbacks do not run with a session inherited from the
+  # code that first opened the connection. LiveQuery authorization comes
+  # from the client and subscription configuration.
   #
   # An explicit `session_token:` kwarg on any call still wins over the
   # ambient. An explicit `use_master_key: true` skips the ambient and
@@ -171,6 +224,7 @@ module Parse
     # Capture BEFORE any raise so the `ensure` always restores the real
     # previous ambient (never clobbers an enclosing with_session).
     previous = Fiber[SESSION_TOKEN_STATE_KEY]
+    previous_innermost = Fiber[INNERMOST_AUTH_BLOCK_KEY]
     # SEC-02: a present-but-blank (empty or whitespace) token is an unusable
     # credential. The prior behavior stored a whitespace token as the ambient
     # (only an exactly-empty string was treated as absent), and the request
@@ -187,9 +241,56 @@ module Parse
     # "no ambient", which the request layer resolves to the master key on a
     # master-keyed client: the opposite of the documented anonymous block.
     Fiber[SESSION_TOKEN_STATE_KEY] = resolved.nil? ? ANONYMOUS_SESSION : resolved
+    Fiber[INNERMOST_AUTH_BLOCK_KEY] = :session
     yield
   ensure
     Fiber[SESSION_TOKEN_STATE_KEY] = previous
+    Fiber[INNERMOST_AUTH_BLOCK_KEY] = previous_innermost
+  end
+
+  # Run `block` with no ambient identity on the current fiber: the
+  # {.with_session} token, the {.with_master_key} / {.without_master_key}
+  # state, and the innermost-block marker are all cleared, and restored on
+  # exit (including on exception).
+  #
+  # Use it at the start of a long-lived worker, so a thread that happens to
+  # be created inside a session block does not run every later job as that
+  # user (see "Ambient identity lifetime" on {.with_session}).
+  #
+  # Cleared means "no ambient", not anonymous: requests inside the block
+  # authenticate as the client is configured, which on a client with a
+  # master key means the master key. Wrap a unit of work in
+  # {.with_session} or {.without_master_key} inside the worker to scope it.
+  #
+  # Pass `keep_restrictions: true` to drop the inherited identity without
+  # gaining authority: when the surrounding code was restricted (inside
+  # {.with_session}, an anonymous session, or {.without_master_key}), the
+  # block runs with no session token and the master key suppressed, as in
+  # {.without_master_key}. Only an unrestricted caller's block runs with no
+  # ambient state. The SDK starts its LiveQuery callback threads this way.
+  #
+  # @param keep_restrictions [Boolean] never lift a restriction the caller had
+  # @yield runs the block with no ambient session token or master-key state
+  # @return [Object] the block's return value
+  # @example start a background worker
+  #   Thread.new do
+  #     Parse.without_ambient_identity do
+  #       loop { process(queue.pop) }
+  #     end
+  #   end
+  def self.without_ambient_identity(keep_restrictions: false)
+    previous_token = Fiber[SESSION_TOKEN_STATE_KEY]
+    previous_master = Fiber[MASTER_KEY_STATE_KEY]
+    previous_innermost = Fiber[INNERMOST_AUTH_BLOCK_KEY]
+    restricted = !previous_token.nil? || previous_master == :disabled
+    Fiber[SESSION_TOKEN_STATE_KEY] = nil
+    Fiber[MASTER_KEY_STATE_KEY] = keep_restrictions && restricted ? :disabled : nil
+    Fiber[INNERMOST_AUTH_BLOCK_KEY] = nil
+    yield
+  ensure
+    Fiber[SESSION_TOKEN_STATE_KEY] = previous_token
+    Fiber[MASTER_KEY_STATE_KEY] = previous_master
+    Fiber[INNERMOST_AUTH_BLOCK_KEY] = previous_innermost
   end
 
   # Fiber-state sentinel installed by `Parse.with_session(nil)`. The request

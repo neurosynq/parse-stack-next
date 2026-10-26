@@ -253,7 +253,12 @@ module Parse
       #   and raise an exception responding to `#retry_after` (such as
       #   `Parse::Agent::RateLimiter::RateLimitExceeded`) when exhausted.
       #   Defaults to `nil` (no pre-auth limiter). On exhaustion the request
-      #   is rejected with HTTP 429 and a `Retry-After` header.
+      #   is rejected with HTTP 429 and a `Retry-After` header. `#check!` is
+      #   called with no arguments, so this limits total volume, not any one
+      #   client. A per-agent {Parse::Agent::RateLimiter} built inside a
+      #   per-request factory does not limit across requests. Enforce
+      #   per-client limits at a reverse proxy or API gateway as well; see
+      #   "Deployment-layer limits" in docs/mcp_guide.md.
       # @param allowed_origins [Array<String>, nil] when set, the `Origin`
       #   request header must match one of these entries (case-insensitive,
       #   exact host match — wildcard via leading `.` matches subdomains).
@@ -263,6 +268,21 @@ module Parse
       #   as allowed regardless of this setting. The default loopback
       #   bind makes this check optional in development; operators who
       #   bind MCP to a routable interface should configure it.
+      # @param allowed_hosts [Array<String>, nil] `Host` header values this app
+      #   answers to, as a hostname (`"mcp.example.com"`, any port) or
+      #   `host:port` (`"mcp.example.com:8443"`, that port only), compared
+      #   case-insensitively. This is the MCP spec's DNS-rebinding guidance: a
+      #   rebinding page reaches a loopback server under the attacker's
+      #   hostname, so its requests carry that hostname in `Host` even when it
+      #   strips or spoofs nothing else. When set, a request whose `Host` is not
+      #   listed (and, on a loopback bind, is not a loopback host) is refused
+      #   with 403. `nil` (default) applies the check only on a loopback bind.
+      # @param loopback_bind [Boolean] the app is served on a loopback
+      #   interface. Enables the `Host` check with `localhost`, `127.0.0.1`,
+      #   and `[::1]` (any port) allowed, plus any `allowed_hosts:` entries.
+      #   Implied by `loopback_csrf_default: true`. {MCPServer} sets it from its
+      #   bind address. A request with no `Host` header is allowed: browsers
+      #   always send one, so its absence is a native client.
       # @param require_custom_header [String, nil] when set (e.g.
       #   `"X-MCP-Client"`), requests must carry that header with any
       #   non-empty value. Custom headers can't be set by a `<form>`
@@ -333,6 +353,8 @@ module Parse
                      allowed_origins: nil,
                      require_custom_header: nil,
                      loopback_csrf_default: false,
+                     allowed_hosts: nil,
+                     loopback_bind: false,
                      resource_subscriptions: false,
                      subscription_manager: nil,
                      notifications: nil,
@@ -401,6 +423,12 @@ module Parse
         # browser UI sends a loopback Origin and is allowed. Ignored when an
         # explicit allowlist is configured (operator owns the policy then).
         @loopback_csrf_default = loopback_csrf_default && @allowed_origins.nil?
+        # Host header gate (DNS-rebinding). Keyed off the raw
+        # `loopback_csrf_default` argument, not the Origin-suppressed value
+        # above: an explicit Origin allowlist does not change the fact that
+        # the app is reachable on a loopback interface.
+        @allowed_hosts = normalize_allowed_hosts(allowed_hosts)
+        @loopback_host_check = loopback_bind == true || loopback_csrf_default == true
         @health_path = health_path.is_a?(String) && !health_path.empty? ? health_path : nil
         # Per-app registry of in-flight cancellable requests. Keyed by
         # [correlation_id, request_id]. A `notifications/cancelled` POST
@@ -617,6 +645,14 @@ module Parse
         #     a load balancer needs "is it up?", not "what is it?".
         if @health_path && env["PATH_INFO"] == @health_path && env["REQUEST_METHOD"] == "GET"
           return [200, json_headers, ['{"status":"ok"}']]
+        end
+
+        # 0a2. Host header gate (DNS-rebinding). Runs ahead of every method
+        #      branch (POST, GET listening stream, DELETE) so a rebinding page
+        #      cannot reach any of them under its own hostname.
+        if host_refused?(env)
+          @logger&.warn("[Parse::Agent::MCPRackApp] Host refused: #{env["HTTP_HOST"].to_s.strip[0, 255].inspect}")
+          return [403, json_headers, [json_rpc_error(-32_700, "Host not allowed")]]
         end
 
         # 0b. NEW-MCP-6: pre-auth rate limit. Runs BEFORE the agent_factory
@@ -2583,6 +2619,59 @@ module Parse
         return nil if value.nil?
         arr = Array(value).map { |v| v.to_s.strip.downcase }.reject(&:empty?)
         arr.empty? ? nil : arr.freeze
+      end
+
+      # Normalize the `allowed_hosts:` kwarg into a frozen Array of
+      # downcased entries, or nil when none are configured.
+      def normalize_allowed_hosts(value)
+        return nil if value.nil?
+        arr = Array(value).map { |v| v.to_s.strip.downcase }.reject(&:empty?)
+        arr.empty? ? nil : arr.freeze
+      end
+
+      # Hostnames accepted on a loopback bind (IPv6 without brackets).
+      LOOPBACK_HOST_NAMES = %w[localhost 127.0.0.1 ::1].freeze
+
+      # Split a `Host` header value into `[hostname, port]`. The hostname is
+      # downcased with IPv6 brackets removed; the port is a String or nil.
+      # Returns nil for a malformed value.
+      def split_host_header(value)
+        v = value.downcase
+        if v.start_with?("[")
+          m = v.match(/\A\[([0-9a-f:.]+)\](?::(\d{1,5}))?\z/)
+          return nil unless m
+          [m[1], m[2]]
+        else
+          m = v.match(/\A([a-z0-9._-]+)(?::(\d{1,5}))?\z/)
+          return nil unless m
+          [m[1], m[2]]
+        end
+      end
+
+      # Single chokepoint for the Host header gate. Inactive unless the app
+      # is on a loopback bind or `allowed_hosts:` is configured. A missing or
+      # empty Host is allowed (browsers always send one); a malformed Host is
+      # refused.
+      def host_refused?(env)
+        return false unless @loopback_host_check || @allowed_hosts
+        raw = env["HTTP_HOST"].to_s.strip
+        return false if raw.empty?
+        parts = split_host_header(raw)
+        return true if parts.nil?
+        name, port = parts
+        return false if @loopback_host_check && LOOPBACK_HOST_NAMES.include?(name)
+        return false if @allowed_hosts&.any? { |entry| host_entry_matches?(entry, name, port) }
+        true
+      end
+
+      # An `allowed_hosts:` entry matches by hostname alone (any port) or by
+      # `host:port` exactly.
+      def host_entry_matches?(entry, name, port)
+        entry_parts = split_host_header(entry)
+        return false if entry_parts.nil?
+        entry_name, entry_port = entry_parts
+        return false unless entry_name == name
+        entry_port.nil? || entry_port == port
       end
 
       # Normalize the `require_custom_header:` kwarg into a

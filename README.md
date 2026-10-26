@@ -102,7 +102,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full 5.1 entry, including breaking ch
 - **MCP transport hardening** — Streamable HTTP `Mcp-Session-Id` header (renamed from `X-MCP-Session-Id`, **breaking**), `MCP-Protocol-Version` validation, `DELETE /` session termination, structured-content (`outputSchema`) on built-in tools, optional `health_path:` liveness probe
 - **`Parse::GraphQL::TypeGenerator`** — generate `graphql-ruby` types directly from your `Parse::Object` subclasses (no Parse Server round-trip), with `:vector` columns surfaced as `[Float]` and association registries (`has_one_associations`, `has_many_associations`) populated at DSL time
 - **LiveQuery promoted to stable** — the experimental warning is removed; `Parse.live_query_enabled = true` is retained as a network-egress safety toggle, not a stability gate
-- **Server-version deprecation warning**: a one-shot warning when connecting to a Parse Server older than the configured threshold (default `7.0.0`, override with `PARSE_DEPRECATED_SERVER_VERSION_BELOW`); silence with `Parse.suppress_server_version_warning = true`. The **supported baseline is Parse Server 9.x** (the SDK is developed and tested against a pinned `parse-server:9.10.3`); the default warning threshold is intentionally conservative so older deployments only get an advisory, not a hard break.
+- **Server-version deprecation warning**: a one-shot warning when connecting to a Parse Server older than the configured threshold (default `7.0.0`, override with `PARSE_DEPRECATED_SERVER_VERSION_BELOW`); silence with `Parse.suppress_server_version_warning = true`. The **supported baseline is Parse Server 9.x** (the SDK is developed and tested against a pinned `parse-server:9.10.7`); the default warning threshold is intentionally conservative so older deployments only get an advisory, not a hard break.
 - **`mongo_relation_index :field, dedup: true`** — register a compound `{owningId, relatedId}` UNIQUE on relation join collections to prevent duplicate-pair subscriptions without breaking `has_many` semantics
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full 5.0 entry, including security-hardening notes and Ruby 3.x cleanup.
@@ -286,7 +286,7 @@ Runnable, self-contained scripts live in [`examples/`](examples/) — see
 
 ## Release History
 
-**Current version: 5.5.5** | **Ruby 3.2+ required**
+**Current version: 5.8.4** | **Ruby 3.2+ required** (3.3.13, 3.4.12, or 4.0.9 or later recommended for their regular-expression compiler fixes)
 
 The 5.0 highlights (vector search / RAG, pooled Redis cache, AS::N instrumentation, MCP transport hardening, GraphQL type generation) are summarized in the [What's new in 5.0](#whats-new-in-50) section above. Earlier releases are recorded below.
 
@@ -689,9 +689,13 @@ A caching adapter of type `Moneta::Transformer`. Caching queries and object fetc
   Parse.setup(cache: store, expires: 10, ...)
 ```
 
-If you supply your own raw `Moneta.new(:Redis, ...)` store instead of the
-wrapper, build it with `value_serializer: nil` to keep Marshal off the cache
-read path.
+Use the wrapper rather than a raw `Moneta.new(:Redis, ...)` store. A store that
+keeps Moneta's default Marshal serializer over an external backend is refused
+with `ArgumentError` unless you pass `allow_marshal_cache: true`. Setting
+`value_serializer: nil` on a raw store is not a substitute: the response cache
+stores Hash values, which a file or Redis backend cannot hold without a
+serializer, so every lookup misses. In-process stores (`:Memory`, `:LRUHash`,
+`:Null`) are accepted as they are.
 
 As a shortcut, if you are planning on using REDIS and have configured the use of `redis` in your `Gemfile`, you can just pass the REDIS connection string directly to the cache option. The string form builds a `Parse::Cache::Redis` wrapper for you, so it is JSON-serialized and safe by default.
 
@@ -1219,6 +1223,8 @@ The default MIME type for all files is `image/jpeg`. This can be default can be 
   # or another Parse::File object
   file = Parse::File.new parse_file
 ```
+
+A URL String passed to `Parse::File.new` or `Parse::File.create`, or assigned to a `:file` property, is downloaded and the remote server's `Content-Type` header is recorded as the file's mime type. That type is controlled by whoever controls the URL. Do not assign request strings to file properties; build files from bytes (`Parse::File.new(name, bytes, type)`) and determine the type server-side. Code that decodes stored files (libvips or ImageMagick, Active Storage variants, document parsers) should treat the stored mime type as untrusted, sniff the content, and disable untrusted decoders (for libvips 8.13 and later, `VIPS_BLOCK_UNTRUSTED` or `Vips.block_untrusted(true)` with ruby-vips 2.2.1 and later). Keep `Parse::File.allowed_remote_hosts` restricted to expected hosts.
 
 If you are using displaying these files on a secure site and want to make sure that urls returned by a call to `url` are `https`, you can set `Parse::File.force_ssl` to true.
 
@@ -1954,6 +1960,14 @@ user.disable_mfa!(current_token: "123456")
 user.disable_mfa_master_key!(authorized_by: admin_user, admin_role: "Admin")
 # or: user.disable_mfa_master_key!(authorized_by: admin_user, allow_unverified: true)
 ```
+
+**MFA enforcement boundary:**
+
+`Parse::MFA.verify`, `Parse::MFA.verify_timestamp` and `disable_mfa!` are client-side checks. Parse Server's MFA adapter enforces MFA at login and is the enforcement boundary. Removing MFA is a user update (`authData: { mfa: nil }`) that any holder of the session token can send to the REST API directly, so protect it server-side, for example with a `beforeSave` trigger on `_User` or a Cloud Code function that requires a fresh code verified on the server.
+
+When using `Parse::MFA.verify(secret, code, after:)` as an application's own second factor, store the last accepted timestamp per user and update it atomically: a compare-and-set keyed on the previous value, or a database unique constraint on user and time step. Otherwise two concurrent requests with the same code can both succeed.
+
+`authorized_by:` on `disable_mfa_master_key!` must be the authenticated operator from the caller's verified session, never a user id taken from the request.
 
 **SMS MFA (requires Parse Server SMS callback):**
 ```ruby
@@ -5735,7 +5749,7 @@ For high traffic applications that may be performing several server tasks on sim
 # Parse::Cache::Redis serializes cached responses as JSON, not Marshal — a raw
 # Moneta.new(:Redis) store Marshals values by default and a cache read would
 # Marshal.load Redis bytes (RCE if the cache is shared/untrusted). Prefer the
-# wrapper; if you supply a raw Moneta-Redis store, pass value_serializer: nil.
+# wrapper over a raw Moneta-Redis store.
 store = Parse::Cache::Redis.new(url: 'redis://localhost:6379')
  # use a Redis cache store with an automatic expire of 10 seconds.
 Parse.setup(cache: store, expires: 10, ...)

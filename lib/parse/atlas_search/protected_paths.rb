@@ -120,6 +120,169 @@ module Parse
         nil
       end
 
+      # Collections whose documents carry Parse Server's credential columns
+      # (`_hashed_password`, `_perishable_token`, `_session_token`, ...).
+      CREDENTIAL_COLLECTIONS = %w[_User _Session].freeze
+
+      # Sample names a wildcard glob is tested against: every internal
+      # column, plus a representative `_auth_data_<provider>` column.
+      # ACL columns present in every Parse collection.
+      ACL_COLUMNS = %w[_rperm _wperm _tombstone].freeze
+
+      # Stored credential column names a wildcard glob is tested against on
+      # `_User` / `_Session` (or an unknown collection). Only stored,
+      # underscore-prefixed names are listed: `sessionToken` is a REST field
+      # name, not a stored column, so `s*` does not count as reaching it.
+      CREDENTIAL_GLOB_SAMPLES = (
+        Parse::PipelineSecurity::INTERNAL_FIELDS_DENYLIST.select { |n| n.start_with?("_") } - ACL_COLUMNS +
+        %w[anonymous apple facebook github google instagram linkedin mfa twitter].map { |p| "_auth_data_#{p}" } +
+        %w[_perishable_token_expires_at _email_verify_token_expires_at _password_changed_at]
+      ).uniq.freeze
+
+      # Whether `path` names one of Parse Server's internal columns
+      # ({Parse::PipelineSecurity::INTERNAL_FIELDS_DENYLIST} or an
+      # `_auth_data_<provider>` column). A wildcard path object counts when
+      # its glob (other than the bare `*`, handled as reaching every field)
+      # matches one of them, so `*token` and `?hashed*` are caught.
+      #
+      # @return [Boolean]
+      def internal_path?(path, collection_name: nil)
+        case path
+        when String, Symbol
+          head = path.to_s.split(".").first.to_s
+          Parse::PipelineSecurity::INTERNAL_FIELDS_DENYLIST.include?(head) ||
+            Parse::PipelineSecurity::INTERNAL_FIELDS_PREFIX_DENYLIST.any? { |p| head.start_with?(p) }
+        when Array
+          path.any? { |p| internal_path?(p, collection_name: collection_name) }
+        when Hash
+          value = path.key?("value") ? path["value"] : path[:value]
+          glob = path.key?("wildcard") ? path["wildcard"] : path[:wildcard]
+          (!value.nil? && internal_path?(value)) || internal_glob?(glob, collection_name: collection_name)
+        else
+          false
+        end
+      end
+
+      # Whether an Atlas wildcard path glob matches an internal column.
+      # @!visibility private
+      def internal_glob?(glob, collection_name: nil, include_acl: true)
+        return false unless glob.is_a?(String) || glob.is_a?(Symbol)
+        g = glob.to_s
+        return false if g == "*"
+        samples = include_acl ? ACL_COLUMNS.dup : []
+        prefix = g[/\A[^*?\[\\]*/].to_s
+        # Parse fields never start with `_`, so a glob whose literal prefix
+        # does can only reach internal columns: test it against the
+        # credential columns on every class. A glob that starts with a
+        # wildcard (`*token`, `s*`) can match ordinary fields, so the
+        # credential columns count only where they are stored.
+        if prefix.start_with?("_") || collection_name.nil? ||
+           CREDENTIAL_COLLECTIONS.include?(collection_name.to_s)
+          samples.concat(CREDENTIAL_GLOB_SAMPLES)
+          # `_auth_data_<provider>` columns are open-ended: refuse a glob whose
+          # literal prefix reaches into that namespace (`_auth_data_f*`, `_a*`).
+          return true if !prefix.empty? &&
+                         (prefix.start_with?("_auth_data_") || "_auth_data_".start_with?(prefix))
+        end
+        samples.any? { |name| ::File.fnmatch?(g, name) }
+      end
+
+      # Field names written into a `queryString` query, with Lucene escapes
+      # removed first (`_hashed\_password:a*` names `_hashed_password`).
+      # A match starts only at a token boundary and the quantifiers are
+      # possessive, so a long run of field characters with no colon is
+      # scanned in linear time.
+      # @!visibility private
+      QUERY_STRING_FIELD_RE = /(?<![A-Za-z0-9_.*?])([A-Za-z0-9_.*?]++)\s*+:/.freeze
+
+      def query_string_fields(text)
+        text.to_s.gsub(/\\(.)/m, "\\1").scan(QUERY_STRING_FIELD_RE).map(&:first)
+      end
+
+      # Whether a path reference reaches fields by glob: the all-fields
+      # sentinel, a `{ wildcard: ... }` path object, or an Array path with
+      # one of those at any depth (`[{ wildcard: "*" }]`).
+      # @!visibility private
+      def wildcard_path?(ref)
+        return true if ref == ALL_FIELDS
+        case ref
+        when Array
+          ref.any? { |r| wildcard_path?(r) }
+        when Hash
+          ref.key?("wildcard") || ref.key?(:wildcard)
+        else
+          false
+        end
+      end
+
+      # Field names written into `queryString` query texts in a stage
+      # (`_perishable_token:a*` names `_perishable_token`).
+      # @!visibility private
+      def each_query_string_field(node, &block)
+        case node
+        when Array
+          node.each { |child| each_query_string_field(child, &block) }
+        when Hash
+          node.each do |key, value|
+            if key.to_s == "queryString" && value.is_a?(Hash)
+              text = value["query"] || value[:query]
+              query_string_fields(text).each { |field| yield field }
+            end
+            each_query_string_field(value, &block)
+          end
+        end
+        nil
+      end
+
+      # Refuse a `$search` / `$searchMeta` body, or a list of paths, that
+      # references a Parse Server internal column. Unlike the protectedFields
+      # checks this runs for every caller, master included: a `wildcard`,
+      # `regex`, or `autocomplete` operator over `_perishable_token` or
+      # `_hashed_password` returns which documents match a prefix, so row
+      # counts reveal the value. On `_User` and `_Session` a non-master
+      # caller is also refused a path that reaches every field, since on a
+      # dynamically mapped index that includes those columns.
+      #
+      # @param stage [Hash, nil] a `$search` / `$searchMeta` stage to walk.
+      # @param paths [Object, nil] a path, or an Array of paths.
+      # @raise [Parse::CLPScope::Denied]
+      def assert_no_internal_paths!(stage: nil, paths: nil, collection_name: nil, resolution: nil,
+                                    method_name: "Parse::AtlasSearch.search", what: "path")
+        refs = []
+        unless stage.nil?
+          each_search_reference(stage) { |ref| refs << ref }
+          each_query_string_field(stage) do |field|
+            next unless internal_path?(field, collection_name: collection_name) ||
+                        internal_glob?(field, collection_name: collection_name)
+            raise Parse::CLPScope::Denied.new(
+              collection_name, :find,
+              "#{method_name} refused: a queryString query names the Parse Server " \
+              "internal field #{field.inspect}; matching on it would reveal its value.",
+            )
+          end
+        end
+        refs.concat(paths.is_a?(Array) ? paths : [paths]) unless paths.nil?
+        all_fields_refused = CREDENTIAL_COLLECTIONS.include?(collection_name.to_s) &&
+                             !(resolution.respond_to?(:master?) && resolution.master?)
+        refs.each do |ref|
+          if ref != ALL_FIELDS && internal_path?(ref, collection_name: collection_name)
+            raise Parse::CLPScope::Denied.new(
+              collection_name, :find,
+              "#{method_name} refused: #{what} #{ref.inspect} names a Parse Server " \
+              "internal field; matching, ranking, or filtering on it would reveal its value.",
+            )
+          end
+          next unless all_fields_refused && wildcard_path?(ref)
+          raise Parse::CLPScope::Denied.new(
+            collection_name, :find,
+            "#{method_name} refused: a #{what} that reaches every field of " \
+            "#{collection_name} would include its credential columns; name the " \
+            "fields to search explicitly.",
+          )
+        end
+        nil
+      end
+
       # Yield every field reference in a `$search`-style body.
       # @!visibility private
       def each_search_reference(node, &block)

@@ -136,7 +136,11 @@ module Parse
         def check(env, body_str, request_id)
           secret = signing_secret
           signed_key = nil
-          if secret && !secret.empty?
+          # A whitespace-only secret is treated as absent, matching how the
+          # webhook key is checked with `present?`. An HMAC keyed with a few
+          # spaces is no secret at all, so it must not count as configured.
+          secret = nil if secret.nil? || secret.to_s.strip.empty?
+          if secret
             ts_header = env[HEADER_TIMESTAMP].to_s
             sig_header = env[HEADER_SIGNATURE].to_s
             return ["Missing webhook signature.", false] if ts_header.empty? || sig_header.empty?

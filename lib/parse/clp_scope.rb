@@ -92,6 +92,10 @@ module Parse
     # stops a down server from being refetched on every read in the block.
     SUPPRESSED_NEGATIVE_TTL = 2
 
+    # Fiber-local key for the per-request entry snapshot ({.with_snapshot}).
+    SNAPSHOT_KEY = :__parse_clp_scope_snapshot
+    private_constant :SNAPSHOT_KEY
+
     @cache = {}
     @suppressed_failures = {}
     @cache_mutex = Mutex.new
@@ -291,7 +295,12 @@ module Parse
         access_evaluation(:denied, role_claims: role_claims, reason: reason)
       end
 
-      def protected_fields_for(class_name, permission_strings, client: nil)
+      # @param strict [Boolean] when true, an unresolvable schema raises
+      #   {Denied} instead of returning an empty set. Callers that use the
+      #   set to REFUSE a request (the pipeline reference scanner) pass
+      #   true: an empty set there would let the request through.
+      # @raise [Denied] when `strict` and the schema is unresolvable.
+      def protected_fields_for(class_name, permission_strings, client: nil, strict: false)
         return EMPTY_SET if permission_strings.nil?
 
         entry = fetch(class_name, client: client)
@@ -299,7 +308,15 @@ module Parse
         # `permits?` already refused the query, so this branch is only
         # reached when callers ask for the protected-fields set directly
         # (e.g. for documentation or audit tooling).
-        return EMPTY_SET if entry.kind == :unresolvable
+        if entry.kind == :unresolvable
+          if strict
+            warn_unresolvable_once!(class_name)
+            raise Denied.new(class_name, :find,
+                             "protectedFields for '#{class_name}' are unresolvable; " \
+                             "refusing the pipeline for the current scope.")
+          end
+          return EMPTY_SET
+        end
         stored_map = if entry.kind == :no_clp
             nil
           else
@@ -539,6 +556,30 @@ module Parse
         @warned_unresolvable_classes = Set.new
       end
 
+      # Pin every schema entry read inside the block to the first value
+      # read for its cache key, for the current thread (fiber).
+      #
+      # A scoped mongo-direct request reads the schema several times: the
+      # protected-field reference scanner, the CLP row gate, the join gate,
+      # and the protected-field strip. Each read used to consult the shared
+      # cache on its own, so a TTL expiry and refetch between two reads
+      # could give the scanner one schema and the gate another (an
+      # unresolvable scan with an empty protected set, then a successful
+      # gate). Inside this block every read for a class sees one entry, so
+      # the decisions agree. Nested calls reuse the outer snapshot.
+      #
+      # @yield the request whose schema reads should agree.
+      # @return [Object] the block's value.
+      def with_snapshot
+        return yield if Thread.current[SNAPSHOT_KEY]
+        Thread.current[SNAPSHOT_KEY] = {}
+        begin
+          yield
+        ensure
+          Thread.current[SNAPSHOT_KEY] = nil
+        end
+      end
+
       private
 
       # Collect one field set per protectedFields group that applies to the
@@ -606,6 +647,16 @@ module Parse
         resolved_client = client || schema_client || default_client_safe
         key = cache_key(class_key, resolved_client)
 
+        snapshot = Thread.current[SNAPSHOT_KEY]
+        return snapshot[key] if snapshot&.key?(key)
+        entry = fetch_entry(class_key, resolved_client, key)
+        snapshot[key] = entry if snapshot
+        entry
+      end
+
+      # Resolve the cached or freshly fetched entry for one cache key.
+      # @!visibility private
+      def fetch_entry(class_key, resolved_client, key)
         cached = @cache_mutex.synchronize { @cache[key] }
         return cached if cached && !stale?(cached)
 

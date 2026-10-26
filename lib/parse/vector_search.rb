@@ -313,6 +313,7 @@ module Parse
         pointer_fields = resolve_pointer_fields!(collection_name, resolution)
         protected_fields = Parse::CLPScope.protected_fields_for(
           collection_name, resolution.permission_strings,
+          client: Parse::MongoDB.clp_client_for(resolution), strict: true,
         )
         assert_protected_fields_untouched!(collection_name, path, filter, vector_filter,
                                            protected_fields, resolution)
@@ -549,6 +550,7 @@ module Parse
         # user, and role grants first; then pointerFields / readUserFields).
         # Raises Parse::CLPScope::Denied when the scope cannot find at all.
         Parse::CLPScope.row_constraint_for!(collection_name, :find, resolution,
+                                            client: Parse::MongoDB.clp_client_for(resolution),
                                             label: "VectorSearch")
         nil
       end
@@ -593,6 +595,7 @@ module Parse
         # permits? / pointer_fields_for pair missed readUserFields entirely
         # and over-restricted a public grant that also listed pointerFields.
         Parse::CLPScope.row_constraint_for!(collection_name, :find, resolution,
+                                            client: Parse::MongoDB.clp_client_for(resolution),
                                             label: "VectorSearch")
       end
 
@@ -734,6 +737,18 @@ module Parse
     end
 
     @default_index = nil
+
+    # Each public entry point resolves the class schema once: the CLP gate,
+    # pointerFields check, and protectedFields lookups inside one call share
+    # a single Parse::CLPScope snapshot, so a cache expiry between them
+    # cannot change the decision.
+    class << self
+      alias_method :search_without_schema_snapshot, :search
+      # @!visibility private
+      def search(*args, **kwargs, &block)
+        Parse::CLPScope.with_snapshot { search_without_schema_snapshot(*args, **kwargs, &block) }
+      end
+    end
   end
 end
 

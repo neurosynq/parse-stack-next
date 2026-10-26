@@ -12,6 +12,9 @@ class SemanticSearchToolTest < Minitest::Test
   class Doc < Parse::Object
     parse_class "SemanticSearchDoc"
     property :title, :string
+    property :published, :boolean
+    property :public_state, :string, field: "PublicState"
+    belongs_to :owner_ref, as: :user, field: "OwnerRef"
     property :body, :string
     property :embedding, :vector, dimensions: 8, provider: :fixture
     embed :title, :body, into: :embedding
@@ -24,6 +27,7 @@ class SemanticSearchToolTest < Minitest::Test
   def fake_agent(permissions: :readonly, scope_kwargs: { master: true })
     a = Object.new
     a.define_singleton_method(:permissions) { permissions }
+    a.define_singleton_method(:class_filter_permits?) { |_c| true }
     a.define_singleton_method(:acl_scope_kwargs) { scope_kwargs }
     a
   end
@@ -261,6 +265,40 @@ class SemanticSearchToolTest < Minitest::Test
     end
   end
 
+  def test_class_outside_agent_allowlist_refused
+    agent = fake_agent
+    agent.define_singleton_method(:class_filter_permits?) { |_c| false }
+    with_retrieve_spy do |captured|
+      err = assert_raises(Parse::Agent::AccessDenied) do
+        call(agent, class_name: "SemanticSearchDoc", query: "hi")
+      end
+      assert_equal :class_filter, err.kind
+      assert_empty captured, "retrieve must not run for a class outside the allowlist"
+    end
+  end
+
+  def test_per_agent_filter_applied_without_caller_filter
+    agent = fake_agent
+    agent.define_singleton_method(:filter_for) { |_c| { "published" => true } }
+    with_retrieve_spy do |captured|
+      call(agent, class_name: "SemanticSearchDoc", query: "hi")
+      assert_equal({ "published" => true }, captured[:filter])
+    end
+  end
+
+  def test_per_agent_filter_anded_with_caller_filter
+    agent = fake_agent
+    agent.define_singleton_method(:filter_for) { |_c| { "published" => true } }
+    with_retrieve_spy do |captured|
+      # A caller filter on the same field cannot replace the operator's.
+      call(agent, class_name: "SemanticSearchDoc", query: "hi",
+                  filter: { "published" => false, "category" => "news" })
+      assert_equal({ "$and" => [{ "published" => true },
+                                { "published" => false, "category" => "news" }] },
+                   captured[:filter])
+    end
+  end
+
   def test_tenant_scope_value_threaded_when_present
     reg = Parse::Agent::MetadataRegistry
     with_retrieve_spy do |captured|
@@ -380,6 +418,72 @@ class SemanticSearchToolTest < Minitest::Test
       end
       assert_match(/too large/, err.message)
     end
+  end
+
+  # A hybrid config's own lexical filter is ANDed with the filter retrieve
+  # receives (which carries the per-agent filter), never merged over it.
+  def test_hybrid_lexical_filter_cannot_replace_the_passed_filter
+    captured = nil
+    klass = Object.new
+    klass.define_singleton_method(:hybrid_search) do |**kw|
+      captured = kw
+      []
+    end
+    Parse::Retrieval.send(:fetch_hybrid_hits, klass, "q", 5, :embedding,
+                          { "published" => true }, nil, nil,
+                          { lexical: { filter: { "published" => { "$in" => [true, false] } } } }, {})
+    assert_equal({ "$and" => [{ "published" => true },
+                              { "published" => { "$in" => [true, false] } }] },
+                 captured[:lexical][:filter])
+  end
+
+  # Per-agent filter fields resolve to their declared stored columns: a
+  # declared server name is kept as written and a pointer uses `_p_`.
+  def test_per_agent_filter_keeps_declared_server_names
+    agent = fake_agent
+    agent.define_singleton_method(:filter_for) do |_c|
+      { "PublicState" => { "$ne" => "private" },
+        "OwnerRef" => { "__type" => "Pointer", "className" => "_User", "objectId" => "u1" } }
+    end
+    with_retrieve_spy do |captured|
+      call(agent, class_name: "SemanticSearchDoc", query: "hi")
+      assert_equal({ "PublicState" => { "$ne" => "private" }, "_p_OwnerRef" => "_User$u1" },
+                   captured[:filter])
+    end
+  end
+
+  def test_per_agent_filter_on_undeclared_field_is_refused
+    agent = fake_agent
+    agent.define_singleton_method(:filter_for) { |_c| { "undeclared" => { "$ne" => 1 } } }
+    with_retrieve_spy do |captured|
+      assert_raises(Parse::Agent::ValidationError) do
+        call(agent, class_name: "SemanticSearchDoc", query: "hi")
+      end
+      assert_empty captured
+    end
+  end
+
+  def test_per_agent_and_clause_given_as_a_hash
+    agent = fake_agent
+    agent.define_singleton_method(:filter_for) { |_c| { "$and" => { "published" => true } } }
+    with_retrieve_spy do |captured|
+      call(agent, class_name: "SemanticSearchDoc", query: "hi")
+      assert_equal({ "$and" => [{ "published" => true }] }, captured[:filter])
+    end
+  end
+
+  def test_hybrid_vector_filter_cannot_replace_the_passed_filter
+    captured = nil
+    klass = Object.new
+    klass.define_singleton_method(:hybrid_search) do |**kw|
+      captured = kw
+      []
+    end
+    Parse::Retrieval.send(:fetch_hybrid_hits, klass, "q", 5, :embedding,
+                          { "$and" => [{ "published" => true }] }, nil, nil,
+                          { vector: { filter: { "$and" => [{ "x" => 1 }] } } }, {})
+    assert_equal({ "$and" => [{ "$and" => [{ "x" => 1 }] }, { "$and" => [{ "published" => true }] }] },
+                 captured[:vector][:filter])
   end
 
   def teardown

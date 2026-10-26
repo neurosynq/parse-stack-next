@@ -87,7 +87,12 @@ module Parse
           return if @running
 
           @running = true
-          @processor_thread = Thread.new { process_loop(&processor) }
+          # Long-lived: started without the ambient identity of the caller
+          # (see Parse.without_ambient_identity), so callbacks dispatched on
+          # it never run with an inherited with_session token. A restricted
+          # caller's thread keeps the master key suppressed instead of
+          # gaining it.
+          @processor_thread = Thread.new { Parse.without_ambient_identity(keep_restrictions: true) { process_loop(&processor) } }
           @processor_thread.abort_on_exception = false
 
           Logging.debug("Event queue started", max_size: @max_size, strategy: @strategy)

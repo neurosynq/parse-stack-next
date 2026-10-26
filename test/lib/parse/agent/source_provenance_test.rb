@@ -68,6 +68,7 @@ class SourceProvenanceTest < Minitest::Test
   def fake_agent
     a = Object.new
     a.define_singleton_method(:permissions) { :readonly }
+    a.define_singleton_method(:class_filter_permits?) { |_c| true }
     a.define_singleton_method(:acl_scope_kwargs) { { master: true } }
     a
   end

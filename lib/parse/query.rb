@@ -4463,6 +4463,18 @@ module Parse
       # every document silently satisfied the constraint.
       return field_str if field_str.start_with?("_")
 
+      # A name the model declares, either its Ruby property name or its
+      # declared server name (`belongs_to :owner_ref, field: "OwnerRef"`
+      # takes both `owner_ref` and `OwnerRef`), resolves to the declared
+      # column whether or not a query's field alias scope is active. Left
+      # to the formatter, an unscoped `OwnerRef` columnizes to `ownerRef`,
+      # which no property declares, so it passed through as `OwnerRef`
+      # instead of `_p_OwnerRef`, and a `$ne` / `$nin` / `$exists: false`
+      # on that missing column matched every row. Undeclared names (the
+      # pipeline-local aliases described below) are not affected.
+      declared = declared_column_for_direct_mongodb(field_str)
+      return declared if declared
+
       # Apply field formatting for regular fields
       formatted = Query.format_field(field)
 
@@ -4523,6 +4535,36 @@ module Parse
           formatted
         end
       end
+    end
+
+    # The storage column for a name the query's model declares, by its Ruby
+    # property name or its declared server name, or nil for any other name.
+    # A pointer resolves to `_p_<server name>`. Built-in system fields and
+    # server names that start with `_` are left to the default handling.
+    #
+    # @param field_str [String]
+    # @return [String, nil]
+    # @api private
+    def declared_column_for_direct_mongodb(field_str)
+      return nil if field_str.empty? || field_str.include?(".")
+      klass = table_model_class
+      return nil unless klass.respond_to?(:field_map) && klass.respond_to?(:fields)
+      fmap = klass.field_map
+      sym = field_str.to_sym
+      local = if fmap.key?(sym)
+          sym
+        else
+          fmap.find { |_k, remote| remote.to_s == field_str }&.first
+        end
+      return nil if local.nil?
+      return nil if Query::FIELD_ALIAS_BUILTINS.include?(local.to_s)
+      remote = fmap[local].to_s
+      return nil if remote.empty? || remote.start_with?("_")
+      return nil if %w[objectId createdAt updatedAt ACL].include?(remote)
+      type = klass.fields[local] || klass.fields[remote.to_sym]
+      type == :pointer ? "_p_#{remote}" : remote
+    rescue NameError
+      nil
     end
 
     # Convert a value for direct MongoDB execution.

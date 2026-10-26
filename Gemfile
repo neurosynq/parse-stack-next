@@ -13,7 +13,7 @@ group :test, :development do
   gem "minitest-reporters"
   gem "pry"
   # bundler-audit: scans Gemfile.lock against the ruby-advisory-db for known
-  # CVEs. Used by the upstream-watch skill and dependency review.
+  # CVEs. Run by the Gem Tests workflow and available for local review.
   gem "bundler-audit", ">= 0.9"
   gem "yard", ">= 0.9.11"
   # Rack 3 removed Rack::Server (used by `yard server`); the rackup gem

@@ -17,6 +17,23 @@ permissions:
   contents: read
 
 jobs:
+  dependency-audit:
+    name: Audit gem dependencies
+    runs-on: ubuntu-latest
+    env:
+      BUNDLE_FROZEN: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@26e5b7d197ebf60545ee9667bcbace0be11ccaec # v1.334.0
+        with:
+          ruby-version: "3.4.12"
+          bundler-cache: true
+      - name: Check locked gems against current security advisories
+        run: bundle exec bundle-audit check --update
+
   test:
     strategy:
       fail-fast: false
@@ -25,7 +42,9 @@ jobs:
         ruby: ['3.2', '3.3', '3.4', '4.0']
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Ruby
         # To automatically get bug fixes and new Ruby versions for ruby/setup-ruby,
         # change this to (see https://github.com/ruby/setup-ruby#versioning):
@@ -50,7 +69,9 @@ jobs:
     env:
       BUNDLE_GEMFILE: ${{ github.workspace }}/gemfiles/${{ matrix.gemfile }}.gemfile
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Ruby
         uses: ruby/setup-ruby@26e5b7d197ebf60545ee9667bcbace0be11ccaec # v1.334.0
         with:
