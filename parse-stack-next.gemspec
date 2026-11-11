@@ -54,12 +54,12 @@ Gem::Specification.new do |spec|
   spec.add_runtime_dependency "faraday-net_http_persistent", "~> 2.0"
   spec.add_runtime_dependency "moneta", "< 2"
   spec.add_runtime_dependency "connection_pool", ">= 2.2", "< 4"
-  # Rack's 2026-04 advisories are fixed per branch: 2.2.23, 3.1.21, and
-  # 3.2.6 (the 3.0 line has no fixed release). RubyGems limits a dependency's
+  # Rack's 2026 advisories are fixed per branch: 2.2.25, 3.1.23, and
+  # 3.2.8 (the 3.0 line has no fixed release). RubyGems limits a dependency's
   # requirement string to 255 characters, too short to exclude each vulnerable
   # 3.x release by name, so the floor covers the 2.2 line and
   # Parse::Stack::RackAdvisory warns at load time on a vulnerable 3.x release.
-  spec.add_runtime_dependency "rack", ">= 2.2.23", "< 4"
+  spec.add_runtime_dependency "rack", ">= 2.2.25", "< 4"
   spec.add_runtime_dependency "csv", "~> 3.3"
   spec.add_runtime_dependency "ostruct", "~> 0.6"
 

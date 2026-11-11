@@ -1,5 +1,44 @@
 ## parse-stack-next Changelog
 
+### 5.8.5
+
+A security patch for the 2026 Rack and ActiveSupport advisories. It raises the
+Rack floor, warns at load time on a vulnerable Rack or ActiveSupport release,
+and refreshes locked dependencies.
+
+#### Vulnerable Rack and ActiveSupport releases are reported at load time
+
+- **CHANGED**: The `rack` requirement is raised from `>= 2.2.23` to
+  `>= 2.2.25`, the fixed release on the 2.2 line for GHSA-5v64-555j-wjxm
+  (multipart scan buffer DoS), GHSA-wvg4-6p58-3gh3 (`Rack::Static`
+  `header_rules` bypass), and GHSA-p8x9-v4hv-2w4g (multipart boundary guard
+  bypass).
+- **FIXED**: The load-time Rack warning now covers 3.1.21 to 3.1.22 and 3.2.6
+  to 3.2.7, which are affected by those advisories and by GHSA-2j8w-xcrc-x985
+  (`Rack::Request#host_with_port` returns the raw invalid Host header). The
+  fixed releases are 3.1.23 and 3.2.8; the 3.0 line has no fixed release.
+- **NEW**: The SDK warns once at load time when the loaded ActiveSupport is
+  affected by GHSA-8474-xrp6-wh69 (`safe_constantize` DoS) or
+  GHSA-2w9f-fxwj-w2qf (MessagePack serializer XSS). The fixed releases are
+  8.0.5.2 and 8.1.4.1; the 6.1 and 7.x lines have no fixed release, so every
+  release on them is reported. The gemspec range is unchanged, and the SDK
+  does not call either affected API itself.
+
+#### Dependency updates
+
+- **CHANGED**: Bumped locked dependencies to their latest compatible releases:
+  `activemodel` 8.1.4 → 8.1.4.1, `activesupport` 8.1.4 → 8.1.4.1, `csv` 3.3.6
+  → 3.3.7, `faraday` 2.15.0 → 2.15.1, `graphql` 2.6.13 → 2.6.15, `mongo`
+  2.26.0 → 2.26.1, `rack` 3.2.7 → 3.2.8, and `rotp` 6.3.0 → 6.4.0. The
+  test-only `minitest` dependency moves 6.0.6 → 6.1.0.
+
+#### Behavior Notes
+
+- An application on Rack 2.2.23 or 2.2.24 no longer resolves against this
+  release and needs to update Rack. An application on a vulnerable Rack 3.x or
+  ActiveSupport release still installs and loads, and prints one warning to
+  standard error.
+
 ### 5.8.4
 
 A security patch across the agent, MCP, Atlas Search, mongo-direct, transport,

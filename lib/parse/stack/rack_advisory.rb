@@ -3,8 +3,8 @@
 
 module Parse
   module Stack
-    # Load-time check for Rack releases affected by the 2026-04 Rack
-    # advisories. The fixes are per branch (2.2.23, 3.1.21, 3.2.6, with no
+    # Load-time check for Rack releases affected by the 2026 Rack security
+    # advisories. The fixes are per branch (2.2.25, 3.1.23, 3.2.8, with no
     # fixed 3.0 release). The gemspec floor covers the 2.2 line; RubyGems
     # limits a requirement string to 255 characters, which is too short to
     # exclude each vulnerable 3.x release by name, so a vulnerable 3.x
@@ -12,7 +12,7 @@ module Parse
     module RackAdvisory
       # Lowest fixed release per Rack 3.x minor line; nil means no fix exists
       # on that line.
-      FIXED_3X = { "3.0" => nil, "3.1" => "3.1.21", "3.2" => "3.2.6" }.freeze
+      FIXED_3X = { "3.0" => nil, "3.1" => "3.1.23", "3.2" => "3.2.8" }.freeze
 
       module_function
 
@@ -38,8 +38,8 @@ module Parse
         return false if version.nil? || @warned
         return false unless vulnerable?(version)
         @warned = true
-        warn "[parse-stack-next] Rack #{version} is affected by the 2026-04 Rack " \
-             "security advisories. Upgrade to Rack 3.2.6 or later (or 3.1.21 or later " \
+        warn "[parse-stack-next] Rack #{version} is affected by the 2026 Rack " \
+             "security advisories. Upgrade to Rack 3.2.8 or later (or 3.1.23 or later " \
              "on the 3.1 line; the 3.0 line has no fixed release)."
         true
       end

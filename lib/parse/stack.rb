@@ -3,6 +3,7 @@
 
 require_relative "stack/version"
 require_relative "stack/rack_advisory"
+require_relative "stack/active_support_advisory"
 require_relative "terminal_safe"
 require_relative "client"
 require_relative "query"
@@ -19,6 +20,7 @@ require_relative "lookup_rewriter"
 require_relative "console"
 
 Parse::Stack::RackAdvisory.check!
+Parse::Stack::ActiveSupportAdvisory.check!
 
 module Parse
   class Error < StandardError; end
