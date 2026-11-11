@@ -1,5 +1,18 @@
 ## parse-stack-next Changelog
 
+### 5.8.5
+
+A maintenance release that refreshes locked dependencies to their latest
+compatible versions. No SDK behavior changes.
+
+#### Dependency updates
+
+- **CHANGED**: Bumped locked dependencies to their latest compatible releases:
+  `activemodel` 8.1.4 → 8.1.4.1, `activesupport` 8.1.4 → 8.1.4.1, `csv` 3.3.6
+  → 3.3.7, `faraday` 2.15.0 → 2.15.1, `graphql` 2.6.13 → 2.6.15, `mongo`
+  2.26.0 → 2.26.1, `rack` 3.2.7 → 3.2.8, and `rotp` 6.3.0 → 6.4.0. The
+  test-only `minitest` dependency moves 6.0.6 → 6.1.0.
+
 ### 5.8.4
 
 A security patch across the agent, MCP, Atlas Search, mongo-direct, transport,
